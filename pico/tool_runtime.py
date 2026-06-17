@@ -2,8 +2,8 @@
 
 import re
 
-from . import tools as toolkit
 from . import approval
+from . import tool_policy
 from . import workspace_diff
 from .workspace import clip
 
@@ -25,75 +25,9 @@ def record_process_note_for_tool(agent, name, metadata):
     agent.session["memory"] = agent.memory.to_dict()
 
 
-def tool_capability(tool):
-    if not tool:
-        return ""
-    return str(tool.get("capability", "write" if tool.get("risky") else "read"))
-
-
-def tool_risk_level(tool):
-    capability = tool_capability(tool)
-    if capability in {"write", "execute"}:
-        return "high"
-    if capability == "delegate":
-        return "medium"
-    return "low"
-
-
-def tool_permission_error(agent, tool):
-    capability = tool_capability(tool)
-    if agent.read_only and capability != "read":
-        return {
-            "code": "capability_denied",
-            "security_event_type": "read_only_block",
-            "message": f"error: permission denied for {capability} capability in read-only mode",
-        }
-    return None
-
-
-def dry_run_tool_result(name, args):
-    args = args or {}
-    if name == "run_shell":
-        return f"dry_run: would run shell command: {args.get('command', '')}"
-    if name == "write_file":
-        content = str(args.get("content", ""))
-        return f"dry_run: would write {args.get('path', '')} ({len(content)} chars)"
-    if name == "patch_file":
-        return f"dry_run: would patch {args.get('path', '')}"
-    return f"dry_run: would execute {name}"
-
-
-def shell_policy_metadata(policy):
-    if not policy:
-        return {
-            "shell_allowlisted": None,
-            "shell_policy_reason": "",
-            "shell_allowlist_match": "",
-        }
-    return {
-        "shell_allowlisted": bool(policy.get("allowed")),
-        "shell_policy_reason": str(policy.get("reason", "")),
-        "shell_allowlist_match": str(policy.get("matched_prefix", "")),
-    }
-
-
-def shell_command_policy(name, args):
-    if name != "run_shell":
-        return None
-    return toolkit.shell_command_policy((args or {}).get("command", ""))
-
-
-def repeated_tool_call(agent, name, args):
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
-    if len(tool_events) < 2:
-        return False
-    recent = tool_events[-2:]
-    return all(item["name"] == name and item["args"] == args for item in recent)
-
-
 def run_tool(agent, name, args):
     tool = agent.tools.get(name)
-    capability = tool_capability(tool)
+    capability = tool_policy.tool_capability(tool)
     if tool is None:
         agent._last_tool_result_metadata = {
             "tool_status": "rejected",
@@ -140,13 +74,13 @@ def run_tool(agent, name, args):
         }
         record_process_note_for_tool(agent, name, agent._last_tool_result_metadata)
         return message
-    permission_error = tool_permission_error(agent, tool)
+    permission_error = tool_policy.tool_permission_error(agent, tool)
     if permission_error:
         agent._last_tool_result_metadata = {
             "tool_status": "rejected",
             "tool_error_code": permission_error["code"],
             "security_event_type": permission_error["security_event_type"],
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": bool(agent.dry_run),
@@ -157,12 +91,12 @@ def run_tool(agent, name, args):
             "diff_summary": [],
         }
         return permission_error["message"]
-    if repeated_tool_call(agent, name, args):
+    if tool_policy.repeated_tool_call(agent, name, args):
         agent._last_tool_result_metadata = {
             "tool_status": "rejected",
             "tool_error_code": "repeated_identical_call",
             "security_event_type": "",
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": bool(agent.dry_run),
@@ -173,13 +107,13 @@ def run_tool(agent, name, args):
             "diff_summary": [],
         }
         return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-    shell_policy = shell_command_policy(name, args)
+    shell_policy = tool_policy.shell_command_policy(name, args)
     if shell_policy and not shell_policy["allowed"] and agent.approval_policy == "never":
         agent._last_tool_result_metadata = {
             "tool_status": "rejected",
             "tool_error_code": "shell_not_allowlisted",
             "security_event_type": "shell_not_allowlisted",
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": bool(agent.dry_run),
@@ -194,18 +128,18 @@ def run_tool(agent, name, args):
         }
         return "error: shell command is not on the allowlist"
     if agent.dry_run and tool["risky"]:
-        result = dry_run_tool_result(name, args)
+        result = tool_policy.dry_run_tool_result(name, args)
         agent._last_tool_result_metadata = {
             "tool_status": "dry_run",
             "tool_error_code": "",
             "security_event_type": "",
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": True,
             "approval_required": False,
             "approval_decision": "dry_run",
-            **shell_policy_metadata(shell_policy),
+            **tool_policy.shell_policy_metadata(shell_policy),
             "affected_paths": [],
             "workspace_changed": False,
             "workspace_fingerprint": agent.workspace.fingerprint(),
@@ -223,7 +157,7 @@ def run_tool(agent, name, args):
             "dry_run": bool(agent.dry_run),
             "approval_required": True,
             "approval_decision": "denied",
-            **shell_policy_metadata(shell_policy),
+            **tool_policy.shell_policy_metadata(shell_policy),
             "affected_paths": [],
             "workspace_changed": False,
             "diff_summary": [],
@@ -252,13 +186,13 @@ def run_tool(agent, name, args):
             "tool_status": tool_status,
             "tool_error_code": tool_error_code,
             "security_event_type": "",
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": False,
             "approval_required": bool(tool["risky"]),
             "approval_decision": "granted" if tool["risky"] else "not_required",
-            **shell_policy_metadata(shell_policy),
+            **tool_policy.shell_policy_metadata(shell_policy),
             "affected_paths": affected_paths,
             "workspace_changed": workspace_changed,
             "workspace_fingerprint": agent.workspace.fingerprint(),
@@ -277,13 +211,13 @@ def run_tool(agent, name, args):
             "tool_status": "partial_success" if workspace_changed else "error",
             "tool_error_code": "tool_partial_success" if workspace_changed else "tool_failed",
             "security_event_type": security_event_type,
-            "risk_level": tool_risk_level(tool),
+            "risk_level": tool_policy.tool_risk_level(tool),
             "capability": capability,
             "read_only": capability == "read",
             "dry_run": False,
             "approval_required": bool(tool["risky"]),
             "approval_decision": "granted" if tool["risky"] else "not_required",
-            **shell_policy_metadata(shell_policy),
+            **tool_policy.shell_policy_metadata(shell_policy),
             "affected_paths": affected_paths,
             "workspace_changed": workspace_changed,
             "workspace_fingerprint": agent.workspace.fingerprint(),

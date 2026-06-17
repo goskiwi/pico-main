@@ -794,30 +794,6 @@ class Pico:
     def run_tool(self, name, args):
         return tool_runtime.run_tool(self, name, args)
 
-    @staticmethod
-    def tool_capability(tool):
-        return tool_runtime.tool_capability(tool)
-
-    def tool_risk_level(self, tool):
-        return tool_runtime.tool_risk_level(tool)
-
-    def tool_permission_error(self, tool):
-        return tool_runtime.tool_permission_error(self, tool)
-
-    def dry_run_tool_result(self, name, args):
-        return tool_runtime.dry_run_tool_result(name, args)
-
-    @staticmethod
-    def shell_policy_metadata(policy):
-        return tool_runtime.shell_policy_metadata(policy)
-
-    @staticmethod
-    def shell_command_policy(name, args):
-        return tool_runtime.shell_command_policy(name, args)
-
-    def repeated_tool_call(self, name, args):
-        return tool_runtime.repeated_tool_call(self, name, args)
-
     def tool_example(self, name):
         return toolkit.tool_example(name)
 
