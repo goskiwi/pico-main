@@ -17,6 +17,7 @@ from pathlib import Path
 from . import checkpoints
 from . import memory as memorylib
 from . import memory_runtime
+from . import report
 from . import security
 from . import tool_runtime
 from .checkpoints import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
@@ -666,7 +667,7 @@ class Pico:
                         "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
                     },
                 )
-                self.run_store.write_report(task_state, security.redact_artifact(self, self.build_report(task_state)))
+                self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
                 return final
             completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
             if completion_metadata:
@@ -695,7 +696,7 @@ class Pico:
                 tool_started_at = time.monotonic()
                 result = self.run_tool(name, args)
                 tool_duration_ms = int((time.monotonic() - tool_started_at) * 1000)
-                self.record_tool_audit(name, args, result, tool_duration_ms)
+                report.record_tool_audit(self, name, args, result, tool_duration_ms)
                 self.mark_tool_finished(name, dict(self._last_tool_result_metadata or {}), result)
                 self.record(
                     {
@@ -762,7 +763,7 @@ class Pico:
                     "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
                 },
             )
-            self.run_store.write_report(task_state, security.redact_artifact(self, self.build_report(task_state)))
+            self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
             return final
 
         if attempts >= max_attempts and tool_steps < self.max_steps:
@@ -794,7 +795,7 @@ class Pico:
                 "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
             },
         )
-        self.run_store.write_report(task_state, security.redact_artifact(self, self.build_report(task_state)))
+        self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
         return final
 
     def run_tool(self, name, args):
@@ -823,15 +824,6 @@ class Pico:
 
     def repeated_tool_call(self, name, args):
         return tool_runtime.repeated_tool_call(self, name, args)
-
-    def build_report(self, task_state):
-        return tool_runtime.build_report(self, task_state)
-
-    def record_tool_audit(self, name, args, result, duration_ms):
-        return tool_runtime.record_tool_audit(self, name, args, result, duration_ms)
-
-    def build_run_summary(self, task_state):
-        return tool_runtime.build_run_summary(self, task_state)
 
     def tool_example(self, name):
         return toolkit.tool_example(name)
