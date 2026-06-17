@@ -401,13 +401,6 @@ class Pico:
         self.run_store.append_trace(task_state, payload)
         return payload
 
-    def capture_workspace_snapshot(self):
-        return tool_runtime.capture_workspace_snapshot(self)
-
-    @staticmethod
-    def diff_workspace_snapshots(before, after):
-        return tool_runtime.diff_workspace_snapshots(before, after)
-
     def create_checkpoint(self, task_state, user_message, trigger):
         return checkpoints.create_checkpoint(self, task_state, user_message, trigger)
 

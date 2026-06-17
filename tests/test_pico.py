@@ -256,6 +256,14 @@ def test_runtime_does_not_expose_legacy_report_api():
     assert not any(hasattr(MiniAgent, name) for name in legacy_names)
 
 
+def test_runtime_does_not_expose_legacy_workspace_diff_api():
+    legacy_names = [
+        "capture_workspace_snapshot",
+        "diff_workspace_snapshots",
+    ]
+    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+
+
 def test_agent_saves_and_resumes_session(tmp_path):
     agent = build_agent(tmp_path, ["<final>First pass.</final>"])
     assert agent.ask("Start a session") == "First pass."
