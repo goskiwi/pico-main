@@ -230,6 +230,23 @@ def test_runtime_does_not_expose_legacy_security_api():
     assert not any(hasattr(MiniAgent, name) for name in legacy_names)
 
 
+def test_runtime_does_not_expose_legacy_memory_promotion_api():
+    legacy_names = [
+        "reject_durable_reason",
+        "extract_durable_promotions",
+        "promote_durable_memory",
+        "llm_memory_index_text",
+        "build_memory_extractor_prompt",
+        "parse_memory_extractor_output",
+        "llm_promote_durable_memory",
+    ]
+    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+
+
+def test_runtime_does_not_expose_legacy_approval_api():
+    assert not hasattr(MiniAgent, "approve")
+
+
 def test_agent_saves_and_resumes_session(tmp_path):
     agent = build_agent(tmp_path, ["<final>First pass.</final>"])
     assert agent.ask("Start a session") == "First pass."

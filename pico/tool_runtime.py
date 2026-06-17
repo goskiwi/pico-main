@@ -5,6 +5,7 @@ import re
 import subprocess
 
 from . import tools as toolkit
+from . import approval
 from . import security
 from .config import IGNORED_PATH_NAMES
 from .workspace import clip
@@ -352,7 +353,7 @@ def run_tool(agent, name, args):
             "diff_summary": [],
         }
         return result
-    if tool["risky"] and not agent.approve(name, args):
+    if tool["risky"] and not approval.approve(agent, name, args):
         agent._last_tool_result_metadata = {
             "tool_status": "rejected",
             "tool_error_code": "approval_denied",

@@ -6,7 +6,6 @@ Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型�
 
 import json
 import os
-import re
 import textwrap
 import uuid
 import hashlib
@@ -16,8 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import checkpoints
-from . import durable_memory
 from . import memory as memorylib
+from . import memory_runtime
 from . import security
 from . import tool_runtime
 from .checkpoints import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
@@ -28,7 +27,6 @@ from .config import (
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_MAX_STEPS,
     DEFAULT_SHELL_ENV_ALLOWLIST,
-    MEMORY_EXTRACTOR_MAX_TOKENS,
 )
 from .context_manager import ContextManager
 from .parser import parse_model_output
@@ -506,118 +504,6 @@ class Pico:
     def record_process_note_for_tool(self, name, metadata):
         return tool_runtime.record_process_note_for_tool(self, name, metadata)
 
-    def reject_durable_reason(self, note_text):
-        return durable_memory.reject_reason(note_text)
-
-    def extract_durable_promotions(self, user_message, final_answer):
-        return durable_memory.extract_promotions(user_message, final_answer)
-
-    def promote_durable_memory(self, user_message, final_answer):
-        result = durable_memory.promote(self.memory, user_message, final_answer)
-        self.session["memory"] = self.memory.to_dict()
-        self.last_durable_promotions = result.promoted
-        self.last_durable_rejections = result.rejections
-        self.last_durable_superseded = result.superseded
-        return result.promoted, result.rejections, result.superseded
-
-    def llm_memory_index_text(self):
-        if not getattr(self.memory, "durable_store", None):
-            return "- none"
-        entries = self.memory.durable_store.load_index()
-        if not entries:
-            return "- none"
-        lines = []
-        for entry in entries:
-            memory_type = entry.get("type", "")
-            summary = entry.get("summary", "")
-            notes = self.memory.durable_store.load_type_notes(memory_type)
-            lines.append(f"- {memory_type}: {summary}")
-            for note in notes[:8]:
-                description = str(note.get("description") or note.get("text") or "").strip()
-                if description:
-                    lines.append(f"  - {clip(description, 160)}")
-        return "\n".join(lines) if lines else "- none"
-
-    def build_memory_extractor_prompt(self, user_message, final_answer):
-        return textwrap.dedent(
-            f"""\
-            You are pico's durable memory extractor. Decide whether the latest completed turn contains long-term memory worth saving.
-
-            Allowed memory types:
-            - user: stable facts about the user, their background, or skill profile.
-            - feedback: user preferences, corrections, and behavioral guidance for future agent work.
-            - project: stable project constraints, decisions, policies, or durable project dynamics.
-            - reference: durable pointers to external sources of truth or where to look things up.
-
-            Save only information that is likely to remain useful across future sessions.
-            Do not save code facts, file paths, line numbers, git history, current task state, tool output, stack traces, secrets, or temporary debugging details.
-            Do not infer user traits from a single question. Prefer explicit user feedback, corrections, or stated constraints.
-            If a candidate is a feedback or project rule, include the rule as a concise standalone sentence in text. Include why/how only when the user supplied that rationale.
-
-            Existing durable memory index:
-            {self.llm_memory_index_text()}
-
-            Latest user message:
-            {user_message}
-
-            Final assistant answer:
-            {final_answer}
-
-            Return JSON only, with this shape:
-            {{"memories":[{{"type":"user|feedback|project|reference","text":"concise memory text"}}]}}
-            Return {{"memories":[]}} if there is nothing worth saving.
-            """
-        ).strip()
-
-    @staticmethod
-    def parse_memory_extractor_output(raw):
-        text = str(raw or "").strip()
-        if not text:
-            return []
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text).strip()
-        if not text.startswith("{"):
-            match = re.search(r"\{.*\}", text, re.S)
-            if not match:
-                raise ValueError("extractor returned no JSON object")
-            text = match.group(0)
-        data = json.loads(text)
-        memories = data.get("memories", [])
-        if not isinstance(memories, list):
-            raise ValueError("extractor memories must be a list")
-        candidates = []
-        for item in memories:
-            if not isinstance(item, dict):
-                continue
-            memory_type = str(item.get("type", "")).strip()
-            note_text = str(item.get("text", "")).strip()
-            if memory_type and note_text:
-                candidates.append((memory_type, note_text))
-        return candidates
-
-    def llm_promote_durable_memory(self, user_message, final_answer):
-        self.last_llm_durable_promotions = []
-        self.last_llm_durable_rejections = []
-        self.last_llm_durable_superseded = []
-        self.last_llm_memory_extractor_error = ""
-        if not self.feature_enabled("llm_memory_extract"):
-            return [], [], []
-        prompt = self.build_memory_extractor_prompt(user_message, final_answer)
-        try:
-            raw = self.model_client.complete(prompt, MEMORY_EXTRACTOR_MAX_TOKENS)
-            candidates = self.parse_memory_extractor_output(raw)
-        except Exception as exc:
-            self.last_llm_memory_extractor_error = str(exc)
-            self.session["memory"] = self.memory.to_dict()
-            return [], [f"extractor_error:{type(exc).__name__}"], []
-        result = durable_memory.promote_candidates(self.memory, candidates)
-        self.session["memory"] = self.memory.to_dict()
-        self.last_llm_durable_promotions = result.promoted
-        self.last_llm_durable_rejections = result.rejections
-        self.last_llm_durable_superseded = result.superseded
-        return result.promoted, result.rejections, result.superseded
-
     def ask(self, user_message):
         """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
 
@@ -854,8 +740,8 @@ class Pico:
             self.mark_work_finished(final)
             self.record({"role": "assistant", "content": final, "created_at": now()})
             task_state.finish_success(final)
-            self.promote_durable_memory(user_message, final)
-            self.llm_promote_durable_memory(user_message, final)
+            memory_runtime.promote_durable_memory(self, user_message, final)
+            memory_runtime.llm_promote_durable_memory(self, user_message, final)
             checkpoint = self.create_checkpoint(task_state, user_message, trigger="run_finished")
             self.run_store.write_task_state(task_state)
             self.emit_trace(
@@ -887,7 +773,7 @@ class Pico:
             task_state.stop_step_limit(final)
         self.mark_work_finished(final, stopped=True)
         self.record({"role": "assistant", "content": final, "created_at": now()})
-        self.promote_durable_memory(user_message, final)
+        memory_runtime.promote_durable_memory(self, user_message, final)
         self.run_store.write_task_state(task_state)
         checkpoint = self.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
         self.emit_trace(
@@ -980,19 +866,6 @@ class Pico:
 
     def tool_delegate_many(self, args):
         return toolkit.tool_delegate_many(self, args)
-
-    def approve(self, name, args):
-        if self.read_only:
-            return False
-        if self.approval_policy == "auto":
-            return True
-        if self.approval_policy == "never":
-            return False
-        try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
 
     def reset(self):
         self.session["history"] = []
