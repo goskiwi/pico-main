@@ -1,4 +1,4 @@
-from pico.context_manager import ContextManager
+from pico.context_manager import ContextManager, _estimate_tokens
 from tests.helpers import build_agent
 
 
@@ -45,7 +45,7 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
     prompt, metadata = manager.build("keep this request verbatim")
 
     for section in ("prefix", "memory", "relevant_memory", "history"):
-        assert metadata["sections"][section]["rendered_chars"] <= metadata["sections"][section]["budget_chars"]
+        assert metadata["sections"][section]["rendered_estimated_tokens"] <= metadata["sections"][section]["budget_tokens"]
 
     reduction_sections = [entry["section"] for entry in metadata["budget_reductions"]]
     assert reduction_sections[0] == "relevant_memory"
@@ -124,13 +124,14 @@ def test_context_manager_records_estimated_token_budget_metadata(tmp_path):
     prompt, metadata = ContextManager(agent).build("请检查 README.md and summarize it")
 
     assert metadata["prompt_estimated_tokens"] > 0
-    assert metadata["prompt_budget_estimated_tokens"] > 0
-    assert metadata["section_token_budgets"]["prefix"] > 0
-    assert metadata["section_token_budgets"]["current_request"] is None
+    assert metadata["prompt_budget_tokens"] > 0
+    assert metadata["section_budgets_tokens"]["prefix"] > 0
+    assert metadata["section_budgets_tokens"]["current_request"] is None
     assert metadata["sections"]["prefix"]["rendered_estimated_tokens"] > 0
-    assert metadata["sections"]["current_request"]["budget_estimated_tokens"] is None
+    assert metadata["sections"]["current_request"]["budget_tokens"] is None
     assert metadata["current_request"]["estimated_tokens"] > 0
     assert metadata["prompt_estimated_tokens"] <= len(prompt)
+    assert metadata["prompt_estimated_tokens"] == _estimate_tokens(prompt)
 
 
 def test_context_manager_ranks_mentioned_and_recent_files(tmp_path):
@@ -283,7 +284,7 @@ def test_context_manager_uses_llm_history_compaction_when_enabled(tmp_path):
             "prefix": 300,
             "memory": 300,
             "relevant_memory": 120,
-            "history": 1000,
+            "history": 200,
         },
     ).build("continue")
 

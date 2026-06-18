@@ -41,6 +41,32 @@ def _tail_clip(text, limit):
     return text[: limit - 3] + "..."
 
 
+def _token_clip(text, token_budget):
+    text = str(text)
+    token_budget = int(token_budget or 0)
+    if token_budget <= 0:
+        return ""
+    if _estimate_tokens(text) <= token_budget:
+        return text
+
+    suffix = "..."
+    suffix_tokens = _estimate_tokens(suffix)
+    lo = 0
+    hi = len(text)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[:mid]
+        if mid < len(text) and token_budget > suffix_tokens:
+            candidate += suffix
+        if _estimate_tokens(candidate) <= token_budget:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def _estimate_tokens(text):
     text = str(text or "")
     if not text:
@@ -87,7 +113,7 @@ class SectionRender:
 
     @property
     def budget_tokens(self):
-        return _estimate_tokens("x" * max(0, int(self.budget or 0)))
+        return max(0, int(self.budget or 0))
 
 
 class ContextManager:
@@ -179,12 +205,13 @@ class ContextManager:
         prompt = self._assemble_prompt(rendered)
         reduction_log = []
 
-        # 如果 prompt 超预算，就按固定顺序不断压缩。
+        # 如果 prompt 超过 token 预算，就按固定顺序不断压缩。
         # 这里的顺序体现了平台偏好：
         # 先牺牲 relevant_memory，再牺牲 history，然后才动 memory 和 prefix。
         # 最新用户请求永远不裁剪，因为那是本轮最重要的输入。
-        while len(prompt) > self.total_budget:
-            overflow = len(prompt) - self.total_budget
+        prompt_tokens = _estimate_tokens(prompt)
+        while prompt_tokens > self.total_budget:
+            overflow = prompt_tokens - self.total_budget
             reduced = False
             for section in self.reduction_order:
                 floor = int(self.section_floors.get(section, 0))
@@ -197,9 +224,9 @@ class ContextManager:
                 reduction_log.append(
                     {
                         "section": section,
-                        "before_chars": current_budget,
-                        "after_chars": new_budget,
-                        "overflow_chars": overflow,
+                        "before_tokens": current_budget,
+                        "after_tokens": new_budget,
+                        "overflow_tokens": overflow,
                     }
                 )
                 budgets[section] = new_budget
@@ -210,6 +237,7 @@ class ContextManager:
                     llm_history_compaction_enabled=llm_history_compaction_enabled,
                 )
                 prompt = self._assemble_prompt(rendered)
+                prompt_tokens = _estimate_tokens(prompt)
                 reduced = True
                 break
             if not reduced:
@@ -241,11 +269,11 @@ class ContextManager:
         history = list(getattr(self.agent, "session", {}).get("history", []))
         history_raw = self._raw_history_text(history)
         return {
-            "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
-            "memory": SectionRender(raw=section_texts["memory"], budget=len(section_texts["memory"]), rendered=section_texts["memory"], details={}),
+            "prefix": SectionRender(raw=section_texts["prefix"], budget=_estimate_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
+            "memory": SectionRender(raw=section_texts["memory"], budget=_estimate_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
             "relevant_memory": SectionRender(
                 raw=relevant_raw,
-                budget=len(relevant_raw),
+                budget=_estimate_tokens(relevant_raw),
                 rendered=relevant_raw,
                 details={
                     "selected_notes": [memorylib.render_relevant_memory_note(note) for note in selected_notes],
@@ -255,7 +283,7 @@ class ContextManager:
                     "note_budget": 0,
                 },
             ),
-            "history": SectionRender(raw=history_raw, budget=len(history_raw), rendered=history_raw, details={"rendered_entries": []}),
+            "history": SectionRender(raw=history_raw, budget=_estimate_tokens(history_raw), rendered=history_raw, details={"rendered_entries": []}),
             CURRENT_REQUEST_SECTION: SectionRender(
                 raw=section_texts[CURRENT_REQUEST_SECTION],
                 budget=0,
@@ -288,7 +316,7 @@ class ContextManager:
                 )
             else:
                 raw = section_texts[section]
-                rendered_text = _tail_clip(raw, int(budget)) if budget is not None else raw
+                rendered_text = _token_clip(raw, int(budget)) if budget is not None else raw
                 rendered[section] = SectionRender(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
         return rendered
 
@@ -321,14 +349,14 @@ class ContextManager:
         rendered_notes = []
         while True:
             # 让每条 note 平分这一段的预算，避免一条超长笔记把其他笔记都挤掉。
-            rendered_notes = [_tail_clip(text, per_note_budget) for text in note_texts]
+            rendered_notes = [_token_clip(text, per_note_budget) for text in note_texts]
             rendered = "\n".join([header] + [f"- {text}" for text in rendered_notes])
-            if len(rendered) <= budget or per_note_budget <= 1:
+            if _estimate_tokens(rendered) <= budget or per_note_budget <= 1:
                 break
             per_note_budget -= 1
 
-        if len(rendered) > budget and budget > 0:
-            rendered = _tail_clip(raw, budget)
+        if _estimate_tokens(rendered) > budget and budget > 0:
+            rendered = _token_clip(raw, budget)
             rendered_notes = [rendered]
 
         return SectionRender(
@@ -347,7 +375,7 @@ class ContextManager:
     def _per_note_budget(self, budget, note_count, header):
         if note_count <= 0:
             return 0
-        overhead = len(header) + 3 * note_count
+        overhead = _estimate_tokens(header) + note_count
         usable = max(0, budget - overhead)
         return max(1, usable // note_count)
 
@@ -384,7 +412,7 @@ class ContextManager:
             "summarized_tool_count": 0,
         }
 
-        if llm_history_compaction_enabled and older_history and len(raw) > budget:
+        if llm_history_compaction_enabled and older_history and _estimate_tokens(raw) > budget:
             try:
                 compact_summary = self._llm_compact_history(older_history)
                 compact_used = bool(compact_summary)
@@ -431,19 +459,19 @@ class ContextManager:
             fixed = "Transcript:\n"
             if compact_summary:
                 fixed += "Session compact summary:\n"
-            if len(fixed) + len(reserved_recent) + 1 <= budget:
+            if _estimate_tokens(fixed + reserved_recent) <= budget:
                 selected_recent = candidate
                 continue
             if not selected_recent:
-                available = max(20, budget - len(fixed) - len("Recent transcript:\n") - 1)
-                selected_recent = [_tail_clip(line, available)]
+                available = max(1, budget - _estimate_tokens(fixed + "Recent transcript:\n"))
+                selected_recent = [_token_clip(line, available)]
             break
 
         recent_block = "\n".join(["Recent transcript:", *selected_recent]) if selected_recent else ""
-        available_summary = budget - len("Transcript:\n") - len(recent_block)
+        available_summary = budget - _estimate_tokens("Transcript:\n") - _estimate_tokens(recent_block)
         if compact_summary:
-            available_summary -= len("Session compact summary:\n\n")
-        compact_summary = _tail_clip(compact_summary, max(40, available_summary)) if compact_summary else ""
+            available_summary -= _estimate_tokens("Session compact summary:\n\n")
+        compact_summary = _token_clip(compact_summary, max(1, available_summary)) if compact_summary else ""
 
         lines = ["Transcript:"]
         if compact_summary:
@@ -451,8 +479,8 @@ class ContextManager:
         if recent_block:
             lines.append(recent_block)
         rendered = "\n".join(lines)
-        if len(rendered) > budget:
-            rendered = _tail_clip(rendered, budget)
+        if _estimate_tokens(rendered) > budget:
+            rendered = _token_clip(rendered, budget)
         return rendered
 
     def _llm_compact_history(self, older_history):
@@ -526,7 +554,7 @@ class ContextManager:
                 lines.append(f"- {self._summarize_old_tool_item(item)}")
                 details["summarized_tool_count"] += 1
             else:
-                rendered = self._render_history_item(item, 120)
+                rendered = self._render_history_item(item, 30)
                 lines.extend(f"- {line}" for line in rendered)
         return ("\n".join(lines) if lines else "- none"), details
 
@@ -565,9 +593,9 @@ class ContextManager:
     def _render_history_item(self, item, line_limit):
         if item["role"] == "tool":
             prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
-            content = _tail_clip(item["content"], max(20, line_limit))
+            content = _token_clip(item["content"], max(20, line_limit))
             return [prefix, content]
-        return [f"[{item['role']}] {_tail_clip(item['content'], line_limit)}"]
+        return [f"[{item['role']}] {_token_clip(item['content'], line_limit)}"]
 
     def _assemble_prompt(self, rendered):
         # 顺序是刻意设计的：稳定规则放前面，最新请求放最后。
@@ -586,33 +614,27 @@ class ContextManager:
         for section in SECTION_ORDER[:-1]:
             section_metadata[section] = {
                 "raw_chars": rendered[section].raw_chars,
-                "budget_chars": int(budgets.get(section, 0)),
                 "rendered_chars": rendered[section].rendered_chars,
                 "raw_estimated_tokens": rendered[section].raw_tokens,
-                "budget_estimated_tokens": rendered[section].budget_tokens,
+                "budget_tokens": rendered[section].budget_tokens,
                 "rendered_estimated_tokens": rendered[section].rendered_tokens,
             }
         section_metadata[CURRENT_REQUEST_SECTION] = {
             "raw_chars": len(section_texts[CURRENT_REQUEST_SECTION]),
-            "budget_chars": None,
             "rendered_chars": len(rendered[CURRENT_REQUEST_SECTION].rendered),
             "raw_estimated_tokens": rendered[CURRENT_REQUEST_SECTION].raw_tokens,
-            "budget_estimated_tokens": None,
+            "budget_tokens": None,
             "rendered_estimated_tokens": rendered[CURRENT_REQUEST_SECTION].rendered_tokens,
         }
+        prompt_tokens = _estimate_tokens(prompt)
         return {
             "prompt_chars": len(prompt),
-            "prompt_budget_chars": self.total_budget,
-            "prompt_estimated_tokens": _estimate_tokens(prompt),
-            "prompt_budget_estimated_tokens": _estimate_tokens("x" * self.total_budget),
-            "prompt_over_budget": len(prompt) > self.total_budget,
+            "prompt_estimated_tokens": prompt_tokens,
+            "prompt_budget_tokens": self.total_budget,
+            "prompt_over_budget": prompt_tokens > self.total_budget,
             "section_order": list(SECTION_ORDER),
-            "section_budgets": {
+            "section_budgets_tokens": {
                 section: (None if section == CURRENT_REQUEST_SECTION else int(budgets.get(section, 0)))
-                for section in SECTION_ORDER
-            },
-            "section_token_budgets": {
-                section: (None if section == CURRENT_REQUEST_SECTION else _estimate_tokens("x" * int(budgets.get(section, 0))))
                 for section in SECTION_ORDER
             },
             "sections": section_metadata,
