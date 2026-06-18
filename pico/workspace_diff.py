@@ -2,25 +2,85 @@
 
 import hashlib
 import subprocess
+from dataclasses import dataclass
 
 from .config import IGNORED_PATH_NAMES
 
 
+@dataclass
+class SnapshotCacheEntry:
+    mtime_ns: int
+    size: int
+    digest: str
+
+
+def _snapshot_cache(agent):
+    cache = getattr(agent, "_workspace_snapshot_hash_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(agent, "_workspace_snapshot_hash_cache", cache)
+    return cache
+
+
+def _ignored_relative_parts(relative_parts):
+    return any(part in IGNORED_PATH_NAMES for part in relative_parts)
+
+
+def _hash_file(agent, path, relative_path, stat_result=None):
+    try:
+        stat_result = stat_result or path.stat()
+    except Exception:
+        return None
+
+    cache = _snapshot_cache(agent)
+    cached = cache.get(relative_path)
+    if (
+        isinstance(cached, SnapshotCacheEntry)
+        and cached.mtime_ns == stat_result.st_mtime_ns
+        and cached.size == stat_result.st_size
+    ):
+        return cached.digest
+
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        cache.pop(relative_path, None)
+        return None
+
+    cache[relative_path] = SnapshotCacheEntry(
+        mtime_ns=stat_result.st_mtime_ns,
+        size=stat_result.st_size,
+        digest=digest,
+    )
+    return digest
+
+
 def capture_workspace_snapshot(agent):
     snapshot = {}
+    seen_paths = set()
     for path in agent.root.rglob("*"):
         try:
             relative_parts = path.relative_to(agent.root).parts
         except ValueError:
             continue
-        if any(part in IGNORED_PATH_NAMES for part in relative_parts):
+        if _ignored_relative_parts(relative_parts):
             continue
         if not path.is_file():
             continue
+        relative_path = path.relative_to(agent.root).as_posix()
         try:
-            snapshot[path.relative_to(agent.root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+            stat_result = path.stat()
         except Exception:
             continue
+        digest = _hash_file(agent, path, relative_path, stat_result=stat_result)
+        if digest is None:
+            continue
+        seen_paths.add(relative_path)
+        snapshot[relative_path] = digest
+    cache = _snapshot_cache(agent)
+    for relative_path in list(cache):
+        if relative_path not in seen_paths:
+            cache.pop(relative_path, None)
     return snapshot
 
 
@@ -35,17 +95,21 @@ def capture_path_snapshot(agent, paths):
             relative_parts = path.relative_to(agent.root).parts
         except Exception:
             continue
-        if any(part in IGNORED_PATH_NAMES for part in relative_parts):
+        if _ignored_relative_parts(relative_parts):
             continue
         if not path.exists():
+            _snapshot_cache(agent).pop(relative_path, None)
             snapshot[relative_path] = None
             continue
         if not path.is_file():
             continue
         try:
-            snapshot[relative_path] = hashlib.sha256(path.read_bytes()).hexdigest()
+            stat_result = path.stat()
         except Exception:
             continue
+        digest = _hash_file(agent, path, relative_path, stat_result=stat_result)
+        if digest is not None:
+            snapshot[relative_path] = digest
     return snapshot
 
 
@@ -74,7 +138,7 @@ def capture_git_status_snapshot(agent):
         if not path_text:
             continue
         parts = tuple(part for part in path_text.split("/") if part)
-        if any(part in IGNORED_PATH_NAMES for part in parts):
+        if _ignored_relative_parts(parts):
             continue
         snapshot[path_text] = status
     return snapshot
