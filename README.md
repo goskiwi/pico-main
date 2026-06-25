@@ -117,6 +117,36 @@ uv run pico --provider anthropic
 - `/reset`：清空当前会话状态
 - `/exit` 或 `/quit`：退出 REPL
 
+## Skills
+
+`pico` 可以从本地 `.pico/skills/**/SKILL.md` 读取可复用工作流说明，并按当前用户请求自动匹配后注入 prompt。仓库里提供了一组可提交的示例 skill：
+
+```text
+examples/skills/
+```
+
+启用这些示例：
+
+```bash
+mkdir -p .pico/skills
+cp -R examples/skills/* .pico/skills/
+```
+
+每个 `SKILL.md` 可以带简单 frontmatter：
+
+```md
+---
+name: code-review
+description: Review code changes for bugs, regressions, safety issues, and missing tests.
+---
+
+# Code Review
+
+Review the change as production code.
+```
+
+`.pico/` 是本地运行时目录，默认不提交；`examples/skills/` 用来保存可复用模板。
+
 ## 安全与持久化
 
 `pico` 不会默认把所有动作都放开。像 shell 执行、文件写入这类高风险操作，会受审批模式控制：

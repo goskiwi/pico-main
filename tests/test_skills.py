@@ -1,7 +1,10 @@
 import json
 
+import pytest
+
 from pico.context_manager import ContextManager
-from pico.skills import load_skills, select_skills
+from pico.models import FakeModelClient
+from pico.skills import load_skills, select_skills_with_model
 from tests.helpers import build_agent
 
 
@@ -35,7 +38,7 @@ Check behavior, tests, and safety.
     assert "Check behavior" in skills[0]["content"]
 
 
-def test_select_skills_matches_request_against_name_description_and_content(tmp_path):
+def test_select_skills_with_model_uses_valid_json_names(tmp_path):
     write_skill(
         tmp_path,
         "debugging",
@@ -61,9 +64,69 @@ description: Prepare release notes.
 """,
     )
 
-    selected = select_skills(load_skills(tmp_path), "please debug the failing tests")
+    model = FakeModelClient(['{"selected_names":["systematic-debugging"]}'])
+    selected = select_skills_with_model(model, load_skills(tmp_path), "please debug the failing tests")
 
     assert [skill["name"] for skill in selected] == ["systematic-debugging"]
+    assert "systematic-debugging" in model.prompts[0]
+    assert "release" in model.prompts[0]
+
+
+def test_select_skills_with_model_filters_invalid_names_and_limit(tmp_path):
+    for name in ["debugging", "code-review", "test-driven-development"]:
+        write_skill(
+            tmp_path,
+            name,
+            f"""---
+name: {name}
+description: {name} skill.
+---
+
+# {name}
+""",
+        )
+
+    model = FakeModelClient(['{"selected_names":["missing","debugging","code-review","test-driven-development"]}'])
+    selected = select_skills_with_model(model, load_skills(tmp_path), "debug failing tests", limit=2)
+
+    assert [skill["name"] for skill in selected] == ["debugging", "code-review"]
+
+
+def test_select_skills_with_model_returns_empty_for_bad_json(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+---
+
+# Debugging
+""",
+    )
+
+    model = FakeModelClient(["not json"])
+    selected = select_skills_with_model(model, load_skills(tmp_path), "测试失败了，帮我定位原因")
+
+    assert selected == []
+
+
+def test_select_skills_with_model_raises_model_errors(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+---
+
+# Debugging
+""",
+    )
+
+    model = FakeModelClient([])
+    with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
+        select_skills_with_model(model, load_skills(tmp_path), "debug failing tests")
 
 
 def test_context_manager_injects_matching_skills_between_memory_and_history(tmp_path):
@@ -80,7 +143,7 @@ description: Use for implementing features with tests first.
 Write a failing test before production code.
 """,
     )
-    agent = build_agent(tmp_path, [])
+    agent = build_agent(tmp_path, ['{"selected_names":["tdd"]}'])
 
     prompt, metadata = ContextManager(agent).build("implement a new feature with tests")
 
@@ -105,7 +168,7 @@ description: Prepare release notes.
 # Release
 """,
     )
-    agent = build_agent(tmp_path, [])
+    agent = build_agent(tmp_path, ['{"selected_names":[]}'])
 
     prompt, metadata = ContextManager(agent).build("summarize README")
 
@@ -126,7 +189,7 @@ description: Use this large skill for implementation.
 """
         + ("Long guidance. " * 500),
     )
-    agent = build_agent(tmp_path, [])
+    agent = build_agent(tmp_path, ['{"selected_names":["large-skill"]}'])
 
     _, metadata = ContextManager(
         agent,
@@ -157,7 +220,7 @@ description: Debug failing tests.
 # Debugging
 """,
     )
-    agent = build_agent(tmp_path, ["<final>Inspected.</final>"])
+    agent = build_agent(tmp_path, ['{"selected_names":["debugging"]}', "<final>Inspected.</final>"])
 
     assert agent.ask("debug failing tests") == "Inspected."
 

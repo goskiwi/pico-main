@@ -109,6 +109,15 @@ Token budgets are enforced per section. When the total exceeds `DEFAULT_TOTAL_BU
 
 Local skills live under `.pico/skills/**/SKILL.md`. Each file can include simple frontmatter with `name` and `description`. `ContextManager` reloads skills when building each prompt, selects up to three skills by lexical matching against the user request, and injects them as a `Skills:` section between memory and relevant memory. Selected skills are recorded in prompt metadata, trace, and report summaries.
 
+Committed example skills live under `examples/skills/`. To enable them locally:
+
+```bash
+mkdir -p .pico/skills
+cp -R examples/skills/* .pico/skills/
+```
+
+Do not commit `.pico/skills/`; `.pico/` is local runtime state. Add reusable skill templates under `examples/skills/` instead.
+
 ### Model output format
 
 Models must return exactly one `<tool>...</tool>` or `<final>...</final>` per response. Two tool formats are supported:

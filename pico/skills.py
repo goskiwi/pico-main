@@ -1,12 +1,8 @@
-"""Local skill loading and prompt rendering.
-
-Skills are repository-local instruction files. The first implementation is
-deliberately small: read `.pico/skills/**/SKILL.md`, match them with lexical
-tokens, and render selected guidance into the prompt.
-"""
+"""Local skill loading, model selection, and prompt rendering."""
 
 from __future__ import annotations
 
+import json
 import hashlib
 import os
 import re
@@ -17,6 +13,7 @@ SKILLS_DIR = ".pico/skills"
 SKILL_FILENAME = "SKILL.md"
 DEFAULT_SKILL_LIMIT = 3
 MAX_SKILL_FILE_BYTES = 20_000
+SKILL_SELECTOR_MAX_TOKENS = 200
 
 
 def load_skills(root):
@@ -81,28 +78,59 @@ def _parse_simple_frontmatter(text):
     return metadata
 
 
-def select_skills(skills, user_message, limit=DEFAULT_SKILL_LIMIT):
-    query_tokens = _tokens(user_message)
-    if not query_tokens:
+def select_skills_with_model(model_client, skills, user_message, limit=DEFAULT_SKILL_LIMIT):
+    skills = list(skills or [])
+    if not skills:
+        return []
+    prompt = _selection_prompt(skills, user_message, limit)
+    raw = model_client.complete(prompt, SKILL_SELECTOR_MAX_TOKENS)
+    try:
+        payload = _parse_selector_response(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
         return []
 
-    ranked = []
-    for skill in skills:
-        name = str(skill.get("name", ""))
-        description = str(skill.get("description", ""))
-        content = str(skill.get("content", ""))
-        name_tokens = _tokens(name)
-        description_tokens = _tokens(description)
-        content_tokens = _tokens(content)
-        score = 0
-        score += 8 * len(query_tokens & name_tokens)
-        score += 5 * len(query_tokens & description_tokens)
-        score += 2 * len(query_tokens & content_tokens)
-        if score > 0:
-            ranked.append((score, name, skill))
+    by_name = {str(skill.get("name", "")).strip(): skill for skill in skills}
+    selected = []
+    seen = set()
+    for name in payload.get("selected_names", []):
+        name = str(name).strip()
+        if name in by_name and name not in seen:
+            selected.append(by_name[name])
+            seen.add(name)
+        if len(selected) >= int(limit or DEFAULT_SKILL_LIMIT):
+            break
+    return selected
 
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    return [skill for _, _, skill in ranked[: int(limit or DEFAULT_SKILL_LIMIT)]]
+
+def _selection_prompt(skills, user_message, limit=DEFAULT_SKILL_LIMIT):
+    lines = [
+        "You are pico's skill selector.",
+        "Choose only the skills that are clearly useful for the user's request.",
+        "Return strict JSON only, with this schema: {\"selected_names\":[\"skill-name\"]}",
+        f"Select at most {int(limit or DEFAULT_SKILL_LIMIT)} skills. Return an empty list when no skill clearly applies.",
+        "",
+        "Available skills:",
+    ]
+    for skill in skills:
+        name = str(skill.get("name", "")).strip()
+        description = str(skill.get("description", "")).strip()
+        lines.append(f"- {name}: {description}")
+    lines.extend(["", "User request:", str(user_message or "")])
+    return "\n".join(lines)
+
+
+def _parse_selector_response(raw):
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return {"selected_names": []}
+    selected_names = payload.get("selected_names", [])
+    if not isinstance(selected_names, list):
+        return {"selected_names": []}
+    return {"selected_names": selected_names}
 
 
 def render_skills(selected_skills):
@@ -135,7 +163,3 @@ def skill_metadata(selected_skills, rendered_text=""):
         "selected_hashes": [str(skill.get("hash", "")).strip() for skill in selected_skills],
         "rendered_chars": len(str(rendered_text or "")),
     }
-
-
-def _tokens(text):
-    return {token.lower() for token in re.findall(r"[A-Za-z0-9_-]+", str(text or ""))}

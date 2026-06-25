@@ -205,7 +205,7 @@ class Pico:
 
     def select_skills(self, user_message):
         self.skills = self.load_skills()
-        self.last_selected_skills = skillslib.select_skills(self.skills, user_message)
+        self.last_selected_skills = skillslib.select_skills_with_model(self.model_client, self.skills, user_message)
         return list(self.last_selected_skills)
 
     def identity_metadata(self):
