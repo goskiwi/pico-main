@@ -15,7 +15,7 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     assert prompt.index("Relevant memory:") < prompt.index("Transcript:")
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["section_order"] == ["prefix", "memory", "relevant_memory", "history", "current_request"]
+    assert metadata["section_order"] == ["prefix", "memory", "skills", "relevant_memory", "history", "current_request"]
 
 
 def test_context_manager_reduces_relevant_memory_before_history_and_preserves_newer_context(tmp_path):

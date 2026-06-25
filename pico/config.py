@@ -56,16 +56,18 @@ DEFAULT_TOTAL_BUDGET: int = 12000
 DEFAULT_SECTION_BUDGETS: dict = {
     "prefix": 3600,
     "memory": 1600,
+    "skills": 1200,
     "relevant_memory": 1200,
     "history": 5200,
 }
 DEFAULT_SECTION_FLOORS: dict = {
     "prefix": 1200,
     "memory": 400,
+    "skills": 250,
     "relevant_memory": 300,
     "history": 1500,
 }
-DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = ("relevant_memory", "history", "memory", "prefix")
+DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = ("relevant_memory", "skills", "history", "memory", "prefix")
 HISTORY_RECENT_WINDOW: int = 6
 RELEVANT_MEMORY_LIMIT: int = 3
 FILE_PRIORITY_LIMIT: int = 5

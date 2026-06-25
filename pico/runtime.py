@@ -19,6 +19,7 @@ from . import memory as memorylib
 from . import memory_runtime
 from . import report
 from . import security
+from . import skills as skillslib
 from . import tool_runtime
 from .checkpoints import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
 from .config import (
@@ -110,6 +111,8 @@ class Pico:
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
+        self.skills = self.load_skills()
+        self.last_selected_skills = []
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
@@ -196,6 +199,14 @@ class Pico:
 
     def build_tools(self):
         return toolkit.build_tool_registry(self)
+
+    def load_skills(self):
+        return skillslib.load_skills(self.root)
+
+    def select_skills(self, user_message):
+        self.skills = self.load_skills()
+        self.last_selected_skills = skillslib.select_skills(self.skills, user_message)
+        return list(self.last_selected_skills)
 
     def identity_metadata(self):
         return {
@@ -374,6 +385,7 @@ class Pico:
                 "history_chars": len(self.history_text()),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
+                "skill_count": len(getattr(self, "skills", []) or []),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,

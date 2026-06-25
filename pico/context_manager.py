@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from . import memory as memorylib
+from . import skills as skillslib
 from .config import (
     DEFAULT_TOTAL_BUDGET,
     DEFAULT_SECTION_BUDGETS,
@@ -23,7 +24,7 @@ from .config import (
 )
 
 
-SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
+SECTION_ORDER = ("prefix", "memory", "skills", "relevant_memory", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
 SHELL_IMPORTANT_LINE_PATTERN = re.compile(
     r"(?i)(\b(error|failed|failure|traceback|exception|assert|assertion|timeout)\b|assertionerror|exit_code:\s*[1-9])"
@@ -169,6 +170,7 @@ class ContextManager:
         section_texts = {
             "prefix": str(getattr(self.agent, "prefix", "")),
             "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "skills": "",
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
@@ -180,6 +182,10 @@ class ContextManager:
         selected_notes = []
         if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
+        selected_skills = []
+        if hasattr(self.agent, "select_skills"):
+            selected_skills = self.agent.select_skills(user_message)
+        section_texts["skills"] = skillslib.render_skills(selected_skills)
 
         if not context_reduction_enabled:
             rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes)
@@ -190,6 +196,7 @@ class ContextManager:
                 budgets={section: render.budget for section, render in rendered.items() if section != CURRENT_REQUEST_SECTION},
                 reduction_log=[],
                 selected_notes=selected_notes,
+                selected_skills=selected_skills,
                 user_message=user_message,
                 section_texts=section_texts,
             )
@@ -249,6 +256,7 @@ class ContextManager:
             budgets=budgets,
             reduction_log=reduction_log,
             selected_notes=selected_notes,
+            selected_skills=selected_skills,
             user_message=user_message,
             section_texts=section_texts,
         )
@@ -271,6 +279,7 @@ class ContextManager:
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=_estimate_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
             "memory": SectionRender(raw=section_texts["memory"], budget=_estimate_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
+            "skills": SectionRender(raw=section_texts["skills"], budget=_estimate_tokens(section_texts["skills"]), rendered=section_texts["skills"], details={}),
             "relevant_memory": SectionRender(
                 raw=relevant_raw,
                 budget=_estimate_tokens(relevant_raw),
@@ -599,17 +608,15 @@ class ContextManager:
 
     def _assemble_prompt(self, rendered):
         # 顺序是刻意设计的：稳定规则放前面，最新请求放最后。
-        return "\n\n".join(
-            [
-                rendered["prefix"].rendered,
-                rendered["memory"].rendered,
-                rendered["relevant_memory"].rendered,
-                rendered["history"].rendered,
-                rendered[CURRENT_REQUEST_SECTION].rendered,
-            ]
-        ).strip()
+        parts = []
+        for section in SECTION_ORDER:
+            text = rendered[section].rendered
+            if section == "skills" and not str(text).strip():
+                continue
+            parts.append(text)
+        return "\n\n".join(parts).strip()
 
-    def _metadata(self, prompt, rendered, budgets, reduction_log, selected_notes, user_message, section_texts):
+    def _metadata(self, prompt, rendered, budgets, reduction_log, selected_notes, selected_skills, user_message, section_texts):
         section_metadata = {}
         for section in SECTION_ORDER[:-1]:
             section_metadata[section] = {
@@ -641,6 +648,7 @@ class ContextManager:
             "budget_reductions": reduction_log,
             "reduction_order": list(self.reduction_order),
             "file_priority": self._file_priority(user_message),
+            "skills": skillslib.skill_metadata(selected_skills, rendered["skills"].rendered),
             "relevant_memory": {
                 "limit": RELEVANT_MEMORY_LIMIT,
                 "selected_count": len(selected_notes),
