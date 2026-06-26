@@ -167,24 +167,25 @@ class ContextManager:
             relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
             context_reduction_enabled = self.agent.feature_enabled("context_reduction")
             llm_history_compaction_enabled = self.agent.feature_enabled("llm_history_compaction")
-        section_texts = {
-            "prefix": str(getattr(self.agent, "prefix", "")),
-            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
-            "skills": "",
-            "history": "",
-            CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
-        }
-        checkpoint_text = ""
-        if hasattr(self.agent, "render_checkpoint_text"):
-            checkpoint_text = str(self.agent.render_checkpoint_text() or "").strip()
-        if checkpoint_text:
-            section_texts["prefix"] = checkpoint_text + "\n\n" + section_texts["prefix"]
         selected_notes = []
         if memory_enabled and relevant_memory_enabled and hasattr(self.agent, "memory") and hasattr(self.agent.memory, "retrieval_candidates"):
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
         selected_skills = []
         if hasattr(self.agent, "select_skills"):
             selected_skills = self.agent.select_skills(user_message)
+        prefix_text = str(getattr(self.agent, "prefix", ""))
+        checkpoint_text = ""
+        if hasattr(self.agent, "render_checkpoint_text"):
+            checkpoint_text = str(self.agent.render_checkpoint_text() or "").strip()
+        if checkpoint_text:
+            prefix_text = checkpoint_text + "\n\n" + prefix_text
+        section_texts = {
+            "prefix": prefix_text,
+            "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
+            "skills": "",
+            "history": "",
+            CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
+        }
         section_texts["skills"] = skillslib.render_skills(selected_skills)
 
         if not context_reduction_enabled:

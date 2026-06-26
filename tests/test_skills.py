@@ -4,7 +4,7 @@ import pytest
 
 from pico.context_manager import ContextManager
 from pico.models import FakeModelClient
-from pico.skills import load_skills, select_skills_with_model
+from pico.skills import compute_active_tools, load_skills, select_skills_with_model
 from tests.helpers import build_agent
 
 
@@ -32,10 +32,46 @@ Check behavior, tests, and safety.
     skills = load_skills(tmp_path)
 
     assert len(skills) == 1
-    assert skills[0]["name"] == "code-review"
-    assert skills[0]["path"] == ".pico/skills/review/SKILL.md"
-    assert "Review Python code" in skills[0]["description"]
-    assert "Check behavior" in skills[0]["content"]
+    assert skills[0].name == "code-review"
+    assert skills[0].path == ".pico/skills/review/SKILL.md"
+    assert "Review Python code" in skills[0].description
+    assert "Check behavior" in skills[0].content
+
+
+def test_load_skills_parses_extended_frontmatter(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+tools: read_file, search, run_shell
+allowed_tools_strict: true
+trigger_keywords: test, failure
+priority: 20
+conflicts_with: code-review
+when_to_use: Use when tests fail.
+version: "1.2.3"
+disclosure_level: lazy
+owner: agent-team
+---
+
+# Debugging
+""",
+    )
+
+    skill = load_skills(tmp_path)[0]
+
+    assert skill.name == "debugging"
+    assert skill.tools == ("read_file", "search", "run_shell")
+    assert skill.allowed_tools_strict is True
+    assert skill.trigger_keywords == ("test", "failure")
+    assert skill.priority == 20
+    assert skill.conflicts_with == ("code-review",)
+    assert skill.when_to_use == "Use when tests fail."
+    assert skill.version == "1.2.3"
+    assert skill.disclosure_level == "lazy"
+    assert skill.owner == "agent-team"
 
 
 def test_select_skills_with_model_uses_valid_json_names(tmp_path):
@@ -67,7 +103,7 @@ description: Prepare release notes.
     model = FakeModelClient(['{"selected_names":["systematic-debugging"]}'])
     selected = select_skills_with_model(model, load_skills(tmp_path), "please debug the failing tests")
 
-    assert [skill["name"] for skill in selected] == ["systematic-debugging"]
+    assert [skill.name for skill in selected] == ["systematic-debugging"]
     assert "systematic-debugging" in model.prompts[0]
     assert "release" in model.prompts[0]
 
@@ -89,7 +125,109 @@ description: {name} skill.
     model = FakeModelClient(['{"selected_names":["missing","debugging","code-review","test-driven-development"]}'])
     selected = select_skills_with_model(model, load_skills(tmp_path), "debug failing tests", limit=2)
 
-    assert [skill["name"] for skill in selected] == ["debugging", "code-review"]
+    assert [skill.name for skill in selected] == ["debugging", "code-review"]
+
+
+def test_select_skills_uses_keyword_prefilter_without_model_when_small_candidate_set(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+trigger_keywords: pytest, failure
+---
+
+# Debugging
+""",
+    )
+    write_skill(
+        tmp_path,
+        "release",
+        """---
+name: release
+description: Prepare release notes.
+trigger_keywords: release
+---
+
+# Release
+""",
+    )
+
+    model = FakeModelClient([])
+    selected = select_skills_with_model(model, load_skills(tmp_path), "pytest failure in tests")
+
+    assert [skill.name for skill in selected] == ["debugging"]
+    assert model.prompts == []
+
+
+def test_select_skills_resolves_conflicts_by_priority(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+trigger_keywords: failure
+priority: 20
+conflicts_with: code-review
+---
+
+# Debugging
+""",
+    )
+    write_skill(
+        tmp_path,
+        "review",
+        """---
+name: code-review
+description: Review code.
+trigger_keywords: failure
+priority: 10
+conflicts_with: debugging
+---
+
+# Review
+""",
+    )
+
+    model = FakeModelClient([])
+    selected = select_skills_with_model(model, load_skills(tmp_path), "failure in tests")
+
+    assert [skill.name for skill in selected] == ["debugging"]
+
+
+def test_compute_active_tools_uses_declared_union_and_strict_flag(tmp_path):
+    write_skill(
+        tmp_path,
+        "debugging",
+        """---
+name: debugging
+description: Debug failing tests.
+tools: read_file, run_shell
+allowed_tools_strict: true
+---
+
+# Debugging
+""",
+    )
+    write_skill(
+        tmp_path,
+        "review",
+        """---
+name: code-review
+description: Review code.
+tools: read_file, search
+---
+
+# Review
+""",
+    )
+
+    active_tools, is_strict = compute_active_tools(load_skills(tmp_path), {"read_file", "run_shell", "search", "write_file"})
+
+    assert active_tools == frozenset({"read_file", "run_shell", "search"})
+    assert is_strict is True
 
 
 def test_select_skills_with_model_returns_empty_for_bad_json(tmp_path):

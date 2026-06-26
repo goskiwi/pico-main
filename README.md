@@ -115,6 +115,7 @@ uv run pico --provider anthropic
 - `/memory`：查看提炼后的工作记忆
 - `/session`：查看当前会话文件路径
 - `/reset`：清空当前会话状态
+- `/reload-skills`：重新从 `.pico/skills/` 加载技能文件
 - `/exit` 或 `/quit`：退出 REPL
 
 ## Skills

@@ -111,8 +111,11 @@ class Pico:
         )
         self.session["memory"] = self.memory.to_dict()
         self.tools = self.build_tools()
+        self.all_tools = dict(self.tools)
         self.skills = self.load_skills()
         self.last_selected_skills = []
+        self.active_tool_names = None
+        self.active_tools_strict = False
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
@@ -203,10 +206,27 @@ class Pico:
     def load_skills(self):
         return skillslib.load_skills(self.root)
 
-    def select_skills(self, user_message):
+    def reload_skills(self):
         self.skills = self.load_skills()
+        return list(self.skills)
+
+    def select_skills(self, user_message):
         self.last_selected_skills = skillslib.select_skills_with_model(self.model_client, self.skills, user_message)
+        self.active_tool_names, self.active_tools_strict = skillslib.compute_active_tools(
+            self.last_selected_skills,
+            self.all_tools.keys(),
+        )
+        self.apply_active_tool_filter()
         return list(self.last_selected_skills)
+
+    def apply_active_tool_filter(self):
+        previous_signature = self.tool_signature()
+        if self.active_tools_strict and self.active_tool_names is not None:
+            self.tools = {name: tool for name, tool in self.all_tools.items() if name in self.active_tool_names}
+        else:
+            self.tools = dict(self.all_tools)
+        if self.tool_signature() != previous_signature:
+            self._apply_prefix_state(self.build_prefix())
 
     def identity_metadata(self):
         return {
@@ -385,6 +405,8 @@ class Pico:
                 "history_chars": len(self.history_text()),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
+                "active_tool_names": sorted(self.active_tool_names) if self.active_tool_names is not None else None,
+                "active_tools_strict": bool(self.active_tools_strict),
                 "skill_count": len(getattr(self, "skills", []) or []),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
@@ -811,6 +833,9 @@ class Pico:
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
+        if self.active_tool_names is not None and name not in self.active_tool_names:
+            allowed = ", ".join(sorted(self.active_tool_names)) or "(none)"
+            raise ValueError(f"tool '{name}' is not available for the active skills. Available tools: {allowed}")
         toolkit.validate_tool(self, name, args)
         if name in {"delegate", "delegate_many"}:
             if self.depth >= self.max_depth:

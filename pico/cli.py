@@ -57,6 +57,7 @@ HELP_DETAILS = textwrap.dedent(
     /memory  Show the agent's working state panel.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
+    /reload-skills Reload .pico/skills from disk.
     /exit    Exit the agent.
     """
 ).strip()
@@ -413,6 +414,11 @@ def main(argv=None):
             logger.info("重置 session")
             agent.reset()
             print("session reset")
+            continue
+        if user_input == "/reload-skills":
+            logger.info("重新加载 skills")
+            skills = agent.reload_skills()
+            print(f"skills reloaded: {len(skills)}")
             continue
 
         print()

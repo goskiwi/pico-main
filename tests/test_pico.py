@@ -9,6 +9,12 @@ from pico import (
 from tests.helpers import build_agent
 
 
+def write_skill(root, name, text):
+    path = root / ".pico" / "skills" / name
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "SKILL.md").write_text(text, encoding="utf-8")
+
+
 def test_agent_runs_tool_then_final(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     agent = build_agent(
@@ -24,6 +30,68 @@ def test_agent_runs_tool_then_final(tmp_path):
     assert answer == "Read the file successfully."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
     assert "hello.txt" in agent.session["memory"]["working"]["recent_files"]
+
+
+def test_skill_tool_whitelist_rejects_undeclared_tool(tmp_path):
+    write_skill(
+        tmp_path,
+        "review",
+        """---
+name: review
+description: Review code without editing.
+tools: read_file, search
+trigger_keywords: review
+---
+
+# Review
+""",
+    )
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"write_file","args":{"path":"out.txt","content":"bad"}}</tool>',
+            "<final>Stopped editing.</final>",
+        ],
+    )
+
+    assert agent.ask("review README") == "Stopped editing."
+
+    tool_items = [item for item in agent.session["history"] if item["role"] == "tool"]
+    assert tool_items[-1]["name"] == "write_file"
+    assert "not available for the active skills" in tool_items[-1]["content"]
+    assert not (tmp_path / "out.txt").exists()
+
+
+def test_strict_skill_filters_tools_from_prompt(tmp_path):
+    write_skill(
+        tmp_path,
+        "readonly",
+        """---
+name: readonly
+description: Read files only.
+tools: read_file
+allowed_tools_strict: true
+trigger_keywords: inspect
+---
+
+# Readonly
+""",
+    )
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>',
+            "<final>Done.</final>",
+        ],
+    )
+
+    assert agent.ask("inspect hello.txt") == "Done."
+
+    prompt = agent.model_client.prompts[0]
+    assert "- read_file(" in prompt
+    assert "- write_file(" not in prompt
+    assert "- run_shell(" not in prompt
 
 
 def test_agent_updates_goal_on_each_request(tmp_path):

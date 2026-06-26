@@ -4,6 +4,7 @@ import sys
 from unittest.mock import patch
 
 import pico as mini_pkg
+from pico import cli
 
 
 def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
@@ -163,3 +164,27 @@ def test_module_execution_help_works():
 
     assert result.returncode == 0
     assert "usage:" in result.stdout.lower()
+
+
+def test_repl_reload_skills_command_calls_agent_reload(capsys):
+    class FakeAgent:
+        def __init__(self):
+            self.model_client = type("Model", (), {"model": "fake"})()
+            self.workspace = type("Workspace", (), {"cwd": ".", "branch": "main"})()
+            self.approval_policy = "auto"
+            self.session = {"id": "session"}
+            self.session_path = ".pico/sessions/session.json"
+            self.reload_called = False
+
+        def reload_skills(self):
+            self.reload_called = True
+            return [object(), object()]
+
+    fake_agent = FakeAgent()
+
+    with patch("pico.cli.build_agent", return_value=fake_agent), patch("builtins.input", side_effect=["/reload-skills", "/exit"]):
+        assert cli.main([]) == 0
+
+    output = capsys.readouterr().out
+    assert fake_agent.reload_called is True
+    assert "skills reloaded: 2" in output
