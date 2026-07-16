@@ -1,4 +1,4 @@
-"""Small utilities shared by offline evaluation modules."""
+"""Small utilities shared by evaluation modules."""
 
 import subprocess
 from datetime import datetime, timezone

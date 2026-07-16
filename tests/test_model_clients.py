@@ -10,15 +10,15 @@ def test_openai_delegate_fork_has_independent_action_state():
     client = OpenAICompatibleModelClient(
         "gpt-test", "https://api.openai.com/v1", "sk-test", 0, 30
     )
-    client._action_pending_call_id = "parent-call"
+    client._action_pending_call_ids = ["parent-call"]
 
     child = client.fork_for_delegate()
 
     assert child is not client
     assert child.model == client.model
     assert child.base_url == client.base_url
-    assert child._action_pending_call_id == ""
-    assert client._action_pending_call_id == "parent-call"
+    assert child._action_pending_call_ids == []
+    assert client._action_pending_call_ids == ["parent-call"]
 
 
 def test_ollama_client_posts_expected_payload():
@@ -217,6 +217,7 @@ def test_openai_compatible_client_uses_one_required_strict_function_call():
     assert action.protocol == "responses_function"
     assert captured["body"]["tool_choice"] == "required"
     assert captured["body"]["parallel_tool_calls"] is False
+    assert captured["body"]["include"] == ["reasoning.encrypted_content"]
     assert captured["body"]["tools"] == tools
     assert client.last_completion_metadata["structured_action"] is True
 
@@ -278,6 +279,7 @@ def test_openai_compatible_client_continues_with_client_managed_function_output(
 
     assert second.kind == "final"
     assert "previous_response_id" not in captured[1]
+    assert captured[1]["include"] == ["reasoning.encrypted_content"]
     assert captured[1]["input"] == [
         {
             "role": "user",
@@ -294,6 +296,81 @@ def test_openai_compatible_client_continues_with_client_managed_function_output(
             "call_id": "call_1",
             "output": "README contents",
         }
+    ]
+
+
+def test_openai_compatible_client_rejects_parallel_calls_and_acknowledges_each():
+    captured = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    responses = [
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                    "call_id": "call_1",
+                },
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "arguments": '{"path":"pyproject.toml"}',
+                    "call_id": "call_2",
+                },
+            ]
+        },
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                    "call_id": "call_3",
+                }
+            ]
+        },
+    ]
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured.append(json.loads(request.data.decode("utf-8")))
+        return FakeResponse(responses.pop(0))
+
+    tools = [{"type": "function", "name": "read_file"}]
+    client = OpenAICompatibleModelClient("gpt-test", "https://right.codes/v1", "sk-test", 0, 30)
+    with patch("urllib.request.urlopen", fake_urlopen):
+        rejected = client.complete_action("inspect", 100, action_tools=tools)
+        client.record_action_result(rejected, rejected.error)
+        retried = client.complete_action("ignored", 100, action_tools=tools)
+
+    assert rejected.kind == "retry"
+    assert retried.kind == "tool"
+    assert captured[1]["input"][-2:] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "expected exactly one function call, received 2",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_2",
+            "output": "expected exactly one function call, received 2",
+        },
     ]
 
 

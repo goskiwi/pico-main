@@ -178,8 +178,16 @@ def _run_agent_turn(agent, user_message):
     max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
     native_actions = bool(getattr(agent.model_client, "supports_native_actions", False))
     native_prompt = None
+    action_tools = toolkit.responses_action_tools(agent.tools)
+    final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
+    finalization_attempted = False
 
-    while tool_steps < agent.max_steps and attempts < max_attempts:
+    while attempts < max_attempts:
+        finalization_only = tool_steps >= agent.max_steps
+        if finalization_only:
+            if not native_actions or finalization_attempted:
+                break
+            finalization_attempted = True
         attempts += 1
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
@@ -198,6 +206,7 @@ def _run_agent_turn(agent, user_message):
             {
                 "attempts": task_state.attempts,
                 "tool_steps": task_state.tool_steps,
+                "finalization_only": finalization_only,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
             },
         )
@@ -214,7 +223,7 @@ def _run_agent_turn(agent, user_message):
             action = agent.model_client.complete_action(
                 prompt,
                 agent.max_new_tokens,
-                action_tools=toolkit.responses_action_tools(agent.tools),
+                action_tools=final_action_tools if finalization_only else action_tools,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
                 require_explicit_final=agent.feature_enabled("require_explicit_final"),
@@ -245,6 +254,24 @@ def _run_agent_turn(agent, user_message):
         agent.last_prompt_metadata = prompt_metadata
         kind = action.kind
         payload = _action_payload(action)
+
+        if finalization_only and kind == ACTION_TOOL:
+            rejected_tool_name = action.name
+            payload = retry_notice(
+                "the tool step budget is exhausted; only submit_final is allowed"
+            )
+            action = ModelAction.retry(
+                payload,
+                protocol="runtime_guard",
+                raw_preview=action.raw_preview,
+                call_id=action.call_id,
+            )
+            kind = ACTION_RETRY
+            agent.emit_trace(
+                task_state,
+                "finalization_rejected",
+                {"reason": "tool_step_budget_exhausted", "tool_name": rejected_tool_name},
+            )
 
         if (
             kind == ACTION_FINAL

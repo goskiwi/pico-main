@@ -29,11 +29,18 @@ def build_arg_parser():
     parser.add_argument("--artifact-path", default=str(DEFAULT_REAL_ARTIFACT_PATH))
     parser.add_argument("--report-path", default=str(DEFAULT_REAL_REPORT_PATH))
     parser.add_argument("--workspace-root", default=str(DEFAULT_REAL_WORKSPACE_ROOT))
-    parser.add_argument("--variant", action="append", choices=SUPPORTED_VARIANTS, dest="variants")
+    parser.add_argument(
+        "--variant", action="append", choices=SUPPORTED_VARIANTS, dest="variants"
+    )
     parser.add_argument("--task", action="append", dest="task_ids")
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--verifier-timeout", type=int, default=90)
+    parser.add_argument(
+        "--require-clean-worktree",
+        action="store_true",
+        help="Refuse to run when tracked or untracked files are present.",
+    )
     parser.add_argument("--sandbox-image", default="pico-sandbox:latest")
     parser.add_argument("--sandbox-cpus", type=float, default=4.0)
     parser.add_argument("--sandbox-memory", default="4g")
@@ -55,6 +62,7 @@ def main(argv=None):
         repetitions=args.repetitions,
         max_new_tokens=args.max_new_tokens,
         verifier_timeout=args.verifier_timeout,
+        require_clean_worktree=args.require_clean_worktree,
         sandbox_config=DockerSandboxConfig(
             image=args.sandbox_image,
             cpus=args.sandbox_cpus,
@@ -64,7 +72,11 @@ def main(argv=None):
     )
     artifact = runner.run(task_ids=args.task_ids)
     for variant, summary in artifact["summary"]["variants"].items():
-        print(f"{variant}: {summary['passed']}/{summary['task_count']} ({summary['pass_rate']:.1%})")
+        print(
+            f"{variant}: {summary['passed']}/{summary['attempt_count']} attempts "
+            f"({summary['pass_rate']:.1%}); "
+            f"{summary['complete_repetitions']}/{summary['repetition_count']} complete runs"
+        )
     print(f"artifact: {runner.artifact_path}")
     print(f"report: {runner.report_path}")
     return 0

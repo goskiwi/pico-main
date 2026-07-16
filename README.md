@@ -1,29 +1,34 @@
 # pico
 
-`pico` 是一个面向代码仓库的轻量本地 coding agent。它直接跑在终端里，先看当前工作区，再用一组受约束的工具去读文件、改文件、跑命令，并把会话状态保存在本地 `.pico/` 目录里。
+`pico` 是一个面向代码仓库的轻量本地 coding agent。它不是聊天接口的简单封装，而是一个
+带结构化 Action、安全工具执行、任务状态和可复现实验记录的 Agent runtime。
 
-它更像一个能在仓库里持续工作的命令行助手，不是纯聊天窗口。你可以拿它做代码排查、测试修复、仓库分析，或者让它在当前项目里执行一次性的工程任务。
+它直接运行在终端中，读取当前工作区，通过受约束的工具修改文件、执行测试，并将会话和每次
+运行的完整证据保存在本地 `.pico/` 目录。
 
-## 适合做什么
+## 项目亮点
 
-- 在本地仓库里排查测试失败
-- 读取当前代码结构并给出修改建议
-- 基于现有文件做小步迭代，而不是脱离仓库空想
-- 在会话中保留上下文，支持继续上一次工作
+- **结构化 Agent loop**：OpenAI-compatible 路径使用 strict function calling，统一输出
+  `tool / final / retry` Action；异常格式、并行 call 违规和 runtime guard 拒绝都会进入审计记录。
+- **明确的终止语义**：工具额度与结束协议分离；额度耗尽后最多增加一次只暴露
+  `submit_final` 的收尾调用，不能借机继续修改工作区。
+- **安全执行边界**：文件工具限制敏感路径；Shell 强制进入无网络 Docker 沙箱，不提供宿主机
+  回退，并限制 CPU、内存、PIDs、RootFS 和 Linux capabilities。
+- **可追溯运行状态**：每次任务保存 `task_state`、trace、工具审计、任务图、完整工具输出和最终
+  report，可复盘模型决策、失败类别与工作区变更。
+- **真实模型评测**：工程任务从全新 fixture 开始，Agent 停止后才注入隐藏 verifier；报告记录
+  快照哈希、Git 状态、重复运行波动、token、时延和逐任务稳定性。
 
-## 主要特性
+历史实测中，同一 V1 快照从文本/XML 协议的 6/10 提升到 strict structured actions 的 9/10，
+平均模型调用从 9.50 降至 6.40；首次 V2 held-out 运行通过 5/5。完整结果与解释边界见
+[真实模型评测](#真实模型评测)。
 
-- 包名是 `pico`
-- CLI 命令是 `pico`
-- 模块入口是 `python -m pico`
-- 会话保存在 `.pico/sessions/`
-- 每次运行的工件保存在 `.pico/runs/<run_id>/`
-- 支持三类模型后端：
-  - Ollama
-  - OpenAI 兼容 Responses API
-  - Anthropic 兼容 Messages API
-- OpenAI-compatible 主循环使用 strict function calling：工具动作和 `submit_final` 都是结构化 Action，格式错误会进入 trace/report 审计
-- Shell 命令强制进入无网络 Docker 沙箱，默认限制为 4 CPU、4 GB 内存、512 PIDs
+## 适用场景
+
+- 在本地仓库中排查和修复测试失败
+- 基于现有代码完成小步功能修改或重构
+- 用受限工具链执行代码阅读、测试和验证
+- 通过持久化会话与运行工件续接长任务
 
 ## 使用截图
 
@@ -115,13 +120,13 @@ uv run pico --provider openai
 ### Anthropic 兼容接口
 
 ```bash
-export ANTHROPIC_API_BASE="https://www.right.codes/claude/v1"
+export ANTHROPIC_API_BASE="https://your-api.example/v1"
 export ANTHROPIC_API_KEY="your-api-key"
 export ANTHROPIC_MODEL="claude-sonnet-4-6"
 uv run pico --provider anthropic
 ```
 
-如果你的服务端对多个兼容接口复用了同一套密钥，`pico` 也支持从 `ANTHROPIC_API_KEY` 回退到 `RIGHT_CODES_API_KEY` 或 `OPENAI_API_KEY`。
+密钥只通过环境变量提供，不写入仓库、trace 或 benchmark artifact。
 
 ## 常用交互命令
 
@@ -255,6 +260,7 @@ tool_outputs/*.txt
   -> model_client.complete_action() 返回统一 ModelAction
   -> Responses function_call / function_call_output 组成结构化工具循环
   -> Pico.run_tool() 校验、审批、执行工具
+  -> 工具额度耗尽时进入一次 final-only 收尾状态
   -> session / task_state / trace / report 落盘
 ```
 
@@ -296,20 +302,25 @@ uv run python scripts/render_run_report.py .pico/runs --all
 
 生成的页面包含任务结果、工具调用时间线、Mermaid 任务图原文、安全事件、prompt/token 指标和完整 trace 展开项。
 
-## Benchmark 结果
+## 真实模型评测
 
-pico 只把真实 API 调用计入 Agent 效果评测。普通 pytest 使用离线替身验证代码逻辑，
-不作为模型能力成绩。真实模型结果分为原始文本协议基线、
+pico 的 Agent 效果评测强制调用真实模型 API，不提供 FakeModelClient 或离线 benchmark 模式。
+真实模型结果分为原始文本协议基线、
 [结构化 Action V1](docs/metrics/real-world-benchmark-v1-structured.md)、
 [同快照对比](docs/metrics/structured-action-comparison.md)和
 [V2 held-out](docs/metrics/real-world-benchmark-v2-heldout.md)。
 
-### Real-world Benchmark V1
+### 已发布结果
 
 V1 包含 10 个相互独立的仓库快照，覆盖 4 个 bugfix、2 个 feature、2 个测试补强、
 1 个文档任务和 1 个重构任务。每轮都复制全新工作区；Agent 停止后才注入隐藏测试，并在
 无网络的强制 Docker 沙箱中验收。报告记录 pass rate、失败分类、工具步数、模型调用、token
 和总耗时。
+
+评测 artifact v2 还记录完整 `evaluation_snapshot_id`（覆盖 prompt、fixture、任务配置和隐藏
+verifier）、Git dirty 状态、Python/平台版本和运行参数。多次运行会报告整套任务的均值、标准差、
+最好/最差结果，以及逐任务的稳定性。完整口径见
+[Real-model evaluation methodology](docs/metrics/evaluation-methodology.md)。
 
 同一模型、同一组 task ID、同一 fixture snapshot 的前后对比结果：
 
@@ -322,24 +333,36 @@ V1 包含 10 个相互独立的仓库快照，覆盖 4 个 bugfix、2 个 featur
 100% (5/5)，平均 6.20 次模型调用，Action 拒绝为 0。该结果只有一次真实模型重复，应理解为
 带快照和模型约束的工程证据，不是通用 coding benchmark 结论。
 
+V2 在首次 held-out 运行后已经用于 trace 分析和 runtime 开发，因此后续 V2 运行只作为回归，
+不再作为新的独立 held-out 证据。未来若发布新的泛化结果，需要使用开发过程中未查看的新任务集；
+不能通过反复运行 V2 把回归成绩包装成新的 held-out 提升。
+
 ```bash
 export OPENAI_API_KEY="..."
+export OPENAI_API_BASE="https://your-api.example/v1"
 uv run python scripts/run_real_world_benchmark.py \
   --provider openai \
   --model YOUR_MODEL \
-  --variant full
+  --variant full \
+  --benchmark-path benchmarks/real_world_tasks_v2.json \
+  --repetitions 3 \
+  --require-clean-worktree \
+  --artifact-path artifacts/real-world-benchmark-v2-3x.json \
+  --report-path docs/metrics/real-world-benchmark-v2-3x.md
 ```
 
-使用 `--benchmark-path benchmarks/real_world_tasks_v2.json` 可运行 held-out 集合；使用
-`scripts/compare_real_world_benchmarks.py BASELINE CANDIDATE` 可生成同快照协议对比。建议先加
-`--task inventory_normalize_sku` 做低成本 smoke run。仓库只提交经过检查的 JSON/Markdown 指标，
-工作区副本继续被 `.gitignore` 忽略；API Key 不写入配置或 artifact，也不用 FakeModelClient
-冒充真实模型成绩。
+使用 `scripts/compare_real_world_benchmarks.py BASELINE CANDIDATE` 可生成同快照协议对比；比较器
+会拒绝 provider、model、任务集合或完整评测快照不一致的输入。建议先加
+`--task url_query_before_fragment --repetitions 1` 做低成本 smoke run。仓库只提交经过检查的
+JSON/Markdown 指标，工作区副本继续被 `.gitignore` 忽略；API Key 不写入配置或 artifact。
+重复运行同一批任务并不等于增加了独立样本，报告中的
+标准差只描述固定任务集上的运行波动。
 
 ## 开发
 
-如果装了 Ruff，可以这样检查：
+提交前运行完整回归和静态检查：
 
 ```bash
+uv run pytest -q
 uv run ruff check .
 ```

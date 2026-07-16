@@ -32,6 +32,8 @@ htmlcov/
 tmp/
 .worktrees/
 .pico/
+.env
+.env.local
 # Live benchmark outputs are ignored by default because provider-backed runs
 # may contain local metadata. Keep only reviewed result summaries.
 artifacts/*

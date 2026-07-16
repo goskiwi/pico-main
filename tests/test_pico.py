@@ -89,6 +89,100 @@ def test_native_action_loop_reuses_the_structured_conversation_prompt(tmp_path):
     assert agent.last_prompt_metadata["prompt_reused"] is True
 
 
+def test_native_action_gets_one_final_only_turn_after_tool_limit(tmp_path):
+    class NativeModelClient:
+        supports_native_actions = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+            self.tool_sets = []
+            self.actions = [
+                ModelAction.tool(
+                    "list_files",
+                    {"path": "."},
+                    protocol="responses_function",
+                    call_id="call_1",
+                ),
+                ModelAction.final(
+                    "Finished at the tool limit.",
+                    protocol="responses_function",
+                    call_id="call_2",
+                ),
+            ]
+
+        def reset_action_session(self):
+            pass
+
+        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
+            del prompt, max_new_tokens, kwargs
+            self.tool_sets.append([tool["name"] for tool in action_tools])
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            del action, result
+
+    agent = build_agent(tmp_path, [], max_steps=1)
+    client = NativeModelClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    answer = agent.ask("Inspect once, then finish")
+
+    assert answer == "Finished at the tool limit."
+    assert "list_files" in client.tool_sets[0]
+    assert client.tool_sets[1] == ["submit_final"]
+    assert agent.current_task_state.tool_steps == 1
+    assert agent.current_task_state.attempts == 2
+
+
+def test_final_only_turn_cannot_execute_another_tool(tmp_path):
+    class NativeModelClient:
+        supports_native_actions = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+            self.tool_sets = []
+            self.actions = [
+                ModelAction.tool(
+                    "list_files",
+                    {"path": "."},
+                    protocol="responses_function",
+                    call_id="call_1",
+                ),
+                ModelAction.tool(
+                    "write_file",
+                    {"path": "too-late.txt", "content": "blocked"},
+                    protocol="responses_function",
+                    call_id="call_2",
+                ),
+            ]
+
+        def reset_action_session(self):
+            pass
+
+        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
+            del prompt, max_new_tokens, kwargs
+            self.tool_sets.append([tool["name"] for tool in action_tools])
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            del action, result
+
+    agent = build_agent(tmp_path, [], max_steps=1)
+    client = NativeModelClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    answer = agent.ask("Try to exceed the tool budget")
+
+    assert answer == "Stopped after reaching the step limit without a final answer."
+    assert client.tool_sets[1] == ["submit_final"]
+    assert not (tmp_path / "too-late.txt").exists()
+    assert [entry["name"] for entry in agent.tool_audit_log] == ["list_files"]
+
+
 def test_skill_tool_whitelist_rejects_undeclared_tool(tmp_path):
     write_skill(
         tmp_path,

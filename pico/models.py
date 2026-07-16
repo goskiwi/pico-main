@@ -236,7 +236,7 @@ class OpenAICompatibleModelClient:
 
     def reset_action_session(self):
         self._action_input_items = []
-        self._action_pending_call_id = ""
+        self._action_pending_call_ids = []
         self._action_pending_output = None
 
     def fork_for_delegate(self):
@@ -251,9 +251,9 @@ class OpenAICompatibleModelClient:
 
     def record_action_result(self, action, result):
         """Queue a tool or guard result for the pending Responses function call."""
-        if not self._action_pending_call_id:
+        if not self._action_pending_call_ids:
             return
-        if action.call_id and action.call_id != self._action_pending_call_id:
+        if action.call_id and action.call_id not in self._action_pending_call_ids:
             raise RuntimeError("action call_id does not match the pending Responses call")
         self._action_pending_output = str(result)
 
@@ -320,19 +320,23 @@ class OpenAICompatibleModelClient:
                     "content": [{"type": "input_text", "text": prompt}],
                 }
             ]
-        if self._action_pending_call_id:
+        if self._action_pending_call_ids:
             if self._action_pending_output is None:
                 raise RuntimeError("pending Responses function call has no recorded output")
-            self._action_input_items.append(
+            self._action_input_items.extend(
                 {
                     "type": "function_call_output",
-                    "call_id": self._action_pending_call_id,
+                    "call_id": call_id,
                     "output": self._action_pending_output,
                 }
+                for call_id in self._action_pending_call_ids
             )
         payload = {
             "model": self.model,
             "input": list(self._action_input_items),
+            # Stateless multi-turn Responses calls must carry encrypted reasoning
+            # items forward when the model emits them.
+            "include": ["reasoning.encrypted_content"],
             "max_output_tokens": max_new_tokens,
             "stream": False,
             "tools": list(action_tools),
@@ -352,7 +356,13 @@ class OpenAICompatibleModelClient:
         self._action_input_items.extend(
             item for item in data.get("output", []) if isinstance(item, dict)
         )
-        self._action_pending_call_id = action.call_id
+        self._action_pending_call_ids = [
+            str(item.get("call_id", "")).strip()
+            for item in data.get("output", [])
+            if isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and str(item.get("call_id", "")).strip()
+        ]
         self.last_completion_metadata.update(
             {
                 "action_protocol": action.protocol,
@@ -435,6 +445,7 @@ class OpenAICompatibleModelClient:
                 f"expected exactly one function call, received {len(calls)}",
                 protocol=protocol,
                 raw_preview=raw_preview,
+                call_id=str(calls[0].get("call_id", "")).strip() if calls else "",
             )
         call = calls[0]
         name = str(call.get("name", "")).strip()
