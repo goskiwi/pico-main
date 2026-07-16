@@ -260,7 +260,7 @@ def _responses_schema_property(tool_name, field_name, spec):
         ("write_file", "path"): "Workspace-relative path to create or replace.",
         ("write_file", "content"): "Complete file content to write, including imports and final newline when appropriate.",
         ("patch_file", "path"): "Workspace-relative path to edit.",
-        ("patch_file", "old_text"): "Exact existing file text without display line numbers; it must occur exactly once.",
+        ("patch_file", "old_text"): "Exact existing file text without read_file metadata or display line numbers; it must occur exactly once.",
         ("patch_file", "new_text"): "Complete replacement for old_text.",
         ("read_file", "path"): "Workspace-relative file path.",
         ("run_shell", "command"): "Shell command to run inside the isolated workspace sandbox.",
@@ -469,7 +469,10 @@ def validate_tool(agent, name, args):
         text = path.read_text(encoding="utf-8")
         count = text.count(old_text)
         if count != 1:
-            raise ValueError(f"old_text must occur exactly once, found {count}")
+            raise ValueError(
+                f"old_text must occur exactly once, found {count}; use exact file content "
+                "without the read_file metadata header or display line numbers"
+            )
         return
 
     if name == "delegate":
@@ -518,7 +521,11 @@ def tool_read_file(agent, args):
     end = int(args.get("end", 200))
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(agent.root)}\n{body}"
+    return (
+        f"=== read_file metadata: {path.relative_to(agent.root)}; "
+        "header and line numbers are not file content ===\n"
+        f"{body}"
+    )
 
 
 def tool_read_tool_output(agent, args):

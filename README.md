@@ -9,7 +9,8 @@
 ## 项目亮点
 
 - **结构化 Agent loop**：OpenAI-compatible 路径使用 strict function calling，统一输出
-  `tool / final / retry` Action；异常格式、并行 call 违规和 runtime guard 拒绝都会进入审计记录。
+  `tool / final / retry` Action；多调用响应只执行首个普通工具并延迟其余调用，异常格式和
+  runtime guard 拒绝都会进入审计记录。
 - **明确的终止语义**：工具额度与结束协议分离；额度耗尽后最多增加一次只暴露
   `submit_final` 的收尾调用，不能借机继续修改工作区。
 - **安全执行边界**：文件工具限制敏感路径；Shell 强制进入无网络 Docker 沙箱，不提供宿主机

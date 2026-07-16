@@ -39,6 +39,36 @@ def test_patch_file_replaces_exact_match(tmp_path):
     assert file_path.read_text(encoding="utf-8") == "hello agent\n"
 
 
+def test_read_file_marks_display_metadata_as_not_file_content(tmp_path):
+    (tmp_path / "sample.txt").write_text("hello\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "read_file", {"path": "sample.txt", "start": 1, "end": 1}
+    )
+
+    assert result.startswith("=== read_file metadata: sample.txt")
+    assert "header and line numbers are not file content" in result
+    assert result.endswith("   1: hello")
+
+
+def test_patch_file_mismatch_explains_display_metadata(tmp_path):
+    (tmp_path / "sample.txt").write_text("hello\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "patch_file",
+        {
+            "path": "sample.txt",
+            "old_text": "# sample.txt\nhello",
+            "new_text": "updated",
+        },
+    )
+
+    assert "old_text must occur exactly once, found 0" in result
+    assert "without the read_file metadata header or display line numbers" in result
+
+
 def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="ask")
 

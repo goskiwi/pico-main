@@ -237,6 +237,8 @@ class OpenAICompatibleModelClient:
     def reset_action_session(self):
         self._action_input_items = []
         self._action_pending_call_ids = []
+        self._action_primary_call_id = ""
+        self._action_defer_extra_calls = False
         self._action_pending_output = None
 
     def fork_for_delegate(self):
@@ -323,14 +325,23 @@ class OpenAICompatibleModelClient:
         if self._action_pending_call_ids:
             if self._action_pending_output is None:
                 raise RuntimeError("pending Responses function call has no recorded output")
-            self._action_input_items.extend(
-                {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": self._action_pending_output,
-                }
-                for call_id in self._action_pending_call_ids
-            )
+            for call_id in self._action_pending_call_ids:
+                output = self._action_pending_output
+                if (
+                    self._action_defer_extra_calls
+                    and call_id != self._action_primary_call_id
+                ):
+                    output = (
+                        "deferred_by_runtime: only the first function call is executed; "
+                        "call this function again if it is still needed"
+                    )
+                self._action_input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    }
+                )
         payload = {
             "model": self.model,
             "input": list(self._action_input_items),
@@ -353,6 +364,11 @@ class OpenAICompatibleModelClient:
             prompt_cache_retention=prompt_cache_retention,
         )
         action = self._action_from_response(data, text, action_tools)
+        calls = [
+            item
+            for item in data.get("output", [])
+            if isinstance(item, dict) and item.get("type") == "function_call"
+        ]
         self._action_input_items.extend(
             item for item in data.get("output", []) if isinstance(item, dict)
         )
@@ -363,11 +379,16 @@ class OpenAICompatibleModelClient:
             and item.get("type") == "function_call"
             and str(item.get("call_id", "")).strip()
         ]
+        self._action_primary_call_id = action.call_id
+        self._action_defer_extra_calls = len(calls) > 1 and action.kind == "tool"
         self.last_completion_metadata.update(
             {
                 "action_protocol": action.protocol,
                 "structured_action": True,
                 "action_kind": action.kind,
+                "deferred_function_calls": (
+                    len(calls) - 1 if self._action_defer_extra_calls else 0
+                ),
             }
         )
         return action
@@ -440,13 +461,22 @@ class OpenAICompatibleModelClient:
         protocol = "responses_function"
         calls = [item for item in data.get("output", []) if item.get("type") == "function_call"]
         raw_preview = text or json.dumps(data.get("output", []), ensure_ascii=False)
-        if len(calls) != 1:
+        if not calls:
             return ModelAction.retry(
-                f"expected exactly one function call, received {len(calls)}",
+                "expected exactly one function call, received 0",
                 protocol=protocol,
                 raw_preview=raw_preview,
-                call_id=str(calls[0].get("call_id", "")).strip() if calls else "",
             )
+        allowed_names = {str(item.get("name", "")) for item in action_tools}
+        if len(calls) > 1:
+            names = [str(call.get("name", "")).strip() for call in calls]
+            if "submit_final" in names or any(name not in allowed_names for name in names):
+                return ModelAction.retry(
+                    "multiple function calls may contain only known non-final tools",
+                    protocol=protocol,
+                    raw_preview=raw_preview,
+                    call_id=str(calls[0].get("call_id", "")).strip(),
+                )
         call = calls[0]
         name = str(call.get("name", "")).strip()
         call_id = str(call.get("call_id", "")).strip()
@@ -481,7 +511,6 @@ class OpenAICompatibleModelClient:
                 raw_preview=raw_preview,
                 call_id=call_id,
             )
-        allowed_names = {str(item.get("name", "")) for item in action_tools}
         if name not in allowed_names:
             return ModelAction.retry(
                 f"unknown function call: {name or '<missing>'}",

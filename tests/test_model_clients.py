@@ -299,7 +299,7 @@ def test_openai_compatible_client_continues_with_client_managed_function_output(
     ]
 
 
-def test_openai_compatible_client_rejects_parallel_calls_and_acknowledges_each():
+def test_openai_compatible_client_executes_first_call_and_defers_extras():
     captured = []
 
     class FakeResponse:
@@ -354,24 +354,58 @@ def test_openai_compatible_client_rejects_parallel_calls_and_acknowledges_each()
     tools = [{"type": "function", "name": "read_file"}]
     client = OpenAICompatibleModelClient("gpt-test", "https://right.codes/v1", "sk-test", 0, 30)
     with patch("urllib.request.urlopen", fake_urlopen):
-        rejected = client.complete_action("inspect", 100, action_tools=tools)
-        client.record_action_result(rejected, rejected.error)
+        first = client.complete_action("inspect", 100, action_tools=tools)
+        deferred_count = client.last_completion_metadata["deferred_function_calls"]
+        client.record_action_result(first, "README contents")
         retried = client.complete_action("ignored", 100, action_tools=tools)
 
-    assert rejected.kind == "retry"
+    assert first.kind == "tool"
+    assert first.call_id == "call_1"
+    assert deferred_count == 1
     assert retried.kind == "tool"
     assert captured[1]["input"][-2:] == [
         {
             "type": "function_call_output",
             "call_id": "call_1",
-            "output": "expected exactly one function call, received 2",
+            "output": "README contents",
         },
         {
             "type": "function_call_output",
             "call_id": "call_2",
-            "output": "expected exactly one function call, received 2",
+            "output": (
+                "deferred_by_runtime: only the first function call is executed; "
+                "call this function again if it is still needed"
+            ),
         },
     ]
+
+
+def test_openai_compatible_client_rejects_multiple_calls_with_final():
+    data = {
+        "output": [
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+                "call_id": "call_1",
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final",
+                "arguments": '{"answer":"Done."}',
+                "call_id": "call_2",
+            },
+        ]
+    }
+
+    action = OpenAICompatibleModelClient._action_from_response(
+        data,
+        "",
+        [{"name": "read_file"}, {"name": "submit_final"}],
+    )
+
+    assert action.kind == "retry"
+    assert "known non-final tools" in action.error
 
 
 def test_openai_compatible_client_maps_submit_final_function():
