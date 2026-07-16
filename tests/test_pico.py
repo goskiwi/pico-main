@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pico as mini_pkg
+from pico import tools as toolkit
 from pico import (
     FakeModelClient,
-    MiniAgent,
+    Pico,
+    ModelAction,
     build_welcome,
 )
 from tests.helpers import build_agent
@@ -28,8 +30,63 @@ def test_agent_runs_tool_then_final(tmp_path):
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Read the file successfully."
-    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
+    tool_items = [item for item in agent.session["history"] if item["role"] == "tool" and item["name"] == "read_file"]
+    assert tool_items
+    assert tool_items[0]["node_id"] == "t001_read_file"
+    assert tool_items[0]["content_ref"].endswith("tool_outputs/0001_read_file.txt")
     assert "hello.txt" in agent.session["memory"]["working"]["recent_files"]
+
+    graph = (agent.current_run_dir / "task_graph.mmd").read_text(encoding="utf-8")
+    assert 't001_read_file["tool | ok | read_file hello.txt"]' in graph
+    assert "%% t001_read_file ref:" in graph
+    assert "tool_outputs/0001_read_file.txt" in graph
+
+
+def test_native_action_loop_reuses_the_structured_conversation_prompt(tmp_path):
+    class NativeModelClient:
+        supports_native_actions = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.prompts = []
+            self.results = []
+            self.last_completion_metadata = {}
+            self.actions = [
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "README.md", "start": 1, "end": 1},
+                    protocol="responses_function",
+                    call_id="call_1",
+                ),
+                ModelAction.final(
+                    "Finished.",
+                    protocol="responses_function",
+                    call_id="call_2",
+                ),
+            ]
+
+        def reset_action_session(self):
+            self.results = []
+
+        def complete_action(self, prompt, max_new_tokens, **kwargs):
+            del max_new_tokens, kwargs
+            self.prompts.append(prompt)
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            self.results.append((action.call_id, result))
+
+    agent = build_agent(tmp_path, [])
+    client = NativeModelClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    assert agent.ask("Inspect README.md") == "Finished."
+
+    assert len(client.prompts) == 2
+    assert client.prompts[0] == client.prompts[1]
+    assert client.results[0][0] == "call_1"
+    assert agent.last_prompt_metadata["prompt_reused"] is True
 
 
 def test_skill_tool_whitelist_rejects_undeclared_tool(tmp_path):
@@ -58,7 +115,7 @@ trigger_keywords: review
 
     tool_items = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert tool_items[-1]["name"] == "write_file"
-    assert "not available for the active skills" in tool_items[-1]["content"]
+    assert "not available for the active skills" in tool_items[-1]["summary"]
     assert not (tmp_path / "out.txt").exists()
 
 
@@ -92,6 +149,15 @@ trigger_keywords: inspect
     assert "- read_file(" in prompt
     assert "- write_file(" not in prompt
     assert "- run_shell(" not in prompt
+
+
+def test_prompt_teaches_read_tool_output_for_task_graph_refs(tmp_path):
+    agent = build_agent(tmp_path, ["<final>Done.</final>"])
+
+    prompt = agent.prompt("continue previous run")
+
+    assert "- read_tool_output(" in prompt
+    assert "When a task graph node has a ref, use read_tool_output instead of manually reading tool_outputs paths." in prompt
 
 
 def test_agent_updates_goal_on_each_request(tmp_path):
@@ -186,7 +252,7 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     assert not any(note["text"] == "Done." for note in notes)
     assert not any(note["text"] == "Done." for note in notes)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>It is red.</final>"]),
         workspace=agent.workspace,
         session_store=agent.session_store,
@@ -214,7 +280,7 @@ def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling
     assert "- sample.txt: sample.txt: alpha" in rendered
     file_path.write_text("beta\n", encoding="utf-8")
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient([]),
         workspace=agent.workspace,
         session_store=agent.session_store,
@@ -243,6 +309,59 @@ def test_agent_retries_after_empty_model_output(tmp_path):
     assert any("empty response" in item for item in notices)
 
 
+def test_explicit_final_mode_retries_bare_action_narration(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "I will update the file next.",
+            "<final>Finished after the runtime requested an explicit final.</final>",
+        ],
+        feature_flags={"require_explicit_final": True},
+    )
+
+    answer = agent.ask("Do the task")
+
+    assert answer == "Finished after the runtime requested an explicit final."
+    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    assert any("bare text is not a final answer" in item for item in notices)
+
+
+def test_agent_retries_unclosed_protocol_tags(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"write_file","args":{"path":"broken.txt","content":"x"}}',
+            "<final>Recovered from an unclosed tool tag.</final>",
+        ],
+    )
+
+    answer = agent.ask("Do the task")
+
+    assert answer == "Recovered from an unclosed tool tag."
+    assert not (tmp_path / "broken.txt").exists()
+    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    assert any("unclosed <tool>" in item for item in notices)
+
+
+def test_workspace_change_mode_rejects_premature_final(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>Done.</final>",
+            '<tool name="write_file" path="result.txt"><content>complete\n</content></tool>',
+            "<final>Created result.txt.</final>",
+        ],
+        feature_flags={"require_workspace_change": True},
+    )
+
+    answer = agent.ask("Create result.txt")
+
+    assert answer == "Created result.txt."
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "complete\n"
+    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    assert any("no effective file change" in item for item in notices)
+
+
 def test_agent_retries_after_malformed_tool_payload(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
@@ -260,6 +379,11 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
     notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
     assert any("valid <tool> call" in item for item in notices)
+    assert len(agent.model_action_rejections) == 1
+    assert agent.model_action_rejections[0]["protocol"] == "scripted_text"
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert report["summary"]["model_action_rejection_count"] == 1
+    assert report["model_action_rejections"][0]["raw_preview"].startswith("<tool>")
 
 
 def test_retries_do_not_consume_the_whole_budget(tmp_path):
@@ -279,8 +403,19 @@ def test_retries_do_not_consume_the_whole_budget(tmp_path):
 
 
 def test_runtime_does_not_expose_legacy_parse_api():
-    assert not hasattr(MiniAgent, "parse")
-    assert not hasattr(MiniAgent, "parse_xml_tool")
+    assert not hasattr(Pico, "parse")
+
+
+def test_short_read_summary_keeps_the_complete_file(tmp_path):
+    agent = build_agent(tmp_path, [])
+    result = "\n".join(f"{line}: value" for line in range(1, 13))
+
+    summary = agent.summarize_tool_result("read_file", {"path": "small.py"}, result)
+
+    assert "1: value" in summary
+    assert "12: value" in summary
+    assert "omitted" not in summary
+    assert not hasattr(Pico, "parse_xml_tool")
 
 
 def test_runtime_does_not_expose_legacy_security_api():
@@ -295,7 +430,7 @@ def test_runtime_does_not_expose_legacy_security_api():
         "detected_secret_env_summary",
         "shell_env",
     ]
-    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+    assert not any(hasattr(Pico, name) for name in legacy_names)
 
 
 def test_runtime_does_not_expose_legacy_memory_promotion_api():
@@ -308,11 +443,11 @@ def test_runtime_does_not_expose_legacy_memory_promotion_api():
         "parse_memory_extractor_output",
         "llm_promote_durable_memory",
     ]
-    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+    assert not any(hasattr(Pico, name) for name in legacy_names)
 
 
 def test_runtime_does_not_expose_legacy_approval_api():
-    assert not hasattr(MiniAgent, "approve")
+    assert not hasattr(Pico, "approve")
 
 
 def test_runtime_does_not_expose_legacy_report_api():
@@ -321,7 +456,7 @@ def test_runtime_does_not_expose_legacy_report_api():
         "record_tool_audit",
         "build_run_summary",
     ]
-    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+    assert not any(hasattr(Pico, name) for name in legacy_names)
 
 
 def test_runtime_does_not_expose_legacy_workspace_diff_api():
@@ -329,7 +464,7 @@ def test_runtime_does_not_expose_legacy_workspace_diff_api():
         "capture_workspace_snapshot",
         "diff_workspace_snapshots",
     ]
-    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+    assert not any(hasattr(Pico, name) for name in legacy_names)
 
 
 def test_runtime_does_not_expose_legacy_tool_policy_api():
@@ -342,14 +477,14 @@ def test_runtime_does_not_expose_legacy_tool_policy_api():
         "shell_command_policy",
         "repeated_tool_call",
     ]
-    assert not any(hasattr(MiniAgent, name) for name in legacy_names)
+    assert not any(hasattr(Pico, name) for name in legacy_names)
 
 
 def test_agent_saves_and_resumes_session(tmp_path):
     agent = build_agent(tmp_path, ["<final>First pass.</final>"])
     assert agent.ask("Start a session") == "First pass."
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=agent.workspace,
         session_store=agent.session_store,
@@ -376,7 +511,30 @@ def test_delegate_uses_child_agent(tmp_path):
     assert answer == "Parent incorporated the child result."
     tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate"
-    assert "delegate_result role=explore" in tool_events[0]["content"]
+    assert "delegate_result role=explore" in tool_events[0]["summary"]
+
+
+def test_native_delegate_uses_independent_model_client(tmp_path):
+    class NativeParentClient:
+        supports_native_actions = True
+
+        def __init__(self):
+            self.fork_count = 0
+
+        def fork_for_delegate(self):
+            self.fork_count += 1
+            return FakeModelClient(["<final>Child result.</final>"])
+
+    agent = build_agent(tmp_path, [])
+    parent_client = NativeParentClient()
+    agent.model_client = parent_client
+
+    result = toolkit.run_delegate_child(
+        agent, {"role": "explore", "task": "inspect README", "max_steps": 2}
+    )
+
+    assert parent_client.fork_count == 1
+    assert result["answer"] == "Child result."
 
 
 def test_delegate_many_uses_multiple_child_agents(tmp_path):
@@ -395,11 +553,11 @@ def test_delegate_many_uses_multiple_child_agents(tmp_path):
     assert answer == "Parent incorporated the child results."
     tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate_many"
-    assert "delegate_many_result count=2" in tool_events[0]["content"]
-    assert "role=explore" in tool_events[0]["content"]
-    assert "Explore result." in tool_events[0]["content"]
-    assert "role=review" in tool_events[0]["content"]
-    assert "Review result." in tool_events[0]["content"]
+    assert "delegate_many_result count=2" in tool_events[0]["summary"]
+    assert "role=explore" in tool_events[0]["summary"]
+    assert "Explore result." in tool_events[0]["summary"]
+    assert "role=review" in tool_events[0]["summary"]
+    assert "Review result." in tool_events[0]["summary"]
 
 
 def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
@@ -427,7 +585,8 @@ def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
 def test_public_api_exports_resolve_through_package_path():
     assert callable(mini_pkg.build_welcome)
     assert mini_pkg.FakeModelClient is not None
-    assert mini_pkg.MiniAgent is not None
+    assert mini_pkg.Pico is not None
+    assert not hasattr(mini_pkg, "MiniAgent")
     assert mini_pkg.OllamaModelClient is not None
     assert mini_pkg.SessionStore is not None
     assert mini_pkg.WorkspaceContext is not None

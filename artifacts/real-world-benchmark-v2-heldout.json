@@ -1,0 +1,242 @@
+{
+  "artifact_type": "real-world-benchmark",
+  "benchmark": {
+    "description": "Five independent held-out repository tasks created before evaluating the structured Action protocol.",
+    "fixture_snapshot_id": "sha256:b6c80d23edd3fba9b200f0f2f31349f850adb161d72de0006bfb9c4da0b1aea1",
+    "name": "pico-real-world-benchmark-v2-heldout",
+    "source": "benchmarks/real_world_tasks_v2.json",
+    "task_count": 5
+  },
+  "captured_at": "2026-07-13T19:43:55.422756Z",
+  "model": "gpt-5.4",
+  "provider": "openai",
+  "repetitions": 1,
+  "rows": [
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 14593,
+      "cached_tokens": 11008,
+      "category": "bugfix",
+      "changed_files": [
+        "url_tools.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Fixed `append_query` in `url_tools.py` to use standard-library URL parsing/rebuilding so added params go before fragments, preserve existing query strings and fragments, and return the original URL unchanged for empty params. Verified with `pytest -q` (2 tests passed).",
+      "input_tokens": 12787,
+      "model_action_rejections": 0,
+      "model_calls": 4,
+      "model_failures": 0,
+      "output_tokens": 345,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260714-034139-9afb12",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "url_query_before_fragment",
+      "tool_steps": 3,
+      "total_duration_ms": 15033,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "...                                                                      [100%]\n3 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 440,
+      "workspace": "rep-1/full/url_query_before_fragment/url_fragment"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 37906,
+      "cached_tokens": 22784,
+      "category": "feature",
+      "changed_files": [
+        "cache.py",
+        "test_cache.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented TTL expiration in `cache.py`: `set` now stores `(value, deadline)` using the injected clock plus `ttl_seconds`, and `get` returns only before the deadline, otherwise deletes the expired entry and raises `KeyError`. Added tests for deadline behavior, post-expiry eviction, and overwrite deadline reset using a fake clock with no real sleeps. Verified with `pytest -q` (5 passed).",
+      "input_tokens": 25435,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 923,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260714-034154-c6d952",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "ttl_cache_expiration",
+      "tool_steps": 6,
+      "total_duration_ms": 38351,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".....                                                                    [100%]\n5 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 445,
+      "workspace": "rep-1/full/ttl_cache_expiration/ttl_cache"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 26234,
+      "cached_tokens": 20480,
+      "category": "bugfix",
+      "changed_files": [
+        "records.py",
+        "test_records.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated records.py to use csv.reader with StringIO, preserving the existing TypeError and signature, correctly handling quoted commas/doubled quotes, preserving whitespace per csv.reader, and raising ValueError when more than one record is present. Added tests for quoted commas, doubled quotes, whitespace preservation, multiple-record rejection, and kept existing coverage. Verified with `pytest -q` passing: 6 passed.",
+      "input_tokens": 23353,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 592,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260714-034232-903f1a",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "csv_quoted_record",
+      "tool_steps": 6,
+      "total_duration_ms": 26683,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "...                                                                      [100%]\n3 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 449,
+      "workspace": "rep-1/full/csv_quoted_record/csv_record"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 20953,
+      "cached_tokens": 17408,
+      "category": "test-addition",
+      "changed_files": [
+        "test_event_bus_contract.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Added test_event_bus_contract.py with the two unsubscribe contract tests using pytest and EventBus.unsubscribe. Verified by running the full suite: 3 passed.",
+      "input_tokens": 19875,
+      "model_action_rejections": 0,
+      "model_calls": 6,
+      "model_failures": 0,
+      "output_tokens": 343,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260714-034259-66f17d",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "event_bus_unsubscribe_tests",
+      "tool_steps": 5,
+      "total_duration_ms": 21431,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".....                                                                    [100%]\n5 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 478,
+      "workspace": "rep-1/full/event_bus_unsubscribe_tests/event_bus_tests"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 34096,
+      "cached_tokens": 19840,
+      "category": "refactor",
+      "changed_files": [
+        "lru.py",
+        "test_lru.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated `LRUCache.put` so updating an existing key now refreshes recency by removing and re-appending the key, preventing duplicate order entries. Added tests covering value update + MRU behavior and repeated updates without duplicate recency entries. Verified with `pytest -q` (4 passed).",
+      "input_tokens": 25481,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1107,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260714-034320-63fbd3",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "lru_update_recency",
+      "tool_steps": 6,
+      "total_duration_ms": 34551,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "..                                                                       [100%]\n2 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 455,
+      "workspace": "rep-1/full/lru_update_recency/lru_update"
+    }
+  ],
+  "runtime": {
+    "branch": "main",
+    "commit_sha": "3160f344d4334baab0a51bf5760ede1c55063b60"
+  },
+  "sandbox": {
+    "cpus": 4.0,
+    "image": "pico-sandbox:latest",
+    "memory": "4g",
+    "pids_limit": 512
+  },
+  "schema_version": 1,
+  "summary": {
+    "category_counts": {
+      "bugfix": 2,
+      "feature": 1,
+      "refactor": 1,
+      "test-addition": 1
+    },
+    "comparison": {},
+    "failure_category_counts": {},
+    "row_count": 5,
+    "variants": {
+      "full": {
+        "action_protocols": [
+          "responses_function"
+        ],
+        "avg_agent_duration_ms": 26756.4,
+        "avg_model_action_rejections": 0.0,
+        "avg_model_calls": 6.2,
+        "avg_tool_steps": 5.2,
+        "avg_total_duration_ms": 27209.8,
+        "pass_rate": 1.0,
+        "passed": 5,
+        "task_count": 5,
+        "total_cached_tokens": 91520,
+        "total_input_tokens": 106931,
+        "total_output_tokens": 3310
+      }
+    }
+  },
+  "variants": [
+    "full"
+  ]
+}

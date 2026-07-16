@@ -23,6 +23,7 @@ def write_run(run_dir):
                 "attempts": 2,
                 "tool_steps": 1,
                 "dry_run": False,
+                "task_graph_path": str(run_dir / "task_graph.mmd"),
                 "summary": {
                     "task": "Inspect README",
                     "changed_files": ["README.md"],
@@ -65,6 +66,10 @@ def write_run(run_dir):
         + json.dumps({"event": "run_finished", "run_duration_ms": 42, "created_at": "2026-04-07T00:00:02+00:00"}) + "\n",
         encoding="utf-8",
     )
+    (run_dir / "task_graph.mmd").write_text(
+        'flowchart TD\n  G["goal | open | Inspect README"]\n  G --> t001_read_file\n',
+        encoding="utf-8",
+    )
 
 
 def test_render_run_report_writes_single_html(tmp_path):
@@ -81,6 +86,9 @@ def test_render_run_report_writes_single_html(tmp_path):
     assert "README.md" in html
     assert "Trace Events" in html
     assert "Prompt chars" in html
+    assert "Task Graph" in html
+    assert "flowchart TD" in html
+    assert "goal | open | Inspect README" in html
 
 
 def test_render_run_report_cli_all_writes_index(tmp_path, capsys):
@@ -97,4 +105,3 @@ def test_render_run_report_cli_all_writes_index(tmp_path, capsys):
     assert (runs_root / "run_001" / "report.html").exists()
     assert (runs_root / "run_002" / "report.html").exists()
     assert "run_001" in index.read_text(encoding="utf-8")
-

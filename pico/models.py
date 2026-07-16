@@ -11,12 +11,16 @@ from http.client import RemoteDisconnected
 import urllib.error
 import urllib.request
 
+from .actions import ModelAction, action_from_text
+from .config import DEFAULT_MODEL_MAX_RETRIES, DEFAULT_MODEL_RETRY_BACKOFF
+
 
 class FakeModelClient:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []
         self.supports_prompt_cache = False
+        self.supports_native_actions = False
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, **kwargs):
@@ -27,6 +31,14 @@ class FakeModelClient:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
 
+    def complete_action(self, prompt, max_new_tokens, *, require_explicit_final=False, **kwargs):
+        kwargs.pop("action_tools", None)
+        return action_from_text(
+            self.complete(prompt, max_new_tokens, **kwargs),
+            require_explicit_final=require_explicit_final,
+            protocol="scripted_text",
+        )
+
 
 class OllamaModelClient:
     def __init__(self, model, host, temperature, top_p, timeout):
@@ -36,6 +48,7 @@ class OllamaModelClient:
         self.top_p = top_p
         self.timeout = timeout
         self.supports_prompt_cache = False
+        self.supports_native_actions = False
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, **kwargs):
@@ -78,6 +91,14 @@ class OllamaModelClient:
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
 
+    def complete_action(self, prompt, max_new_tokens, *, require_explicit_final=False, **kwargs):
+        kwargs.pop("action_tools", None)
+        return action_from_text(
+            self.complete(prompt, max_new_tokens, **kwargs),
+            require_explicit_final=require_explicit_final,
+            protocol="ollama_text",
+        )
+
 
 def _normalize_versioned_base_url(base_url):
     base = str(base_url).rstrip("/")
@@ -110,56 +131,6 @@ def _extract_openai_text(data):
                     if text:
                         return text
 
-    return ""
-
-
-def _extract_openai_text_from_sse(body_text):
-    last_response = None
-    deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        if event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text
-        part = event.get("part")
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str) and text:
-                return text
-        item = event.get("item")
-        if isinstance(item, dict):
-            text = _extract_openai_text({"output": [item]})
-            if text:
-                return text
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            text = _extract_openai_text(response)
-            if text:
-                return text
-        text = _extract_openai_text(event)
-        if text:
-            return text
-    if deltas:
-        return "".join(deltas)
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response)
     return ""
 
 
@@ -221,9 +192,14 @@ def _extract_usage_cache_details(data):
     }
 
 
-def _read_response_body_with_retries(request, timeout, *, backend_name, reachability_message, attempts=3):
-    body_text = ""
-    content_type = ""
+def _read_response_body_with_retries(
+    request,
+    timeout,
+    *,
+    backend_name,
+    reachability_message,
+    attempts=DEFAULT_MODEL_MAX_RETRIES + 1,
+):
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -234,15 +210,14 @@ def _read_response_body_with_retries(request, timeout, *, backend_name, reachabi
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if exc.code >= 500 and attempt < attempts - 1:
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(DEFAULT_MODEL_RETRY_BACKOFF * (attempt + 1))
                 continue
             raise RuntimeError(f"{backend_name} request failed with HTTP {exc.code}: {body}") from exc
         except (urllib.error.URLError, RemoteDisconnected) as exc:
             if attempt < attempts - 1:
-                time.sleep(0.5 * (attempt + 1))
+                time.sleep(DEFAULT_MODEL_RETRY_BACKOFF * (attempt + 1))
                 continue
             raise RuntimeError(reachability_message) from exc
-    return body_text, content_type
 
 
 class OpenAICompatibleModelClient:
@@ -255,7 +230,32 @@ class OpenAICompatibleModelClient:
         # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
         # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
+        self.supports_native_actions = True
         self.last_completion_metadata = {}
+        self.reset_action_session()
+
+    def reset_action_session(self):
+        self._action_input_items = []
+        self._action_pending_call_id = ""
+        self._action_pending_output = None
+
+    def fork_for_delegate(self):
+        """Create an independent Responses conversation for a child agent."""
+        return OpenAICompatibleModelClient(
+            model=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            temperature=self.temperature,
+            timeout=self.timeout,
+        )
+
+    def record_action_result(self, action, result):
+        """Queue a tool or guard result for the pending Responses function call."""
+        if not self._action_pending_call_id:
+            return
+        if action.call_id and action.call_id != self._action_pending_call_id:
+            raise RuntimeError("action call_id does not match the pending Responses call")
+        self._action_pending_output = str(result)
 
     def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
@@ -274,7 +274,6 @@ class OpenAICompatibleModelClient:
         它位于 `Pico.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
         落到 provider API 的地方。
         """
-        self.last_completion_metadata = {}
         payload = {
             "model": self.model,
             "input": [
@@ -293,8 +292,80 @@ class OpenAICompatibleModelClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        _, text = self._responses_request(
+            payload,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+        )
+        if text:
+            return text
+        raise RuntimeError("OpenAI-compatible error: could not extract text from response")
+
+    def complete_action(
+        self,
+        prompt,
+        max_new_tokens,
+        *,
+        action_tools,
+        prompt_cache_key=None,
+        prompt_cache_retention=None,
+        require_explicit_final=False,
+    ):
+        """Request exactly one strict function call and normalize it to ``ModelAction``."""
+        del require_explicit_final
+        if not self._action_input_items:
+            self._action_input_items = [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ]
+        if self._action_pending_call_id:
+            if self._action_pending_output is None:
+                raise RuntimeError("pending Responses function call has no recorded output")
+            self._action_input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": self._action_pending_call_id,
+                    "output": self._action_pending_output,
+                }
+            )
+        payload = {
+            "model": self.model,
+            "input": list(self._action_input_items),
+            "max_output_tokens": max_new_tokens,
+            "stream": False,
+            "tools": list(action_tools),
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "store": False,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        self._action_pending_output = None
+        data, text = self._responses_request(
+            payload,
+            prompt_cache_key=prompt_cache_key,
+            prompt_cache_retention=prompt_cache_retention,
+        )
+        action = self._action_from_response(data, text, action_tools)
+        self._action_input_items.extend(
+            item for item in data.get("output", []) if isinstance(item, dict)
+        )
+        self._action_pending_call_id = action.call_id
+        self.last_completion_metadata.update(
+            {
+                "action_protocol": action.protocol,
+                "structured_action": True,
+                "action_kind": action.kind,
+            }
+        )
+        return action
+
+    def _responses_request(self, payload, *, prompt_cache_key=None, prompt_cache_retention=None):
+        self.last_completion_metadata = {}
+        payload = dict(payload)
         # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
-        # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
@@ -334,9 +405,9 @@ class OpenAICompatibleModelClient:
                     "prompt_cache_retention": prompt_cache_retention,
                     **_extract_usage_cache_details(response_data),
                 }
-            if text:
-                return text
-            raise RuntimeError("OpenAI-compatible error: could not extract text from event stream response")
+            if response_data or text:
+                return response_data, text
+            raise RuntimeError("OpenAI-compatible error: could not extract response from event stream")
 
         try:
             data = json.loads(body_text)
@@ -352,7 +423,68 @@ class OpenAICompatibleModelClient:
             "prompt_cache_retention": prompt_cache_retention,
             **_extract_usage_cache_details(data),
         }
-        return _extract_openai_text(data)
+        return data, _extract_openai_text(data)
+
+    @staticmethod
+    def _action_from_response(data, text, action_tools):
+        protocol = "responses_function"
+        calls = [item for item in data.get("output", []) if item.get("type") == "function_call"]
+        raw_preview = text or json.dumps(data.get("output", []), ensure_ascii=False)
+        if len(calls) != 1:
+            return ModelAction.retry(
+                f"expected exactly one function call, received {len(calls)}",
+                protocol=protocol,
+                raw_preview=raw_preview,
+            )
+        call = calls[0]
+        name = str(call.get("name", "")).strip()
+        call_id = str(call.get("call_id", "")).strip()
+        try:
+            args = json.loads(call.get("arguments", ""))
+        except (TypeError, json.JSONDecodeError):
+            return ModelAction.retry(
+                f"function {name or '<missing>'} returned malformed JSON arguments",
+                protocol=protocol,
+                raw_preview=raw_preview,
+                call_id=call_id,
+            )
+        if not isinstance(args, dict):
+            return ModelAction.retry(
+                f"function {name or '<missing>'} arguments must be an object",
+                protocol=protocol,
+                raw_preview=raw_preview,
+                call_id=call_id,
+            )
+        if name == "submit_final":
+            answer = args.get("answer")
+            if set(args) != {"answer"} or not isinstance(answer, str) or not answer.strip():
+                return ModelAction.retry(
+                    "submit_final requires one non-empty string answer",
+                    protocol=protocol,
+                    raw_preview=raw_preview,
+                    call_id=call_id,
+                )
+            return ModelAction.final(
+                answer,
+                protocol=protocol,
+                raw_preview=raw_preview,
+                call_id=call_id,
+            )
+        allowed_names = {str(item.get("name", "")) for item in action_tools}
+        if name not in allowed_names:
+            return ModelAction.retry(
+                f"unknown function call: {name or '<missing>'}",
+                protocol=protocol,
+                raw_preview=raw_preview,
+                call_id=call_id,
+            )
+        return ModelAction.tool(
+            name,
+            args,
+            protocol=protocol,
+            raw_preview=raw_preview,
+            call_id=call_id,
+        )
 
 
 def _extract_anthropic_text(data):
@@ -372,6 +504,7 @@ class AnthropicCompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.supports_prompt_cache = False
+        self.supports_native_actions = False
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
@@ -433,3 +566,11 @@ class AnthropicCompatibleModelClient:
         if text:
             return text
         raise RuntimeError("Anthropic-compatible error: could not extract text from response")
+
+    def complete_action(self, prompt, max_new_tokens, *, require_explicit_final=False, **kwargs):
+        kwargs.pop("action_tools", None)
+        return action_from_text(
+            self.complete(prompt, max_new_tokens, **kwargs),
+            require_explicit_final=require_explicit_final,
+            protocol="anthropic_text",
+        )

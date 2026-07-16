@@ -6,13 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pico` is a lightweight local coding agent that runs in the terminal. It reads the workspace, calls a model backend, executes constrained local tools through runtime safety checks, and persists session state to `.pico/`. The package name is `pico`, the CLI command is `pico`, and the module entry point is `python -m pico`.
 
-**Key constraint**: zero external dependencies in production — only Python stdlib. Dev dependencies (pytest, ruff) are optional.
+**Key constraint**: zero Python package dependencies in production — only Python stdlib. Docker and the prebuilt `pico-sandbox:latest` image are mandatory for `run_shell`; there is no host-shell fallback. Dev dependencies (pytest, ruff) are optional.
 
 ## Commands
 
 ```bash
 # Install
 uv sync
+
+# Build the mandatory shell sandbox image (requires network only while building)
+docker build -f Dockerfile.sandbox -t pico-sandbox:latest .
 
 # Run interactively
 uv run pico
@@ -61,22 +64,26 @@ user input → pico.cli constructs Pico runtime → Pico.ask() creates task_stat
 | Module | Role |
 |---|---|
 | `pico/cli.py` | CLI args, REPL loop, model backend selection, agent assembly (`build_agent`) |
-| `pico/runtime.py` | Agent main loop (`Pico.ask()`), tool dispatch, trace emission, checkpoint creation, memory promotion. Also contains `MiniAgent` (alias for `Pico`). |
+| `pico/runtime.py` | `Pico` agent object, tool dispatch, trace helpers, and prompt state. |
+| `pico/agent_loop.py` | Complete `Pico.ask()` lifecycle: model/tool loop, stop conditions, checkpoints, reports, and memory promotion. |
 | `pico/models.py` | Model backends: `OllamaModelClient`, `OpenAICompatibleModelClient` (uses `/responses` API with SSE support), `AnthropicCompatibleModelClient` (uses `/messages` API), `FakeModelClient` (for tests). All use stdlib `urllib`. |
-| `pico/context_manager.py` | Prompt assembly with token budget per section. Builds: prefix → memory → skills → relevant_memory → history → current_request. Reduces sections in order when over budget. Supports LLM-based history compaction. |
+| `pico/context_manager.py` | Prompt section assembly and token-budget allocation: prefix → memory → skills → relevant_memory → history → current_request. |
+| `pico/context_history.py` | Transcript rendering, deterministic fallback summaries, and LLM task-graph compaction. |
+| `pico/context_types.py` | Shared token estimation, semantic clipping, and `SectionRender` primitives. |
 | `pico/skills.py` | Loads local `.pico/skills/**/SKILL.md`, matches skills to the current request, and renders selected guidance into prompts. |
 | `pico/parser.py` | Parses model raw output into `(kind, payload)` tuples: `tool`, `final`, or `retry`. Supports both JSON-in-XML and XML-attribute tool formats. |
-| `pico/tools.py` | Tool specifications, schema validation, and execution functions for 8 tools: `list_files`, `read_file`, `search`, `run_shell`, `write_file`, `patch_file`, `delegate`, `delegate_many`. Each tool has a capability (`read`/`write`/`execute`/`delegate`) and risk level. |
+| `pico/tools.py` | Tool specifications, schema validation, and execution functions for 9 tools: `list_files`, `read_file`, `read_tool_output`, `search`, `run_shell`, `write_file`, `patch_file`, `delegate`, `delegate_many`. Each tool has a capability (`read`/`write`/`execute`/`delegate`) and risk level. |
+| `pico/sandbox.py` | Mandatory Docker execution for `run_shell`: no network, read-only rootfs, dropped capabilities, resource limits, protected workspace paths, timeout cleanup, and audit metadata. |
 | `pico/tool_runtime.py` | Tool execution lifecycle: validation → permission check → approval → dry-run → workspace snapshot → execute → diff snapshot → audit. |
 | `pico/tool_policy.py` | Capability checking, risk classification, read-only enforcement, repeated-call detection, shell policy lookup. |
 | `pico/memory.py` | `LayeredMemory`: working state (goal, recent files), episodic notes, file summaries. `DurableMemoryStore`: persistent structured memory in `.pico/memory/` with `MEMORY.md` index. |
 | `pico/workspace.py` | `WorkspaceContext`: git-aware snapshot (branch, status, recent commits, project docs). Used as the stable prefix in prompts. |
 | `pico/security.py` | Secret redaction in traces/reports, shell environment filtering, sensitive env var detection. |
-| `pico/config.py` | All shared constants: budgets, limits, feature flags, allowlisted shell commands, dangerous shell patterns. Also `PicoConfig` dataclass. |
+| `pico/config.py` | Shared budgets, limits, feature flags, allowlisted shell commands, and dangerous shell patterns. |
 | `pico/checkpoints.py` | Session resume state evaluation, checkpoint creation, runtime identity comparison. |
 | `pico/session_store.py` | JSON file persistence for sessions in `.pico/sessions/`. |
 | `pico/run_store.py` | Per-run artifact storage in `.pico/runs/<run_id>/` (trace.jsonl, task_state.json, report.json). |
-| `pico/evaluator.py` | Benchmark harness for running task evaluations with scripted model outputs. |
+| `evaluation/real_benchmark.py` | Live-LLM repository benchmark with hidden Docker verification and result reporting. |
 | `pico/report.py` | Run report and tool audit log construction. |
 | `pico/durable_memory.py` | Rule-based durable memory promotion/rejection logic. |
 | `pico/memory_runtime.py` | Runtime hook for triggering durable memory extraction after `ask()` completes. |
@@ -134,7 +141,7 @@ Only allowlisted commands can run under `--approval never`. Dangerous patterns (
 
 ### Testing
 
-Tests usually use `build_agent()` from `tests/helpers.py`, which wires `FakeModelClient` with scripted outputs. The standard pattern:
+The pytest suite is offline and does not measure model capability. Tests usually use `build_agent()` from `tests/helpers.py`, which wires `FakeModelClient` with scripted outputs. The standard pattern:
 
 ```python
 from tests.helpers import build_agent

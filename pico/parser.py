@@ -24,20 +24,16 @@ def retry_notice(problem=None):
 
 
 def extract_tag(text, tag):
-    """提取 <tag>...</tag> 之间的内容，前后去除空白。
-
-    如果找不到闭合标签，返回从开始标签到末尾的内容。
-    如果找不到开始标签，返回原文。
-    """
+    """提取闭合的 <tag>...</tag> 内容，前后去除空白。"""
     start_tag = f"<{tag}>"
     end_tag = f"</{tag}>"
     start = text.find(start_tag)
     if start == -1:
-        return text
+        return None
     start += len(start_tag)
     end = text.find(end_tag, start)
     if end == -1:
-        return text[start:].strip()
+        return None
     return text[start:end].strip()
 
 
@@ -47,11 +43,11 @@ def extract_raw(text, tag):
     end_tag = f"</{tag}>"
     start = text.find(start_tag)
     if start == -1:
-        return text
+        return None
     start += len(start_tag)
     end = text.find(end_tag, start)
     if end == -1:
-        return text[start:]
+        return None
     return text[start:end]
 
 
@@ -81,7 +77,10 @@ def parse_xml_tool(raw):
     args = dict(attrs)
     for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
         if f"<{key}>" in body:
-            args[key] = extract_raw(body, key)
+            value = extract_raw(body, key)
+            if value is None:
+                return None
+            args[key] = value
 
     body_text = body.strip("\n")
     if name == "write_file" and "content" not in args and body_text:
@@ -91,7 +90,7 @@ def parse_xml_tool(raw):
     return {"name": name, "args": args}
 
 
-def parse_model_output(raw):
+def parse_model_output(raw, *, require_explicit_final=False):
     """把模型原始输出解析成 runtime 可执行的动作或最终答案。
 
     为什么存在：
@@ -113,9 +112,11 @@ def parse_model_output(raw):
     # 2. XML 风格属性/子标签，适合写文件这类多行内容
     if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
         body = extract_tag(raw, "tool")
+        if body is None:
+            return "retry", retry_notice("model returned an unclosed <tool> call")
         try:
             payload = json.loads(body)
-        except Exception:
+        except json.JSONDecodeError:
             return "retry", retry_notice("model returned malformed tool JSON")
         if not isinstance(payload, dict):
             return "retry", retry_notice("tool payload must be a JSON object")
@@ -133,11 +134,18 @@ def parse_model_output(raw):
             return "tool", payload
         return "retry", retry_notice()
     if "<final>" in raw:
-        final = extract_tag(raw, "final").strip()
+        final = extract_tag(raw, "final")
+        if final is None:
+            return "retry", retry_notice("model returned an unclosed <final> answer")
+        final = final.strip()
         if final:
             return "final", final
         return "retry", retry_notice("model returned an empty <final> answer")
     raw = raw.strip()
     if raw:
+        if require_explicit_final:
+            return "retry", retry_notice(
+                "bare text is not a final answer; wrap completion in <final>...</final>"
+            )
         return "final", raw
     return "retry", retry_notice("model returned an empty response")

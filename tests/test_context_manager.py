@@ -1,3 +1,5 @@
+import json
+
 from pico.context_manager import ContextManager, _estimate_tokens
 from tests.helpers import build_agent
 
@@ -16,6 +18,35 @@ def test_context_manager_assembles_sections_in_expected_order(tmp_path):
     assert prompt.index("Transcript:") < prompt.index("Current user request:")
     assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
     assert metadata["section_order"] == ["prefix", "memory", "skills", "relevant_memory", "history", "current_request"]
+
+
+def test_context_manager_injects_recent_runs_only_for_resume_requests(tmp_path):
+    agent = build_agent(tmp_path, [])
+    run_index = [
+        {
+            "run_id": "run_20260407",
+            "task_id": "task_20260407",
+            "task_goal": "Fix the parser bug.",
+            "status": "completed",
+            "stop_reason": "final_answer_returned",
+            "updated_at": "2026-04-07T10:00:00+00:00",
+            "task_graph_path": str(tmp_path / ".pico" / "runs" / "run_20260407" / "task_graph.mmd"),
+            "report_path": str(tmp_path / ".pico" / "runs" / "run_20260407" / "report.json"),
+        }
+    ]
+    (agent.run_store.root / "index.json").write_text(json.dumps(run_index), encoding="utf-8")
+
+    ordinary_prompt, ordinary_metadata = ContextManager(agent).build("inspect README.md")
+    resume_prompt, resume_metadata = ContextManager(agent).build("继续刚才那个 bug")
+
+    assert "Recent runs:" not in ordinary_prompt
+    assert ordinary_metadata["recent_runs"]["included"] is False
+    assert "Recent runs:" in resume_prompt
+    assert "Use read_file on task_graph, then read_tool_output for node refs." in resume_prompt
+    assert "Fix the parser bug." in resume_prompt
+    assert "task_graph.mmd" in resume_prompt
+    assert resume_metadata["recent_runs"]["included"] is True
+    assert resume_metadata["recent_runs"]["selected_count"] == 1
 
 
 def test_context_manager_reduces_relevant_memory_before_history_and_preserves_newer_context(tmp_path):
@@ -51,7 +82,7 @@ def test_context_manager_reduces_relevant_memory_before_history_and_preserves_ne
     assert reduction_sections[0] == "relevant_memory"
     assert reduction_sections
     assert "RECENT-CONTEXT" in prompt
-    assert "Session compact summary:" in prompt
+    assert "Task graph:" in prompt
     assert "keep this request verbatim" in prompt
 
 
@@ -118,6 +149,20 @@ def test_context_manager_preserves_current_request_when_over_budget(tmp_path):
     assert metadata["current_request"]["rendered_chars"] == len(request)
 
 
+def test_context_manager_clips_huge_request_to_hard_budget(tmp_path):
+    agent = build_agent(tmp_path, [])
+    request = "BEGIN " + ("A" * 20_000) + " END"
+
+    prompt, metadata = ContextManager(agent, total_budget=1000).build(request)
+
+    assert _estimate_tokens(prompt) <= 1000
+    assert metadata["prompt_over_budget"] is False
+    assert metadata["current_request"]["truncated"] is True
+    assert "BEGIN" in prompt
+    assert "END" in prompt
+    assert "[request truncated]" in prompt
+
+
 def test_context_manager_records_estimated_token_budget_metadata(tmp_path):
     agent = build_agent(tmp_path, [])
 
@@ -132,29 +177,6 @@ def test_context_manager_records_estimated_token_budget_metadata(tmp_path):
     assert metadata["current_request"]["estimated_tokens"] > 0
     assert metadata["prompt_estimated_tokens"] <= len(prompt)
     assert metadata["prompt_estimated_tokens"] == _estimate_tokens(prompt)
-
-
-def test_context_manager_ranks_mentioned_and_recent_files(tmp_path):
-    agent = build_agent(tmp_path, [])
-    agent.memory.remember_file("src/old.py")
-    agent.memory.remember_file("tests/test_app.py")
-    agent.memory.set_file_summary("src/old.py", "old implementation summary")
-    agent.record(
-        {
-            "role": "tool",
-            "name": "patch_file",
-            "args": {"path": "tests/test_app.py", "old_text": "a", "new_text": "b"},
-            "content": "patched tests/test_app.py",
-            "created_at": "2026-04-07T09:00:00+00:00",
-        }
-    )
-
-    _, metadata = ContextManager(agent).build("Fix src/old.py based on the failing tests")
-
-    files = metadata["file_priority"]["files"]
-    assert files[0]["path"] == "src/old.py"
-    assert "mentioned_in_request" in files[0]["reasons"]
-    assert any(item["path"] == "tests/test_app.py" and "recent_write" in item["reasons"] for item in files)
 
 
 def test_context_manager_collapses_older_duplicate_reads_into_one_summary_line(tmp_path):
@@ -259,7 +281,12 @@ def test_context_manager_shell_summary_prioritizes_failure_lines(tmp_path):
 def test_context_manager_uses_llm_history_compaction_when_enabled(tmp_path):
     agent = build_agent(
         tmp_path,
-        ["## Primary Goal\nKeep the deploy fix moving.\n## Pending Next Step\nInspect auth.py."],
+        [
+            "flowchart TD\n"
+            "  G[\"goal | open | Keep the deploy fix moving.\"]\n"
+            "  N1[\"next | open | Inspect auth.py.\"]\n"
+            "  G --> N1\n"
+        ],
         feature_flags={"llm_history_compaction": True},
     )
     for index in range(8):
@@ -289,11 +316,37 @@ def test_context_manager_uses_llm_history_compaction_when_enabled(tmp_path):
     ).build("continue")
 
     assert "You are compacting a coding agent transcript." in agent.model_client.prompts[0]
-    assert "Session compact summary:" in prompt
+    assert "flowchart TD" in agent.model_client.prompts[0]
+    assert "Task graph:" in prompt
+    assert "Session compact summary:" not in prompt
     assert "Keep the deploy fix moving." in prompt
     assert "Recent transcript:" in prompt
     assert "recent decision: keep retry budget low" in prompt
     assert metadata["history"]["llm_compact_used"] is True
+
+
+def test_context_manager_sanitizes_compacted_history_to_mermaid_flowchart(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>flowchart TD\n"
+            "  A[\"goal | open | Continue <b>work</b>`\"]\n"
+            "  B[\"tool | done | ref: .pico/runs/run_1/tool_outputs/0001_read_file.txt\"]\n"
+            "  A --> B\n"
+            "</final>"
+        ],
+        feature_flags={"llm_history_compaction": True},
+    )
+    for index in range(8):
+        agent.record({"role": "user", "content": f"older {index} " + ("A" * 120), "created_at": "2026-04-07T09:00:00+00:00"})
+
+    prompt, _ = ContextManager(agent, section_budgets={"history": 260}).build("continue")
+
+    graph = prompt.split("Task graph:\n", 1)[1].split("\nRecent transcript:", 1)[0]
+    assert "flowchart TD" in graph
+    assert "<final>" not in graph
+    assert "<b>" not in graph
+    assert "`" not in graph
 
 
 def test_context_manager_relevant_memory_can_mix_durable_notes(tmp_path):

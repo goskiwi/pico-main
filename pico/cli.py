@@ -12,8 +12,17 @@ import shutil
 import sys
 import textwrap
 
+from .config import DEFAULT_APPROVAL_POLICY
 from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from .runtime import Pico
+from .sandbox import (
+    DEFAULT_SANDBOX_CPUS,
+    DEFAULT_SANDBOX_IMAGE,
+    DEFAULT_SANDBOX_MEMORY,
+    DEFAULT_SANDBOX_PIDS_LIMIT,
+    DockerSandbox,
+    DockerSandboxConfig,
+)
 from .session_store import SessionStore
 from .workspace import WorkspaceContext, middle
 
@@ -224,6 +233,7 @@ def build_welcome(agent, model, host):
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
             pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
+            pair("SANDBOX", agent.sandbox.backend, "IMAGE", agent.sandbox.config.image),
             row(""),
         ]
     )
@@ -265,6 +275,15 @@ def build_agent(args):
 
     # 构建模型客户端
     model = _build_model_client(args)
+    sandbox_config = DockerSandboxConfig(
+        image=getattr(args, "sandbox_image", None)
+        or os.environ.get("PICO_SANDBOX_IMAGE")
+        or DEFAULT_SANDBOX_IMAGE,
+        cpus=float(getattr(args, "sandbox_cpus", DEFAULT_SANDBOX_CPUS)),
+        memory=str(getattr(args, "sandbox_memory", DEFAULT_SANDBOX_MEMORY)),
+        pids_limit=int(getattr(args, "sandbox_pids_limit", DEFAULT_SANDBOX_PIDS_LIMIT)),
+    )
+    sandbox = DockerSandbox(workspace.repo_root, config=sandbox_config)
 
     # 判断是恢复旧 session 还是创建新 session
     session_id = args.resume
@@ -289,6 +308,7 @@ def build_agent(args):
             max_new_tokens=args.max_new_tokens,
             dry_run=dry_run,
             secret_env_names=configured_secret_names,
+            sandbox=sandbox,
         )
 
     logger.info("创建新的 Pico 实例")
@@ -301,6 +321,7 @@ def build_agent(args):
         max_new_tokens=args.max_new_tokens,
         dry_run=dry_run,
         secret_env_names=configured_secret_names,
+        sandbox=sandbox,
     )
 
 
@@ -335,8 +356,35 @@ def build_arg_parser():
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
-    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
+    parser.add_argument(
+        "--approval",
+        choices=("ask", "auto", "never"),
+        default=DEFAULT_APPROVAL_POLICY,
+        help="Approval policy for risky tools.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Simulate risky tools without running shell commands or writing files.")
+    parser.add_argument(
+        "--sandbox-image",
+        default=os.environ.get("PICO_SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE),
+        help="Prebuilt Docker image used for every run_shell call.",
+    )
+    parser.add_argument(
+        "--sandbox-cpus",
+        type=float,
+        default=DEFAULT_SANDBOX_CPUS,
+        help="Maximum CPUs available to a shell sandbox.",
+    )
+    parser.add_argument(
+        "--sandbox-memory",
+        default=DEFAULT_SANDBOX_MEMORY,
+        help="Docker memory limit for a shell sandbox, for example 512m.",
+    )
+    parser.add_argument(
+        "--sandbox-pids-limit",
+        type=int,
+        default=DEFAULT_SANDBOX_PIDS_LIMIT,
+        help="Maximum process count available to a shell sandbox.",
+    )
     parser.add_argument(
         "--secret-env-name",
         dest="secret_env_names",

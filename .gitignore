@@ -32,12 +32,15 @@ htmlcov/
 tmp/
 .worktrees/
 .pico/
-artifacts/
+# Live benchmark outputs are ignored by default because provider-backed runs
+# may contain local metadata. Keep only reviewed result summaries.
+artifacts/*
+!artifacts/real-world-benchmark-v1.json
+!artifacts/real-world-benchmark-v1-structured.json
+!artifacts/real-world-benchmark-v2-heldout.json
+!artifacts/structured-action-comparison.json
 readme_intro_locked/
 .idea/
-
-# Local docs not intended for publication
-docs/
 
 # OS files
 .DS_Store

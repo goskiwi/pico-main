@@ -55,6 +55,55 @@ def test_run_store_writes_report_json(tmp_path):
     assert report["task_state"]["final_answer"] == "Done."
 
 
+def test_run_store_updates_cross_run_index_when_report_is_written(tmp_path):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    state = TaskState.create(run_id="run_005", task_id="task_005", user_request="Continue the bug fix.")
+    store.start_run(state)
+    state.finish_success("Done.")
+
+    store.write_report(
+        state,
+        {
+            "task_id": state.task_id,
+            "status": state.status,
+            "stop_reason": state.stop_reason,
+            "final_answer": state.final_answer,
+        },
+    )
+
+    index = json.loads((store.root / "index.json").read_text(encoding="utf-8"))
+    assert index == [
+        {
+            "run_id": "run_005",
+            "task_id": "task_005",
+            "task_goal": "Continue the bug fix.",
+            "status": "completed",
+            "stop_reason": STOP_REASON_FINAL_ANSWER_RETURNED,
+            "updated_at": index[0]["updated_at"],
+            "task_graph_path": str(store.run_dir(state.run_id) / "task_graph.mmd"),
+            "report_path": str(store.report_path(state.run_id)),
+        }
+    ]
+
+
+def test_run_store_loads_recent_index_newest_first(tmp_path):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    (store.root / "index.json").write_text(
+        json.dumps(
+            [
+                {"run_id": "run_old", "updated_at": "2026-04-07T09:00:00+00:00"},
+                {"run_id": "run_new", "updated_at": "2026-04-07T10:00:00+00:00"},
+                {"run_id": "run_middle", "updated_at": "2026-04-07T09:30:00+00:00"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    recent = store.load_recent_index(limit=2)
+
+    assert [item["run_id"] for item in recent] == ["run_new", "run_middle"]
+
+
 def test_run_store_tolerates_missing_final_report(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
     state = TaskState.create(run_id="run_004", task_id="task_004", user_request="Crash before finalize.")

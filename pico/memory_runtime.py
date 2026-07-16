@@ -9,14 +9,6 @@ from .config import MEMORY_EXTRACTOR_MAX_TOKENS
 from .workspace import clip
 
 
-def reject_durable_reason(note_text):
-    return durable_memory.reject_reason(note_text)
-
-
-def extract_durable_promotions(user_message, final_answer):
-    return durable_memory.extract_promotions(user_message, final_answer)
-
-
 def promote_durable_memory(agent, user_message, final_answer):
     result = durable_memory.promote(agent.memory, user_message, final_answer)
     agent.session["memory"] = agent.memory.to_dict()

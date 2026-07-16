@@ -151,6 +151,25 @@ def render_trace(events):
     return "\n".join(items)
 
 
+def load_task_graph(run_dir, report):
+    path = report.get("task_graph_path") or str(Path(run_dir) / "task_graph.mmd")
+    graph_path = Path(path)
+    if not graph_path.is_absolute():
+        graph_path = Path(run_dir) / graph_path
+    if not graph_path.exists() or not graph_path.is_file():
+        return "", str(graph_path)
+    return graph_path.read_text(encoding="utf-8", errors="replace"), str(graph_path)
+
+
+def render_task_graph(graph_text, graph_path):
+    if not str(graph_text).strip():
+        return '<p class="empty">No task graph recorded.</p>'
+    return f"""
+    <p class="subtle">{esc(graph_path)}</p>
+    <pre>{esc(graph_text)}</pre>
+    """
+
+
 def render_html(run_dir):
     run_dir = Path(run_dir)
     report = load_json(run_dir / "report.json", default={}) or {}
@@ -164,6 +183,7 @@ def render_html(run_dir):
     final_answer = report.get("final_answer") or task_state.get("final_answer") or ""
     changed_files = summary.get("changed_files") or []
     failed_tools = summary.get("failed_tools") or []
+    task_graph, task_graph_path = load_task_graph(run_dir, report)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -278,6 +298,11 @@ def render_html(run_dir):
   <section>
     <h2>Tool Timeline</h2>
     {render_tool_audit(tool_audit)}
+  </section>
+
+  <section>
+    <h2>Task Graph</h2>
+    {render_task_graph(task_graph, task_graph_path)}
   </section>
 
   <section>

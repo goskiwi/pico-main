@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "pico-real-world-benchmark-v2-heldout",
+  "description": "Five independent held-out repository tasks created before evaluating the structured Action protocol.",
+  "tasks": [
+    {
+      "id": "url_query_before_fragment",
+      "category": "bugfix",
+      "prompt": "Fix append_query in url_tools.py so new encoded query parameters are inserted before a URL fragment, while preserving any existing query string and fragment. Empty params must return the input URL unchanged. Keep the public signature and use standard-library URL handling. Run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v2/url_fragment",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v2/url_fragment/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "ttl_cache_expiration",
+      "category": "feature",
+      "prompt": "Complete TTLCache expiration behavior in cache.py. set must store a deadline using the injected clock plus ttl_seconds. get must return values strictly before the deadline; at or after the deadline it must remove the entry and raise KeyError. Overwriting a key resets its deadline. Keep constructor validation and signatures unchanged, add tests, and run them without real sleeps.",
+      "fixture_repo": "benchmarks/fixtures/real_v2/ttl_cache",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 10,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v2/ttl_cache/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "csv_quoted_record",
+      "category": "bugfix",
+      "prompt": "Fix parse_record in records.py to follow standard CSV quoting rules, including quoted commas and doubled quotes. Preserve whitespace according to csv.reader rather than globally stripping fields. It must parse exactly one record and raise ValueError when the input contains multiple records. Preserve the non-string TypeError and public signature, then run tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v2/csv_record",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v2/csv_record/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "event_bus_unsubscribe_tests",
+      "category": "test-addition",
+      "prompt": "Add test_event_bus_contract.py without changing event_bus.py. Add test_unsubscribe_stops_future_notifications to prove a removed callback receives no later publish, and test_unsubscribe_unknown_callback_raises to verify ValueError for an unregistered callback. Both tests must call EventBus.unsubscribe. Use pytest and run the full suite.",
+      "fixture_repo": "benchmarks/fixtures/real_v2/event_bus_tests",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 7,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v2/event_bus_tests/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider test_event_bus.py test_event_bus_contract.py .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "lru_update_recency",
+      "category": "refactor",
+      "prompt": "Refactor LRUCache so put on an existing key updates its value and also makes that key most recently used. Repeated updates must not create duplicate recency entries. Preserve constructor, get, put, len, capacity validation, and KeyError behavior. Add tests and run them.",
+      "fixture_repo": "benchmarks/fixtures/real_v2/lru_update",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v2/lru_update/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}

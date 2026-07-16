@@ -1,0 +1,11 @@
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv pip install --system --no-cache pytest==8.3.5 ruff==0.4.4
+
+WORKDIR /workspace
+
+ENTRYPOINT []

@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "name": "pico-real-world-benchmark-v1",
+  "description": "Ten small repository tasks verified by tests hidden from the coding agent.",
+  "tasks": [
+    {
+      "id": "inventory_normalize_sku",
+      "category": "bugfix",
+      "prompt": "Fix normalize_sku in inventory.py. It must reject non-string and blank values as it does now, trim surrounding whitespace, and return the remaining SKU in uppercase. Do not change the public function signature. Run the relevant tests before finishing.",
+      "fixture_repo": "benchmarks/fixtures/real/inventory_normalize",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/inventory_normalize/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "inventory_reserve_exact_stock",
+      "category": "bugfix",
+      "prompt": "Fix Inventory.reserve so reserving exactly the available quantity succeeds, returns 0, and leaves zero available. Reserving more than available must still raise OutOfStockError, and non-positive quantities must still raise ValueError. Keep the public API unchanged and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real/inventory_reserve",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/inventory_reserve/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "inventory_add_boundary_tests",
+      "category": "test-addition",
+      "prompt": "Add a new test module named test_inventory_edge_cases.py without changing inventory.py. It must contain two tests named test_reserve_rejects_zero_quantity and test_reserve_rejects_negative_quantity. Both tests must use pytest.raises to verify that Inventory.reserve raises ValueError. Run the full test suite.",
+      "fixture_repo": "benchmarks/fixtures/real/inventory_tests",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 7,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/inventory_tests/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider test_inventory.py test_inventory_edge_cases.py .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "inventory_total_value",
+      "category": "feature",
+      "prompt": "Add Inventory.total_value(prices) in inventory.py. It must multiply each current quantity by its price and return the exact Decimal total. Normalize price-map SKU keys with normalize_sku, accept values supported by Decimal such as strings and Decimal instances, return Decimal('0') for an empty inventory, and raise KeyError if a stocked SKU has no price. Do not use float arithmetic. Add or update tests and run them.",
+      "fixture_repo": "benchmarks/fixtures/real/inventory_value",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 10,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/inventory_value/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "config_preserve_equals",
+      "category": "bugfix",
+      "prompt": "Fix parse_config so a value may contain additional '=' characters. Only the first '=' separates the key from the value. Preserve comment/blank-line handling and whitespace trimming, keep the public signature unchanged, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real/config_equals",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/config_equals/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "config_non_strict_mode",
+      "category": "feature",
+      "prompt": "Extend parse_config with a keyword-only strict argument that defaults to True. Existing strict behavior stays unchanged. With strict=False, skip malformed non-comment lines that lack '=' or have an empty key, while continuing to parse later valid lines. Values may be empty or contain '='. Add tests and run the suite.",
+      "fixture_repo": "benchmarks/fixtures/real/config_malformed",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 10,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/config_malformed/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "config_document_precedence",
+      "category": "documentation",
+      "prompt": "Improve README.md only. Add a Precedence section explaining that defaults are overridden by file values, which are overridden by APP_<KEY> environment variables. Add a fenced Python example that imports load_config, demonstrates port values 7000/8000/9000, and asserts the resulting port is '9000'. Keep the example executable and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real/config_docs",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 7,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/config_docs/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "retry_exact_attempt_budget",
+      "category": "bugfix",
+      "prompt": "Fix retry so max_attempts is the total number of operation calls, not the number of retries after the first call. A max_attempts value of 3 must call a consistently failing operation exactly three times, and success on the third call must be returned. Preserve validation and re-raise the last error after exhaustion. Run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real/retry_attempts",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/retry_attempts/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "retry_add_boundary_tests",
+      "category": "test-addition",
+      "prompt": "Add test_retry_edge_cases.py without changing retry.py. Add test_zero_retries_calls_operation_once, which asserts retries=0 makes exactly one call, and test_negative_retries_raise_value_error, which uses pytest.raises to check retries=-1. Run the full test suite.",
+      "fixture_repo": "benchmarks/fixtures/real/retry_tests",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 7,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/retry_tests/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider test_retry.py test_retry_edge_cases.py .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "priority_queue_stable_fifo",
+      "category": "refactor",
+      "prompt": "Refactor StablePriorityQueue so lower numeric priority still pops first, while equal-priority items pop in insertion order. Equal-priority items may be non-comparable objects such as dicts. Keep push(item, priority), pop(), len(), and the empty-pop IndexError behavior unchanged. Add tests and run the suite.",
+      "fixture_repo": "benchmarks/fixtures/real/priority_stable",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 10,
+      "verifier_files": [{"source": "benchmarks/verifiers/real/priority_stable/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}

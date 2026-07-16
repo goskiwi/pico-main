@@ -1,6 +1,8 @@
 import subprocess
 from unittest.mock import patch
 
+from pico.task_state import TaskState
+from pico.tools import responses_action_tools
 from tests.helpers import build_agent
 
 
@@ -86,6 +88,85 @@ def test_repeated_identical_tool_call_is_rejected(tmp_path):
     assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
 
 
+def test_read_tool_output_reads_current_run_node_ref(tmp_path):
+    agent = build_agent(tmp_path, [])
+    state = agent.current_task_state = TaskState.create(
+        run_id="run_current",
+        task_id="task_current",
+        user_request="Inspect output.",
+    )
+    run_dir = agent.run_store.start_run(state)
+    output_path = run_dir / "tool_outputs" / "0001_read_file.txt"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("full tool output\nline 2\n", encoding="utf-8")
+    (run_dir / "task_graph.mmd").write_text(
+        "flowchart TD\n"
+        '  t001_read_file["tool | ok | read_file hello.txt"]\n'
+        "  %% t001_read_file ref: tool_outputs/0001_read_file.txt\n",
+        encoding="utf-8",
+    )
+
+    result = agent.run_tool("read_tool_output", {"node_id": "t001_read_file"})
+
+    assert result == "full tool output\nline 2\n"
+
+
+def test_read_tool_output_reads_cross_run_node_ref(tmp_path):
+    agent = build_agent(tmp_path, [])
+    run_dir = agent.run_store.run_dir("run_previous")
+    output_path = run_dir / "tool_outputs" / "0002_run_shell.txt"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("pytest failed\n", encoding="utf-8")
+    (run_dir / "task_graph.mmd").write_text(
+        "flowchart TD\n"
+        '  t002_run_shell["tool | error | run_shell pytest -q"]\n'
+        "  %% t002_run_shell ref: tool_outputs/0002_run_shell.txt\n",
+        encoding="utf-8",
+    )
+
+    result = agent.run_tool("read_tool_output", {"run_id": "run_previous", "node_id": "t002_run_shell"})
+
+    assert result == "pytest failed\n"
+
+
+def test_read_tool_output_resolves_ref_despite_long_label(tmp_path):
+    # 回归：长命令让 label 触顶 220 字符截断时，ref 存在独立注释行仍可解析。
+    agent = build_agent(tmp_path, [])
+    state = agent.current_task_state = TaskState.create(
+        run_id="run_long",
+        task_id="task_long",
+        user_request="Run the suite.",
+    )
+    agent.run_store.start_run(state)
+    long_command = "uv run --with pytest python -m pytest " + " ".join(
+        f"tests/test_module_{i}.py" for i in range(20)
+    )
+    content_ref = agent.run_store.save_tool_output(state, 3, "run_shell", "pytest output\n")
+    agent.run_store.append_task_graph_tool(
+        state, "t003_run_shell", "run_shell", {"command": long_command}, "ok", content_ref
+    )
+
+    result = agent.run_tool("read_tool_output", {"node_id": "t003_run_shell"})
+
+    assert result == "pytest output\n"
+
+
+def test_read_tool_output_rejects_ref_outside_tool_outputs(tmp_path):
+    agent = build_agent(tmp_path, [])
+    run_dir = agent.run_store.run_dir("run_previous")
+    run_dir.mkdir(parents=True)
+    (run_dir / "task_graph.mmd").write_text(
+        "flowchart TD\n"
+        '  t001_read_file["tool | ok | bad ref"]\n'
+        "  %% t001_read_file ref: tool_outputs/../../README.md\n",
+        encoding="utf-8",
+    )
+
+    result = agent.run_tool("read_tool_output", {"run_id": "run_previous", "node_id": "t001_read_file"})
+
+    assert "invalid ref" in result
+
+
 def test_delegate_requires_explicit_role(tmp_path):
     agent = build_agent(tmp_path, [])
 
@@ -126,3 +207,20 @@ def test_delegate_many_rejects_unknown_role(tmp_path):
     result = agent.run_tool("delegate_many", {"tasks": [{"role": "builder", "task": "inspect README.md"}]})
 
     assert "unsupported delegate role: builder" in result
+
+
+def test_responses_action_tools_are_strict_and_include_final(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    definitions = responses_action_tools(agent.tools)
+
+    assert definitions[-1]["name"] == "submit_final"
+    assert all(item["type"] == "function" and item["strict"] is True for item in definitions)
+    for item in definitions:
+        parameters = item["parameters"]
+        assert parameters["additionalProperties"] is False
+        assert set(parameters["required"]) == set(parameters["properties"])
+    delegate_many = next(item for item in definitions if item["name"] == "delegate_many")
+    task_schema = delegate_many["parameters"]["properties"]["tasks"]["items"]
+    assert task_schema["additionalProperties"] is False
+    assert set(task_schema["required"]) == {"role", "task", "max_steps"}

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from pico import workspace_diff
 from tests.helpers import build_agent
 
@@ -53,3 +55,30 @@ def test_path_snapshot_reuses_hashes_for_unchanged_target(tmp_path, monkeypatch)
 
     assert first == second
     assert read_count == 1
+
+
+def test_path_snapshot_does_not_hide_invalid_paths(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    with pytest.raises(ValueError, match="escapes workspace"):
+        workspace_diff.capture_path_snapshot(agent, ["../outside.txt"])
+
+
+def test_shell_snapshot_detects_changes_to_already_dirty_file(tmp_path):
+    agent = build_agent(tmp_path, [])
+    target = tmp_path / "dirty.txt"
+    target.write_text("before\n", encoding="utf-8")
+    tool = agent.tools["run_shell"]
+
+    before, mode = workspace_diff.before_workspace_snapshot(
+        agent, "run_shell", {"command": "pytest -q"}, tool
+    )
+    target.write_text("after changed\n", encoding="utf-8")
+    after = workspace_diff.after_workspace_snapshot(
+        agent, "run_shell", {"command": "pytest -q"}, tool, mode, before
+    )
+
+    changed, summaries = workspace_diff.diff_workspace_snapshots(before, after)
+    assert mode == "full"
+    assert changed == ["dirty.txt"]
+    assert summaries == ["modified:dirty.txt"]

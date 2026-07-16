@@ -9,31 +9,28 @@ import os
 import textwrap
 import uuid
 import hashlib
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from . import agent_loop
 from . import checkpoints
 from . import memory as memorylib
-from . import memory_runtime
-from . import report
 from . import security
 from . import skills as skillslib
 from . import tool_runtime
-from .checkpoints import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
+from .checkpoints import CHECKPOINT_NONE_STATUS
 from .config import (
+    DEFAULT_APPROVAL_POLICY,
     DEFAULT_MAX_DEPTH,
     DEFAULT_FEATURE_FLAGS,
-    MAX_HISTORY,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_MAX_STEPS,
     DEFAULT_SHELL_ENV_ALLOWLIST,
 )
 from .context_manager import ContextManager
-from .parser import parse_model_output
 from .run_store import RunStore
-from .task_state import TaskState
+from .sandbox import DockerSandbox
 from . import tools as toolkit
 from .workspace import WorkspaceContext, clip, now
 
@@ -46,7 +43,6 @@ class PromptPrefix:
     hash: str
     workspace_fingerprint: str
     tool_signature: str
-    built_at: str
 
 
 def new_agent_id():
@@ -61,7 +57,7 @@ class Pico:
         session_store,
         session=None,
         run_store=None,
-        approval_policy="ask",
+        approval_policy=DEFAULT_APPROVAL_POLICY,
         max_steps=DEFAULT_MAX_STEPS,
         max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         depth=0,
@@ -75,10 +71,12 @@ class Pico:
         agent_id=None,
         parent_agent_id=None,
         allowed_tools=None,
+        sandbox=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        self.sandbox = sandbox or DockerSandbox(self.root)
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -133,7 +131,9 @@ class Pico:
         self.last_llm_durable_superseded = []
         self.last_llm_memory_extractor_error = ""
         self.tool_audit_log = []
+        self.model_action_rejections = []
         self._last_tool_result_metadata = {}
+        self._last_sandbox_metadata = {}
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -173,32 +173,11 @@ class Pico:
         if not isinstance(resume_state, dict):
             self.session["resume_state"] = {}
 
-    def current_runtime_identity(self):
-        return checkpoints.current_runtime_identity(self)
-
-    def checkpoint_state(self):
-        return checkpoints.checkpoint_state(self)
-
-    def current_checkpoint(self):
-        return checkpoints.current_checkpoint(self)
-
-    def invalidate_stale_memory(self):
-        return checkpoints.invalidate_stale_memory(self)
-
     def evaluate_resume_state(self):
         return checkpoints.evaluate_resume_state(self)
 
     def render_checkpoint_text(self):
         return checkpoints.render_checkpoint_text(self)
-
-    @staticmethod
-    def remember(bucket, item, limit):
-        if not item:
-            return
-        if item in bucket:
-            bucket.remove(item)
-        bucket.append(item)
-        del bucket[:-limit]
 
     def build_tools(self):
         return toolkit.build_tool_registry(self)
@@ -237,6 +216,7 @@ class Pico:
             "max_depth": self.max_depth,
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "read_only": bool(self.read_only),
+            "sandbox": self.sandbox.identity(),
         }
 
     def tool_signature(self):
@@ -262,16 +242,33 @@ class Pico:
             capability = tool.get("capability", "read")
             tool_lines.append(f"- {name}({fields}) [{risk}; capability={capability}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
-        examples = "\n".join(
-            [
-                '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                "<final>Done.</final>",
-            ]
-        )
+        native_actions = bool(getattr(self.model_client, "supports_native_actions", False))
+        if native_actions:
+            action_rules = """\
+            - Call exactly one provided function in every response.
+            - Use submit_final only after the requested work and verification are complete.
+            - Do not narrate outside a function call.
+            - Supply every function argument; use the documented default value when appropriate."""
+            examples = "Use the provider's strict function-calling interface."
+        else:
+            action_rules = """\
+            - Return exactly one <tool>...</tool> or one <final>...</final>.
+            - Tool calls must look like:
+              <tool>{"name":"tool_name","args":{...}}</tool>
+            - For write_file and patch_file with multi-line text, prefer XML style:
+              <tool name="write_file" path="file.py"><content>...</content></tool>
+            - Final answers must look like:
+              <final>your answer</final>"""
+            examples = "\n".join(
+                [
+                    '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
+                    '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+                    '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
+                    '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
+                    '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
+                    "<final>Done.</final>",
+                ]
+            )
         # prefix 可以理解成 agent 的“工作手册”：
         # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
         text = textwrap.dedent(
@@ -287,13 +284,7 @@ class Pico:
 
             Rules:
             - Use tools instead of guessing about the workspace.
-            - Return exactly one <tool>...</tool> or one <final>...</final>.
-            - Tool calls must look like:
-              <tool>{{"name":"tool_name","args":{{...}}}}</tool>
-            - For write_file and patch_file with multi-line text, prefer XML style:
-              <tool name="write_file" path="file.py"><content>...</content></tool>
-            - Final answers must look like:
-              <final>your answer</final>
+            {action_rules}
             - Never invent tool results.
             - Keep answers concise and concrete.
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
@@ -301,6 +292,8 @@ class Pico:
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
             - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
+            - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.
+            - When a task graph node has a ref, use read_tool_output instead of manually reading tool_outputs paths.
             - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, delegate, or delegate_many with args={{}}.
 
             Tools:
@@ -317,7 +310,6 @@ class Pico:
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             workspace_fingerprint=self.workspace.fingerprint(),
             tool_signature=self.tool_signature(),
-            built_at=now(),
         )
 
     def _apply_prefix_state(self, prefix_state):
@@ -351,30 +343,7 @@ class Pico:
         return self.memory.render_memory_text()
 
     def history_text(self):
-        history = self.session["history"]
-        if not history:
-            return "- empty"
-
-        lines = []
-        seen_reads = set()
-        recent_start = max(0, len(history) - 6)
-        for index, item in enumerate(history):
-            recent = index >= recent_start
-            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
-                path = str(item["args"].get("path", ""))
-                if path in seen_reads:
-                    continue
-                seen_reads.add(path)
-
-            if item["role"] == "tool":
-                limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
-                lines.append(clip(item["content"], limit))
-            else:
-                limit = 900 if recent else 220
-                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
-
-        return clip("\n".join(lines), MAX_HISTORY)
+        return self.context_manager.history_renderer.history_text()
 
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
@@ -387,7 +356,41 @@ class Pico:
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
 
-    def prompt_metadata(self, user_message, prompt):
+    def summarize_tool_result(self, name, args, result):
+        """为 history 生成工具输出的简要摘要。
+
+        完整输出已通过 RunStore.save_tool_output 落盘，
+        history 里只保留这个摘要和文件引用，保持 prompt 精简。
+        """
+        result = str(result or "")
+        if name == "read_file":
+            path = str(args.get("path", ""))
+            lines = result.splitlines()
+            if len(lines) <= 16:
+                preview = "\n".join(lines)
+            else:
+                omitted = len(lines) - 15
+                preview = "\n".join([*lines[:10], f"... ({omitted} lines omitted)", *lines[-5:]])
+            return f"read_file {path}: {len(lines)} lines\n{preview}"
+        if name == "run_shell":
+            command = str(args.get("command", "")).strip()
+            lines = [line for line in result.splitlines() if line.strip()]
+            key = lines[:4] if lines else ["(empty)"]
+            return f"run_shell {command}\n" + "\n".join(key)
+        if name in ("write_file", "patch_file"):
+            path = str(args.get("path", ""))
+            has_error = "error" in result.lower() or "not available" in result.lower()
+            status = "(error)" if has_error else "(ok)"
+            detail = f" {result[:120]}" if has_error else ""
+            return f"{name} {path}: {status}{detail}"
+        if name in ("list_files", "search"):
+            lines = [line for line in result.splitlines() if line.strip()][:5]
+            return f"{name}: " + (" | ".join(lines) if lines else "(empty)")
+        if name in ("delegate", "delegate_many"):
+            return result[:400] if result else "(empty)"
+        return result[:200] if result else "(empty)"
+
+    def prompt_metadata(self, user_message):
         _, metadata = self._build_prompt_and_metadata(user_message)
         return metadata
 
@@ -438,9 +441,6 @@ class Pico:
     def create_checkpoint(self, task_state, user_message, trigger):
         return checkpoints.create_checkpoint(self, task_state, user_message, trigger)
 
-    def infer_next_step(self, task_state):
-        return checkpoints.infer_next_step(task_state)
-
     def update_memory_after_tool(self, name, args, result):
         """把少量高价值工具结果沉淀到 working memory。
 
@@ -474,9 +474,6 @@ class Pico:
             self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
         elif name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
-
-    def note_tool(self, name, args, result):
-        self.update_memory_after_tool(name, args, result)
 
     def update_working_state(self, **updates):
         if not self.feature_enabled("memory"):
@@ -529,301 +526,8 @@ class Pico:
             last_error=clip(final, 240) if stopped else "",
         )
 
-    def record_process_note_for_tool(self, name, metadata):
-        return tool_runtime.record_process_note_for_tool(self, name, metadata)
-
     def ask(self, user_message):
-        """执行一次完整的 agent 回合，直到产出最终答案或命中停止条件。
-
-        为什么存在：
-        `ask()` 是整个 runtime 的总调度器。它把“用户提一个请求”扩展成一条
-        可持续推进的控制循环：记录会话、组 prompt、调用模型、执行工具、
-        写 trace/report、更新状态，直到模型给出最终答案或系统主动停下。
-
-        输入 / 输出：
-        - 输入：`user_message`，即用户这一次的任务描述
-        - 输出：字符串形式的最终回答；如果中途达到步数上限或重试上限，
-          返回的是一条停止原因说明
-
-        在 agent 链路里的位置：
-        它是 CLI 和底层工具/模型之间的核心桥梁。CLI 收到用户输入后基本只做
-        一件事：调用 `agent.ask()`。而 `ask()` 内部再去驱动 `ContextManager`
-        组 prompt、`model_client.complete()` 调模型、`run_tool()` 执行动作。
-        如果新人想理解 pico 是怎么“从一句话跑成一个 agent 流程”的，
-        这里就是最关键的入口。
-        """
-        run_started_at = time.monotonic()
-        self.mark_work_started(user_message)
-        self.record({"role": "user", "content": user_message, "created_at": now()})
-
-        task_state = TaskState.create(run_id=self.new_run_id(), task_id=self.new_task_id(), user_request=user_message)
-        task_state.resume_status = self.resume_state.get("status", CHECKPOINT_NONE_STATUS)
-        self.current_task_state = task_state
-        self.current_run_dir = self.run_store.start_run(task_state)
-        self.tool_audit_log = []
-        self.emit_trace(
-            task_state,
-            "run_started",
-            {
-                "task_id": task_state.task_id,
-                "user_request": clip(user_message, 300),
-                **self.identity_metadata(),
-            },
-        )
-
-        tool_steps = 0
-        attempts = 0
-        max_attempts = max(self.max_steps * 3, self.max_steps + 4)
-
-        # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
-        # 1. 感知：重新组 prompt，把当前状态整理给模型看
-        # 2. 决策：让模型返回一个工具调用，或一个最终答案
-        # 3. 行动：如果是工具调用，就执行工具
-        # 4. 记录：把结果写回 history / task_state / trace / memory
-        # 然后进入下一轮，直到停机条件满足
-        while tool_steps < self.max_steps and attempts < max_attempts:
-            attempts += 1
-            task_state.record_attempt()
-            self.run_store.write_task_state(task_state)
-            prompt_started_at = time.monotonic()
-            prompt, prompt_metadata = self._build_prompt_and_metadata(user_message)
-            self.emit_trace(
-                task_state,
-                "prompt_built",
-                {
-                    "prompt_metadata": prompt_metadata,
-                    "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
-                },
-            )
-            if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "freshness_mismatch",
-                    },
-                )
-            elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
-                self.emit_trace(
-                    task_state,
-                    "runtime_identity_mismatch",
-                    {
-                        "fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", [])),
-                    },
-                )
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "workspace_mismatch",
-                    },
-                )
-            if prompt_metadata.get("budget_reductions"):
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="context_reduction")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "context_reduction",
-                    },
-                )
-            self.emit_trace(
-                task_state,
-                "model_requested",
-                {
-                    "attempts": task_state.attempts,
-                    "tool_steps": task_state.tool_steps,
-                    "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-                },
-            )
-            prompt_cache_key = None
-            prompt_cache_retention = None
-            if getattr(self.model_client, "supports_prompt_cache", False):
-                # 只有后端明确支持时，才把稳定前缀的 hash 作为 cache key 发出去。
-                prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-                prompt_cache_retention = "in_memory"
-            model_started_at = time.monotonic()
-            try:
-                raw = self.model_client.complete(
-                    prompt,
-                    self.max_new_tokens,
-                    prompt_cache_key=prompt_cache_key,
-                    prompt_cache_retention=prompt_cache_retention,
-                )
-            except Exception as exc:
-                final = f"Stopped after model error: {type(exc).__name__}: {exc}"
-                self.mark_work_finished(final, stopped=True)
-                self.record({"role": "assistant", "content": final, "created_at": now()})
-                task_state.stop_model_error(final)
-                self.last_prompt_metadata = prompt_metadata
-                self.last_completion_metadata = {}
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="model_error")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "model_error",
-                    },
-                )
-                self.emit_trace(
-                    task_state,
-                    "model_failed",
-                    {
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                        "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                    },
-                )
-                self.emit_trace(
-                    task_state,
-                    "run_finished",
-                    {
-                        "status": task_state.status,
-                        "stop_reason": task_state.stop_reason,
-                        "final_answer": final,
-                        "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                    },
-                )
-                self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
-                return final
-            completion_metadata = dict(getattr(self.model_client, "last_completion_metadata", {}) or {})
-            if completion_metadata:
-                # 把后端返回的 usage/cache 统计并回 prompt_metadata，
-                # 方便统一写入 report 和 trace。
-                prompt_metadata.update(completion_metadata)
-            self.last_completion_metadata = completion_metadata
-            self.last_prompt_metadata = prompt_metadata
-            kind, payload = parse_model_output(raw)
-            self.emit_trace(
-                task_state,
-                "model_parsed",
-                {
-                    "kind": kind,
-                    "completion_metadata": completion_metadata,
-                    "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                },
-            )
-
-            if kind == "tool":
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                self.mark_tool_planned(name)
-                task_state.record_tool(name)
-                tool_started_at = time.monotonic()
-                result = self.run_tool(name, args)
-                tool_duration_ms = int((time.monotonic() - tool_started_at) * 1000)
-                report.record_tool_audit(self, name, args, result, tool_duration_ms)
-                self.mark_tool_finished(name, dict(self._last_tool_result_metadata or {}), result)
-                self.record(
-                    {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
-                        "created_at": now(),
-                    }
-                )
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "tool_executed",
-                    {
-                        "name": name,
-                        "args": args,
-                        "result": clip(result, 500),
-                        "duration_ms": tool_duration_ms,
-                        **dict(self._last_tool_result_metadata or {}),
-                    },
-                )
-                checkpoint = self.create_checkpoint(task_state, user_message, trigger="tool_executed")
-                self.run_store.write_task_state(task_state)
-                self.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "tool_executed",
-                    },
-                )
-                continue
-
-            if kind == "retry":
-                self.mark_retry_needed(payload)
-                self.record({"role": "assistant", "content": payload, "created_at": now()})
-                self.run_store.write_task_state(task_state)
-                continue
-
-            final = (payload or raw).strip()
-            self.mark_work_finished(final)
-            self.record({"role": "assistant", "content": final, "created_at": now()})
-            task_state.finish_success(final)
-            memory_runtime.promote_durable_memory(self, user_message, final)
-            memory_runtime.llm_promote_durable_memory(self, user_message, final)
-            checkpoint = self.create_checkpoint(task_state, user_message, trigger="run_finished")
-            self.run_store.write_task_state(task_state)
-            self.emit_trace(
-                task_state,
-                "checkpoint_created",
-                {
-                    "checkpoint_id": checkpoint["checkpoint_id"],
-                    "trigger": "run_finished",
-                },
-            )
-            self.emit_trace(
-                task_state,
-                "run_finished",
-                {
-                    "status": task_state.status,
-                    "stop_reason": task_state.stop_reason,
-                    "final_answer": final,
-                    "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-                },
-            )
-            self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
-            return final
-
-        if attempts >= max_attempts and tool_steps < self.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-            task_state.stop_retry_limit(final)
-        else:
-            final = "Stopped after reaching the step limit without a final answer."
-            task_state.stop_step_limit(final)
-        self.mark_work_finished(final, stopped=True)
-        self.record({"role": "assistant", "content": final, "created_at": now()})
-        memory_runtime.promote_durable_memory(self, user_message, final)
-        self.run_store.write_task_state(task_state)
-        checkpoint = self.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
-        self.emit_trace(
-            task_state,
-            "checkpoint_created",
-            {
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "trigger": task_state.stop_reason or "run_stopped",
-            },
-        )
-        self.emit_trace(
-            task_state,
-            "run_finished",
-            {
-                "status": task_state.status,
-                "stop_reason": task_state.stop_reason,
-                "final_answer": final,
-                "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            },
-        )
-        self.run_store.write_report(task_state, security.redact_artifact(self, report.build_report(self, task_state)))
-        return final
+        return agent_loop.run_agent_turn(self, user_message)
 
     def run_tool(self, name, args):
         return tool_runtime.run_tool(self, name, args)
@@ -841,30 +545,6 @@ class Pico:
             if self.depth >= self.max_depth:
                 raise ValueError("delegate depth exceeded")
 
-    def tool_list_files(self, args):
-        return toolkit.tool_list_files(self, args)
-
-    def tool_read_file(self, args):
-        return toolkit.tool_read_file(self, args)
-
-    def tool_search(self, args):
-        return toolkit.tool_search(self, args)
-
-    def tool_run_shell(self, args):
-        return toolkit.tool_run_shell(self, args)
-
-    def tool_write_file(self, args):
-        return toolkit.tool_write_file(self, args)
-
-    def tool_patch_file(self, args):
-        return toolkit.tool_patch_file(self, args)
-
-    def tool_delegate(self, args):
-        return toolkit.tool_delegate(self, args)
-
-    def tool_delegate_many(self, args):
-        return toolkit.tool_delegate_many(self, args)
-
     def reset(self):
         self.session["history"] = []
         self.session["memory"].clear()
@@ -881,6 +561,3 @@ class Pico:
         if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
             raise ValueError(f"path escapes workspace: {raw_path}")
         return resolved
-
-
-MiniAgent = Pico

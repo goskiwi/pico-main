@@ -169,11 +169,11 @@ def select_skills_with_model(model_client, skills, user_message, limit=DEFAULT_S
         return resolve_conflicts(candidates, limit=limit)
 
     prompt = _selection_prompt(candidates, user_message, limit)
-    raw = model_client.complete(prompt, SKILL_SELECTOR_MAX_TOKENS)
     try:
+        raw = model_client.complete(prompt, SKILL_SELECTOR_MAX_TOKENS)
         payload = _parse_selector_response(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return []
+    except (json.JSONDecodeError, TypeError, ValueError, RuntimeError):
+        return resolve_conflicts(candidates, limit=limit)
 
     by_name = {skill.name: skill for skill in candidates}
     selected = []

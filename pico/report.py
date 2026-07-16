@@ -16,10 +16,12 @@ def build_report(agent, task_state):
         "checkpoint_id": task_state.checkpoint_id,
         "resume_status": task_state.resume_status,
         "dry_run": bool(agent.dry_run),
+        "task_graph_path": str(agent.run_store.task_graph_path(task_state.run_id)),
         "agent": agent.identity_metadata(),
         "summary": build_run_summary(agent, task_state),
         "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
         "tool_audit": list(agent.tool_audit_log),
+        "model_action_rejections": list(getattr(agent, "model_action_rejections", [])),
         "task_state": task_state.to_dict(),
         "prompt_metadata": agent.last_prompt_metadata,
         "durable_promotions": list(agent.last_durable_promotions),
@@ -56,6 +58,16 @@ def record_tool_audit(agent, name, args, result, duration_ms):
     }
     if name == "run_shell":
         entry["command"] = clip(str((args or {}).get("command", "")), 200)
+        entry["sandbox"] = {
+            "backend": metadata.get("sandbox_backend", ""),
+            "image": metadata.get("sandbox_image", ""),
+            "network": metadata.get("sandbox_network", ""),
+            "rootfs_read_only": bool(metadata.get("sandbox_rootfs_read_only")),
+            "cpus": metadata.get("sandbox_cpus"),
+            "memory": metadata.get("sandbox_memory", ""),
+            "pids_limit": metadata.get("sandbox_pids_limit"),
+            "timed_out": bool(metadata.get("sandbox_timed_out")),
+        }
     elif name in {"read_file", "write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
         entry["path"] = clip(str((args or {}).get("path", ".")), 200)
     agent.tool_audit_log.append(entry)
@@ -82,6 +94,7 @@ def build_run_summary(agent, task_state):
         for entry in agent.tool_audit_log
         if entry.get("security_event_type")
     ]
+    action_rejections = list(getattr(agent, "model_action_rejections", []))
     return {
         "task": clip(task_state.user_request, 300),
         "status": task_state.status,
@@ -94,5 +107,7 @@ def build_run_summary(agent, task_state):
         "changed_files": changed_paths,
         "failed_tools": failed_tools,
         "security_events": security_events,
+        "model_action_rejection_count": len(action_rejections),
+        "model_action_rejection_reasons": [clip(item.get("reason", ""), 160) for item in action_rejections],
         "final_answer_preview": clip(task_state.final_answer, 300),
     }

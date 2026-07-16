@@ -1,6 +1,6 @@
 import json
 
-from pico import FakeModelClient, MiniAgent
+from pico import FakeModelClient, Pico
 from pico.session_store import SessionStore
 from tests.helpers import build_agent, build_workspace
 
@@ -77,7 +77,7 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
     }
     agent.session_store.save(agent.session)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
@@ -123,7 +123,7 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
     agent.session_store.save(agent.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
@@ -179,7 +179,7 @@ def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_sta
     }
     agent.session_store.save(agent.session)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
@@ -241,7 +241,7 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
     }
     agent.session_store.save(agent.session)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
@@ -258,7 +258,7 @@ def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_pat
     agent.session.pop("checkpoints", None)
     agent.session_store.save(agent.session)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,
@@ -315,7 +315,7 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
 def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    agent = MiniAgent(
+    agent = Pico(
         model_client=FakeModelClient(["<final>Done.</final>"]),
         workspace=workspace,
         session_store=store,
@@ -374,7 +374,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
     }
     agent.session_store.save(agent.session)
 
-    resumed = MiniAgent.from_session(
+    resumed = Pico.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
         session_store=agent.session_store,

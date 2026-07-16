@@ -2,7 +2,7 @@ import json
 import os
 from unittest.mock import patch
 
-from pico import FakeModelClient, MiniAgent
+from pico import FakeModelClient, Pico
 from pico.session_store import SessionStore
 from tests.helpers import build_agent, build_workspace
 
@@ -33,9 +33,11 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     assert (run_dir / "task_state.json").exists()
     assert (run_dir / "trace.jsonl").exists()
     assert (run_dir / "report.json").exists()
+    assert (run_dir / "task_graph.mmd").exists()
     assert task_state["stop_reason"] == "final_answer_returned"
     assert task_state["final_answer"] == "Finished."
     assert report["stop_reason"] == "final_answer_returned"
+    assert report["task_graph_path"] == str(run_dir / "task_graph.mmd")
     assert report["task_state"]["stop_reason"] == "final_answer_returned"
     assert report["run_id"] == task_state["run_id"]
     assert report["agent"]["agent_id"] == agent.agent_id
@@ -80,10 +82,18 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
     run_dir = run_dirs[0]
     trace_text = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
     report_text = (run_dir / "report.json").read_text(encoding="utf-8")
+    session_text = agent.session_path.read_text(encoding="utf-8")
+    tool_output_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (run_dir / "tool_outputs").glob("*.txt")
+    )
     trace_events = [json.loads(line) for line in trace_text.splitlines()]
 
     assert secret not in trace_text
     assert secret not in report_text
+    assert secret not in session_text
+    assert secret not in tool_output_text
+    assert "<redacted>" in tool_output_text
 
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
@@ -143,8 +153,8 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
 def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
     agent = build_agent(tmp_path, [])
 
-    first = agent.prompt_metadata("first", "")
-    second = agent.prompt_metadata("second", "")
+    first = agent.prompt_metadata("first")
+    second = agent.prompt_metadata("second")
 
     assert first["prefix_hash"] == second["prefix_hash"]
     assert second["prefix_changed"] is False
@@ -152,7 +162,7 @@ def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
 
     (tmp_path / "README.md").write_text("demo changed\n", encoding="utf-8")
 
-    third = agent.prompt_metadata("third", "")
+    third = agent.prompt_metadata("third")
 
     assert third["prefix_hash"] != second["prefix_hash"]
     assert third["prefix_changed"] is True
@@ -196,7 +206,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
 
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    agent = MiniAgent(
+    agent = Pico(
         model_client=CacheAwareFakeModelClient(["<final>Done.</final>"]),
         workspace=workspace,
         session_store=store,
@@ -215,7 +225,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
 def test_model_error_is_persisted_as_failed_run(tmp_path):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    agent = MiniAgent(
+    agent = Pico(
         model_client=FakeModelClient([]),
         workspace=workspace,
         session_store=store,

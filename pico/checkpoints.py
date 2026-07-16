@@ -28,6 +28,7 @@ def current_runtime_identity(agent):
         "max_new_tokens": int(agent.max_new_tokens),
         "feature_flags": dict(agent.feature_flags),
         "shell_env_allowlist": list(agent.shell_env_allowlist),
+        "sandbox": agent.sandbox.identity(),
         "workspace_fingerprint": getattr(getattr(agent, "prefix_state", None), "workspace_fingerprint", agent.workspace.fingerprint()),
         "tool_signature": agent.tool_signature(),
     }
@@ -85,6 +86,7 @@ def evaluate_resume_state(agent):
                 "allowed_tools",
                 "feature_flags",
                 "shell_env_allowlist",
+                "sandbox",
                 "workspace_fingerprint",
                 "tool_signature",
             )

@@ -173,6 +173,11 @@ def test_repl_reload_skills_command_calls_agent_reload(capsys):
             self.workspace = type("Workspace", (), {"cwd": ".", "branch": "main"})()
             self.approval_policy = "auto"
             self.session = {"id": "session"}
+            self.sandbox = type(
+                "Sandbox",
+                (),
+                {"backend": "docker", "config": type("Config", (), {"image": "pico-sandbox:test"})()},
+            )()
             self.session_path = ".pico/sessions/session.json"
             self.reload_called = False
 

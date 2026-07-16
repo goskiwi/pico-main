@@ -8,8 +8,8 @@ import re
 import shlex
 import shutil
 import subprocess
-import textwrap
 from functools import partial
+from pathlib import Path
 
 from . import security
 from .config import (
@@ -45,6 +45,15 @@ BASE_TOOL_SPECS = {
         "risky": False,
         "description": "Read a UTF-8 file by line range.",
     },
+    "read_tool_output": {
+        "schema": {
+            "node_id": {"type": "str", "required": True, "min_length": 1},
+            "run_id": {"type": "str", "default": ""},
+        },
+        "capability": "read",
+        "risky": False,
+        "description": "Read full saved tool output by task graph node id.",
+    },
     "search": {
         "schema": {
             "pattern": {"type": "str", "required": True, "min_length": 1},
@@ -61,7 +70,7 @@ BASE_TOOL_SPECS = {
         },
         "capability": "execute",
         "risky": True,
-        "description": "Run a shell command in the repo root.",
+        "description": "Run a shell command in the mandatory isolated Docker sandbox.",
     },
     "write_file": {
         "schema": {
@@ -122,6 +131,7 @@ DELEGATE_ROLES = {
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
     "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+    "read_tool_output": '<tool>{"name":"read_tool_output","args":{"node_id":"t001_read_file"}}</tool>',
     "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
@@ -166,6 +176,103 @@ def schema_field_display(spec):
 
 def schema_display(schema):
     return {name: schema_field_display(spec) for name, spec in schema.items()}
+
+
+def responses_action_tools(tool_registry):
+    """Build strict Responses API function definitions for one agent turn."""
+    definitions = []
+    for name, tool in sorted(dict(tool_registry).items()):
+        properties = {
+            field_name: _responses_schema_property(name, field_name, field_spec)
+            for field_name, field_spec in tool["schema"].items()
+        }
+        definitions.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": str(tool.get("description", "")),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(properties),
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        )
+    definitions.append(
+        {
+            "type": "function",
+            "name": "submit_final",
+            "description": "Finish the task only after all required workspace work is complete.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Concise final answer describing completed work and verification.",
+                    }
+                },
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    )
+    return definitions
+
+
+def _responses_schema_property(tool_name, field_name, spec):
+    field_type = str(spec.get("type", "str"))
+    if field_type == "str":
+        result = {"type": "string"}
+        if int(spec.get("min_length", 0) or 0) > 0:
+            result["minLength"] = int(spec["min_length"])
+    elif field_type == "int":
+        result = {"type": "integer"}
+        if "min" in spec:
+            result["minimum"] = int(spec["min"])
+        if "max" in spec:
+            result["maximum"] = int(spec["max"])
+    elif field_type == "list":
+        result = {"type": "array"}
+        if tool_name == "delegate_many" and field_name == "tasks":
+            result["items"] = {
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "enum": sorted(DELEGATE_ROLES)},
+                    "task": {"type": "string", "minLength": 1},
+                    "max_steps": {"type": "integer", "minimum": 1, "maximum": 12},
+                },
+                "required": ["role", "task", "max_steps"],
+                "additionalProperties": False,
+            }
+        else:
+            result["items"] = {}
+        if int(spec.get("min_length", 0) or 0) > 0:
+            result["minItems"] = int(spec["min_length"])
+        if spec.get("max_length") is not None:
+            result["maxItems"] = int(spec["max_length"])
+    else:
+        raise ValueError(f"unsupported Responses schema type: {field_type}")
+    descriptions = {
+        ("write_file", "path"): "Workspace-relative path to create or replace.",
+        ("write_file", "content"): "Complete file content to write, including imports and final newline when appropriate.",
+        ("patch_file", "path"): "Workspace-relative path to edit.",
+        ("patch_file", "old_text"): "Exact existing file text without display line numbers; it must occur exactly once.",
+        ("patch_file", "new_text"): "Complete replacement for old_text.",
+        ("read_file", "path"): "Workspace-relative file path.",
+        ("run_shell", "command"): "Shell command to run inside the isolated workspace sandbox.",
+    }
+    notes = []
+    if descriptions.get((tool_name, field_name)):
+        notes.append(descriptions[(tool_name, field_name)])
+    if "default" in spec:
+        notes.append(f"Use {spec['default']!r} when the default behavior is intended.")
+    if notes:
+        result["description"] = " ".join(notes)
+    return result
 
 
 def validate_schema(schema, args):
@@ -224,6 +331,12 @@ def shell_command_policy(command):
             "matched_prefix": "",
             "reason": "empty_command",
         }
+    if any(marker in command for marker in (";", "&", "|", ">", "<", "$(", "`", "\n", "\r")):
+        return {
+            "allowed": False,
+            "matched_prefix": "",
+            "reason": "shell_composition",
+        }
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -263,6 +376,13 @@ def protected_write_reason(agent, raw_path):
     return ""
 
 
+def protected_read_reason(agent, raw_path):
+    path = agent.path(raw_path)
+    if path.name.startswith(".env"):
+        return f"protected secret-like file: {path.name}"
+    return ""
+
+
 def validate_tool(agent, name, args):
     args = args or {}
     tool = agent.tools.get(name, {})
@@ -276,6 +396,9 @@ def validate_tool(agent, name, args):
 
     if name == "read_file":
         path = agent.path(args["path"])
+        protected_reason = protected_read_reason(agent, args["path"])
+        if protected_reason:
+            raise ValueError(f"protected read path blocked: {protected_reason}")
         if not path.is_file():
             raise ValueError("path is not a file")
         start = int(args.get("start", 1))
@@ -284,11 +407,26 @@ def validate_tool(agent, name, args):
             raise ValueError("invalid line range")
         return
 
+    if name == "read_tool_output":
+        node_id = str(args.get("node_id", "")).strip()
+        if not node_id:
+            raise ValueError("node_id must not be empty")
+        run_id = str(args.get("run_id", "")).strip()
+        if ".." in node_id or "/" in node_id or "\\" in node_id:
+            raise ValueError("invalid node_id")
+        if run_id and (".." in run_id or "/" in run_id or "\\" in run_id):
+            raise ValueError("invalid run_id")
+        return
+
     if name == "search":
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
-        agent.path(args.get("path", "."))
+        raw_path = args.get("path", ".")
+        agent.path(raw_path)
+        protected_reason = protected_read_reason(agent, raw_path)
+        if protected_reason:
+            raise ValueError(f"protected read path blocked: {protected_reason}")
         return
 
     if name == "run_shell":
@@ -363,8 +501,6 @@ def validate_delegate_task(args, label="delegate"):
 
 def tool_list_files(agent, args):
     path = agent.path(args.get("path", "."))
-    if not path.is_dir():
-        raise ValueError("path is not a directory")
     entries = [
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         if item.name not in IGNORED_PATH_NAMES
@@ -378,27 +514,63 @@ def tool_list_files(agent, args):
 
 def tool_read_file(agent, args):
     path = agent.path(args["path"])
-    if not path.is_file():
-        raise ValueError("path is not a file")
     start = int(args.get("start", 1))
     end = int(args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
     return f"# {path.relative_to(agent.root)}\n{body}"
 
 
+def tool_read_tool_output(agent, args):
+    node_id = str(args.get("node_id", "")).strip()
+    run_id = str(args.get("run_id", "")).strip()
+    if not run_id:
+        task_state = getattr(agent, "current_task_state", None)
+        run_id = str(getattr(task_state, "run_id", "") or "")
+    if not run_id:
+        raise ValueError("run_id is required when no current run is active")
+
+    run_dir = agent.run_store.run_dir(run_id).resolve()
+    graph_path = agent.run_store.task_graph_path(run_id).resolve()
+    if not graph_path.is_file():
+        raise ValueError(f"task graph not found for run_id: {run_id}")
+    graph_text = graph_path.read_text(encoding="utf-8", errors="replace")
+    ref = _tool_output_ref_for_node(graph_text, node_id)
+    if not ref:
+        raise ValueError(f"node not found or ref missing: {node_id}")
+    if Path(ref).is_absolute() or ".." in ref:
+        raise ValueError(f"invalid ref: {ref}")
+    ref_path = (run_dir / ref).resolve()
+    tool_outputs_dir = (run_dir / "tool_outputs").resolve()
+    try:
+        ref_path.relative_to(tool_outputs_dir)
+    except ValueError as exc:
+        raise ValueError("ref escapes tool_outputs") from exc
+    if not ref_path.is_file():
+        raise ValueError(f"tool output not found: {ref}")
+    return ref_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _tool_output_ref_for_node(graph_text, node_id):
+    # ref 存在独立注释行 `%% <node_id> ref: <path>`，不受节点 label 截断影响。
+    comment_pattern = re.compile(
+        rf"^\s*%%\s*{re.escape(node_id)}\s+ref:\s*(.+?)\s*$", re.MULTILINE
+    )
+    match = comment_pattern.search(str(graph_text or ""))
+    return match.group(1).strip() if match else ""
+
+
 def tool_search(agent, args):
     pattern = str(args.get("pattern", "")).strip()
-    if not pattern:
-        raise ValueError("pattern must not be empty")
     path = agent.path(args.get("path", "."))
 
     if shutil.which("rg"):
         # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
         result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
+            [
+                "rg", "-n", "--smart-case", "--max-count", "200",
+                "--glob", "!.env*", pattern, str(path),
+            ],
             cwd=agent.root,
             capture_output=True,
             text=True,
@@ -413,6 +585,7 @@ def tool_search(agent, args):
     files = [path] if path.is_file() else [
         item for item in path.rglob("*")
         if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(agent.root).parts)
+        and not protected_read_reason(agent, item.relative_to(agent.root))
     ]
     for file_path in files:
         for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
@@ -425,31 +598,24 @@ def tool_search(agent, args):
 
 def tool_run_shell(agent, args):
     command = str(args.get("command", "")).strip()
-    if not command:
-        raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
-    if timeout < 1 or timeout > 120:
-        raise ValueError("timeout must be in [1, 120]")
-    result = subprocess.run(
+    result = agent.sandbox.run(
         command,
         cwd=agent.root,
-        shell=True,
-        capture_output=True,
-        text=True,
         timeout=timeout,
-        # 这里传入的是过滤后的环境变量，而不是直接继承整个父 shell 环境，
-        # 目的是减少敏感信息被意外带进命令执行环境的风险。
         env=security.shell_env(agent),
     )
-    return textwrap.dedent(
-        f"""\
-        exit_code: {result.returncode}
-        stdout:
-        {result.stdout.strip() or "(empty)"}
-        stderr:
-        {result.stderr.strip() or "(empty)"}
-        """
-    ).strip()
+    agent._last_sandbox_metadata = agent.sandbox.audit_metadata(timed_out=result.timed_out)
+    return "\n".join(
+        [
+            f"sandbox: {agent.sandbox.backend}",
+            f"exit_code: {result.returncode}",
+            "stdout:",
+            result.stdout.strip() or "(empty)",
+            "stderr:",
+            result.stderr.strip() or "(empty)",
+        ]
+    )
 
 
 def tool_write_file(agent, args):
@@ -462,17 +628,8 @@ def tool_write_file(agent, args):
 
 def tool_patch_file(agent, args):
     path = agent.path(args["path"])
-    if not path.is_file():
-        raise ValueError("path is not a file")
     old_text = str(args.get("old_text", ""))
-    if not old_text:
-        raise ValueError("old_text must not be empty")
-    if "new_text" not in args:
-        raise ValueError("missing new_text")
     text = path.read_text(encoding="utf-8")
-    count = text.count(old_text)
-    if count != 1:
-        raise ValueError(f"old_text must occur exactly once, found {count}")
     path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
     return f"patched {path.relative_to(agent.root)}"
 
@@ -491,8 +648,11 @@ def run_delegate_child(agent, args):
 
     role_config = DELEGATE_ROLES[role]
     child_task = f"{role_config['instruction']}\n\nTask:\n{task}"
+    child_model_client = agent.model_client
+    if getattr(agent.model_client, "supports_native_actions", False):
+        child_model_client = agent.model_client.fork_for_delegate()
     child = Pico(
-        model_client=agent.model_client,
+        model_client=child_model_client,
         workspace=agent.workspace,
         session_store=agent.session_store,
         run_store=agent.run_store,
@@ -562,6 +722,7 @@ def tool_delegate_many(agent, args):
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
+    "read_tool_output": tool_read_tool_output,
     "search": tool_search,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,

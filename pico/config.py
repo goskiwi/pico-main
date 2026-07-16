@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Tuple
 
 
@@ -27,6 +26,8 @@ DEFAULT_FEATURE_FLAGS: dict = {
     "prompt_cache": True,
     "llm_memory_extract": True,
     "llm_history_compaction": True,
+    "dynamic_budget": True,
+    "cross_section_dedup": True,
 }
 
 DEFAULT_SHELL_ENV_ALLOWLIST: Tuple[str, ...] = (
@@ -60,17 +61,9 @@ DEFAULT_SECTION_BUDGETS: dict = {
     "relevant_memory": 1200,
     "history": 5200,
 }
-DEFAULT_SECTION_FLOORS: dict = {
-    "prefix": 1200,
-    "memory": 400,
-    "skills": 250,
-    "relevant_memory": 300,
-    "history": 1500,
-}
 DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = ("relevant_memory", "skills", "history", "memory", "prefix")
 HISTORY_RECENT_WINDOW: int = 6
 RELEVANT_MEMORY_LIMIT: int = 3
-FILE_PRIORITY_LIMIT: int = 5
 LLM_COMPACT_MAX_INPUT_CHARS: int = 12000
 LLM_COMPACT_MAX_OUTPUT_TOKENS: int = 700
 
@@ -129,51 +122,4 @@ _DANGEROUS_SHELL_PATTERNS_RAW: Tuple[Tuple[str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL_MAX_RETRIES: int = 2
-DEFAULT_MODEL_RETRY_BACKOFF: float = 1.0
-
-# ---------------------------------------------------------------------------
-# Session 存储
-# ---------------------------------------------------------------------------
-
-SESSION_COMPACT_INTERVAL: int = 50  # 每 N 次 save 触发一次 compaction
-
-
-@dataclass
-class PicoConfig:
-    """运行时可调配置。
-
-    零外部依赖——只用标准库 dataclass。
-    所有字段都有默认值，所以 PicoConfig() 就能直接用。
-    """
-
-    # 运行时
-    max_steps: int = DEFAULT_MAX_STEPS
-    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
-    max_depth: int = DEFAULT_MAX_DEPTH
-    approval_policy: str = DEFAULT_APPROVAL_POLICY
-    memory_extractor_max_tokens: int = MEMORY_EXTRACTOR_MAX_TOKENS
-    feature_flags: dict = field(default_factory=lambda: dict(DEFAULT_FEATURE_FLAGS))
-    shell_env_allowlist: Tuple[str, ...] = DEFAULT_SHELL_ENV_ALLOWLIST
-
-    # 上下文预算
-    total_budget: int = DEFAULT_TOTAL_BUDGET
-    section_budgets: dict = field(default_factory=lambda: dict(DEFAULT_SECTION_BUDGETS))
-    section_floors: dict = field(default_factory=lambda: dict(DEFAULT_SECTION_FLOORS))
-    reduction_order: Tuple[str, ...] = DEFAULT_REDUCTION_ORDER
-    history_recent_window: int = HISTORY_RECENT_WINDOW
-    relevant_memory_limit: int = RELEVANT_MEMORY_LIMIT
-    file_priority_limit: int = FILE_PRIORITY_LIMIT
-    llm_compact_max_input_chars: int = LLM_COMPACT_MAX_INPUT_CHARS
-    llm_compact_max_output_tokens: int = LLM_COMPACT_MAX_OUTPUT_TOKENS
-
-    # 工作记忆
-    working_file_limit: int = WORKING_FILE_LIMIT
-    episodic_note_limit: int = EPISODIC_NOTE_LIMIT
-    file_summary_limit: int = FILE_SUMMARY_LIMIT
-
-    # 模型重试
-    model_max_retries: int = DEFAULT_MODEL_MAX_RETRIES
-    model_retry_backoff: float = DEFAULT_MODEL_RETRY_BACKOFF
-
-    # Session 存储
-    session_compact_interval: int = SESSION_COMPACT_INTERVAL
+DEFAULT_MODEL_RETRY_BACKOFF: float = 0.5

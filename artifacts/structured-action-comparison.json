@@ -1,0 +1,130 @@
+{
+  "artifact_type": "real-world-benchmark-comparison",
+  "captured_at": "2026-07-13T19:46:48.322546Z",
+  "fixture_snapshot_id": "sha256:ba62646485ac83e54c39e86d6f5c53017c93406d5160ee7f5fc83834bad6657c",
+  "model": "gpt-5.4",
+  "rows": [
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 4,
+      "baseline_passed": false,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 4,
+      "candidate_passed": false,
+      "model_calls_delta": 0,
+      "pass_change": 0,
+      "task_id": "config_document_precedence"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 30,
+      "baseline_passed": false,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 10,
+      "candidate_passed": true,
+      "model_calls_delta": -20,
+      "pass_change": 1,
+      "task_id": "config_non_strict_mode"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 10,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 7,
+      "candidate_passed": true,
+      "model_calls_delta": -3,
+      "pass_change": 0,
+      "task_id": "config_preserve_equals"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 4,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 4,
+      "candidate_passed": true,
+      "model_calls_delta": 0,
+      "pass_change": 0,
+      "task_id": "inventory_add_boundary_tests"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 6,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 4,
+      "candidate_passed": true,
+      "model_calls_delta": -2,
+      "pass_change": 0,
+      "task_id": "inventory_normalize_sku"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 9,
+      "baseline_passed": false,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 7,
+      "candidate_passed": true,
+      "model_calls_delta": -2,
+      "pass_change": 1,
+      "task_id": "inventory_reserve_exact_stock"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 12,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 7,
+      "candidate_passed": true,
+      "model_calls_delta": -5,
+      "pass_change": 0,
+      "task_id": "inventory_total_value"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 8,
+      "baseline_passed": false,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 7,
+      "candidate_passed": true,
+      "model_calls_delta": -1,
+      "pass_change": 1,
+      "task_id": "priority_queue_stable_fifo"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 5,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 6,
+      "candidate_passed": true,
+      "model_calls_delta": 1,
+      "pass_change": 0,
+      "task_id": "retry_add_boundary_tests"
+    },
+    {
+      "baseline_action_rejections": null,
+      "baseline_model_calls": 7,
+      "baseline_passed": true,
+      "candidate_action_rejections": 0,
+      "candidate_model_calls": 8,
+      "candidate_passed": true,
+      "model_calls_delta": 1,
+      "pass_change": 0,
+      "task_id": "retry_exact_attempt_budget"
+    }
+  ],
+  "schema_version": 1,
+  "summary": {
+    "avg_model_calls_delta": -3.1,
+    "baseline_action_rejections": null,
+    "baseline_avg_model_calls": 9.5,
+    "baseline_pass_rate": 0.6,
+    "candidate_action_rejections": 0,
+    "candidate_avg_model_calls": 6.4,
+    "candidate_pass_rate": 0.9,
+    "pass_rate_delta": 0.3
+  },
+  "task_count": 10
+}

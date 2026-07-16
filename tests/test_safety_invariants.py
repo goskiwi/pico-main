@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from pico import cli as mini_cli
 from pico import security
+from pico.sandbox import SandboxResult
 from pico.task_state import TaskState
 from tests.helpers import build_agent
 
@@ -47,6 +48,20 @@ def test_allowlisted_shell_command_reaches_approval_policy(tmp_path):
     assert result == "error: approval denied for run_shell"
     assert agent._last_tool_result_metadata["shell_allowlisted"] is True
     assert agent._last_tool_result_metadata["shell_allowlist_match"] == "pytest"
+
+
+def test_shell_composition_does_not_match_allowlist(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    for command in (
+        "pytest -q; rm README.md",
+        "pytest -q && cat pyproject.toml",
+        "python -m pytest -q $(touch injected.txt)",
+        "ruff check . | sh",
+    ):
+        result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+        assert result == "error: shell command is not on the allowlist"
+        assert agent._last_tool_result_metadata["shell_policy_reason"] == "shell_composition"
 
 
 def test_dangerous_shell_command_is_blocked_before_approval(tmp_path):
@@ -127,6 +142,22 @@ def test_protected_patch_paths_are_rejected(tmp_path):
     assert "protected write path blocked" in result
     assert agent._last_tool_result_metadata["security_event_type"] == "protected_write_path"
     assert target.read_text(encoding="utf-8") == "SECRET=old\n"
+
+
+def test_env_files_are_rejected_by_read_and_search_tools(tmp_path):
+    target = tmp_path / "service" / ".env.test"
+    target.parent.mkdir()
+    target.write_text("TOKEN=secret\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    read_result = agent.run_tool("read_file", {"path": "service/.env.test"})
+    search_result = agent.run_tool(
+        "search", {"pattern": "TOKEN", "path": "service/.env.test"}
+    )
+
+    assert "protected read path blocked" in read_result
+    assert "protected read path blocked" in search_result
+    assert agent._last_tool_result_metadata["security_event_type"] == "protected_read_path"
 
 
 def test_structured_schema_rejects_wrong_argument_types_before_approval(tmp_path):
@@ -279,26 +310,23 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     assert "missing" in result
 
 
-def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
+def test_run_tool_uses_the_validated_runtime_entrypoint(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
-    with patch("pico.tools.subprocess.run") as fake_run:
-        fake_run.return_value = type(
-            "Result",
-            (),
-            {"returncode": 0, "stdout": "toolkit-shell\n", "stderr": ""},
-        )()
-        shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
+    with patch.object(agent.sandbox, "run") as fake_run:
+        fake_run.return_value = SandboxResult(
+            returncode=0,
+            stdout="toolkit-shell\n",
+            stderr="",
+        )
+        shell_result = agent.run_tool("run_shell", {"command": "echo bypass", "timeout": 20})
 
     assert "toolkit-shell" in shell_result
     fake_run.assert_called_once()
-    assert agent.tool_run_shell.__func__.__module__ == "pico.runtime"
+    delegate_result = agent.run_tool("delegate", {"task": "inspect README.md", "max_steps": 2})
 
-    with patch("pico.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
-
-    assert delegate_result == "toolkit-delegate"
-    fake_delegate.assert_called_once()
+    assert "missing required argument: role" in delegate_result
+    assert agent._last_tool_result_metadata["tool_status"] == "rejected"
 
 
 def test_delegate_depth_limit_is_enforced(tmp_path):
@@ -330,7 +358,7 @@ def test_delegate_child_is_read_only(tmp_path):
     assert not target.exists()
     tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate"
-    assert "delegate_result role=explore" in tool_events[0]["content"]
+    assert "delegate_result role=explore" in tool_events[0]["summary"]
 
 
 def test_delegate_child_does_not_expose_write_tools(tmp_path):

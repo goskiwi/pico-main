@@ -1,7 +1,6 @@
 """Workspace change detection for risky tool execution."""
 
 import hashlib
-import subprocess
 from dataclasses import dataclass
 
 from .config import IGNORED_PATH_NAMES
@@ -29,7 +28,7 @@ def _ignored_relative_parts(relative_parts):
 def _hash_file(agent, path, relative_path, stat_result=None):
     try:
         stat_result = stat_result or path.stat()
-    except Exception:
+    except OSError:
         return None
 
     cache = _snapshot_cache(agent)
@@ -43,7 +42,7 @@ def _hash_file(agent, path, relative_path, stat_result=None):
 
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except Exception:
+    except OSError:
         cache.pop(relative_path, None)
         return None
 
@@ -59,10 +58,7 @@ def capture_workspace_snapshot(agent):
     snapshot = {}
     seen_paths = set()
     for path in agent.root.rglob("*"):
-        try:
-            relative_parts = path.relative_to(agent.root).parts
-        except ValueError:
-            continue
+        relative_parts = path.relative_to(agent.root).parts
         if _ignored_relative_parts(relative_parts):
             continue
         if not path.is_file():
@@ -70,7 +66,7 @@ def capture_workspace_snapshot(agent):
         relative_path = path.relative_to(agent.root).as_posix()
         try:
             stat_result = path.stat()
-        except Exception:
+        except OSError:
             continue
         digest = _hash_file(agent, path, relative_path, stat_result=stat_result)
         if digest is None:
@@ -89,12 +85,9 @@ def capture_path_snapshot(agent, paths):
     for raw_path in paths:
         if not str(raw_path or "").strip():
             continue
-        try:
-            path = agent.path(raw_path)
-            relative_path = path.relative_to(agent.root).as_posix()
-            relative_parts = path.relative_to(agent.root).parts
-        except Exception:
-            continue
+        path = agent.path(raw_path)
+        relative_path = path.relative_to(agent.root).as_posix()
+        relative_parts = path.relative_to(agent.root).parts
         if _ignored_relative_parts(relative_parts):
             continue
         if not path.exists():
@@ -105,42 +98,11 @@ def capture_path_snapshot(agent, paths):
             continue
         try:
             stat_result = path.stat()
-        except Exception:
+        except OSError:
             continue
         digest = _hash_file(agent, path, relative_path, stat_result=stat_result)
         if digest is not None:
             snapshot[relative_path] = digest
-    return snapshot
-
-
-def capture_git_status_snapshot(agent):
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=agent.root,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-    except Exception:
-        return None
-
-    snapshot = {}
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-        status = line[:2]
-        path_text = line[3:] if len(line) > 3 else ""
-        if " -> " in path_text:
-            path_text = path_text.split(" -> ", 1)[1]
-        path_text = path_text.strip().strip('"')
-        if not path_text:
-            continue
-        parts = tuple(part for part in path_text.split("/") if part)
-        if _ignored_relative_parts(parts):
-            continue
-        snapshot[path_text] = status
     return snapshot
 
 
@@ -157,19 +119,9 @@ def diff_workspace_snapshots(before, after):
         elif before.get(path) is not None and after.get(path) is None:
             summaries.append(f"deleted:{path}")
         elif path not in before:
-            after_status = str(after.get(path, ""))
-            if "D" in after_status:
-                summaries.append(f"deleted:{path}")
-            elif after_status.strip() == "??" or "A" in after_status:
-                summaries.append(f"created:{path}")
-            else:
-                summaries.append(f"modified:{path}")
+            summaries.append(f"created:{path}")
         elif path not in after:
-            before_status = str(before.get(path, ""))
-            if "D" in before_status:
-                summaries.append(f"modified:{path}")
-            else:
-                summaries.append(f"deleted:{path}")
+            summaries.append(f"deleted:{path}")
         else:
             summaries.append(f"modified:{path}")
     return changed_paths, summaries
@@ -187,10 +139,6 @@ def before_workspace_snapshot(agent, name, args, tool):
     paths = target_snapshot_paths(name, args)
     if paths:
         return capture_path_snapshot(agent, paths), "paths"
-    if name == "run_shell":
-        git_snapshot = capture_git_status_snapshot(agent)
-        if git_snapshot is not None:
-            return git_snapshot, "git_status"
     return capture_workspace_snapshot(agent), "full"
 
 
@@ -199,10 +147,6 @@ def after_workspace_snapshot(agent, name, args, tool, mode, before_snapshot):
         return before_snapshot
     if mode == "paths":
         return capture_path_snapshot(agent, target_snapshot_paths(name, args))
-    if mode == "git_status":
-        git_snapshot = capture_git_status_snapshot(agent)
-        if git_snapshot is not None:
-            return git_snapshot
     if mode == "none":
         return before_snapshot
     return capture_workspace_snapshot(agent)

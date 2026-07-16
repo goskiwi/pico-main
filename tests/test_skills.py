@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from pico.context_manager import ContextManager
 from pico.models import FakeModelClient
 from pico.skills import compute_active_tools, load_skills, select_skills_with_model
@@ -230,7 +228,7 @@ tools: read_file, search
     assert is_strict is True
 
 
-def test_select_skills_with_model_returns_empty_for_bad_json(tmp_path):
+def test_select_skills_with_model_falls_back_for_bad_json(tmp_path):
     write_skill(
         tmp_path,
         "debugging",
@@ -246,10 +244,10 @@ description: Debug failing tests.
     model = FakeModelClient(["not json"])
     selected = select_skills_with_model(model, load_skills(tmp_path), "测试失败了，帮我定位原因")
 
-    assert selected == []
+    assert [skill.name for skill in selected] == ["debugging"]
 
 
-def test_select_skills_with_model_raises_model_errors(tmp_path):
+def test_select_skills_with_model_falls_back_after_model_error(tmp_path):
     write_skill(
         tmp_path,
         "debugging",
@@ -263,8 +261,9 @@ description: Debug failing tests.
     )
 
     model = FakeModelClient([])
-    with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
-        select_skills_with_model(model, load_skills(tmp_path), "debug failing tests")
+    selected = select_skills_with_model(model, load_skills(tmp_path), "debug failing tests")
+
+    assert [skill.name for skill in selected] == ["debugging"]
 
 
 def test_context_manager_injects_matching_skills_between_memory_and_history(tmp_path):
