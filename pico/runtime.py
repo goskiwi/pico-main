@@ -290,6 +290,7 @@ class Pico:
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
+            - Before finalizing an implementation task, verify every explicit behavioral constraint. When constraints interact, add or run at least one discriminating test that exercises the interaction, not only happy paths.
             - New files should be complete and runnable, including obvious imports.
             - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
             - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.

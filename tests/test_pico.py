@@ -89,6 +89,13 @@ def test_native_action_loop_reuses_the_structured_conversation_prompt(tmp_path):
     assert agent.last_prompt_metadata["prompt_reused"] is True
 
 
+def test_prefix_requires_a_test_for_interacting_constraints(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    assert "verify every explicit behavioral constraint" in agent.prefix
+    assert "discriminating test that exercises the interaction" in agent.prefix
+
+
 def test_native_action_gets_one_final_only_turn_after_tool_limit(tmp_path):
     class NativeModelClient:
         supports_native_actions = True
