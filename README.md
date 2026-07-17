@@ -21,7 +21,8 @@
   快照哈希、Git 状态、重复运行波动、token、时延和逐任务稳定性。
 
 历史实测中，同一 V1 快照从文本/XML 协议的 6/10 提升到 strict structured actions 的 9/10，
-平均模型调用从 9.50 降至 6.40；首次 V2 held-out 运行通过 5/5。完整结果与解释边界见
+平均模型调用从 9.50 降至 6.40；首次 V2 held-out 运行通过 5/5，冻结 V3 首次 3 轮运行通过
+13/15。完整结果与解释边界见
 [真实模型评测](#真实模型评测)。
 
 ## 适用场景
@@ -339,7 +340,12 @@ V2 在首次 held-out 运行后已经用于 trace 分析和 runtime 开发，因
 不能通过反复运行 V2 把回归成绩包装成新的 held-out 提升。
 
 [V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
-和隐藏 verifier 已在首次真实模型运行前固定；首次结果生成前不据此调整 runtime。
+和隐藏 verifier 在首次真实模型运行前提交为 `0897195`，运行前工作区干净，期间未据此调整
+runtime。首次 3 轮结果为 13/15（86.7%）：4 题稳定通过 3/3，依赖排序题通过 1/3；15 次运行
+Action 拒绝为 0，所有已执行工具调用成功。两次失败都使用了不能满足全局 ready 顺序的 DFS，
+属于模型实现与自测覆盖不足，而非协议或工具故障。见
+[完整报告](docs/metrics/real-world-benchmark-v3-first-3x.md)和
+[原始 JSON artifact](artifacts/real-world-benchmark-v3-first-3x.json)。V3 在这次运行后也只作为回归集。
 
 ```bash
 export OPENAI_API_KEY="..."
