@@ -347,6 +347,11 @@ Action 拒绝为 0，所有已执行工具调用成功。两次失败都使用�
 [完整报告](docs/metrics/real-world-benchmark-v3-first-3x.md)和
 [原始 JSON artifact](artifacts/real-world-benchmark-v3-first-3x.json)。V3 在这次运行后也只作为回归集。
 
+一次后续实验在系统提示中加入了通用的“为交互约束编写区分性测试”要求，但 V3 回归降至
+12/15，依赖排序题为 0/3，平均模型调用和耗时也上升；没有观察到收益，因此该提示修改已回滚。
+这不是新的 held-out 结果。见[回归报告](docs/metrics/real-world-benchmark-v3-constraint-regression-3x.md)
+和[原始 JSON artifact](artifacts/real-world-benchmark-v3-constraint-regression-3x.json)。
+
 ```bash
 export OPENAI_API_KEY="..."
 export OPENAI_API_BASE="https://your-api.example/v1"

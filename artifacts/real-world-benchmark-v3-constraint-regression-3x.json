@@ -1,0 +1,711 @@
+{
+  "artifact_type": "real-world-benchmark",
+  "benchmark": {
+    "description": "Five independent repository tasks frozen before the first V3 live-model evaluation.",
+    "evaluation_snapshot_id": "sha256:8f98dfb3de88e42628f3241ed1e798d20f827aa1a9fdb6172801658dcff266ef",
+    "fixture_snapshot_id": "sha256:b6f06f654dd99b1abb217a0a54011b55241fe2aa7a98abd503d86ef759aec1ad",
+    "name": "pico-real-world-benchmark-v3-frozen",
+    "source": "benchmarks/real_world_tasks_v3.json",
+    "task_count": 5,
+    "task_ids": [
+      "http_byte_range_forms",
+      "stable_dependency_order",
+      "atomic_batch_reservation",
+      "single_pass_template_expansion",
+      "atomic_name_index_rename"
+    ]
+  },
+  "captured_at": "2026-07-17T03:26:46.461184Z",
+  "execution_mode": "live_llm",
+  "model": "gpt-5.4",
+  "provider": "openai",
+  "repetitions": 3,
+  "rows": [
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 42200,
+      "cached_tokens": 13056,
+      "category": "feature",
+      "changed_files": [
+        "range_parser.py",
+        "test_range_parser.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented parse_byte_range in range_parser.py to support bytes=start-end, bytes=start-, and bytes=-suffix with inclusive offsets, end clamping, and oversized suffix handling. Added comprehensive tests for valid forms and rejection cases. Verified with `pytest -q` (20 passed).",
+      "input_tokens": 18248,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1090,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260717-111514-4b4ac8",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "http_byte_range_forms",
+      "tool_steps": 6,
+      "total_duration_ms": 42753,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 553,
+      "workspace": "rep-1/full/http_byte_range_forms/byte_range"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 43418,
+      "cached_tokens": 14464,
+      "category": "bugfix",
+      "changed_files": [
+        "planner.py",
+        "test_planner.py"
+      ],
+      "failure_category": "verifier_failed",
+      "final_answer": "Fixed `build_order` in `planner.py` to perform a stable DFS-based topological ordering: dependencies are emitted before dependents, unknown dependencies raise `KeyError`, cycles raise `ValueError`, and the input is not mutated. Added tests covering dependency ordering, stable ready-task order, unknown dependencies, cycles, and non-mutation. Verified with `pytest -q` \u2014 7 tests passed.",
+      "input_tokens": 16515,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 857,
+      "passed": false,
+      "repetition": 1,
+      "run_id": "run_20260717-111557-489e80",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stable_dependency_order",
+      "tool_steps": 6,
+      "total_duration_ms": 43926,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": ".F...                                                                    [100%]\n=================================== FAILURES ===================================\n____________________ test_ready_tasks_use_declaration_order ____________________\n\n    def test_ready_tasks_use_declaration_order():\n        tasks = {\n            \"package\": (\"compile\",),\n            \"lint\": (),\n            \"compile\": (\"generate\",),\n            \"generate\": (),\n        }\n>       assert build_order(tasks) == [\"lint\", \"generate\", \"compile\", \"package\"]\nE       AssertionError: assert ['generate', ...kage', 'lint'] == ['lint', 'gen...e', 'package']\nE         \nE         At index 0 diff: 'generate' != 'lint'\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:18: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_ready_tasks_use_declaration_order\n1 failed, 4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 508,
+      "workspace": "rep-1/full/stable_dependency_order/build_order"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 41759,
+      "cached_tokens": 15616,
+      "category": "bugfix",
+      "changed_files": [
+        "inventory.py",
+        "test_inventory.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented atomic validation in `Inventory.reserve_many` so it rejects bool/non-positive/non-int quantities, raises `KeyError` for unknown SKUs, raises `ValueError` for insufficient stock, leaves inventory unchanged on failure, and treats empty requests as a no-op. Added tests covering atomicity and all specified error cases. Verified with `pytest -q` (7 passed).",
+      "input_tokens": 18224,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1258,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260717-111641-070e5a",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_batch_reservation",
+      "tool_steps": 6,
+      "total_duration_ms": 42241,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".......                                                                  [100%]\n7 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 482,
+      "workspace": "rep-1/full/atomic_batch_reservation/inventory_batch"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 51403,
+      "cached_tokens": 12800,
+      "category": "feature",
+      "changed_files": [
+        "template.py",
+        "test_template.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented expand_template in template.py with single-pass parsing, $$ escaping, literal lone dollars, placeholder validation, KeyError for missing names, and one-time stringification of values. Added tests covering single-pass behavior, invalid placeholders, missing names, lone dollars, escape interaction, and stringification count. Verified with pytest: 13 passed.",
+      "input_tokens": 17282,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1064,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260717-111723-dc7c8f",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "single_pass_template_expansion",
+      "tool_steps": 6,
+      "total_duration_ms": 51896,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 493,
+      "workspace": "rep-1/full/single_pass_template_expansion/template_expand"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 56893,
+      "cached_tokens": 20608,
+      "category": "refactor",
+      "changed_files": [
+        "name_index.py",
+        "test_name_index.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated name_index.py so rename is atomic: it now preserves KeyError for missing ids, no-ops when renaming to the current name, rejects names owned by another item before mutating either map, and removes the old name on success. Expanded tests to cover old-name removal, no-op rename, missing id, and atomic duplicate-name failure. Verified with `pytest -q` (5 passed).",
+      "input_tokens": 27521,
+      "model_action_rejections": 0,
+      "model_calls": 9,
+      "model_failures": 0,
+      "output_tokens": 1735,
+      "passed": true,
+      "repetition": 1,
+      "run_id": "run_20260717-111815-21d329",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_name_index_rename",
+      "tool_steps": 8,
+      "total_duration_ms": 57390,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "....                                                                     [100%]\n4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 497,
+      "workspace": "rep-1/full/atomic_name_index_rename/name_index"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 49844,
+      "cached_tokens": 17792,
+      "category": "feature",
+      "changed_files": [
+        "range_parser.py",
+        "test_range_parser.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented parse_byte_range in range_parser.py to support exactly one bytes range in explicit, open-ended, and suffix forms; added validation for malformed, multiple, negative/unsatisfiable, zero-suffix, and nonpositive-size cases; clamped explicit ends and oversized suffixes correctly. Verified with pytest: 23 passed.",
+      "input_tokens": 20940,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1208,
+      "passed": true,
+      "repetition": 2,
+      "run_id": "run_20260717-111913-cd8907",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "http_byte_range_forms",
+      "tool_steps": 6,
+      "total_duration_ms": 50350,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 506,
+      "workspace": "rep-2/full/http_byte_range_forms/byte_range"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 40142,
+      "cached_tokens": 16896,
+      "category": "bugfix",
+      "changed_files": [
+        "planner.py",
+        "test_planner.py"
+      ],
+      "failure_category": "verifier_failed",
+      "final_answer": "Fixed `build_order` in `planner.py` to do a stable topological traversal: dependencies are emitted before dependents, unknown dependencies raise `KeyError`, cycles raise `ValueError`, and input is not mutated. Added tests covering dependency ordering, stable ready-task order, unknown dependency, cycle detection, and non-mutation. Verified with `pytest -q` (`7 passed`).",
+      "input_tokens": 19449,
+      "model_action_rejections": 0,
+      "model_calls": 8,
+      "model_failures": 0,
+      "output_tokens": 867,
+      "passed": false,
+      "repetition": 2,
+      "run_id": "run_20260717-112003-ecf855",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stable_dependency_order",
+      "tool_steps": 7,
+      "total_duration_ms": 40637,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": ".F...                                                                    [100%]\n=================================== FAILURES ===================================\n____________________ test_ready_tasks_use_declaration_order ____________________\n\n    def test_ready_tasks_use_declaration_order():\n        tasks = {\n            \"package\": (\"compile\",),\n            \"lint\": (),\n            \"compile\": (\"generate\",),\n            \"generate\": (),\n        }\n>       assert build_order(tasks) == [\"lint\", \"generate\", \"compile\", \"package\"]\nE       AssertionError: assert ['generate', ...kage', 'lint'] == ['lint', 'gen...e', 'package']\nE         \nE         At index 0 diff: 'generate' != 'lint'\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:18: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_ready_tasks_use_declaration_order\n1 failed, 4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 495,
+      "workspace": "rep-2/full/stable_dependency_order/build_order"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 35020,
+      "cached_tokens": 12544,
+      "category": "bugfix",
+      "changed_files": [
+        "inventory.py",
+        "test_inventory.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented atomic validation in inventory.py for reserve_many: rejects bool/non-int/non-positive quantities with ValueError, raises KeyError for unknown SKUs, raises ValueError for insufficient stock, leaves inventory unchanged on any failure, and keeps empty requests as no-ops. Added discriminating tests for atomic failure cases and empty request. Verified with pytest: 6 passed.",
+      "input_tokens": 17432,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 947,
+      "passed": true,
+      "repetition": 2,
+      "run_id": "run_20260717-112044-df8fd3",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_batch_reservation",
+      "tool_steps": 6,
+      "total_duration_ms": 35544,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".......                                                                  [100%]\n7 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 524,
+      "workspace": "rep-2/full/atomic_batch_reservation/inventory_batch"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 48414,
+      "cached_tokens": 10752,
+      "category": "feature",
+      "changed_files": [
+        "template.py",
+        "test_template.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented expand_template in template.py with single-pass parsing, $$ escaping, literal lone dollars, placeholder validation, KeyError for missing names, and one-time stringification of values. Added tests covering the required behaviors and verified with pytest: 12 passed.",
+      "input_tokens": 16774,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1062,
+      "passed": true,
+      "repetition": 2,
+      "run_id": "run_20260717-112119-72f84f",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "single_pass_template_expansion",
+      "tool_steps": 6,
+      "total_duration_ms": 48963,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 549,
+      "workspace": "rep-2/full/single_pass_template_expansion/template_expand"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 41901,
+      "cached_tokens": 17792,
+      "category": "refactor",
+      "changed_files": [
+        "name_index.py",
+        "test_name_index.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated `NameIndex.rename` in `name_index.py` to be atomic: it now relies on the existing `KeyError` for missing ids, returns immediately for same-name renames, rejects names owned by another item before mutating either map, and on success removes the old name and updates both lookups. Added tests covering no-op rename, atomic duplicate-name failure, missing id, and old-name removal. Verified with `pytest -q` (6 passed).",
+      "input_tokens": 20092,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 874,
+      "passed": true,
+      "repetition": 2,
+      "run_id": "run_20260717-112208-e2fba7",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_name_index_rename",
+      "tool_steps": 6,
+      "total_duration_ms": 42434,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "....                                                                     [100%]\n4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 533,
+      "workspace": "rep-2/full/atomic_name_index_rename/name_index"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 40061,
+      "cached_tokens": 18560,
+      "category": "feature",
+      "changed_files": [
+        "range_parser.py",
+        "test_range_parser.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Completed parse_byte_range in range_parser.py to support exactly one bytes range in explicit, open-ended, and suffix forms; added validation for malformed, multiple, negative, zero-length suffix, reversed/unsatisfiable, and nonpositive-size cases; added discriminating tests for all required forms and rejections. Verified with `pytest -q` (19 passed).",
+      "input_tokens": 21360,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1135,
+      "passed": true,
+      "repetition": 3,
+      "run_id": "run_20260717-112251-f19ca6",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "http_byte_range_forms",
+      "tool_steps": 6,
+      "total_duration_ms": 40576,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 515,
+      "workspace": "rep-3/full/http_byte_range_forms/byte_range"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 50070,
+      "cached_tokens": 16384,
+      "category": "bugfix",
+      "changed_files": [
+        "planner.py",
+        "test_planner.py"
+      ],
+      "failure_category": "verifier_failed",
+      "final_answer": "Implemented build_order in planner.py so dependencies are emitted before dependents, ready tasks follow input declaration order, unknown dependencies raise KeyError, and cycles raise ValueError without mutating input. Added targeted pytest coverage for dependency ordering, ready-order tie breaking, unknown dependencies, cycles, and input immutability. Verified with `pytest -q`: 7 passed.",
+      "input_tokens": 19122,
+      "model_action_rejections": 0,
+      "model_calls": 8,
+      "model_failures": 0,
+      "output_tokens": 799,
+      "passed": false,
+      "repetition": 3,
+      "run_id": "run_20260717-112331-446086",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stable_dependency_order",
+      "tool_steps": 7,
+      "total_duration_ms": 50581,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": ".F...                                                                    [100%]\n=================================== FAILURES ===================================\n____________________ test_ready_tasks_use_declaration_order ____________________\n\n    def test_ready_tasks_use_declaration_order():\n        tasks = {\n            \"package\": (\"compile\",),\n            \"lint\": (),\n            \"compile\": (\"generate\",),\n            \"generate\": (),\n        }\n>       assert build_order(tasks) == [\"lint\", \"generate\", \"compile\", \"package\"]\nE       AssertionError: assert ['generate', ...kage', 'lint'] == ['lint', 'gen...e', 'package']\nE         \nE         At index 0 diff: 'generate' != 'lint'\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:18: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_ready_tasks_use_declaration_order\n1 failed, 4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 511,
+      "workspace": "rep-3/full/stable_dependency_order/build_order"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 56785,
+      "cached_tokens": 15104,
+      "category": "bugfix",
+      "changed_files": [
+        "inventory.py",
+        "test_inventory.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated inventory.py so reserve_many validates the full request before mutating stock, rejects bool/non-positive/non-int quantities with ValueError, raises KeyError for unknown SKUs, raises ValueError for insufficient stock, preserves atomicity, and keeps empty requests as no-ops. Added tests covering atomic failure cases, invalid quantities, unknown SKUs, insufficient stock, and empty requests. Verified with `pytest -q` (11 passed).",
+      "input_tokens": 18049,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 1200,
+      "passed": true,
+      "repetition": 3,
+      "run_id": "run_20260717-112422-4a251b",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_batch_reservation",
+      "tool_steps": 6,
+      "total_duration_ms": 57303,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".......                                                                  [100%]\n7 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 518,
+      "workspace": "rep-3/full/atomic_batch_reservation/inventory_batch"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 39460,
+      "cached_tokens": 18688,
+      "category": "feature",
+      "changed_files": [
+        "template.py",
+        "test_template.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Implemented expand_template in template.py with single-pass parsing, $$ handling, literal lone dollars, placeholder validation, KeyError for missing names, and preserved the existing TypeError/signature. Added tests covering single-pass behavior, invalid names, unclosed placeholders, missing names, lone dollars, and non-reexpansion. Verified with pytest: 12 passed.",
+      "input_tokens": 21897,
+      "model_action_rejections": 0,
+      "model_calls": 8,
+      "model_failures": 0,
+      "output_tokens": 1079,
+      "passed": true,
+      "repetition": 3,
+      "run_id": "run_20260717-112519-64f5b8",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "single_pass_template_expansion",
+      "tool_steps": 7,
+      "total_duration_ms": 39986,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".........                                                                [100%]\n9 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 526,
+      "workspace": "rep-3/full/single_pass_template_expansion/template_expand"
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 46016,
+      "cached_tokens": 13952,
+      "category": "refactor",
+      "changed_files": [
+        "name_index.py",
+        "test_name_index.py"
+      ],
+      "failure_category": "",
+      "final_answer": "Updated `NameIndex.rename` in `name_index.py` to be atomic: it now preserves `KeyError` for missing ids, treats renaming to the current name as a no-op, rejects names owned by another item before mutating either map, and on success removes the old name and updates both lookups. Added tests covering no-op rename, missing id behavior, duplicate-name atomicity, and existing behavior. Verified with `pytest -q` (5 passed).",
+      "input_tokens": 19360,
+      "model_action_rejections": 0,
+      "model_calls": 7,
+      "model_failures": 0,
+      "output_tokens": 875,
+      "passed": true,
+      "repetition": 3,
+      "run_id": "run_20260717-112559-cc9b23",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "atomic_name_index_rename",
+      "tool_steps": 6,
+      "total_duration_ms": 46579,
+      "variant": "full",
+      "verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "....                                                                     [100%]\n4 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 563,
+      "workspace": "rep-3/full/atomic_name_index_rename/name_index"
+    }
+  ],
+  "run_config": {
+    "max_new_tokens": 1024,
+    "require_clean_worktree": true,
+    "temperature": 0.0,
+    "verifier_timeout_seconds": 90
+  },
+  "runtime": {
+    "branch": "master",
+    "commit_sha": "82106a129243abd20e9bed0a358afc706055519e",
+    "platform": "macOS-15.3-arm64-arm-64bit-Mach-O",
+    "python_version": "3.14.6",
+    "working_tree_dirty": false
+  },
+  "sandbox": {
+    "cpus": 4.0,
+    "image": "pico-sandbox:latest",
+    "memory": "4g",
+    "pids_limit": 512
+  },
+  "schema_version": 2,
+  "summary": {
+    "category_counts": {
+      "bugfix": 2,
+      "feature": 2,
+      "refactor": 1
+    },
+    "comparison": {},
+    "failure_category_counts": {
+      "verifier_failed": 3
+    },
+    "row_count": 15,
+    "variants": {
+      "full": {
+        "action_protocols": [
+          "responses_function"
+        ],
+        "attempt_count": 15,
+        "avg_agent_duration_ms": 45559.066666666666,
+        "avg_model_action_rejections": 0.0,
+        "avg_model_calls": 7.333333333333333,
+        "avg_tool_steps": 6.333333333333333,
+        "avg_total_duration_ms": 46077.26666666667,
+        "complete_repetitions": 0,
+        "pass_rate": 0.8,
+        "passed": 12,
+        "repetition_count": 3,
+        "repetition_pass_rate_max": 0.8,
+        "repetition_pass_rate_mean": 0.8000000000000002,
+        "repetition_pass_rate_min": 0.8,
+        "repetition_pass_rate_stddev": 0.0,
+        "repetition_summaries": [
+          {
+            "attempt_count": 5,
+            "avg_model_calls": 7.4,
+            "avg_tool_steps": 6.4,
+            "avg_total_duration_ms": 47641.2,
+            "pass_rate": 0.8,
+            "passed": 4,
+            "repetition": 1
+          },
+          {
+            "attempt_count": 5,
+            "avg_model_calls": 7.2,
+            "avg_tool_steps": 6.2,
+            "avg_total_duration_ms": 43585.6,
+            "pass_rate": 0.8,
+            "passed": 4,
+            "repetition": 2
+          },
+          {
+            "attempt_count": 5,
+            "avg_model_calls": 7.4,
+            "avg_tool_steps": 6.4,
+            "avg_total_duration_ms": 47005.0,
+            "pass_rate": 0.8,
+            "passed": 4,
+            "repetition": 3
+          }
+        ],
+        "task_count": 5,
+        "task_stability": [
+          {
+            "attempt_count": 3,
+            "category": "bugfix",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "atomic_batch_reservation"
+          },
+          {
+            "attempt_count": 3,
+            "category": "refactor",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "atomic_name_index_rename"
+          },
+          {
+            "attempt_count": 3,
+            "category": "feature",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "http_byte_range_forms"
+          },
+          {
+            "attempt_count": 3,
+            "category": "feature",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "single_pass_template_expansion"
+          },
+          {
+            "attempt_count": 3,
+            "category": "bugfix",
+            "outcome": "always_failed",
+            "pass_rate": 0.0,
+            "passed": 0,
+            "task_id": "stable_dependency_order"
+          }
+        ],
+        "total_cached_tokens": 235008,
+        "total_input_tokens": 292265,
+        "total_output_tokens": 16050
+      }
+    }
+  },
+  "variants": [
+    "full"
+  ]
+}
