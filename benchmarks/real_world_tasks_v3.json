@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "pico-real-world-benchmark-v3-frozen",
+  "description": "Five independent repository tasks frozen before the first V3 live-model evaluation.",
+  "tasks": [
+    {
+      "id": "http_byte_range_forms",
+      "category": "feature",
+      "prompt": "Complete parse_byte_range in range_parser.py so it accepts exactly one HTTP byte range in any of these forms: bytes=start-end, bytes=start-, or bytes=-suffix. Return an inclusive (start, end) tuple, clamp an explicit end to size - 1, and let an oversized suffix select the whole resource. Reject a non-bytes unit, multiple ranges, malformed or negative numbers, zero-length suffixes, reversed or unsatisfiable ranges, and nonpositive resource sizes with ValueError. Preserve the public signature and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v3/byte_range",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v3/byte_range/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "stable_dependency_order",
+      "category": "bugfix",
+      "prompt": "Fix build_order in planner.py so every dependency appears before the task that needs it. When multiple tasks are ready, choose them in the declaration order of the input mapping. Raise KeyError for an unknown dependency and ValueError for a dependency cycle. Do not mutate the input, preserve the public signature, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v3/build_order",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v3/build_order/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "atomic_batch_reservation",
+      "category": "bugfix",
+      "prompt": "Fix Inventory.reserve_many in inventory.py so it validates the entire requested mapping before changing stock. Quantities must be positive integers (bool is invalid), an unknown SKU must raise KeyError, and insufficient stock must raise ValueError. Any failure must leave the entire inventory unchanged; success decrements every requested SKU atomically, and an empty request is a no-op. Preserve the existing public APIs and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v3/inventory_batch",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v3/inventory_batch/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "single_pass_template_expansion",
+      "category": "feature",
+      "prompt": "Complete expand_template in template.py. ${NAME} substitutes the named value, $$ emits one literal dollar sign, and expansion must be single-pass so replacement text is never expanded again. Stringify each replacement value once. Missing names raise KeyError; unclosed placeholders and names outside [A-Za-z_][A-Za-z0-9_]* raise ValueError. Other lone dollar signs remain literal. Preserve the existing non-string template TypeError and public signature, then run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v3/template_expand",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v3/template_expand/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "atomic_name_index_rename",
+      "category": "refactor",
+      "prompt": "Refactor NameIndex.rename in name_index.py so the two internal lookup maps always change atomically. The item id must already exist (KeyError otherwise); renaming to its current name is a no-op; a name owned by another item raises ValueError without changing either lookup; and a successful rename removes the old name and updates both directions. Preserve add, resolve, name_for, len, and their existing exception behavior. Run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v3/name_index",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 8,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v3/name_index/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}

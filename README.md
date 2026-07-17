@@ -338,6 +338,9 @@ V2 在首次 held-out 运行后已经用于 trace 分析和 runtime 开发，因
 不再作为新的独立 held-out 证据。未来若发布新的泛化结果，需要使用开发过程中未查看的新任务集；
 不能通过反复运行 V2 把回归成绩包装成新的 held-out 提升。
 
+[V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
+和隐藏 verifier 已在首次真实模型运行前固定；首次结果生成前不据此调整 runtime。
+
 ```bash
 export OPENAI_API_KEY="..."
 export OPENAI_API_BASE="https://your-api.example/v1"
