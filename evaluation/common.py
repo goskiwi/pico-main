@@ -18,7 +18,7 @@ def utc_timestamp():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def git_value(args, *, cwd=None, fallback=""):
+def git_value(args, *, cwd=None, fallback="", preserve_empty=False):
     try:
         result = subprocess.run(
             ["git", *args],
@@ -28,6 +28,7 @@ def git_value(args, *, cwd=None, fallback=""):
             check=True,
             timeout=5,
         )
-        return result.stdout.strip() or fallback
+        output = result.stdout.strip()
+        return output if output or preserve_empty else fallback
     except (OSError, subprocess.SubprocessError):
         return fallback

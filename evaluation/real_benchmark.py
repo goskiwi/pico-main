@@ -483,6 +483,7 @@ class RealWorldBenchmarkRunner:
             ["status", "--porcelain", "--untracked-files=all"],
             cwd=self.repo_root,
             fallback=None,
+            preserve_empty=True,
         )
         artifact = {
             "schema_version": REAL_BENCHMARK_ARTIFACT_SCHEMA_VERSION,
@@ -610,6 +611,7 @@ class RealWorldBenchmarkRunner:
                 ["status", "--porcelain", "--untracked-files=all"],
                 cwd=self.repo_root,
                 fallback=None,
+                preserve_empty=True,
             )
             if git_status is None:
                 raise RuntimeError("cannot verify that the benchmark worktree is clean")
