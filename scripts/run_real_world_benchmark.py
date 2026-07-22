@@ -22,8 +22,11 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Run Pico's real-model coding benchmark with hidden Docker verifiers."
     )
-    parser.add_argument("--provider", required=True, choices=("openai", "anthropic"))
-    parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model override. Defaults to OPENAI_MODEL from the project .env.local.",
+    )
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--benchmark-path", default=str(DEFAULT_REAL_BENCHMARK_PATH))
     parser.add_argument("--artifact-path", default=str(DEFAULT_REAL_ARTIFACT_PATH))
@@ -55,7 +58,6 @@ def main(argv=None):
         artifact_path=args.artifact_path,
         report_path=args.report_path,
         workspace_root=args.workspace_root,
-        provider=args.provider,
         model=args.model,
         base_url=args.base_url,
         variants=tuple(args.variants or ("full",)),

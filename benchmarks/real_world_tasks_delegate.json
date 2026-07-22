@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "pico-delegate-live-regression",
+  "description": "An opt-in live-model regression task that requires a bounded parallel read-only delegation before a small code fix.",
+  "tasks": [
+    {
+      "id": "delegate_many_normalize_label",
+      "category": "delegate_integration",
+      "prompt": "Before editing, call delegate_many once with two tasks: ask an explorer to inspect settings.py and ask a reviewer to inspect the visible tests. Then fix normalize_label in settings.py: it must reject non-string input with TypeError, trim whitespace, reject a blank result with ValueError, and return the remaining label uppercased. Preserve the public signature and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/delegate/label_normalize",
+      "allowed_tools": ["list_files", "read_file", "search", "run_shell", "write_file", "patch_file", "delegate_many"],
+      "required_tools": ["delegate_many"],
+      "require_successful_delegates": true,
+      "expected_delegate_runs": 2,
+      "expected_delegate_attempts": 1,
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/delegate/label_normalize/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}
