@@ -358,7 +358,34 @@ def file_freshness(raw_path, workspace_root=None):
 
 
 def _tokenize(text):
-    return {token.lower() for token in re.findall(r"[A-Za-z0-9_]+", str(text))}
+    text = str(text)
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9_]+", text)}
+
+    cjk_span = []
+
+    def flush_cjk_span():
+        if len(cjk_span) == 1:
+            tokens.add(cjk_span[0])
+        elif cjk_span:
+            # Bigrams make unsegmented Chinese phrases comparable without making
+            # every shared common character a lexical match.
+            tokens.update("".join(cjk_span[index : index + 2]) for index in range(len(cjk_span) - 1))
+        cjk_span.clear()
+
+    for character in text:
+        codepoint = ord(character)
+        if (
+            0x3400 <= codepoint <= 0x4DBF
+            or 0x4E00 <= codepoint <= 0x9FFF
+            or 0xF900 <= codepoint <= 0xFAFF
+            or 0x20000 <= codepoint <= 0x2FA1F
+            or 0x30000 <= codepoint <= 0x323AF
+        ):
+            cjk_span.append(character)
+        else:
+            flush_cjk_span()
+    flush_cjk_span()
+    return tokens
 
 
 def _parse_timestamp(value):

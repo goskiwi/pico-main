@@ -45,6 +45,29 @@ def test_episodic_notes_append_and_retrieve_deterministically():
     ]
 
 
+def test_durable_memory_retrieves_pure_chinese_query(tmp_path):
+    memory = LayeredMemory(workspace_root=tmp_path)
+    memory.promote_durable([("project", "长期记忆默认按类型保存在本地。")])
+
+    rendered = memory.retrieval_view("长期记忆保存在哪里？")
+
+    assert "长期记忆默认按类型保存在本地。" in rendered
+
+
+def test_memory_does_not_match_unrelated_chinese_on_one_shared_character():
+    memory = LayeredMemory()
+    memory.append_note("记忆保持轻量并按类型管理。")
+
+    assert memory.retrieval_view("请回忆昨天的会议内容") == "Relevant memory:\n- none"
+
+
+def test_memory_keeps_case_insensitive_english_retrieval():
+    memory = LayeredMemory()
+    memory.append_note("Prefer constrained tools over guessing.")
+
+    assert "Prefer constrained tools over guessing." in memory.retrieval_view("CONSTRAINED tools")
+
+
 def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\n", encoding="utf-8")
