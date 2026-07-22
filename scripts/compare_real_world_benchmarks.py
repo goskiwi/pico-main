@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evaluation.real_benchmark import (  # noqa: E402
+from evaluation.real_benchmark_reporting import (  # noqa: E402
     compare_real_benchmark_artifacts,
     render_real_benchmark_comparison_markdown,
 )
@@ -20,8 +20,12 @@ def build_arg_parser():
     )
     parser.add_argument("baseline")
     parser.add_argument("candidate")
-    parser.add_argument("--artifact-path", default="artifacts/structured-action-comparison.json")
-    parser.add_argument("--report-path", default="docs/metrics/structured-action-comparison.md")
+    parser.add_argument(
+        "--artifact-path", default="artifacts/structured-action-comparison.json"
+    )
+    parser.add_argument(
+        "--report-path", default="docs/metrics/structured-action-comparison.md"
+    )
     return parser
 
 

@@ -7,13 +7,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evaluation.real_benchmark import (  # noqa: E402
+from evaluation.real_benchmark import RealWorldBenchmarkRunner  # noqa: E402
+from evaluation.real_benchmark_contract import (  # noqa: E402
     DEFAULT_REAL_ARTIFACT_PATH,
     DEFAULT_REAL_BENCHMARK_PATH,
     DEFAULT_REAL_REPORT_PATH,
     DEFAULT_REAL_WORKSPACE_ROOT,
-    RealWorldBenchmarkRunner,
     SUPPORTED_VARIANTS,
+    VARIANT_FULL,
 )
 from pico.sandbox import DockerSandboxConfig  # noqa: E402
 
@@ -60,7 +61,7 @@ def main(argv=None):
         workspace_root=args.workspace_root,
         model=args.model,
         base_url=args.base_url,
-        variants=tuple(args.variants or ("full",)),
+        variants=tuple(args.variants or (VARIANT_FULL,)),
         repetitions=args.repetitions,
         max_new_tokens=args.max_new_tokens,
         verifier_timeout=args.verifier_timeout,
