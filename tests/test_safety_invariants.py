@@ -3,8 +3,8 @@ import shlex
 import sys
 from unittest.mock import patch
 
-from pico import cli as mini_cli
-from pico import security
+import pico.cli as mini_cli
+import pico.security as security
 from pico.sandbox import SandboxResult
 from pico.task_state import TaskState
 from tests.helpers import build_agent

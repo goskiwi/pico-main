@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pico import workspace_diff
+import pico.workspace_diff as workspace_diff
 from tests.helpers import build_agent
 
 

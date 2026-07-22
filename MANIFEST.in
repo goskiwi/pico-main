@@ -1,0 +1,4 @@
+# Repository-only validation code is not part of the runtime source distribution.
+prune evaluation
+prune tests
+exclude README.md

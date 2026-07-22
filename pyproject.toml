@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pico"
 version = "0.1.0"
 description = "Auditable, sandboxed local coding-agent runtime for OpenAI-compatible Responses models"
-readme = "README.md"
+readme = "README.pypi.md"
 requires-python = ">=3.10"
 dependencies = []
 keywords = ["ai-agent", "coding-agent", "llm", "sandbox", "evaluation"]
@@ -21,6 +21,11 @@ classifiers = [
   "Topic :: Software Development :: Testing",
 ]
 
+[project.urls]
+Repository = "https://github.com/goskiwi/pico-main"
+Documentation = "https://github.com/goskiwi/pico-main#readme"
+Issues = "https://github.com/goskiwi/pico-main/issues"
+
 [project.scripts]
 pico = "pico.cli:main"
 
@@ -31,7 +36,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["pico", "evaluation"]
+packages = ["pico"]
 
 [tool.ruff]
 target-version = "py310"

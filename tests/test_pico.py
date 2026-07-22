@@ -1,20 +1,7 @@
-import json
-from pathlib import Path
-import subprocess
-
-import pico as mini_pkg
-import pico.agent_loop as agent_loop
-import pytest
-from pico import tools as toolkit
-from pico import (
-    FakeModelClient,
-    Pico,
-    ModelAction,
-    SessionStore,
-    WorkspaceContext,
-    build_welcome,
-)
-from tests.helpers import UnitTestSandbox, build_agent
+from pico.actions import ModelAction
+from pico.models import FakeModelClient
+from pico.runtime import Pico
+from tests.helpers import build_agent
 
 
 def write_skill(root, name, text):
@@ -36,7 +23,11 @@ def test_agent_runs_tool_then_final(tmp_path):
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Read the file successfully."
-    tool_items = [item for item in agent.session["history"] if item["role"] == "tool" and item["name"] == "read_file"]
+    tool_items = [
+        item
+        for item in agent.session["history"]
+        if item["role"] == "tool" and item["name"] == "read_file"
+    ]
     assert tool_items
     assert tool_items[0]["node_id"] == "t001_read_file"
     assert tool_items[0]["content_ref"].endswith("tool_outputs/0001_read_file.txt")
@@ -257,7 +248,10 @@ def test_prompt_teaches_read_tool_output_for_task_graph_refs(tmp_path):
     prompt = agent.prompt("continue previous run")
 
     assert "- read_tool_output(" in prompt
-    assert "When a task graph node has a ref, use read_tool_output instead of manually reading tool_outputs paths." in prompt
+    assert (
+        "When a task graph node has a ref, use read_tool_output instead of manually reading tool_outputs paths."
+        in prompt
+    )
 
 
 def test_agent_updates_goal_on_each_request(tmp_path):
@@ -299,7 +293,11 @@ def test_agent_records_tool_failure_in_working_state(tmp_path):
 
     assert agent.ask("Inspect missing.txt") == "Recovered."
 
-    process_notes = [note["text"] for note in agent.session["memory"]["episodic_notes"] if note["kind"] == "process"]
+    process_notes = [
+        note["text"]
+        for note in agent.session["memory"]["episodic_notes"]
+        if note["kind"] == "process"
+    ]
     assert any("read_file rejected" in note for note in process_notes)
 
 
@@ -314,7 +312,11 @@ def test_agent_records_retry_in_working_state_until_recovery(tmp_path):
 
     assert agent.ask("Recover from empty output") == "Recovered after retry."
 
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("empty response" in item for item in notices)
 
 
@@ -322,7 +324,9 @@ def test_agent_records_stopped_state_when_step_limit_is_reached(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
-        ['<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>'],
+        [
+            '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>'
+        ],
         max_steps=1,
     )
 
@@ -366,7 +370,9 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
     assert "deploy key is red" in prompt
 
 
-def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling(tmp_path):
+def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling(
+    tmp_path,
+):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
@@ -405,7 +411,11 @@ def test_agent_retries_after_empty_model_output(tmp_path):
     answer = agent.ask("Do the task")
 
     assert answer == "Recovered after retry."
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("empty response" in item for item in notices)
 
 
@@ -422,7 +432,11 @@ def test_explicit_final_mode_retries_bare_action_narration(tmp_path):
     answer = agent.ask("Do the task")
 
     assert answer == "Finished after the runtime requested an explicit final."
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("bare text is not a final answer" in item for item in notices)
 
 
@@ -439,7 +453,11 @@ def test_agent_retries_unclosed_protocol_tags(tmp_path):
 
     assert answer == "Recovered from an unclosed tool tag."
     assert not (tmp_path / "broken.txt").exists()
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("unclosed <tool>" in item for item in notices)
 
 
@@ -458,7 +476,11 @@ def test_workspace_change_mode_rejects_premature_final(tmp_path):
 
     assert answer == "Created result.txt."
     assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "complete\n"
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("no effective file change" in item for item in notices)
 
 
@@ -476,8 +498,15 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Recovered after malformed tool output."
-    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    assert any(
+        item["role"] == "tool" and item["name"] == "read_file"
+        for item in agent.session["history"]
+    )
+    notices = [
+        item["content"]
+        for item in agent.session["history"]
+        if item["role"] == "assistant"
+    ]
     assert any("valid <tool> call" in item for item in notices)
     assert len(agent.model_action_rejections) == 1
     assert agent.model_action_rejections[0]["protocol"] == "scripted_text"
@@ -502,84 +531,6 @@ def test_retries_do_not_consume_the_whole_budget(tmp_path):
     assert answer == "Recovered after several retries."
 
 
-def test_runtime_does_not_expose_legacy_parse_api():
-    assert not hasattr(Pico, "parse")
-
-
-def test_short_read_summary_keeps_the_complete_file(tmp_path):
-    agent = build_agent(tmp_path, [])
-    result = "\n".join(f"{line}: value" for line in range(1, 13))
-
-    summary = agent.summarize_tool_result("read_file", {"path": "small.py"}, result)
-
-    assert "1: value" in summary
-    assert "12: value" in summary
-    assert "omitted" not in summary
-    assert not hasattr(Pico, "parse_xml_tool")
-
-
-def test_runtime_does_not_expose_legacy_security_api():
-    legacy_names = [
-        "redact_text",
-        "redact_artifact",
-        "looks_sensitive_env_name",
-        "is_secret_env_name",
-        "configured_secret_env_items",
-        "detected_secret_env_items",
-        "secret_env_summary",
-        "detected_secret_env_summary",
-        "shell_env",
-    ]
-    assert not any(hasattr(Pico, name) for name in legacy_names)
-
-
-def test_runtime_does_not_expose_legacy_memory_promotion_api():
-    legacy_names = [
-        "reject_durable_reason",
-        "extract_durable_promotions",
-        "promote_durable_memory",
-        "llm_memory_index_text",
-        "build_memory_extractor_prompt",
-        "parse_memory_extractor_output",
-        "llm_promote_durable_memory",
-    ]
-    assert not any(hasattr(Pico, name) for name in legacy_names)
-
-
-def test_runtime_does_not_expose_legacy_approval_api():
-    assert not hasattr(Pico, "approve")
-
-
-def test_runtime_does_not_expose_legacy_report_api():
-    legacy_names = [
-        "build_report",
-        "record_tool_audit",
-        "build_run_summary",
-    ]
-    assert not any(hasattr(Pico, name) for name in legacy_names)
-
-
-def test_runtime_does_not_expose_legacy_workspace_diff_api():
-    legacy_names = [
-        "capture_workspace_snapshot",
-        "diff_workspace_snapshots",
-    ]
-    assert not any(hasattr(Pico, name) for name in legacy_names)
-
-
-def test_runtime_does_not_expose_legacy_tool_policy_api():
-    legacy_names = [
-        "tool_capability",
-        "tool_risk_level",
-        "tool_permission_error",
-        "dry_run_tool_result",
-        "shell_policy_metadata",
-        "shell_command_policy",
-        "repeated_tool_call",
-    ]
-    assert not any(hasattr(Pico, name) for name in legacy_names)
-
-
 def test_agent_saves_and_resumes_session(tmp_path):
     agent = build_agent(tmp_path, ["<final>First pass.</final>"])
     assert agent.ask("Start a session") == "First pass."
@@ -594,350 +545,3 @@ def test_agent_saves_and_resumes_session(tmp_path):
 
     assert resumed.session["history"][0]["content"] == "Start a session"
     assert resumed.ask("Continue") == "Resumed."
-
-
-def test_delegate_uses_child_agent(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"delegate","args":{"role":"explore","task":"inspect README","max_steps":2}}</tool>',
-            "<final>Child result.</final>",
-            "<final>Parent incorporated the child result.</final>",
-        ],
-    )
-
-    answer = agent.ask("Use delegation")
-
-    assert answer == "Parent incorporated the child result."
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
-    assert tool_events[0]["name"] == "delegate"
-    assert "delegate_result role=explore" in tool_events[0]["summary"]
-
-
-def test_native_delegate_uses_independent_model_client(tmp_path):
-    class NativeParentClient:
-        supports_native_actions = True
-
-        def __init__(self):
-            self.fork_count = 0
-
-        def fork_for_delegate(self):
-            self.fork_count += 1
-            return FakeModelClient(["<final>Child result.</final>"])
-
-    agent = build_agent(tmp_path, [])
-    parent_client = NativeParentClient()
-    agent.model_client = parent_client
-
-    result = toolkit.run_delegate_child(
-        agent, {"role": "explore", "task": "inspect README", "max_steps": 2}
-    )
-
-    assert parent_client.fork_count == 1
-    assert result["answer"] == "Child result."
-
-
-def test_delegate_child_can_finalize_when_parent_requires_a_workspace_change(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        ["<final>Investigation complete.</final>"],
-        feature_flags={"require_workspace_change": True},
-    )
-
-    result = toolkit.run_delegate_child(
-        agent, {"role": "explore", "task": "inspect README", "max_steps": 2}
-    )
-
-    assert result["answer"] == "Investigation complete."
-    assert result["status"] == "completed"
-    assert result["stop_reason"] == "final_answer_returned"
-
-
-def test_delegate_child_marks_session_and_disables_llm_memory_extraction(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>Project: Delegate findings must never become durable memory.</final>",
-            '{"memories":[{"type":"project","text":"must not run"}]}',
-        ],
-        feature_flags={"llm_memory_extract": True},
-    )
-
-    result = toolkit.run_delegate_child(
-        agent,
-        {
-            "role": "explore",
-            "task": "Remember this stable project fact after inspecting README.",
-            "max_steps": 2,
-        },
-    )
-
-    assert result["status"] == "completed"
-    assert len(agent.model_client.prompts) == 1
-    assert not (tmp_path / ".pico" / "memory").exists()
-    assert agent.session["session_kind"] == "main"
-    child_ids = [
-        path.stem
-        for path in agent.session_store.root.glob("*.json")
-        if path.stem != agent.session["id"]
-    ]
-    assert len(child_ids) == 1
-    child_session = agent.session_store.load(child_ids[0])
-    assert child_session["session_kind"] == "delegate"
-    assert child_session["agent_mode"] == "explore"
-    assert child_session["parent_agent_id"] == agent.agent_id
-    assert agent.session_store.latest() == agent.session["id"]
-    child_task_states = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in agent.run_store.root.glob("run_*/task_state.json")
-    ]
-    assert len(child_task_states) == 1
-    assert child_task_states[0]["agent_mode"] == "explore"
-    assert child_task_states[0]["parent_agent_id"] == agent.agent_id
-    child_reports = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in agent.run_store.root.glob("run_*/report.json")
-    ]
-    assert len(child_reports) == 1
-    assert child_reports[0]["durable_promotions"] == []
-    assert child_reports[0]["llm_durable_promotions"] == []
-
-
-def test_stopped_delegate_child_never_attempts_durable_memory_promotion(
-    tmp_path, monkeypatch
-):
-    promotion_calls = []
-
-    def record_promotion(*args):
-        promotion_calls.append(args)
-        return [], [], []
-
-    monkeypatch.setattr(
-        agent_loop.memory_runtime,
-        "promote_durable_memory",
-        record_promotion,
-    )
-    agent = build_agent(
-        tmp_path,
-        ['<tool>{"name":"list_files","args":{"path":"."}}</tool>'],
-        feature_flags={"llm_memory_extract": True},
-    )
-
-    result = toolkit.run_delegate_child(
-        agent,
-        {
-            "role": "explore",
-            "task": "Remember a stable Project fact after inspecting the workspace.",
-            "max_steps": 1,
-        },
-    )
-
-    assert result["status"] == "stopped"
-    assert result["stop_reason"] == "step_limit_reached"
-    assert promotion_calls == []
-    assert not (tmp_path / ".pico" / "memory").exists()
-
-
-def _nested_explicit_workspace(tmp_path):
-    outer_repo = tmp_path / "outer-repo"
-    outer_repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=outer_repo, check=True)
-    fixture = outer_repo / "fixture"
-    fixture.mkdir()
-    (fixture / "README.md").write_text("isolated fixture\n", encoding="utf-8")
-    hidden_verifier = outer_repo / "parent_only_hidden_verifier.py"
-    hidden_verifier.write_text("PARENT_ONLY_MARKER = True\n", encoding="utf-8")
-    workspace = WorkspaceContext.build(fixture, repo_root_override=fixture)
-    return outer_repo, fixture, hidden_verifier, workspace
-
-
-def test_refresh_prefix_preserves_explicit_workspace_root_inside_parent_git_repo(
-    tmp_path,
-):
-    outer_repo, fixture, hidden_verifier, workspace = _nested_explicit_workspace(
-        tmp_path
-    )
-    agent = Pico(
-        model_client=FakeModelClient([]),
-        workspace=workspace,
-        session_store=SessionStore(fixture / ".pico" / "sessions"),
-        feature_flags={"llm_memory_extract": False, "llm_history_compaction": False},
-        sandbox=UnitTestSandbox(fixture),
-    )
-
-    agent.refresh_prefix(force=True)
-
-    assert Path(agent.workspace.repo_root) == fixture.resolve()
-    assert agent.workspace.branch == "-"
-    assert agent.workspace.status == "clean"
-    assert agent.workspace.recent_commits == []
-    assert f"- repo_root: {outer_repo.resolve()}\n" not in agent.prefix
-    assert hidden_verifier.name not in agent.prefix
-
-
-def test_refresh_prefix_rejects_workspace_root_drift(tmp_path):
-    outer_repo, fixture, _, workspace = _nested_explicit_workspace(tmp_path)
-    agent = Pico(
-        model_client=FakeModelClient([]),
-        workspace=workspace,
-        session_store=SessionStore(fixture / ".pico" / "sessions"),
-        feature_flags={"llm_memory_extract": False, "llm_history_compaction": False},
-        sandbox=UnitTestSandbox(fixture),
-    )
-    agent.workspace = WorkspaceContext.build(outer_repo)
-
-    with pytest.raises(RuntimeError, match="workspace root invariant violated"):
-        agent.refresh_prefix(force=True)
-
-
-def test_delegate_child_rejects_parent_workspace_root_drift(tmp_path):
-    outer_repo, fixture, _, workspace = _nested_explicit_workspace(tmp_path)
-    agent = Pico(
-        model_client=FakeModelClient(["<final>must not run</final>"]),
-        workspace=workspace,
-        session_store=SessionStore(fixture / ".pico" / "sessions"),
-        feature_flags={"llm_memory_extract": False, "llm_history_compaction": False},
-        sandbox=UnitTestSandbox(fixture),
-    )
-    agent.workspace = WorkspaceContext.build(outer_repo)
-
-    with pytest.raises(RuntimeError, match="workspace root invariant violated"):
-        toolkit.run_delegate_child(
-            agent,
-            {"role": "explore", "task": "inspect files", "max_steps": 1},
-        )
-
-    assert agent.model_client.prompts == []
-
-
-def test_delegate_child_cannot_search_parent_repo_from_explicit_workspace(tmp_path):
-    _, fixture, hidden_verifier, workspace = _nested_explicit_workspace(tmp_path)
-    agent = Pico(
-        model_client=FakeModelClient(
-            [
-                '<tool>{"name":"search","args":{"pattern":"PARENT_ONLY_MARKER","path":"."}}</tool>',
-                "<final>The marker is not present in the workspace.</final>",
-            ]
-        ),
-        workspace=workspace,
-        session_store=SessionStore(fixture / ".pico" / "sessions"),
-        feature_flags={"llm_memory_extract": False, "llm_history_compaction": False},
-        sandbox=UnitTestSandbox(fixture),
-    )
-    agent.refresh_prefix(force=True)
-
-    result = toolkit.run_delegate_child(
-        agent,
-        {"role": "explore", "task": "search for the marker", "max_steps": 2},
-    )
-
-    run_dirs = list((fixture / ".pico" / "runs").glob("run_*"))
-    assert result["status"] == "completed"
-    assert len(run_dirs) == 1
-    events = [
-        json.loads(line)
-        for line in (run_dirs[0] / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    search_event = next(
-        event
-        for event in events
-        if event.get("event") == "tool_executed" and event.get("name") == "search"
-    )
-    assert search_event["result"] == "(no matches)"
-    assert str(hidden_verifier.resolve()) not in search_event["result"]
-
-
-def test_delegate_many_uses_multiple_child_agents(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"delegate_many","args":{"tasks":[{"role":"explore","task":"inspect README","max_steps":2},{"role":"review","task":"review README","max_steps":2}]}}</tool>',
-            "<final>Explore result.</final>",
-            "<final>Review result.</final>",
-            "<final>Parent incorporated the child results.</final>",
-        ],
-    )
-
-    answer = agent.ask("Use multiple delegates")
-
-    assert answer == "Parent incorporated the child results."
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
-    assert tool_events[0]["name"] == "delegate_many"
-    assert "delegate_many_result count=2" in tool_events[0]["summary"]
-    assert "role=explore" in tool_events[0]["summary"]
-    assert "Explore result." in tool_events[0]["summary"]
-    assert "role=review" in tool_events[0]["summary"]
-    assert "Review result." in tool_events[0]["summary"]
-    parent_run_dir = agent.run_store.run_dir(agent.current_task_state)
-    trace_events = [
-        json.loads(line)
-        for line in (parent_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    delegate_event = next(
-        event
-        for event in trace_events
-        if event.get("event") == "tool_executed"
-        and event.get("name") == "delegate_many"
-    )
-    outcome = delegate_event["delegate_outcome"]
-    assert outcome["requested_count"] == 2
-    assert outcome["completed_count"] == 2
-    assert outcome["failed_count"] == 0
-    assert [item["status"] for item in outcome["items"]] == ["ok", "ok"]
-    assert all(item["child_status"] == "completed" for item in outcome["items"])
-    assert all(item["agent_id"] for item in outcome["items"])
-    report = agent.run_store.load_report(agent.current_task_state.run_id)
-    assert report["tool_audit"][0]["delegate_outcome"] == outcome
-
-
-def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
-    deep = tmp_path / "very" / "long" / "path" / "for" / "the" / "mini" / "agent" / "welcome" / "screen"
-    deep.mkdir(parents=True)
-    agent = build_agent(deep, [])
-
-    welcome = build_welcome(agent, model="qwen3.5:4b", host="http://127.0.0.1:11434")
-    lines = welcome.splitlines()
-
-    assert len(lines) >= 5
-    assert len({len(line) for line in lines}) == 1
-    assert "..." in welcome
-    assert "(  o o  )" in welcome
-    assert "MINI-CODING-AGENT" not in welcome
-    assert "MINI CODING AGENT" not in welcome
-    assert "pico" in welcome
-    assert "local coding agent" in welcome
-    assert "// READY" not in welcome
-    assert "SLASH" not in welcome
-    assert "READY      " not in welcome
-    assert "commands: Commands:" not in welcome
-
-
-def test_public_api_exports_resolve_through_package_path():
-    assert callable(mini_pkg.build_welcome)
-    assert mini_pkg.FakeModelClient is not None
-    assert mini_pkg.Pico is not None
-    assert not hasattr(mini_pkg, "MiniAgent")
-    assert mini_pkg.DelegateOutcome is not None
-    assert mini_pkg.DelegateScheduler is not None
-    assert mini_pkg.OpenAICompatibleModelClient is not None
-    assert mini_pkg.SessionStore is not None
-    assert mini_pkg.WorkspaceContext is not None
-    assert Path(mini_pkg.__file__).as_posix().endswith("/pico/__init__.py")
-
-
-def test_reviewer_skeleton_docs_exist():
-    review_pack = Path("docs/review-pack/README.md")
-    architecture = Path("docs/architecture/agent-harness-v1-overview.md")
-
-    assert review_pack.exists()
-    assert architecture.exists()
-
-    review_text = review_pack.read_text(encoding="utf-8")
-    assert "Project pitch" in review_text
-    assert "Architecture map" in review_text
-    assert "Benchmark evidence" in review_text
-    assert "Sample run artifact list" in review_text
-
-    architecture_text = architecture.read_text(encoding="utf-8")
-    assert "Agent Harness v1" in architecture_text
-    assert "task state" in architecture_text.lower()

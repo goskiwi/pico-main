@@ -1,4 +1,4 @@
-from pico import durable_memory
+import pico.durable_memory as durable_memory
 
 
 def test_extract_promotions_requires_explicit_memory_intent():

@@ -1,8 +1,11 @@
 import subprocess
 from types import SimpleNamespace
 
-from pico import FakeModelClient, Pico, SandboxResult, WorkspaceContext
+from pico.models import FakeModelClient
+from pico.runtime import Pico
+from pico.sandbox import SandboxResult
 from pico.session_store import SessionStore
+from pico.workspace import WorkspaceContext
 
 
 class UnitTestSandbox:

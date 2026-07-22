@@ -3,8 +3,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-import pico as mini_pkg
-from pico import cli
+import pico.cli as cli
 
 
 def test_build_agent_uses_openai_cli_overrides(tmp_path):
@@ -14,7 +13,7 @@ def test_build_agent_uses_openai_cli_overrides(tmp_path):
         "OPENAI_MODEL=file-model\n",
         encoding="utf-8",
     )
-    args = mini_pkg.build_arg_parser().parse_args(
+    args = cli.build_arg_parser().parse_args(
         [
             "--cwd",
             str(tmp_path),
@@ -28,7 +27,7 @@ def test_build_agent_uses_openai_cli_overrides(tmp_path):
     with patch.dict(os.environ, {}, clear=True), patch(
         "pico.cli.OpenAICompatibleModelClient"
     ) as mock_openai:
-        agent = mini_pkg.build_agent(args)
+        agent = cli.build_agent(args)
 
     assert mock_openai.call_args.kwargs["model"] == "override-model"
     assert mock_openai.call_args.kwargs["base_url"] == "https://cli.example/v1"
@@ -37,19 +36,19 @@ def test_build_agent_uses_openai_cli_overrides(tmp_path):
 
 
 def test_build_arg_parser_defaults_to_openai_compatible_runtime(tmp_path):
-    args = mini_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+    args = cli.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     assert not hasattr(args, "provider")
     assert args.openai_timeout == 300
 
 
 def test_build_agent_uses_official_openai_defaults(tmp_path):
-    args = mini_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+    args = cli.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     with patch.dict(os.environ, {}, clear=True), patch(
         "pico.cli.OpenAICompatibleModelClient"
     ) as mock_openai:
-        agent = mini_pkg.build_agent(args)
+        agent = cli.build_agent(args)
 
     assert mock_openai.call_args.kwargs["model"] == "gpt-5.4"
     assert mock_openai.call_args.kwargs["base_url"] == "https://api.openai.com/v1"
@@ -64,7 +63,7 @@ def test_build_agent_uses_workspace_env_instead_of_process_env(tmp_path):
         "OPENAI_MODEL=file-model\n",
         encoding="utf-8",
     )
-    args = mini_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+    args = cli.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     with patch.dict(
         os.environ,
@@ -75,7 +74,7 @@ def test_build_agent_uses_workspace_env_instead_of_process_env(tmp_path):
         },
         clear=True,
     ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
-        mini_pkg.build_agent(args)
+        cli.build_agent(args)
 
     assert mock_openai.call_args.kwargs["api_key"] == "file-key"
     assert mock_openai.call_args.kwargs["base_url"] == "https://file.example/v1"
@@ -90,14 +89,14 @@ def test_build_agent_does_not_export_workspace_env(tmp_path):
         "PICO_TEST_EXISTING_VALUE=file-override\n",
         encoding="utf-8",
     )
-    args = mini_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+    args = cli.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     with patch.dict(
         os.environ,
         {"PICO_TEST_EXISTING_VALUE": "ambient-value"},
         clear=True,
     ), patch("pico.cli.OpenAICompatibleModelClient") as mock_openai:
-        mini_pkg.build_agent(args)
+        cli.build_agent(args)
 
         assert "PICO_TEST_NEW_VALUE" not in os.environ
         assert os.environ["PICO_TEST_EXISTING_VALUE"] == "ambient-value"
@@ -107,10 +106,10 @@ def test_build_agent_does_not_export_workspace_env(tmp_path):
     assert mock_openai.call_args.kwargs["base_url"] == "https://file.example/v1"
 
 
-def test_package_import_surface_includes_cli_entrypoints():
-    assert callable(mini_pkg.main)
-    assert callable(mini_pkg.build_agent)
-    assert callable(mini_pkg.build_arg_parser)
+def test_cli_module_exposes_entrypoints():
+    assert callable(cli.main)
+    assert callable(cli.build_agent)
+    assert callable(cli.build_arg_parser)
 
 
 def test_module_execution_help_works():

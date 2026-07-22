@@ -1,4 +1,4 @@
-from pico import checkpoints
+import pico.checkpoints as checkpoints
 from pico.task_state import STATUS_COMPLETED, TaskState
 from tests.helpers import build_agent
 

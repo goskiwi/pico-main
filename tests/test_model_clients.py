@@ -3,7 +3,7 @@ import json
 import urllib.error
 from unittest.mock import patch
 
-from pico import OpenAICompatibleModelClient
+from pico.models import OpenAICompatibleModelClient
 
 
 def test_openai_delegate_fork_has_independent_action_state():

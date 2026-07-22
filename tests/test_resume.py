@@ -1,6 +1,7 @@
 import json
 
-from pico import FakeModelClient, Pico
+from pico.models import FakeModelClient
+from pico.runtime import Pico
 from pico.session_store import SessionStore
 from tests.helpers import build_agent, build_workspace
 
