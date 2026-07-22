@@ -18,6 +18,8 @@ def test_task_state_starts_running_with_empty_progress():
     assert state.last_tool == ""
     assert state.stop_reason == ""
     assert state.final_answer == ""
+    assert state.agent_mode == "main"
+    assert state.parent_agent_id == ""
 
 
 def test_task_state_records_success_and_final_answer():
@@ -73,3 +75,18 @@ def test_task_state_snapshot_keeps_checkpoint_reference_without_body():
     assert snapshot["resume_status"] == "full-valid"
     assert "current_goal" not in snapshot
     assert "next_step" not in snapshot
+
+
+def test_task_state_snapshot_keeps_delegate_identity():
+    state = TaskState.create(
+        run_id="run_delegate",
+        task_id="task_delegate",
+        user_request="Inspect the repository.",
+        agent_mode="review",
+        parent_agent_id="agent_parent",
+    )
+
+    snapshot = state.to_dict()
+
+    assert snapshot["agent_mode"] == "review"
+    assert snapshot["parent_agent_id"] == "agent_parent"

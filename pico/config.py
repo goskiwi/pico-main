@@ -19,9 +19,16 @@ DEFAULT_MAX_DEPTH: int = 1
 DEFAULT_APPROVAL_POLICY: str = "ask"
 MEMORY_EXTRACTOR_MAX_TOKENS: int = 512
 
+# 委派调度护栏。一个父 agent 最多同时运行三个只读子 agent，所有子 agent
+# 预留的步骤总数不能超过 12；超过预算的任务会得到明确结果而不是静默丢失。
+DELEGATE_MAX_CONCURRENCY: int = 3
+DELEGATE_TOTAL_STEP_BUDGET: int = 12
+DELEGATE_BATCH_TIMEOUT_SECONDS: float = 180.0
+
 DEFAULT_FEATURE_FLAGS: dict = {
     "memory": True,
     "relevant_memory": True,
+    "durable_memory_promotion": True,
     "context_reduction": True,
     "prompt_cache": True,
     "llm_memory_extract": True,

@@ -10,6 +10,11 @@ from .workspace import clip
 
 
 def promote_durable_memory(agent, user_message, final_answer):
+    agent.last_durable_promotions = []
+    agent.last_durable_rejections = []
+    agent.last_durable_superseded = []
+    if not agent.feature_enabled("durable_memory_promotion"):
+        return [], [], []
     result = durable_memory.promote(agent.memory, user_message, final_answer)
     agent.session["memory"] = agent.memory.to_dict()
     agent.last_durable_promotions = result.promoted
@@ -101,7 +106,9 @@ def llm_promote_durable_memory(agent, user_message, final_answer):
     agent.last_llm_durable_rejections = []
     agent.last_llm_durable_superseded = []
     agent.last_llm_memory_extractor_error = ""
-    if not agent.feature_enabled("llm_memory_extract"):
+    if not agent.feature_enabled("durable_memory_promotion") or not agent.feature_enabled(
+        "llm_memory_extract"
+    ):
         return [], [], []
     prompt = build_memory_extractor_prompt(agent, user_message, final_answer)
     try:

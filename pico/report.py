@@ -70,6 +70,8 @@ def record_tool_audit(agent, name, args, result, duration_ms):
         }
     elif name in {"read_file", "write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
         entry["path"] = clip(str((args or {}).get("path", ".")), 200)
+        if name in {"delegate", "delegate_many"}:
+            entry["delegate_outcome"] = dict(metadata.get("delegate_outcome") or {})
     agent.tool_audit_log.append(entry)
     return entry
 

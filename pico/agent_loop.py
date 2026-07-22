@@ -154,6 +154,8 @@ def _run_agent_turn(agent, user_message):
         run_id=agent.new_run_id(),
         task_id=agent.new_task_id(),
         user_request=user_message,
+        agent_mode=agent.agent_mode,
+        parent_agent_id=agent.parent_agent_id,
     )
     task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
     agent.current_task_state = task_state
@@ -338,6 +340,5 @@ def _run_agent_turn(agent, user_message):
         task_state.stop_step_limit(final)
     agent.mark_work_finished(final, stopped=True)
     agent.record({"role": "assistant", "content": final, "created_at": now()})
-    memory_runtime.promote_durable_memory(agent, user_message, final)
     _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
     return _write_finished_run(agent, task_state, final, run_started_at)

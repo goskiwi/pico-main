@@ -3,7 +3,7 @@ import json
 import urllib.error
 from unittest.mock import patch
 
-from pico import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from pico import OpenAICompatibleModelClient
 
 
 def test_openai_delegate_fork_has_independent_action_state():
@@ -19,44 +19,6 @@ def test_openai_delegate_fork_has_independent_action_state():
     assert child.base_url == client.base_url
     assert child._action_pending_call_ids == []
     assert client._action_pending_call_ids == ["parent-call"]
-
-
-def test_ollama_client_posts_expected_payload():
-    captured = {}
-
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return json.dumps({"response": "<final>ok</final>"}).encode("utf-8")
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    client = OllamaModelClient(
-        model="qwen3.5:4b",
-        host="http://127.0.0.1:11434",
-        temperature=0.2,
-        top_p=0.9,
-        timeout=30,
-    )
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        result = client.complete("hello", 42)
-
-    assert result == "<final>ok</final>"
-    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
-    assert captured["timeout"] == 30
-    assert captured["body"]["model"] == "qwen3.5:4b"
-    assert captured["body"]["prompt"] == "hello"
-    assert captured["body"]["stream"] is False
 
 
 def test_openai_compatible_client_posts_expected_responses_payload():
@@ -568,104 +530,3 @@ def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
         result = client.complete("hello", 42)
 
     assert result == "<final>OK</final>"
-
-
-def test_anthropic_compatible_client_posts_expected_messages_payload():
-    captured = {}
-
-    class FakeResponse:
-        headers = {"Content-Type": "application/json"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "<final>ok</final>",
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["headers"] = dict(request.headers)
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    client = AnthropicCompatibleModelClient(
-        model="claude-sonnet-4-5-20250929",
-        base_url="https://www.right.codes/claude-aws/v1",
-        api_key="sk-test",
-        temperature=0.2,
-        timeout=30,
-    )
-
-    with patch("urllib.request.urlopen", fake_urlopen):
-        result = client.complete("hello", 42)
-
-    assert result == "<final>ok</final>"
-    assert captured["url"] == "https://www.right.codes/claude-aws/v1/messages"
-    assert captured["timeout"] == 30
-    assert captured["headers"]["X-api-key"] == "sk-test"
-    assert captured["headers"]["Anthropic-version"] == "2023-06-01"
-    assert captured["headers"]["Content-type"] == "application/json"
-    assert captured["body"] == {
-        "model": "claude-sonnet-4-5-20250929",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "hello",
-                    }
-                ],
-            }
-        ],
-        "max_tokens": 42,
-        "stream": False,
-        "temperature": 0.2,
-    }
-
-
-def test_anthropic_compatible_client_extracts_first_text_block():
-    class FakeResponse:
-        headers = {"Content-Type": "application/json"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "content": [
-                        {"type": "thinking", "thinking": "hidden"},
-                        {"type": "text", "text": "<final>ok</final>"},
-                    ]
-                }
-            ).encode("utf-8")
-
-    client = AnthropicCompatibleModelClient(
-        model="claude-sonnet-4-5-20250929",
-        base_url="https://www.right.codes/claude-aws/v1",
-        api_key="sk-test",
-        temperature=0.2,
-        timeout=30,
-    )
-
-    with patch("urllib.request.urlopen", return_value=FakeResponse()):
-        result = client.complete("hello", 42)
-
-    assert result == "<final>ok</final>"

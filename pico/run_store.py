@@ -6,8 +6,15 @@ session.json 负责保存“可恢复的会话状态”；RunStore 负责保存�
 
 import json
 import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
+    fcntl = None
 
 
 def _run_id(value):
@@ -17,9 +24,26 @@ def _run_id(value):
 
 
 class RunStore:
+    # Delegate children share a run root but may receive distinct RunStore
+    # instances.  Keep one process-local lock per index path so the index
+    # read/modify/write sequence cannot drop a sibling run.
+    _index_locks = {}
+    _index_locks_guard = threading.Lock()
+
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._index_lock = self._lock_for_index(self.index_path())
+
+    @classmethod
+    def _lock_for_index(cls, path):
+        key = str(Path(path).resolve())
+        with cls._index_locks_guard:
+            lock = cls._index_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._index_locks[key] = lock
+            return lock
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
@@ -35,6 +59,9 @@ class RunStore:
 
     def index_path(self):
         return self.root / "index.json"
+
+    def index_lock_path(self):
+        return self.root / "index.json.lock"
 
     def task_graph_path(self, run_id):
         return self.run_dir(run_id) / "task_graph.mmd"
@@ -121,30 +148,57 @@ class RunStore:
 
     def update_index(self, task_state):
         path = self.index_path()
-        existing = []
-        if path.exists():
-            try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, list):
-                    existing = loaded
-            except json.JSONDecodeError:
+        # Atomic replace prevents readers from observing partial JSON.  The
+        # lock additionally protects the read/modify/write transaction itself;
+        # replace alone would still allow two children to overwrite each
+        # other's newly appended entry.
+        with self._index_lock:
+            with self._process_index_lock():
                 existing = []
-        entry = {
-            "run_id": task_state.run_id,
-            "task_id": task_state.task_id,
-            "task_goal": str(task_state.user_request),
-            "status": task_state.status,
-            "stop_reason": task_state.stop_reason,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "task_graph_path": str(self.task_graph_path(task_state.run_id)),
-            "report_path": str(self.report_path(task_state.run_id)),
-        }
-        updated = [item for item in existing if item.get("run_id") != task_state.run_id]
-        updated.append(entry)
-        self._write_json_atomic(path, updated)
+                if path.exists():
+                    try:
+                        loaded = json.loads(path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, list):
+                            existing = loaded
+                    except json.JSONDecodeError:
+                        existing = []
+                entry = {
+                    "run_id": task_state.run_id,
+                    "task_id": task_state.task_id,
+                    "task_goal": str(task_state.user_request),
+                    "status": task_state.status,
+                    "stop_reason": task_state.stop_reason,
+                    "agent_mode": str(getattr(task_state, "agent_mode", "main") or "main"),
+                    "parent_agent_id": str(getattr(task_state, "parent_agent_id", "") or ""),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "task_graph_path": str(self.task_graph_path(task_state.run_id)),
+                    "report_path": str(self.report_path(task_state.run_id)),
+                }
+                updated = [item for item in existing if item.get("run_id") != task_state.run_id]
+                updated.append(entry)
+                self._write_json_atomic(path, updated)
         return path
 
-    def load_recent_index(self, limit=5):
+    @contextmanager
+    def _process_index_lock(self):
+        """Serialize index transactions across Pico processes on POSIX hosts."""
+        if fcntl is None:
+            # Non-POSIX platforms retain the process-local thread lock and
+            # atomic replacement.  Callers still get valid JSON, but launching
+            # multiple writers for one run root is not supported there.
+            yield
+            return
+
+        lock_path = self.index_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def load_recent_index(self, limit=5, *, include_children=False):
         path = self.index_path()
         if not path.exists():
             return []
@@ -155,6 +209,16 @@ class RunStore:
         if not isinstance(loaded, list):
             return []
         entries = [item for item in loaded if isinstance(item, dict)]
+        if not include_children:
+            # Entries produced before agent identity was indexed are main runs
+            # by default.  New delegate runs are excluded even if either
+            # identity field is accidentally absent.
+            entries = [
+                item
+                for item in entries
+                if not str(item.get("parent_agent_id", "") or "").strip()
+                and str(item.get("agent_mode", "main") or "main") == "main"
+            ]
         entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
         return entries[: max(0, int(limit))]
 

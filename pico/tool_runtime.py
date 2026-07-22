@@ -44,6 +44,7 @@ def _result_metadata(
     workspace_fingerprint=None,
     diff_summary=None,
     sandbox_metadata=None,
+    delegate_outcome=None,
 ):
     """Build the stable metadata shape shared by every tool outcome."""
     capability = tool_policy.tool_capability(tool)
@@ -66,10 +67,16 @@ def _result_metadata(
         metadata["workspace_fingerprint"] = workspace_fingerprint
     if sandbox_metadata:
         metadata.update(dict(sandbox_metadata))
+    if delegate_outcome is not None:
+        metadata["delegate_outcome"] = dict(delegate_outcome)
     return metadata
 
 
 def _store_outcome(agent, name, tool, *, record_note=False, **updates):
+    if name in {"delegate", "delegate_many"} and "delegate_outcome" not in updates:
+        updates["delegate_outcome"] = dict(
+            getattr(agent, "_delegate_outcome_metadata", {}) or {}
+        )
     metadata = _result_metadata(agent, tool, **updates)
     agent._last_tool_result_metadata = metadata
     if record_note:
@@ -78,6 +85,7 @@ def _store_outcome(agent, name, tool, *, record_note=False, **updates):
 
 
 def run_tool(agent, name, args):
+    agent._delegate_outcome_metadata = _unexecuted_delegate_outcome(name, args)
     tool = agent.tools.get(name)
     if tool is None:
         _store_outcome(
@@ -194,6 +202,15 @@ def run_tool(agent, name, args):
             if sandbox_metadata.get("sandbox_timed_out"):
                 tool_error_code = "sandbox_timeout"
                 security_event_type = "sandbox_timeout"
+        elif name in {"delegate", "delegate_many"}:
+            delegate_outcome = dict(agent._delegate_outcome_metadata or {})
+            failed_count = int(delegate_outcome.get("failed_count") or 0)
+            completed_count = int(delegate_outcome.get("completed_count") or 0)
+            if failed_count:
+                tool_status = "partial_success" if completed_count else "error"
+                tool_error_code = (
+                    "delegate_partial_success" if completed_count else "delegate_failed"
+                )
         agent.update_memory_after_tool(name, args, result)
         _store_outcome(
             agent,
@@ -245,3 +262,31 @@ def run_tool(agent, name, args):
             record_note=True,
         )
         return f"error: tool {name} failed: {exc}"
+
+
+def _unexecuted_delegate_outcome(name, args):
+    """Describe a rejected/failed delegate call without relying on result text."""
+    if name not in {"delegate", "delegate_many"}:
+        return {}
+    if name == "delegate":
+        specs = [args] if isinstance(args, dict) else []
+    else:
+        raw_tasks = args.get("tasks", []) if isinstance(args, dict) else []
+        specs = list(raw_tasks) if isinstance(raw_tasks, list) else []
+    items = []
+    for index, spec in enumerate(specs, start=1):
+        spec = spec if isinstance(spec, dict) else {}
+        items.append(
+            {
+                "index": index,
+                "role": str(spec.get("role", "")).strip(),
+                "status": "not_run",
+                "agent_id": "",
+            }
+        )
+    return {
+        "requested_count": len(specs),
+        "completed_count": 0,
+        "failed_count": len(specs),
+        "items": items,
+    }

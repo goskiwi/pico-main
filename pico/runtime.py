@@ -76,6 +76,7 @@ class Pico:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        self._assert_workspace_root()
         self.sandbox = sandbox or DockerSandbox(self.root)
         self.session_store = session_store
         self.approval_policy = approval_policy
@@ -99,6 +100,9 @@ class Pico:
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
             "created_at": now(),
             "workspace_root": workspace.repo_root,
+            "session_kind": "delegate" if self.parent_agent_id else "main",
+            "agent_mode": self.agent_mode,
+            "parent_agent_id": self.parent_agent_id,
             "history": [],
             "memory": memorylib.default_memory_state(),
         }
@@ -133,6 +137,7 @@ class Pico:
         self.tool_audit_log = []
         self.model_action_rejections = []
         self._last_tool_result_metadata = {}
+        self._delegate_outcome_metadata = {}
         self._last_sandbox_metadata = {}
         self._last_prefix_refresh = {
             "workspace_changed": False,
@@ -158,6 +163,9 @@ class Pico:
         return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
     def _ensure_session_shape(self):
+        self.session.setdefault("session_kind", "delegate" if self.parent_agent_id else "main")
+        self.session.setdefault("agent_mode", self.agent_mode)
+        self.session.setdefault("parent_agent_id", self.parent_agent_id)
         self.session.setdefault("history", [])
         self.session.setdefault("memory", memorylib.default_memory_state())
         checkpoints = self.session.setdefault("checkpoints", {})
@@ -216,8 +224,20 @@ class Pico:
             "max_depth": self.max_depth,
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "read_only": bool(self.read_only),
+            "workspace_root": str(self.root.resolve()),
             "sandbox": self.sandbox.identity(),
         }
+
+    def _assert_workspace_root(self, workspace=None):
+        workspace = workspace or self.workspace
+        expected_root = self.root.resolve()
+        actual_root = Path(workspace.repo_root).resolve()
+        if actual_root != expected_root:
+            raise RuntimeError(
+                "workspace root invariant violated: "
+                f"expected {expected_root}, got {actual_root}"
+            )
+        return actual_root
 
     def tool_signature(self):
         payload = []
@@ -322,7 +342,15 @@ class Pico:
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
-        refreshed_workspace = WorkspaceContext.build(self.root)
+        self._assert_workspace_root()
+        # The runtime root is a fixed capability boundary. Refresh repository
+        # facts inside that boundary instead of rediscovering an enclosing Git
+        # repository, which could expose parent files to delegated children.
+        refreshed_workspace = WorkspaceContext.build(
+            self.root,
+            repo_root_override=self.root,
+        )
+        self._assert_workspace_root(refreshed_workspace)
         refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()
         workspace_changed = force or refreshed_workspace_fingerprint != previous_workspace_fingerprint
         if workspace_changed:

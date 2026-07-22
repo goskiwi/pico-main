@@ -32,7 +32,19 @@ def test_context_manager_injects_recent_runs_only_for_resume_requests(tmp_path):
             "updated_at": "2026-04-07T10:00:00+00:00",
             "task_graph_path": str(tmp_path / ".pico" / "runs" / "run_20260407" / "task_graph.mmd"),
             "report_path": str(tmp_path / ".pico" / "runs" / "run_20260407" / "report.json"),
-        }
+        },
+        {
+            "run_id": "run_delegate",
+            "task_id": "task_delegate",
+            "task_goal": "Internal delegate investigation.",
+            "status": "completed",
+            "stop_reason": "final_answer_returned",
+            "agent_mode": "explore",
+            "parent_agent_id": "agent_parent",
+            "updated_at": "2026-04-07T11:00:00+00:00",
+            "task_graph_path": str(tmp_path / ".pico" / "runs" / "run_delegate" / "task_graph.mmd"),
+            "report_path": str(tmp_path / ".pico" / "runs" / "run_delegate" / "report.json"),
+        },
     ]
     (agent.run_store.root / "index.json").write_text(json.dumps(run_index), encoding="utf-8")
 
@@ -44,6 +56,7 @@ def test_context_manager_injects_recent_runs_only_for_resume_requests(tmp_path):
     assert "Recent runs:" in resume_prompt
     assert "Use read_file on task_graph, then read_tool_output for node refs." in resume_prompt
     assert "Fix the parser bug." in resume_prompt
+    assert "Internal delegate investigation." not in resume_prompt
     assert "task_graph.mmd" in resume_prompt
     assert resume_metadata["recent_runs"]["included"] is True
     assert resume_metadata["recent_runs"]["selected_count"] == 1

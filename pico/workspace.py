@@ -49,12 +49,23 @@ class WorkspaceContext:
     @classmethod
     def build(cls, cwd, repo_root_override=None):
         cwd = Path(cwd).resolve()
+        overridden_repo_root = (
+            Path(repo_root_override).resolve()
+            if repo_root_override is not None
+            else None
+        )
+        git_cwd = overridden_repo_root or cwd
+        git_metadata_enabled = (
+            overridden_repo_root is None or (overridden_repo_root / ".git").exists()
+        )
 
         def git(args, fallback=""):
+            if not git_metadata_enabled:
+                return fallback
             try:
                 result = subprocess.run(
                     ["git", *args],
-                    cwd=cwd,
+                    cwd=git_cwd,
                     capture_output=True,
                     text=True,
                     check=True,
@@ -65,8 +76,8 @@ class WorkspaceContext:
                 return fallback
 
         repo_root = (
-            Path(repo_root_override).resolve()
-            if repo_root_override is not None
+            overridden_repo_root
+            if overridden_repo_root is not None
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
         docs = {}

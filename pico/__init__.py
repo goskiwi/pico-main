@@ -1,13 +1,13 @@
 from .cli import build_agent, build_arg_parser, build_welcome, main
 from .actions import ModelAction
-from .models import AnthropicCompatibleModelClient, FakeModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from .delegate_scheduler import DelegateOutcome, DelegateScheduler
+from .models import FakeModelClient, OpenAICompatibleModelClient
 from .runtime import Pico
 from .sandbox import DockerSandbox, DockerSandboxConfig, SandboxResult
 from .session_store import SessionStore
 from .workspace import WorkspaceContext
 
 __all__ = [
-    "AnthropicCompatibleModelClient",
     "FakeModelClient",
     "Pico",
     "DockerSandbox",
@@ -18,7 +18,8 @@ __all__ = [
     "build_welcome",
     "main",
     "ModelAction",
-    "OllamaModelClient",
+    "DelegateOutcome",
+    "DelegateScheduler",
     "OpenAICompatibleModelClient",
     "SessionStore",
     "WorkspaceContext",

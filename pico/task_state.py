@@ -32,12 +32,27 @@ class TaskState:
     final_answer: str = ""
     checkpoint_id: str = ""
     resume_status: str = ""
+    agent_mode: str = "main"
+    parent_agent_id: str = ""
 
     @classmethod
-    def create(cls, task_id, user_request, run_id=""):
+    def create(
+        cls,
+        task_id,
+        user_request,
+        run_id="",
+        agent_mode="main",
+        parent_agent_id="",
+    ):
         if not run_id:
             run_id = "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
-        return cls(run_id=run_id, task_id=task_id, user_request=user_request)
+        return cls(
+            run_id=run_id,
+            task_id=task_id,
+            user_request=user_request,
+            agent_mode=str(agent_mode or "main"),
+            parent_agent_id=str(parent_agent_id or ""),
+        )
 
     def record_attempt(self):
         # attempt 统计的是“模型被调用了几轮”，不等于 tool_steps。
@@ -86,4 +101,6 @@ class TaskState:
             "final_answer": self.final_answer,
             "checkpoint_id": self.checkpoint_id,
             "resume_status": self.resume_status,
+            "agent_mode": self.agent_mode,
+            "parent_agent_id": self.parent_agent_id,
         }

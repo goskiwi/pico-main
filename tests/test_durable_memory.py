@@ -189,6 +189,31 @@ def test_runtime_llm_promotion_can_be_disabled(tmp_path):
     assert not (tmp_path / ".pico" / "memory" / "entries" / "user.md").exists()
 
 
+def test_durable_memory_promotion_flag_disables_rule_and_llm_paths(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>Project: Delegate findings stay ephemeral.</final>",
+            '{"memories":[{"type":"project","text":"must not run"}]}',
+        ],
+        feature_flags={
+            "durable_memory_promotion": False,
+            "llm_memory_extract": True,
+        },
+    )
+
+    answer = agent.ask("Remember this stable project fact as durable memory.")
+
+    report = json.loads(
+        agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8")
+    )
+    assert answer == "Project: Delegate findings stay ephemeral."
+    assert len(agent.model_client.prompts) == 1
+    assert report["durable_promotions"] == []
+    assert report["llm_durable_promotions"] == []
+    assert not (tmp_path / ".pico" / "memory").exists()
+
+
 def test_runtime_llm_promotion_skips_unsuccessful_runs(tmp_path):
     agent = build_agent(tmp_path, ['<tool>{"name":"list_files","args":{"path":"."}}</tool>'], max_steps=1)
 

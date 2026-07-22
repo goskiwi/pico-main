@@ -221,6 +221,13 @@ def test_delegate_many_requires_non_empty_tasks(tmp_path):
 
     assert result.startswith("error: invalid arguments for delegate_many: tasks must contain at least 1 item")
     assert "delegate_many" in result
+    assert agent._last_tool_result_metadata["tool_status"] == "rejected"
+    assert agent._last_tool_result_metadata["delegate_outcome"] == {
+        "requested_count": 0,
+        "completed_count": 0,
+        "failed_count": 0,
+        "items": [],
+    }
 
 
 def test_delegate_many_validates_each_task(tmp_path):
@@ -237,6 +244,81 @@ def test_delegate_many_rejects_unknown_role(tmp_path):
     result = agent.run_tool("delegate_many", {"tasks": [{"role": "builder", "task": "inspect README.md"}]})
 
     assert "unsupported delegate role: builder" in result
+
+
+def test_delegate_tool_exception_keeps_structured_not_run_evidence(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    def fail(_args):
+        raise RuntimeError("scheduler unavailable")
+
+    agent.tools["delegate"]["run"] = fail
+    result = agent.run_tool(
+        "delegate", {"role": "explore", "task": "inspect README.md", "max_steps": 2}
+    )
+
+    assert result == "error: tool delegate failed: scheduler unavailable"
+    assert agent._last_tool_result_metadata["tool_status"] == "error"
+    assert agent._last_tool_result_metadata["delegate_outcome"] == {
+        "requested_count": 1,
+        "completed_count": 0,
+        "failed_count": 1,
+        "items": [
+            {
+                "index": 1,
+                "role": "explore",
+                "status": "not_run",
+                "agent_id": "",
+            }
+        ],
+    }
+
+
+def test_delegate_child_failure_sets_partial_success_tool_status(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    def partial(_args):
+        agent._delegate_outcome_metadata = {
+            "requested_count": 2,
+            "completed_count": 1,
+            "failed_count": 1,
+            "items": [
+                {
+                    "index": 1,
+                    "role": "explore",
+                    "status": "ok",
+                    "agent_id": "child-1",
+                    "child_status": "completed",
+                    "stop_reason": "final_answer_returned",
+                },
+                {
+                    "index": 2,
+                    "role": "review",
+                    "status": "error",
+                    "agent_id": "",
+                    "child_status": "",
+                    "stop_reason": "",
+                },
+            ],
+        }
+        return "one child completed; one child failed"
+
+    agent.tools["delegate_many"]["run"] = partial
+    agent.run_tool(
+        "delegate_many",
+        {
+            "tasks": [
+                {"role": "explore", "task": "inspect", "max_steps": 1},
+                {"role": "review", "task": "review", "max_steps": 1},
+            ]
+        },
+    )
+
+    assert agent._last_tool_result_metadata["tool_status"] == "partial_success"
+    assert (
+        agent._last_tool_result_metadata["tool_error_code"]
+        == "delegate_partial_success"
+    )
 
 
 def test_responses_action_tools_are_strict_and_include_final(tmp_path):

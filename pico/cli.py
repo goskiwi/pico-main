@@ -8,12 +8,14 @@
 import argparse
 import logging
 import os
+from pathlib import Path
+import re
 import shutil
 import sys
 import textwrap
 
 from .config import DEFAULT_APPROVAL_POLICY
-from .models import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from .models import OpenAICompatibleModelClient
 from .runtime import Pico
 from .sandbox import (
     DEFAULT_SANDBOX_CPUS,
@@ -40,9 +42,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "RIGHT_CODES_API_KEY",
     "GITHUB_PAT",
     "GH_PAT",
 )
@@ -73,66 +72,79 @@ HELP_DETAILS = textwrap.dedent(
 
 
 # 默认模型配置
-DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
-DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
-DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # 环境变量名称常量
 LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
+ENV_LOCAL_FILENAME = ".env.local"
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _effective_model(args, provider):
+def _load_workspace_env(cwd):
+    """Read ``<cwd>/.env.local`` into a mapping for one Pico startup.
+
+    Pico intentionally keeps zero production dependencies, so this is a small
+    dotenv-compatible reader rather than a dependency on ``python-dotenv``.
+    The model client uses this mapping instead of ambient process variables.
+    """
+    env_path = Path(cwd).expanduser().resolve() / ENV_LOCAL_FILENAME
+    if not env_path.is_file():
+        return {}
+
+    values = {}
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        name, separator, raw_value = line.partition("=")
+        name = name.strip()
+        if not separator or not ENV_NAME_PATTERN.fullmatch(name):
+            logger.warning("Ignoring invalid assignment in %s", env_path)
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[name] = value
+    if values:
+        logger.debug("Loaded %s variable(s) from %s", len(values), env_path)
+    return values
+
+
+def _effective_model(args, env=None):
     """根据 provider 和参数确定最终使用的模型名称。
 
     模型选择优先级：
     1. 用户显式传入 --model
-    2. provider 对应的环境变量（如 OPENAI_MODEL）
+    2. `.env.local` 中的 OPENAI_MODEL
     3. 代码里的默认值
     """
+    env = os.environ if env is None else env
     explicit_model = getattr(args, "model", None)
     if explicit_model:
         logger.info(f"使用用户指定的模型: {explicit_model}")
         return explicit_model
-    if provider == "openai":
-        model = os.environ.get("OPENAI_MODEL")
-        if model:
-            logger.info(f"使用环境变量 OPENAI_MODEL: {model}")
-            return model
-        logger.info(f"使用默认 OpenAI 模型: {DEFAULT_OPENAI_MODEL}")
-        return DEFAULT_OPENAI_MODEL
-    if provider == "anthropic":
-        model = os.environ.get("ANTHROPIC_MODEL")
-        if model:
-            logger.info(f"使用环境变量 ANTHROPIC_MODEL: {model}")
-            return model
-        logger.info(f"使用默认 Anthropic 模型: {DEFAULT_ANTHROPIC_MODEL}")
-        return DEFAULT_ANTHROPIC_MODEL
-    logger.info(f"使用默认 Ollama 模型: {DEFAULT_OLLAMA_MODEL}")
-    return DEFAULT_OLLAMA_MODEL
+    model = env.get("OPENAI_MODEL")
+    if model:
+        logger.info(f"使用环境变量 OPENAI_MODEL: {model}")
+        return model
+    logger.info(f"使用默认 OpenAI 模型: {DEFAULT_OPENAI_MODEL}")
+    return DEFAULT_OPENAI_MODEL
 
 
-def _first_env(*names):
-    """按顺序查找环境变量，返回第一个非空值。"""
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return ""
-
-
-def _configured_secret_names(args):
+def _configured_secret_names(args, env=None):
     """收集所有需要脱敏的环境变量名称。
     这些名称对应的值在日志和报告中会被隐藏，防止泄露敏感信息。
     """
+    env = os.environ if env is None else env
     configured_secret_names = set(DEFAULT_SECRET_ENV_NAMES)
     configured_secret_names.update(str(name).upper() for name in args.secret_env_names)
-    extra_names = os.environ.get(SECRET_ENV_NAMES_VAR, "")
+    extra_names = env.get(SECRET_ENV_NAMES_VAR, "")
     if not extra_names.strip():
-        extra_names = os.environ.get(LEGACY_SECRET_ENV_NAMES_VAR, "")
+        extra_names = env.get(LEGACY_SECRET_ENV_NAMES_VAR, "")
     if extra_names.strip():
         configured_secret_names.update(
             item.strip().upper()
@@ -143,50 +155,19 @@ def _configured_secret_names(args):
     return sorted(configured_secret_names)
 
 
-def _build_model_client(args):
-    """根据 provider 参数构建对应的模型客户端。
-
-    CLI 只负责把 provider 选择翻译成具体 client。
-    真正的提示词格式、缓存支持、HTTP 协议差异，都封装在 models.py 里。
-    """
-    provider = getattr(args, "provider", "openai")
-    logger.info(f"构建模型客户端，provider: {provider}")
-
-    if provider == "openai":
-        model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or os.environ.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        logger.info(f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}")
-        return OpenAICompatibleModelClient(
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
-        )
-    if provider == "anthropic":
-        model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or os.environ.get("ANTHROPIC_API_BASE") or DEFAULT_ANTHROPIC_BASE_URL
-        api_key = _first_env("ANTHROPIC_API_KEY", "RIGHT_CODES_API_KEY", "OPENAI_API_KEY")
-        logger.info(f"Anthropic 客户端配置 - model: {model}, base_url: {base_url}")
-        return AnthropicCompatibleModelClient(
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
-        )
-
-    # Ollama provider
-    model = _effective_model(args, provider)
-    host = getattr(args, "host", DEFAULT_OLLAMA_HOST)
-    logger.info(f"Ollama 客户端配置 - model: {model}, host: {host}")
-    return OllamaModelClient(
+def _build_model_client(args, env=None):
+    """Build Pico's sole OpenAI-compatible model client."""
+    env = os.environ if env is None else env
+    model = _effective_model(args, env=env)
+    base_url = getattr(args, "base_url", None) or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
+    api_key = env.get("OPENAI_API_KEY", "")
+    logger.info(f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}")
+    return OpenAICompatibleModelClient(
         model=model,
-        host=host,
+        base_url=base_url,
+        api_key=api_key,
         temperature=args.temperature,
-        top_p=args.top_p,
-        timeout=args.ollama_timeout,
+        timeout=args.openai_timeout,
     )
 
 
@@ -261,8 +242,13 @@ def build_agent(args):
     # 还是创建一个新的 Pico 实例。
     logger.info("开始构建 Pico agent...")
 
+    # 模型配置只来自工作区 .env.local，避免隐式使用 shell、CI 或
+    # secret manager 中碰巧存在的其他项目凭据。配置始终作为显式 mapping
+    # 传给装配函数，不能写入进程环境，否则项目文件可污染父进程的 ambient env。
+    workspace_env = _load_workspace_env(args.cwd)
+
     # 收集需要脱敏的环境变量名称
-    configured_secret_names = _configured_secret_names(args)
+    configured_secret_names = _configured_secret_names(args, env=workspace_env)
     logger.debug(f"敏感环境变量数量: {len(configured_secret_names)}")
 
     # 构建工作区上下文，包含文件快照和 git 状态
@@ -274,7 +260,7 @@ def build_agent(args):
     logger.debug(f"Session 存储路径: {workspace.repo_root}/.pico/sessions")
 
     # 构建模型客户端
-    model = _build_model_client(args)
+    model = _build_model_client(args, env=workspace_env)
     sandbox_config = DockerSandboxConfig(
         image=getattr(args, "sandbox_image", None)
         or os.environ.get("PICO_SANDBOX_IMAGE")
@@ -331,29 +317,27 @@ def build_arg_parser():
     定义所有支持的命令行参数，包括：
     - prompt: one-shot 模式的提示词
     - --cwd: 工作区目录
-    - --provider: 模型后端选择
     - --model: 模型名称
-    - --host: Ollama 服务器地址
-    - --base-url: API 基础 URL
+    - --base-url: OpenAI-compatible API 地址
     - --approval: 审批策略
     - --dry-run: 模拟模式
     等
     """
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for Ollama, OpenAI-compatible, or Anthropic-compatible models.",
+        description=(
+            "Auditable, sandboxed local coding-agent runtime for "
+            "OpenAI-compatible Responses models."
+        ),
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--provider", choices=("ollama", "openai", "anthropic"), default="openai", help="Model backend to use.")
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name override. Defaults to qwen3.5:4b for Ollama, OPENAI_MODEL for openai, and ANTHROPIC_MODEL for anthropic when set.",
+        help="Model name override. Defaults to OPENAI_MODEL from .env.local when set.",
     )
-    parser.add_argument("--host", default=DEFAULT_OLLAMA_HOST, help="Ollama server URL.")
-    parser.add_argument("--base-url", default=None, help="Provider API base URL for openai or anthropic.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible Responses API base URL.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
@@ -394,8 +378,7 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the model.")
     return parser
 
 
@@ -404,16 +387,18 @@ def main(argv=None):
 
     解析参数 -> 构建 agent -> 显示欢迎信息 -> 进入 one-shot 或交互模式。
     """
-    logger.info("pico 启动中...")
     args = build_arg_parser().parse_args(argv)
+    # Parse first so ``pico --help`` remains a clean, side-effect-free CLI
+    # surface instead of printing startup logs before argparse exits.
+    logger.info("pico 启动中...")
     logger.debug(f"命令行参数: {args}")
 
     agent = build_agent(args)
     logger.info("Pico agent 构建完成")
 
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
-    host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
-    print(build_welcome(agent, model=model, host=host))
+    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL))
+    base_url = getattr(agent.model_client, "base_url", getattr(args, "base_url", DEFAULT_OPENAI_BASE_URL))
+    print(build_welcome(agent, model=model, host=base_url))
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。

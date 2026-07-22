@@ -218,7 +218,7 @@ def test_cli_build_agent_wires_dry_run_flag(tmp_path):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    with patch("pico.cli.OllamaModelClient", DummyModelClient):
+    with patch("pico.cli.OpenAICompatibleModelClient", DummyModelClient):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto", "--dry-run"])
         agent = mini_cli.build_agent(args)
 
@@ -236,7 +236,7 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(os.environ, {"GITHUB_PAT": "ghp-1", "GH_PAT": "ghp-2"}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.cli.OpenAICompatibleModelClient",
         DummyModelClient,
     ):
         args = mini_cli.build_arg_parser().parse_args(
@@ -266,7 +266,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(os.environ, {"GH_PAT": "ghp-default-1"}, clear=True), patch(
-        "pico.cli.OllamaModelClient",
+        "pico.cli.OpenAICompatibleModelClient",
         DummyModelClient,
     ):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
@@ -274,7 +274,7 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
         assert security.secret_env_summary(agent)["secret_env_names"] == ["GH_PAT"]
 
 
-def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
+def test_cli_build_agent_reads_secret_names_from_workspace_env_config(tmp_path):
     class DummyModelClient:
         def __init__(self, *args, **kwargs):
             self.args = args
@@ -284,17 +284,17 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
             raise AssertionError("model should not be invoked")
 
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    with patch.dict(
-        os.environ,
-        {
-            "MCA_CUSTOM_SECRET": "custom-secret-value",
-            "MINI_CODING_AGENT_SECRET_ENV_NAMES": "MCA_CUSTOM_SECRET",
-        },
-        clear=True,
-    ), patch("pico.cli.OllamaModelClient", DummyModelClient):
+    (tmp_path / ".env.local").write_text(
+        "MCA_CUSTOM_SECRET=custom-secret-value\n"
+        "MINI_CODING_AGENT_SECRET_ENV_NAMES=MCA_CUSTOM_SECRET\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, {}, clear=True), patch("pico.cli.OpenAICompatibleModelClient", DummyModelClient):
         args = mini_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
         agent = mini_cli.build_agent(args)
-        assert security.secret_env_summary(agent)["secret_env_names"] == ["MCA_CUSTOM_SECRET"]
+        assert "MCA_CUSTOM_SECRET" in agent.secret_env_names
+        assert security.secret_env_summary(agent)["secret_env_names"] == []
+        assert "MCA_CUSTOM_SECRET" not in os.environ
 
 
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
@@ -389,9 +389,7 @@ def test_delegate_many_children_do_not_expose_write_tools(tmp_path):
         tmp_path,
         [
             '<tool>{"name":"delegate_many","args":{"tasks":[{"role":"explore","task":"try to write a file","max_steps":2},{"role":"verify","task":"try to run shell","max_steps":2}]}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
             "<final>first child done</final>",
-            '<tool>{"name":"run_shell","args":{"command":"echo nope","timeout":20}}</tool>',
             "<final>second child done</final>",
             "<final>parent done</final>",
         ],

@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 
 from . import security
+from .delegate_scheduler import DelegateOutcome, DelegateScheduler
 from .config import (
     ALLOWED_SHELL_COMMANDS,
     PROTECTED_WRITE_FILENAMES,
@@ -19,7 +20,7 @@ from .config import (
     IGNORED_PATH_NAMES,
     _DANGEROUS_SHELL_PATTERNS_RAW,
 )
-from .workspace import clip
+from .workspace import WorkspaceContext, clip
 
 # 在 import 时编译正则，避免每次调用都重编译
 DANGEROUS_SHELL_PATTERNS = tuple(
@@ -644,6 +645,7 @@ def tool_patch_file(agent, args):
 def run_delegate_child(agent, args):
     if agent.depth >= agent.max_depth:
         raise ValueError("delegate depth exceeded")
+    agent._assert_workspace_root()
     role = str(args.get("role", "")).strip()
     if role not in DELEGATE_ROLES:
         raise ValueError(f"unsupported delegate role: {role}")
@@ -658,9 +660,20 @@ def run_delegate_child(agent, args):
     child_model_client = agent.model_client
     if getattr(agent.model_client, "supports_native_actions", False):
         child_model_client = agent.model_client.fork_for_delegate()
+    child_feature_flags = dict(agent.feature_flags)
+    # Delegate children are intentionally read-only. Requiring a workspace
+    # change would reject their valid investigation final answers forever, and
+    # investigation summaries must not mutate the shared durable-memory store.
+    child_feature_flags["require_workspace_change"] = False
+    child_feature_flags["durable_memory_promotion"] = False
+    child_feature_flags["llm_memory_extract"] = False
+    child_workspace = WorkspaceContext.build(
+        agent.root,
+        repo_root_override=agent.root,
+    )
     child = Pico(
         model_client=child_model_client,
-        workspace=agent.workspace,
+        workspace=child_workspace,
         session_store=agent.session_store,
         run_store=agent.run_store,
         approval_policy="never",
@@ -672,11 +685,12 @@ def run_delegate_child(agent, args):
         dry_run=agent.dry_run,
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
-        feature_flags=agent.feature_flags,
+        feature_flags=child_feature_flags,
         agent_mode=role,
         parent_agent_id=agent.agent_id,
         allowed_tools=role_config["allowed_tools"],
     )
+    child._assert_workspace_root()
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
     child.memory.set_goal(child_task)
@@ -693,34 +707,78 @@ def run_delegate_child(agent, args):
         "agent_id": child.agent_id,
         "task": task,
         "answer": answer,
+        "status": child.current_task_state.status,
+        "stop_reason": child.current_task_state.stop_reason,
     }
 
 
-def format_delegate_result(result):
+def format_delegate_result(outcome: DelegateOutcome):
+    """Render a scheduler outcome; scheduling itself remains outside tools."""
+    if outcome.status == "ok" and outcome.result is not None:
+        result = outcome.result
+        return (
+            f"delegate_result role={result['role']} agent_id={result['agent_id']}:\n"
+            f"{result['answer']}"
+        )
+    role = str(outcome.spec.get("role", "unknown"))
     return (
-        f"delegate_result role={result['role']} agent_id={result['agent_id']}:\n"
-        f"{result['answer']}"
+        f"delegate_result role={role} status={outcome.status}:\n"
+        f"{outcome.error or 'delegate did not return a result'}"
     )
 
 
+def _record_delegate_outcomes(agent, outcomes, *, requested_count):
+    """Keep complete scheduler evidence separate from the clipped text result."""
+    items = []
+    for outcome in outcomes:
+        result = dict(outcome.result or {})
+        items.append(
+            {
+                "index": int(outcome.index),
+                "role": str(result.get("role") or outcome.spec.get("role", "")).strip(),
+                "status": str(outcome.status),
+                "agent_id": str(result.get("agent_id", "")).strip(),
+                "child_status": str(result.get("status", "")).strip(),
+                "stop_reason": str(result.get("stop_reason", "")).strip(),
+            }
+        )
+    completed_count = sum(item["status"] == "ok" for item in items)
+    agent._delegate_outcome_metadata = {
+        "requested_count": int(requested_count),
+        "completed_count": completed_count,
+        "failed_count": int(requested_count) - completed_count,
+        "items": items,
+    }
+
+
 def tool_delegate(agent, args):
-    return format_delegate_result(run_delegate_child(agent, args))
+    outcome = DelegateScheduler(agent).run([args])[0]
+    _record_delegate_outcomes(agent, [outcome], requested_count=1)
+    return format_delegate_result(outcome)
 
 
 def tool_delegate_many(agent, args):
     tasks = list(args.get("tasks", []))
-    results = []
-    for index, task_args in enumerate(tasks, start=1):
-        result = run_delegate_child(agent, task_args)
-        results.append((index, result))
+    outcomes = DelegateScheduler(agent).run(tasks)
+    _record_delegate_outcomes(agent, outcomes, requested_count=len(tasks))
 
-    lines = [f"delegate_many_result count={len(results)}"]
-    for index, result in results:
+    lines = [f"delegate_many_result count={len(outcomes)}"]
+    for outcome in outcomes:
+        if outcome.status == "ok" and outcome.result is not None:
+            result = outcome.result
+            lines.extend(
+                [
+                    f"--- child {outcome.index} role={result['role']} agent_id={result['agent_id']} ---",
+                    f"task: {result['task']}",
+                    str(result["answer"]),
+                ]
+            )
+            continue
+        role = str(outcome.spec.get("role", "unknown"))
         lines.extend(
             [
-                f"--- child {index} role={result['role']} agent_id={result['agent_id']} ---",
-                f"task: {result['task']}",
-                str(result["answer"]),
+                f"--- child {outcome.index} role={role} status={outcome.status} ---",
+                f"{outcome.error or 'delegate did not return a result'}",
             ]
         )
     return "\n".join(lines)

@@ -22,3 +22,34 @@ def test_session_store_latest_returns_none_when_empty(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
 
     assert store.latest() is None
+
+
+def test_session_store_latest_skips_newer_delegate_and_accepts_legacy_main(tmp_path):
+    store = SessionStore(tmp_path / ".pico" / "sessions")
+    legacy = {"id": "legacy-main", "history": []}
+    child = {
+        "id": "delegate-child",
+        "session_kind": "delegate",
+        "parent_agent_id": "agent_parent",
+        "history": [],
+    }
+
+    store.save(legacy)
+    store.save(child)
+
+    assert store.latest() == "legacy-main"
+    assert store.latest(include_children=True) == "delegate-child"
+
+
+def test_session_store_latest_returns_none_when_only_delegate_sessions_exist(tmp_path):
+    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store.save(
+        {
+            "id": "delegate-only",
+            "session_kind": "delegate",
+            "parent_agent_id": "agent_parent",
+            "history": [],
+        }
+    )
+
+    assert store.latest() is None
