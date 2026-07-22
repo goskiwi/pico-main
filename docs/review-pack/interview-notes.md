@@ -2,7 +2,7 @@
 
 ## 30 秒项目介绍
 
-pico 是一个面向本地代码仓库的轻量 coding agent runtime，不是简单的 LLM API 包装。它包含受约束的文件/命令工具、强制 Docker 沙箱、上下文和记忆管理、checkpoint、逐事件审计，以及带隐藏测试的真实模型 benchmark。我的重点不是做一个大而全的平台，而是把“模型动作如何可靠进入工程控制流”做完整。
+pico 是一个面向本地代码仓库的轻量 coding agent runtime，不是简单的 LLM API 包装。它包含受约束的文件/命令工具、强制 Docker 沙箱、上下文和记忆管理、checkpoint、逐事件审计，以及带隐藏测试的真实模型仓库微基准。我的重点不是做一个大而全的平台，而是把“模型动作如何可靠进入工程控制流”做完整。
 
 ## 最值得讲的亮点
 
@@ -20,9 +20,9 @@ prompt
 
 主循环只处理统一的 `ModelAction(tool | final | retry)`。兼容端点不保存 `previous_response_id` 时，客户端会重发结构化 conversation items，而不是退回文本协议。非法参数、缺失调用和运行时拒绝都会进入 `trace.jsonl` 与 `report.json`。
 
-## 用数据说明收益
+## 用数据说明证据
 
-在同一个 `gpt-5.4`、同一组 10 个 task ID、同一 fixture snapshot 上：
+早期在同一个 `gpt-5.4`、同一组 10 个 task ID、同一 fixture snapshot 上观察到：
 
 | 指标 | 文本/XML | Structured Actions |
 |---|---:|---:|
@@ -30,14 +30,17 @@ prompt
 | 平均模型调用 | 9.50 | 6.40 |
 | Action 格式拒绝 | 未单独记录 | 0 |
 
-另外，在改造后才运行的 5 个独立 V2 held-out 任务上通过 5/5，覆盖 URL、TTL cache、CSV、event bus tests 和 LRU。所有 verifier 都在 Agent 停止后注入，并在无网络 Docker 中执行。
+旧 artifact 没有记录完整 runtime snapshot 和 working-tree dirty 状态，因此不能声称协议是唯一变量。
+面试时把它表述为促使后续实验设计升级的历史观察，不包装成严格因果消融。
 
-不要把单次 5/5 说成模型能力的普遍结论。准确表述是：在固定模型、固定快照和一次重复下，held-out 结果没有显示明显的 V1 过拟合。
+当前主证据是冻结 V3：在干净 commit 上运行 3 轮共通过 13/15，4/5 任务稳定 3/3。所有 verifier
+都在 Agent 停止后注入，并在无网络 Docker 中执行。后续提示实验降到 12/15 后被回滚，这段失败
+分析比单次成功 demo 更能说明评测闭环。
 
 ## 2 分钟架构讲解
 
 1. `ContextManager` 把稳定规则、memory、history 和当前请求按预算组 prompt。
-2. provider adapter 返回 `ModelAction`；OpenAI-compatible 使用 strict function calling，文本后端在适配层内部归一化。
+2. OpenAI-compatible client 通过 strict function calling 返回 `ModelAction`。
 3. `agent_loop` 执行有界循环，工具先经过 schema、路径、read-only、approval 和危险命令校验。
 4. `run_shell` 没有宿主机回退，只能进入 4 CPU / 4 GB / 512 PIDs、无网络、只读根文件系统的 Docker 容器。
 5. 每一步写入 task state、trace、checkpoint、task graph 和最终 report，便于恢复、复盘和评测。
@@ -62,15 +65,15 @@ JSON 仍是字符串，模型可能在前后加解释、给出多个动作或输
 
 ### 4 CPU / 4 GB / 512 PIDs 合理吗？
 
-它是适合常见 Python/Node 小仓库的默认上限，不是安全常数。面试时强调三点：资源必须有界；默认值要避免测试框架正常并发被误杀；CLI 和环境变量允许按仓库调整。安全边界还包括无网络、只读容器根文件系统和 workspace 定向挂载。
+它是适合当前 Python 小仓库测试镜像的默认上限，不是安全常数。面试时强调三点：资源必须有界；默认值要避免测试框架正常并发被误杀；CPU、内存和 PID 上限可通过 CLI 参数按仓库调整。安全边界还包括无网络、只读容器根文件系统和 workspace 定向挂载；支持其他语言需要另行构建包含对应工具链的镜像。
 
 ## 3 分钟演示顺序
 
 1. 展示 `pico/actions.py` 和 `pico/tools.py` 的 strict function schema。
 2. 展示一条 run 的 `trace.jsonl`：`model_parsed -> tool_executed -> checkpoint_created`。
-3. 展示 `structured-action-comparison.md` 的 60% 到 90% 和调用数下降。
-4. 展示 V2 manifest 与隐藏 verifier，说明它们在 Agent 结束后才注入。
-5. 最后主动说明生产边界与单次 benchmark 的统计限制。
+3. 展示 V3 clean-worktree 三轮报告、失败分类和后续负向实验回滚。
+4. 展示 frozen manifest 与隐藏 verifier，说明它们在 Agent 结束后才注入。
+5. 最后主动说明本地单用户边界与仓库微基准的外部有效性限制。
 
 ## 建议拆成的 Git 提交
 

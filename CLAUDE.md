@@ -23,10 +23,8 @@ uv run pico
 # Run a one-shot task
 uv run pico "fix the failing test"
 
-# Specify model backend
-uv run pico --provider ollama --model qwen3.5:4b
-uv run pico --provider openai
-uv run pico --provider anthropic
+# Override the OpenAI-compatible model from .env.local
+uv run pico --model gpt-5.4
 
 # Lint
 uv run ruff check .
@@ -39,6 +37,9 @@ uv run pytest tests/test_tools.py -q
 
 # Run a specific test
 uv run pytest tests/test_pico.py::test_ask_single_step -q
+
+# Opt-in remote delegate smoke; model settings stay in .env.local
+PICO_RUN_LIVE_TESTS=1 uv run pytest -m live tests/test_live_delegate_smoke.py -q
 
 # Visualize a run report
 uv run python scripts/render_run_report.py .pico/runs/<run_id>
@@ -66,13 +67,14 @@ user input → pico.cli constructs Pico runtime → Pico.ask() creates task_stat
 | `pico/cli.py` | CLI args, REPL loop, model backend selection, agent assembly (`build_agent`) |
 | `pico/runtime.py` | `Pico` agent object, tool dispatch, trace helpers, and prompt state. |
 | `pico/agent_loop.py` | Complete `Pico.ask()` lifecycle: model/tool loop, stop conditions, checkpoints, reports, and memory promotion. |
-| `pico/models.py` | Model backends: `OllamaModelClient`, `OpenAICompatibleModelClient` (uses `/responses` API with SSE support), `AnthropicCompatibleModelClient` (uses `/messages` API), `FakeModelClient` (for tests). All use stdlib `urllib`. |
+| `pico/models.py` | `OpenAICompatibleModelClient` (uses `/responses` API with SSE support) and `FakeModelClient` for tests. Both use stdlib `urllib`. |
 | `pico/context_manager.py` | Prompt section assembly and token-budget allocation: prefix → memory → skills → relevant_memory → history → current_request. |
 | `pico/context_history.py` | Transcript rendering, deterministic fallback summaries, and LLM task-graph compaction. |
 | `pico/context_types.py` | Shared token estimation, semantic clipping, and `SectionRender` primitives. |
 | `pico/skills.py` | Loads local `.pico/skills/**/SKILL.md`, matches skills to the current request, and renders selected guidance into prompts. |
 | `pico/parser.py` | Parses model raw output into `(kind, payload)` tuples: `tool`, `final`, or `retry`. Supports both JSON-in-XML and XML-attribute tool formats. |
 | `pico/tools.py` | Tool specifications, schema validation, and execution functions for 9 tools: `list_files`, `read_file`, `read_tool_output`, `search`, `run_shell`, `write_file`, `patch_file`, `delegate`, `delegate_many`. Each tool has a capability (`read`/`write`/`execute`/`delegate`) and risk level. |
+| `pico/delegate_scheduler.py` | Shared bounded-concurrency and budget accounting for `delegate` / `delegate_many`; it runs read-only child agents and returns ordered outcomes. |
 | `pico/sandbox.py` | Mandatory Docker execution for `run_shell`: no network, read-only rootfs, dropped capabilities, resource limits, protected workspace paths, timeout cleanup, and audit metadata. |
 | `pico/tool_runtime.py` | Tool execution lifecycle: validation → permission check → approval → dry-run → workspace snapshot → execute → diff snapshot → audit. |
 | `pico/tool_policy.py` | Capability checking, risk classification, read-only enforcement, repeated-call detection, shell policy lookup. |

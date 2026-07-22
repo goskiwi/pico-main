@@ -11,6 +11,14 @@
 | Avg model calls | 9.50 | 6.40 | -3.10 |
 | Action rejections | not recorded | 0 | n/a |
 
+## Interpretation limit
+
+Both legacy artifacts identify commit `3160f34`, but their older schema did not
+record the working-tree dirty state or a complete runtime snapshot. Matching the
+model, task IDs, and fixture snapshot makes this a useful historical before/after
+observation; it does not establish that the action protocol was the only changed
+variable, so the delta must not be presented as a strict causal ablation.
+
 ## Task details
 
 | Task | Text | Structured | Calls before | Calls after |
@@ -26,4 +34,6 @@
 | retry_add_boundary_tests | PASS | PASS | 5 | 6 |
 | retry_exact_attempt_budget | PASS | PASS | 7 | 8 |
 
-The comparison is accepted only when model, task IDs, and fixture snapshot are identical.
+The legacy comparison accepts artifacts when model, task IDs, and fixture snapshot
+are identical. New causal comparisons should additionally run from the same clean
+runtime commit, record the full evaluation snapshot, and use repeated attempts.
