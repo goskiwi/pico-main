@@ -29,6 +29,19 @@ flowchart LR
     L --> A["Trace / report / checkpoint"]
 ```
 
+## 10–15 分钟审阅路径
+
+| 时间 | 看什么 | 要验证的问题 |
+|---|---|---|
+| 0–2 分钟 | 本页的[项目亮点](#项目亮点)与[适用场景](#适用场景) | 项目解决什么问题，边界是否诚实 |
+| 2–5 分钟 | [架构概览](docs/architecture/agent-harness-v1-overview.md)，再抽查 `pico/agent_loop.py`、`pico/tools.py` | 模型 Action 如何进入受约束的工程控制流 |
+| 5–8 分钟 | [安全模型](docs/security-model.md)，再抽查 `tests/test_safety_invariants.py` | 路径、审批、Docker、secret 和 delegate 边界是否有测试 |
+| 8–11 分钟 | [V3 三轮主报告](docs/metrics/real-world-benchmark-v3-first-3x.md)与[负向实验](docs/metrics/real-world-benchmark-v3-constraint-regression-3x.md) | 结果是否来自干净快照，失败与回滚是否可解释 |
+| 11–15 分钟 | [评测方法](docs/metrics/evaluation-methodology.md)和[review pack](docs/review-pack/README.md) | 指标口径、外部有效性和复现入口是否完整 |
+
+评测文档的 current / historical 分层入口见 [Metrics evidence map](docs/metrics/README.md)。如果只看一份
+结果，优先看 V3 三轮主报告；V1/V2 和旧协议对比均为归档证据，不是当前能力结论。
+
 ## 项目亮点
 
 - **结构化 Agent loop**：OpenAI-compatible 路径使用 strict function calling，统一输出
@@ -72,8 +85,9 @@ REPL 内置命令与会话路径：
 
 需要 Python 3.10+。
 
-当前 `0.1.0` 以源码仓库作为完整交付物；`Dockerfile.sandbox`、benchmark fixtures 和评测脚本
-没有承诺包含在独立 wheel 中。下面的安装与沙箱构建命令都假设你已经 clone 本仓库。
+当前 `0.1.0` 以 GitHub 源码仓库作为完整交付物。PyPI wheel 和 sdist 只包含构建 `pico`
+runtime 所需的文件；`evaluation/`、`tests/`、`benchmarks/`、评测脚本和 `Dockerfile.sandbox`
+是仓库资产，不属于 PyPI 发布包。下面的安装、沙箱和评测命令都假设你已经 clone 本仓库。
 
 如果你用 `uv`，直接安装参考：
 
@@ -315,7 +329,11 @@ tool_outputs/*.txt
 - `pico/memory.py`：短期工作记忆和可持久化记忆。
 - `pico/run_store.py`：单次运行工件落盘。
 - `pico/task_state.py`：一次 `ask()` 的状态机快照。
-- `evaluation/real_benchmark.py`：真实模型工程任务、隐藏验收、对照和报告生成。
+- `evaluation/real_benchmark.py`：真实模型任务清单、模型客户端和 benchmark runner。
+- `evaluation/real_benchmark_evidence.py`：trace、delegate 证据和工作区隔离审计。
+- `evaluation/real_benchmark_reporting.py`：指标汇总、报告渲染与 artifact 对比。
+
+`evaluation/` 是源码仓库的验证资产，不属于 PyPI runtime 发布包。
 
 ## 可视化报告
 
@@ -343,41 +361,10 @@ uv run python scripts/render_run_report.py .pico/runs --all
 
 pico 的 Agent 效果评测强制调用真实模型 API，不提供 FakeModelClient 或离线 benchmark 模式。
 这些任务是可复现的仓库级微基准和回归集，不等同于 SWE-bench、真实生产流量或通用 coding 能力评测。
-真实模型结果分为原始文本协议基线、
-[结构化 Action V1](docs/metrics/real-world-benchmark-v1-structured.md)、
-[同快照对比](docs/metrics/structured-action-comparison.md)和
-[V2 held-out](docs/metrics/real-world-benchmark-v2-heldout.md)。
-
-### 已发布结果
-
-V1 包含 10 个相互独立的仓库快照，覆盖 4 个 bugfix、2 个 feature、2 个测试补强、
-1 个文档任务和 1 个重构任务。每轮都复制全新工作区；Agent 停止后才注入隐藏测试，并在
-无网络的强制 Docker 沙箱中验收。报告记录 pass rate、失败分类、工具步数、模型调用、token
-和总耗时。
-
-评测 artifact v2 还记录完整 `evaluation_snapshot_id`（覆盖 prompt、fixture、任务配置和隐藏
-verifier）、Git dirty 状态、Python/平台版本和运行参数。多次运行会报告整套任务的均值、标准差、
-最好/最差结果，以及逐任务的稳定性。完整口径见
+所有已发布结果、状态和归档关系见 [Metrics evidence map](docs/metrics/README.md)，完整口径见
 [Real-model evaluation methodology](docs/metrics/evaluation-methodology.md)。
 
-早期同一模型、同一组 task ID、同一 fixture snapshot 的两次运行观察结果如下：
-
-| 协议 | Pass rate | 平均模型调用 | Action 拒绝 |
-|---|---:|---:|---:|
-| 文本/XML 基线 | 60% (6/10) | 9.50 | 基线未单独记录 |
-| strict structured actions | 90% (9/10) | 6.40 | 0 |
-
-这组旧 artifact 没有记录完整 runtime snapshot 与 working-tree dirty 状态，因此不能证明协议是唯一
-变量，也不能把差异解释为严格因果提升。它保留为历史工程观察；当前可复现性更强的主证据是下面
-干净 commit 上冻结并运行三轮的 V3。
-
-为了避免只对 V1 调优，结构化协议还在预先固定的 5 个独立 V2 held-out 仓库任务上运行，结果为
-100% (5/5)，平均 6.20 次模型调用，Action 拒绝为 0。该结果只有一次真实模型重复，应理解为
-带快照和模型约束的工程证据，不是通用 coding benchmark 结论。
-
-V2 在首次 held-out 运行后已经用于 trace 分析和 runtime 开发，因此后续 V2 运行只作为回归，
-不再作为新的独立 held-out 证据。未来若发布新的泛化结果，需要使用开发过程中未查看的新任务集；
-不能通过反复运行 V2 把回归成绩包装成新的 held-out 提升。
+### 当前主证据：冻结 V3
 
 [V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
 和隐藏 verifier 在首次真实模型运行前提交为 `0897195`，运行前工作区干净，期间未据此调整
@@ -392,6 +379,16 @@ ready 顺序的 DFS，失败输出与实现缺陷一致；旧 artifact 没有汇
 12/15，依赖排序题为 0/3，平均模型调用和耗时也上升；没有观察到收益，因此该提示修改已回滚。
 这不是新的 held-out 结果。见[回归报告](docs/metrics/real-world-benchmark-v3-constraint-regression-3x.md)
 和[原始 JSON artifact](artifacts/real-world-benchmark-v3-constraint-regression-3x.json)。
+
+### Historical / archive evidence
+
+早期 V1 文本/XML 与 structured actions 两次运行曾观察到 6/10 与 9/10；V2 首次 held-out 为
+5/5。但旧 schema 没有锁定完整 runtime snapshot 和 working-tree dirty 状态，且 V2 后来已进入
+开发反馈，因此这些结果只保留为工程演进记录，不能解释为严格因果 A/B 或当前泛化能力。原报告、
+artifact 和适用边界均未删除，统一从 [Historical metrics archive](docs/metrics/archive/README.md)
+进入。
+
+### 复现与回归入口
 
 ```bash
 uv run python scripts/run_real_world_benchmark.py \

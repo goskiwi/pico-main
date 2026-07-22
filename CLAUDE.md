@@ -85,7 +85,9 @@ user input → pico.cli constructs Pico runtime → Pico.ask() creates task_stat
 | `pico/checkpoints.py` | Session resume state evaluation, checkpoint creation, runtime identity comparison. |
 | `pico/session_store.py` | JSON file persistence for sessions in `.pico/sessions/`. |
 | `pico/run_store.py` | Per-run artifact storage in `.pico/runs/<run_id>/` (trace.jsonl, task_state.json, report.json). |
-| `evaluation/real_benchmark.py` | Live-LLM repository benchmark with hidden Docker verification and result reporting. |
+| `evaluation/real_benchmark.py` | Live-LLM benchmark manifest, model client, hidden verifier, and runner. |
+| `evaluation/real_benchmark_evidence.py` | Trace accounting, delegate evidence, and workspace isolation audit. |
+| `evaluation/real_benchmark_reporting.py` | Metric aggregation, artifact comparison, and Markdown reporting. |
 | `pico/report.py` | Run report and tool audit log construction. |
 | `pico/durable_memory.py` | Rule-based durable memory promotion/rejection logic. |
 | `pico/memory_runtime.py` | Runtime hook for triggering durable memory extraction after `ask()` completes. |

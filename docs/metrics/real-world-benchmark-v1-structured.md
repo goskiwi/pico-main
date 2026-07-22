@@ -1,5 +1,9 @@
 # pico-real-world-benchmark-v1
 
+> **Status: historical/archive.** This result is preserved as an engineering
+> observation, not a strict causal ablation against the text/XML baseline. See the
+> [archive index](archive/README.md).
+
 - Captured at: `2026-07-13T19:41:24.812743Z`
 - Provider: `openai`
 - Model: `gpt-5.4`

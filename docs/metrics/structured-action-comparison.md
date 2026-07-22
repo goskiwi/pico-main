@@ -1,5 +1,9 @@
 # Structured Action Protocol Comparison
 
+> **Status: historical/archive.** The 6/10 → 9/10 delta is a useful correlation,
+> but the legacy artifacts do not prove that the action protocol was the only
+> changed variable. See the [archive index](archive/README.md).
+
 - Captured at: `2026-07-13T19:46:48.322546Z`
 - Model: `gpt-5.4`
 - Matched tasks: 10

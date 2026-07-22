@@ -1,5 +1,9 @@
 # Pico Real-world Benchmark V1
 
+> **Status: historical/archive.** This is the original text/XML baseline. Its old
+> artifact schema does not establish a clean, single-variable comparison with the
+> later structured runtime. See the [archive index](archive/README.md).
+
 - Captured at: `2026-07-13T18:39:17.470279Z`
 - Provider: `openai`
 - Model: `gpt-5.4`

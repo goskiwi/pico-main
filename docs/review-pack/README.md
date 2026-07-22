@@ -1,5 +1,19 @@
 # pico Review Pack
 
+## 10–15 minute review route
+
+1. Read the project pitch and architecture map below (2–3 minutes).
+2. Follow the [agent harness overview](../architecture/agent-harness-v1-overview.md),
+   then inspect `pico/agent_loop.py` and `pico/tools.py` (3 minutes).
+3. Read the [security model](../security-model.md) and sample
+   `tests/test_safety_invariants.py` (3 minutes).
+4. Check the [V3 primary report](../metrics/real-world-benchmark-v3-first-3x.md),
+   [negative regression](../metrics/real-world-benchmark-v3-constraint-regression-3x.md),
+   and [metrics evidence map](../metrics/README.md) (4–6 minutes).
+
+Historical V1/V2 numbers are preserved through the
+[archive index](../metrics/archive/README.md), but they are not the headline claim.
+
 ## Project pitch
 
 `pico` is a lightweight local coding agent for repository work. It runs from the terminal, builds context from the current workspace, calls a constrained tool set, and writes local run artifacts for review.
@@ -18,11 +32,13 @@ The project demonstrates an end-to-end agent harness rather than a single API wr
 - `pico/context_history.py`: transcript summarization, task-graph compaction, and history rendering.
 - `pico/memory.py`: working memory and durable memory records.
 - `pico/run_store.py`: per-run `task_state.json`, `trace.jsonl`, and `report.json` persistence.
-- `evaluation/real_benchmark.py`: live-LLM repository benchmark, hidden verification, comparison, and reporting.
+- `evaluation/real_benchmark.py`: benchmark manifest, model client, hidden verifier, and runner.
+- `evaluation/real_benchmark_evidence.py`: trace accounting, delegate evidence, and workspace isolation audit.
+- `evaluation/real_benchmark_reporting.py`: aggregation, artifact comparison, and Markdown reporting.
 
 ## Benchmark evidence
 
-The real-model repository micro-benchmarks live under `benchmarks/`. Hidden verifiers are injected only after the agent stops and run inside the mandatory Docker sandbox. The strongest current evidence is the frozen V3 suite: it was run from a clean committed runtime for three repetitions and passed 13/15 attempts, with four of five tasks passing 3/3. An older V1 before/after run observed 60% versus 90% on the same model and fixture snapshot, but its artifact schema did not lock complete runtime provenance, so it is historical correlation rather than a strict causal ablation. See the [V3 report](../metrics/real-world-benchmark-v3-first-3x.md), [legacy comparison](../metrics/structured-action-comparison.md), and [evaluation methodology](../metrics/evaluation-methodology.md).
+The real-model repository micro-benchmarks live under `benchmarks/`. Hidden verifiers are injected only after the agent stops and run inside the mandatory Docker sandbox. The strongest current evidence is the frozen V3 suite: it was run from a clean committed runtime for three repetitions and passed 13/15 attempts, with four of five tasks passing 3/3. An older V1 before/after run observed 60% versus 90% on the same model and fixture snapshot, but its artifact schema did not lock complete runtime provenance, so it is historical correlation rather than a strict causal ablation. See the [V3 report](../metrics/real-world-benchmark-v3-first-3x.md), [metrics evidence map](../metrics/README.md), and [evaluation methodology](../metrics/evaluation-methodology.md).
 
 The default pytest suite is offline and validates runtime code paths only; Docker integration and live-model tests are explicitly separated, and none is presented as a universal model-capability claim.
 

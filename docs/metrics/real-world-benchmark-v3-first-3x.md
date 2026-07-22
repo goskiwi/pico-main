@@ -1,5 +1,10 @@
 # pico-real-world-benchmark-v3-frozen
 
+> **Status: current published primary evidence for commit `0897195`.** This
+> clean-worktree, three-repetition run is the headline repository micro-benchmark
+> result; it does not validate later runtime revisions. See the
+> [metrics evidence map](README.md).
+
 - Captured at: `2026-07-17T00:33:59.035614Z`
 - Provider: `openai`
 - Model: `gpt-5.4`

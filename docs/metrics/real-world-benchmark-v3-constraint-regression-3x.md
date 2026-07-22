@@ -1,5 +1,9 @@
 # pico-real-world-benchmark-v3-frozen
 
+> **Status: current negative evidence.** This retained regression explains why the
+> tested prompt change was rolled back; it is not a new held-out result. See the
+> [metrics evidence map](README.md).
+
 - Captured at: `2026-07-17T03:26:46.461184Z`
 - Provider: `openai`
 - Model: `gpt-5.4`

@@ -75,14 +75,8 @@ JSON 仍是字符串，模型可能在前后加解释、给出多个动作或输
 4. 展示 frozen manifest 与隐藏 verifier，说明它们在 Agent 结束后才注入。
 5. 最后主动说明本地单用户边界与仓库微基准的外部有效性限制。
 
-## 建议拆成的 Git 提交
+## 投递前检查
 
-当前工作树改动覆盖多轮连续重构，正式投递前建议按以下边界整理历史：
-
-1. `refactor: split runtime context modules`
-2. `feat: enforce docker-only shell sandbox and audited resource limits`
-3. `feat: add strict structured action protocol for responses backends`
-4. `test: add hidden-verifier real-world benchmarks and held-out suite`
-5. `docs: publish benchmark evidence and interview review pack`
-
-不要把 API Key、`.pico/` 运行目录或 benchmark workspace 副本提交；只提交已脱敏的指标 JSON、Markdown 报告、fixture 和 verifier。
+1. 确认工作区干净，提交历史能按功能、验证和证据顺序阅读。
+2. 运行离线测试、Docker integration suite 和 runtime package smoke test。
+3. 不提交 API Key、`.pico/` 运行目录或 benchmark workspace 副本；只保留已脱敏的指标、报告、fixture 和 verifier。

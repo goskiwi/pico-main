@@ -1,5 +1,8 @@
 # Real-model evaluation methodology
 
+> **Status: current methodology.** Result status and archive boundaries are indexed
+> in the [metrics evidence map](README.md).
+
 Pico's real-world benchmark measures whether a model-driven agent can complete small repository
 tasks that are accepted by tests unavailable to the agent during execution. It is an engineering
 regression suite, not a claim about general coding ability.

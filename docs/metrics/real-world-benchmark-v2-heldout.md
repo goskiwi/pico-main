@@ -1,5 +1,9 @@
 # pico-real-world-benchmark-v2-heldout
 
+> **Status: historical/archive.** This was a single held-out run at capture time;
+> the task set later entered the development feedback loop and is no longer fresh
+> held-out evidence. See the [archive index](archive/README.md).
+
 - Captured at: `2026-07-13T19:43:55.422756Z`
 - Provider: `openai`
 - Model: `gpt-5.4`
