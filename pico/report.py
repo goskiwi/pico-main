@@ -20,6 +20,7 @@ def build_report(agent, task_state):
         "agent": agent.identity_metadata(),
         "summary": build_run_summary(agent, task_state),
         "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
+        "repo_map": dict((agent.last_prompt_metadata or {}).get("repo_map", {})),
         "tool_audit": list(agent.tool_audit_log),
         "model_action_rejections": list(getattr(agent, "model_action_rejections", [])),
         "task_state": task_state.to_dict(),
@@ -72,6 +73,8 @@ def record_tool_audit(agent, name, args, result, duration_ms):
         entry["path"] = clip(str((args or {}).get("path", ".")), 200)
         if name in {"delegate", "delegate_many"}:
             entry["delegate_outcome"] = dict(metadata.get("delegate_outcome") or {})
+    elif name == "query_repo_map":
+        entry["query"] = clip(str((args or {}).get("query", "")), 200)
     agent.tool_audit_log.append(entry)
     return entry
 
@@ -106,6 +109,9 @@ def build_run_summary(agent, task_state):
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
         "skills": list((agent.last_prompt_metadata or {}).get("skills", {}).get("selected_names", [])),
+        "repo_map_files": list(
+            (agent.last_prompt_metadata or {}).get("repo_map", {}).get("selected_files", [])
+        ),
         "changed_files": changed_paths,
         "failed_tools": failed_tools,
         "security_events": security_events,

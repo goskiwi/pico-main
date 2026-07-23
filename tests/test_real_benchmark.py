@@ -6,12 +6,13 @@ from unittest.mock import patch
 import pytest
 
 from evaluation.real_benchmark import (
+    _variant_feature_flags,
     build_real_model_client,
     load_real_benchmark,
     RealWorldBenchmarkRunner,
     validate_real_benchmark,
 )
-from evaluation.real_benchmark_contract import VARIANT_FULL
+from evaluation.real_benchmark_contract import VARIANT_FULL, VARIANT_NO_REPO_MAP
 from evaluation.real_benchmark_evidence import _attempt_trace_metrics
 from pico.models import FakeModelClient
 from tests.helpers import UnitTestSandbox
@@ -19,6 +20,16 @@ from tests.helpers import UnitTestSandbox
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DELEGATE_BENCHMARK_PATH = PROJECT_ROOT / "benchmarks" / "real_world_tasks_delegate.json"
+
+
+def test_repo_map_ablation_disables_only_repo_map_retrieval():
+    full = _variant_feature_flags(VARIANT_FULL)
+    ablated = _variant_feature_flags(VARIANT_NO_REPO_MAP)
+
+    assert full.get("repo_map", True) is True
+    assert ablated["repo_map"] is False
+    assert ablated["require_explicit_final"] is True
+    assert ablated["require_workspace_change"] is True
 
 
 def test_delegate_live_regression_requires_delegate_many():

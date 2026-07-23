@@ -19,6 +19,8 @@
 
 - **结构化控制流**：OpenAI-compatible 主路径使用 strict function calling；工具额度与结束协议
   分离，额度耗尽后只能进入一次 final-only 收尾，不能借机继续修改工作区。
+- **任务相关仓库检索**：tree-sitter 提取 Python 类、函数和方法，导入、调用、继承与测试关系组成
+  符号图；Personalized PageRank 按当前请求排序，并在独立 token 预算内注入函数签名。
 - **强制执行边界**：文件工具限制敏感路径；`run_shell` 只能进入无网络、只读 RootFS、移除
   capabilities 且限制 CPU、内存和 PIDs 的 Docker 容器，没有宿主机回退。
 - **可恢复、可审计**：session、checkpoint、任务图、完整工具输出和逐事件 trace 分层存储，既能
@@ -30,14 +32,16 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| `v0.1.0` 工程回归 | 252 passed，4 个 opt-in 测试默认跳过；Docker integration 9/9 |
+| 当前 `master` 工程回归 | 282 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 微基准 | commit `0897195` 三轮通过 13/15，4/5 任务稳定 3/3；**不是当前 tag 的完整复测** |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
 ```mermaid
 flowchart LR
-    U["User request"] --> C["ContextManager"]
+    U["User request"] --> R["tree-sitter symbol graph + task PageRank"]
+    U --> C["ContextManager"]
+    R --> C
     C --> M["LangChain Responses adapter"]
     M --> L["LangGraph bounded loop"]
     L --> P["Schema / capability / approval"]
@@ -177,6 +181,47 @@ Review the change as production code.
 
 `.pico/` 是本地运行时目录，默认不提交；`examples/skills/` 用来保存可复用模板。
 
+## Task-aware Repo Map
+
+每轮请求进入 `ContextManager` 前，`pico` 会增量扫描工作区中的 Python 文件。它不是把源码全文
+塞进 prompt，而是只提取模块、类、函数、方法和签名，再把以下关系建成带权图：
+
+- `import` / `from ... import ...`
+- 函数与方法调用
+- 类继承
+- 模块、类与内部定义的包含关系
+- 测试函数与被测符号的名称关联
+
+当前请求中的标识符、文件路径和测试意图形成 Personalized PageRank 的 personalization vector。
+最终结果还会结合词法命中分数，并对同一文件做多样性惩罚，避免一个大文件独占全部预算。
+`build/`、`dist/`、`artifacts/`、虚拟环境、缓存、依赖目录、超大文件和 symlink 不进入图。
+
+Repo Map 有两条使用路径：
+
+1. 每轮 prompt 在 `repo_map` section 中自动获得一份受 token 预算约束的签名地图。
+2. 模型可以调用只读的 `query_repo_map`，针对新的子问题重新排序。
+
+工具参数示意：
+
+```json
+{
+  "name": "query_repo_map",
+  "args": {
+    "query": "UserService.create_user callers and tests",
+    "budget_tokens": 1200,
+    "max_results": 24
+  }
+}
+```
+
+每次 prompt 的 `prompt_metadata.repo_map` 和最终 `report.json` 都会记录图节点/边数量、解析错误
+文件数、缓存命中、入选文件、符号分数与命中原因。当前实现有意只支持 Python，并强依赖
+tree-sitter；没有 AST/正则兼容降级。算法与限制见
+[Repo Map architecture](docs/architecture/repo-map.md)。
+
+真实模型回归支持 `--variant no_repo_map`，可在同一冻结任务快照上与 `full` 比较通过率、工具步数、
+token 和时延。加入新检索策略后应先跑这个 ablation，再决定是否扩大默认预算。
+
 ## 安全与持久化
 
 `pico` 不会默认把所有动作都放开。像 shell 执行、文件写入这类高风险操作，会受审批模式控制：
@@ -291,7 +336,8 @@ tool_outputs/*.txt
 用户输入
   -> pico.cli 构造 Pico runtime
   -> Pico.ask() 创建 task_state 和 run 目录
-  -> ContextManager 组装 prompt
+  -> RepoMap 按当前任务构建/刷新 Python 符号图
+  -> ContextManager 按预算注入任务相关签名并组装 prompt
   -> model_client.complete_action() 返回统一 ModelAction
   -> Responses function_call / function_call_output 组成结构化工具循环
   -> Pico.run_tool() 校验、审批、执行工具
@@ -309,6 +355,7 @@ tool_outputs/*.txt
 - `pico/delegate_scheduler.py`：只读子 agent 的并发调度、总步骤预算和 outcome 核算。
 - `pico/sandbox.py`：强制 Docker Shell 沙箱、资源限制、超时回收和审计元数据。
 - `pico/context_manager.py`：prompt 分区组装和上下文预算分配。
+- `pico/repo_map.py`：tree-sitter 符号提取、引用图、增量缓存、Personalized PageRank 和预算渲染。
 - `pico/context_history.py`：历史摘要、任务图压缩和 transcript 渲染。
 - `pico/context_types.py`：token 估算、语义截断和 section 数据结构。
 - `pico/memory.py`：短期工作记忆和可持久化记忆。
@@ -379,6 +426,7 @@ artifact 和适用边界均未删除，统一从 [Historical metrics archive](do
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --variant full \
+  --variant no_repo_map \
   --benchmark-path benchmarks/real_world_tasks_v3.json \
   --repetitions 3 \
   --require-clean-worktree \
@@ -390,6 +438,30 @@ benchmark runner 只读取 `pico` 仓库根目录 `.env.local` 中的 `OPENAI_AP
 `OPENAI_API_KEY` 和 `OPENAI_MODEL`；这与 CLI 读取 `--cwd/.env.local` 不同。复现前需在 `pico`
 仓库中单独准备该文件，`--model` 与 `--base-url` 只用于一次性显式覆盖。上述输出名故意使用
 `rerun`，避免覆盖仓库中的首次运行证据；重复 V3 是回归，不会重新获得 held-out 身份。
+同时指定 `full` 与 `no_repo_map` 会在报告的 Ablation 部分生成 Repo Map 通过率和平均工具步数
+差值；两个 variant 仍会受到远端模型波动影响，因此应至少跑三轮并检查逐任务稳定性。
+
+### Repo Map 定位专项：冻结 V4
+
+[V4 localization suite](benchmarks/real_world_tasks_v4.json) 专门覆盖 Repo Map 的目标场景：
+五个任务共享一个多 package 的服务仓库，每题都跨越 API、service、policy/store 等模块，并包含
+同名的 legacy/experimental 干扰实现。公开 smoke tests 在未修改 fixture 上通过，五组隐藏 verifier
+分别验证区域运费、租户级 webhook 去重、角色继承、缓存失效和 locale fallback；未修改 fixture
+会被每组隐藏验证拒绝。
+
+V4 用于比较定位能力，不替代通用 coding benchmark。首次真实运行前应先提交并冻结
+prompt、fixture、verifier 和 runtime，然后在 clean worktree 上运行：
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant full \
+  --variant no_repo_map \
+  --benchmark-path benchmarks/real_world_tasks_v4.json \
+  --repetitions 3 \
+  --require-clean-worktree \
+  --artifact-path artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json \
+  --report-path docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md
+```
 
 首次检查环境时，建议先运行一个低成本 smoke：
 

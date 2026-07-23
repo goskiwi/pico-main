@@ -20,6 +20,14 @@ an archived report is not a current benchmark claim.
 The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
 fixtures and hidden verifiers remain under `benchmarks/`.
 
+## Development-only evidence
+
+1. [`real-world-benchmark-v3-repo-map-ablation-live-1x.md`](real-world-benchmark-v3-repo-map-ablation-live-1x.md) —
+   a single-repetition live A/B on the frozen V3 suite comparing `full` with
+   `no_repo_map`. Both variants passed 4/5 tasks; `full` used 1.8 fewer tool steps
+   per task on average. This run was captured from a dirty working tree, so it is
+   directional regression evidence rather than a publishable benchmark claim.
+
 ## Historical / archive evidence
 
 V1, V2, and the legacy structured-action comparison predate the current provenance

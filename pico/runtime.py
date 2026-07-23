@@ -29,6 +29,7 @@ from .config import (
     DEFAULT_SHELL_ENV_ALLOWLIST,
 )
 from .context_manager import ContextManager
+from .repo_map import RepoMap
 from .run_store import RunStore
 from .sandbox import DockerSandbox
 from . import tools as toolkit
@@ -112,6 +113,7 @@ class Pico:
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
+        self.repo_map = RepoMap(self.root)
         self.tools = self.build_tools()
         self.all_tools = dict(self.tools)
         self.skills = self.load_skills()

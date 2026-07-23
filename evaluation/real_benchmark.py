@@ -257,6 +257,13 @@ def _variant_feature_flags(variant):
             "require_explicit_final": True,
             "require_workspace_change": True,
         }
+    if variant == contract.VARIANT_NO_REPO_MAP:
+        return {
+            "repo_map": False,
+            "llm_memory_extract": False,
+            "require_explicit_final": True,
+            "require_workspace_change": True,
+        }
     raise ValueError(f"unsupported benchmark variant: {variant}")
 
 

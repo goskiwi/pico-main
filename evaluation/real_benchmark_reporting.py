@@ -13,6 +13,7 @@ from .real_benchmark_contract import (
     SUPPORTED_VARIANTS,
     VARIANT_FULL,
     VARIANT_NO_MEMORY_CONTEXT,
+    VARIANT_NO_REPO_MAP,
 )
 
 
@@ -266,6 +267,15 @@ def summarize_real_rows(rows):
             "avg_tool_steps_delta": variants[VARIANT_FULL]["avg_tool_steps"]
             - variants[VARIANT_NO_MEMORY_CONTEXT]["avg_tool_steps"],
         }
+    if VARIANT_FULL in variants and VARIANT_NO_REPO_MAP in variants:
+        comparison.update(
+            {
+                "repo_map_pass_rate_delta": variants[VARIANT_FULL]["pass_rate"]
+                - variants[VARIANT_NO_REPO_MAP]["pass_rate"],
+                "repo_map_avg_tool_steps_delta": variants[VARIANT_FULL]["avg_tool_steps"]
+                - variants[VARIANT_NO_REPO_MAP]["avg_tool_steps"],
+            }
+        )
     return {
         "row_count": len(rows),
         "category_counts": {
@@ -431,15 +441,21 @@ def render_real_benchmark_markdown(artifact):
                     f"| {item['passed']}/{item['attempt_count']} | {item['outcome']} |"
                 )
     if summary["comparison"]:
-        lines.extend(
-            [
-                "",
-                "## Ablation",
-                "",
-                f"- Pass-rate delta (full - no_memory_context): {summary['comparison']['pass_rate_delta']:+.1%}",
-                f"- Avg tool-step delta: {summary['comparison']['avg_tool_steps_delta']:+.2f}",
-            ]
-        )
+        lines.extend(["", "## Ablation", ""])
+        if "pass_rate_delta" in summary["comparison"]:
+            lines.extend(
+                [
+                    f"- Pass-rate delta (full - no_memory_context): {summary['comparison']['pass_rate_delta']:+.1%}",
+                    f"- Avg tool-step delta (full - no_memory_context): {summary['comparison']['avg_tool_steps_delta']:+.2f}",
+                ]
+            )
+        if "repo_map_pass_rate_delta" in summary["comparison"]:
+            lines.extend(
+                [
+                    f"- Pass-rate delta (full - no_repo_map): {summary['comparison']['repo_map_pass_rate_delta']:+.1%}",
+                    f"- Avg tool-step delta (full - no_repo_map): {summary['comparison']['repo_map_avg_tool_steps_delta']:+.2f}",
+                ]
+            )
     if summary["failure_category_counts"]:
         lines.extend(
             [

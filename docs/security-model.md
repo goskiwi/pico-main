@@ -47,6 +47,11 @@ replace local validation or authorization.
 - LangChain and LangGraph tracing is disabled in code, even when ambient
   LangSmith tracing environment variables are set, so framework telemetry does
   not create an additional prompt or tool-output destination.
+- Repo Map parses workspace Python files locally, but selected paths, symbol
+  names, signatures, rank evidence, and explicit `query_repo_map` results can
+  enter prompts or tool history. A signature can contain annotations and default
+  expressions, so hard-coded secrets in source are not protected by environment
+  redaction.
 - A custom endpoint can observe repository information sent through prompts and
   tool outputs. Users must evaluate that endpoint's retention and access policy.
 
