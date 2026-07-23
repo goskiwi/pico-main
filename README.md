@@ -2,20 +2,37 @@
 
 **一个可审计、沙箱化的本地 Coding Agent Runtime。**
 
-`pico` 把模型输出变成有界的 `tool / final / retry` 状态转换，再经过本地 schema、权限、审批和
-Docker 隔离后执行。它直接面向代码仓库工作，并把 task state、trace、工具审计、workspace diff
-和最终报告保存在 `.pico/`，便于复盘一次任务为什么成功或失败。
+[`v0.1.0`](https://github.com/goskiwi/pico-main/tree/v0.1.0) ·
+[架构](docs/architecture/agent-harness-v1-overview.md) ·
+[安全模型](docs/security-model.md) ·
+[评测证据](docs/metrics/README.md) ·
+[审阅入口](docs/review-pack/README.md)
 
-项目定位是本地单用户的实验型 Agent runtime，不是多租户生产平台，也不把小型仓库回归集解释为
-通用 coding 能力证明。
+`pico` 不是把 LLM API 包一层 CLI：它把模型动作收敛为有界的 `tool / final / retry` 状态转换，
+经过本地 schema、capability、审批和 Docker 隔离后执行，并把 task state、trace、workspace diff、
+工具审计和最终报告完整落盘。
 
-## 30 秒概览
+> 项目边界：本地单用户实验型 runtime，不是多租户生产平台；仓库微基准用于工程回归，不代表
+> 通用 coding 能力。
 
-| 证据 | 当前结果 |
+## 核心工程工作
+
+- **结构化控制流**：OpenAI-compatible 主路径使用 strict function calling；工具额度与结束协议
+  分离，额度耗尽后只能进入一次 final-only 收尾，不能借机继续修改工作区。
+- **强制执行边界**：文件工具限制敏感路径；`run_shell` 只能进入无网络、只读 RootFS、移除
+  capabilities 且限制 CPU、内存和 PIDs 的 Docker 容器，没有宿主机回退。
+- **可恢复、可审计**：session、checkpoint、任务图、完整工具输出和逐事件 trace 分层存储，既能
+  续接长任务，也能解释一次任务为什么成功或失败。
+- **真实模型验证闭环**：冻结 fixture 与隐藏 verifier，记录完整评测快照、Git 状态、token、时延、
+  delegate 证据和失败分类；失败实验同样保留并说明回滚原因。
+
+## 当前证据
+
+| 证据 | 结果与边界 |
 |---|---|
-| 离线工程回归 | 250+ 项测试；CI 覆盖 Python 3.10–3.12 |
-| 冻结 V3 仓库微基准 | 干净工作区真实 LLM 三轮通过 13/15，4/5 任务稳定 3/3 |
-| Shell 执行边界 | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
+| `v0.1.0` 工程回归 | 252 passed，4 个 opt-in 测试默认跳过；Docker integration 9/9 |
+| 最新已发布 LLM 微基准 | commit `0897195` 三轮通过 13/15，4/5 任务稳定 3/3；**不是当前 tag 的完整复测** |
+| Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
 ```mermaid
@@ -29,36 +46,9 @@ flowchart LR
     L --> A["Trace / report / checkpoint"]
 ```
 
-## 10–15 分钟审阅路径
-
-| 时间 | 看什么 | 要验证的问题 |
-|---|---|---|
-| 0–2 分钟 | 本页的[项目亮点](#项目亮点)与[适用场景](#适用场景) | 项目解决什么问题，边界是否诚实 |
-| 2–5 分钟 | [架构概览](docs/architecture/agent-harness-v1-overview.md)，再抽查 `pico/agent_loop.py`、`pico/tools.py` | 模型 Action 如何进入受约束的工程控制流 |
-| 5–8 分钟 | [安全模型](docs/security-model.md)，再抽查 `tests/test_safety_invariants.py` | 路径、审批、Docker、secret 和 delegate 边界是否有测试 |
-| 8–11 分钟 | [V3 三轮主报告](docs/metrics/real-world-benchmark-v3-first-3x.md)与[负向实验](docs/metrics/real-world-benchmark-v3-constraint-regression-3x.md) | 结果是否来自干净快照，失败与回滚是否可解释 |
-| 11–15 分钟 | [评测方法](docs/metrics/evaluation-methodology.md)和[review pack](docs/review-pack/README.md) | 指标口径、外部有效性和复现入口是否完整 |
-
-评测文档的 current / historical 分层入口见 [Metrics evidence map](docs/metrics/README.md)。如果只看一份
-结果，优先看 V3 三轮主报告；V1/V2 和旧协议对比均为归档证据，不是当前能力结论。
-
-## 项目亮点
-
-- **结构化 Agent loop**：OpenAI-compatible 路径使用 strict function calling，统一输出
-  `tool / final / retry` Action；多调用响应只执行首个普通工具并延迟其余调用，异常格式和
-  runtime guard 拒绝都会进入审计记录。
-- **明确的终止语义**：工具额度与结束协议分离；额度耗尽后最多增加一次只暴露
-  `submit_final` 的收尾调用，不能借机继续修改工作区。
-- **安全执行边界**：文件工具限制敏感路径；Shell 强制进入无网络 Docker 沙箱，不提供宿主机
-  回退，并限制 CPU、内存、PIDs、RootFS 和 Linux capabilities。
-- **可追溯运行状态**：每次任务保存 `task_state`、trace、工具审计、任务图、完整工具输出和最终
-  report，可复盘模型决策、失败类别与工作区变更。
-- **真实模型仓库回归**：任务从全新 fixture 开始，Agent 停止后才注入隐藏 verifier；报告记录
-  快照哈希、Git 状态、重复运行波动、token、时延和逐任务稳定性。
-
-当前最可信的能力证据是冻结 V3 在干净 commit 上的三轮结果。早期 V1 两次运行曾观察到文本/XML
-协议 6/10、structured actions 9/10，但旧 artifact 没有锁定完整 runtime/dirty 状态，因此只作为
-历史相关性证据，不表述为严格因果 A/B。完整边界见[真实模型仓库微基准与回归评测](#真实模型仓库微基准与回归评测)。
+如果只有 10–15 分钟，请直接按 [review pack](docs/review-pack/README.md) 的顺序阅读主链路、安全
+边界和评测证据。V1/V2 与旧协议对比保留在[历史证据索引](docs/metrics/archive/README.md)，不作为
+当前能力结论。
 
 ## 适用场景
 
@@ -67,89 +57,74 @@ flowchart LR
 - 用受限工具链执行代码阅读、测试和验证
 - 通过持久化会话与运行工件续接长任务
 
-## 使用截图
+## 界面与示例
 
-CLI 帮助信息：
+当前 CLI 参数：
 
 ![pico help](assets/screenshots/pico-help.png)
 
-启动界面：
+匿名工作区中的启动界面：
 
 ![pico start](assets/screenshots/pico-start.png)
 
-REPL 内置命令与会话路径：
+脱敏的示例交互；路径、session id 和回答均做了展示性归一化：
 
 ![pico repl](assets/screenshots/pico-repl.png)
 
-## 安装
+## 5 分钟快速体验
 
-需要 Python 3.10+。
+需要 Python 3.10+、[`uv`](https://docs.astral.sh/uv/) 和 Docker。模型端点必须支持
+OpenAI-compatible Responses API。
 
-当前 `0.1.0` 以 GitHub 源码仓库作为完整交付物。PyPI wheel 和 sdist 只包含构建 `pico`
-runtime 所需的文件；`evaluation/`、`tests/`、`benchmarks/`、评测脚本和 `Dockerfile.sandbox`
-是仓库资产，不属于 PyPI 发布包。下面的安装、沙箱和评测命令都假设你已经 clone 本仓库。
+> PyPI 上的 [`pico`](https://pypi.org/project/pico/) 是另一个项目；本项目目前不发布 PyPI 包，
+> 请从源码安装，不要执行 `pip install pico`。
 
-如果你用 `uv`，直接安装参考：
+先准备 runtime 和固定沙箱镜像：
 
 ```bash
+git clone https://github.com/goskiwi/pico-main.git
+cd pico-main
 uv sync --locked
-```
-
-如果你已经在自己的 Python 环境里工作，也可以直接装成可编辑模式：
-
-```bash
-pip install -e .
-```
-
-`run_shell` 强制使用 Docker 隔离，不提供宿主机执行回退。首次使用前需要构建固定的沙箱镜像：
-
-```bash
 docker build -f Dockerfile.sandbox -t pico-sandbox:latest .
 ```
 
-运行时使用 `--pull=never`，不会自动下载镜像。可以通过 `--sandbox-image` 或
-`PICO_SANDBOX_IMAGE` 选择提前构建好的其他镜像。
+在准备让 `pico` 工作的目标仓库中创建 `.env.local`：
 
-默认每个 Shell 容器最多使用 4 CPU、4 GB 内存和 512 个进程；可以通过
-`--sandbox-cpus`、`--sandbox-memory`、`--sandbox-pids-limit` 按机器和仓库规模调整。
-
-## 快速开始
-
-在当前仓库里启动交互模式：
-
-```bash
-uv run pico
-```
-
-指定另一个工作目录：
-
-```bash
-uv run pico --cwd /path/to/repo
-```
-
-直接跑一次性任务：
-
-```bash
-uv run pico "inspect the test failures and propose a fix"
-```
-
-如果当前环境已经安装过包，也可以直接这样启动：
-
-```bash
-python -m pico
-```
-
-## 模型配置
-
-在目标工作区的 `.env.local` 中设置 OpenAI-compatible Responses 接口配置：
-
-```bash
-OPENAI_API_BASE=https://your-api.example/v1
+```dotenv
 OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-5.4
+# 使用第三方兼容端点时再设置：
+# OPENAI_API_BASE=https://your-api.example/v1
 ```
 
-不设置 `OPENAI_API_BASE` 时使用 OpenAI 官方端点；任何兼容或第三方端点都必须显式配置。自定义
+回到 `pico` 仓库，执行一个 one-shot 任务：
+
+```bash
+uv run pico --cwd /path/to/target-repo \
+  "inspect the failing tests, patch the smallest safe fix, and verify it"
+```
+
+运行结束后可直接检查审计工件：
+
+```text
+/path/to/target-repo/.pico/runs/<run_id>/
+├── task_state.json
+├── trace.jsonl
+├── task_graph.mmd
+├── report.json
+└── tool_outputs/
+```
+
+交互模式与模块入口：
+
+```bash
+uv run pico --cwd /path/to/target-repo
+uv run python -m pico --cwd /path/to/target-repo
+```
+
+### 配置与交付边界
+
+不设置 `OPENAI_API_BASE` 时使用 OpenAI 官方端点；第三方兼容端点必须显式配置。自定义
 端点会接收发送给模型的 prompt 和工具结果，使用前应确认其数据处理与密钥策略。
 
 除显式传入的 `--model` 和 `--base-url` 外，启动时 `pico` 只读取 `--cwd` 目录下的该文件作为
@@ -158,6 +133,10 @@ OPENAI_MODEL=gpt-5.4
 
 密钥通过显式配置映射传给模型客户端；`pico` 不会把它复制到 session、trace、report 或 benchmark
 artifact，也不会传入 Docker shell 沙箱。
+
+`run_shell` 使用 `--pull=never`，不会自动下载镜像；默认上限为 4 CPU、4 GB 内存和 512 个进程，
+可通过 sandbox 参数调整。`uv build` 生成的 wheel/sdist 只包含 `pico` runtime；评测、测试、
+Dockerfile 和证据文档属于完整源码仓库。需要可编辑安装时可运行 `pip install -e .`。
 
 ## 常用交互命令
 
@@ -256,10 +235,16 @@ workspace diff。更完整的资产、信任边界和非目标见
 - `tool_audit`：每次工具调用的名称、状态、错误码、capability、审批结果、dry-run 状态、shell 白名单结果、耗时、影响文件、结果预览；shell 调用会记录命令预览。
 - `task_graph_path`：本次任务 Mermaid 任务图路径。
 
-工具完整输出不会长期塞进 prompt。`pico` 会把完整工具结果写进 `tool_outputs/`，history 只保留摘要、`node_id` 和 `content_ref`。如果后续需要回看某个任务图节点对应的原始输出，可以用只读工具：
+工具完整输出不会长期塞进 prompt。`pico` 会把完整工具结果写进 `tool_outputs/`，history 只保留摘要、`node_id` 和 `content_ref`。如果后续需要回看某个任务图节点对应的原始输出，模型会发起结构化的只读工具调用。下面是参数示意，不是用户在 REPL 中输入的命令：
 
-```xml
-<tool>{"name":"read_tool_output","args":{"run_id":"run_20260407","node_id":"t001_run_shell"}}</tool>
+```json
+{
+  "name": "read_tool_output",
+  "args": {
+    "run_id": "run_20260407",
+    "node_id": "t001_run_shell"
+  }
+}
 ```
 
 不传 `run_id` 时，`read_tool_output` 默认读取当前 run。工具会校验 `ref` 必须位于对应 run 的 `tool_outputs/` 目录下，避免任务图引用逃逸到其他路径。
@@ -333,7 +318,7 @@ tool_outputs/*.txt
 - `evaluation/real_benchmark_evidence.py`：trace、delegate 证据和工作区隔离审计。
 - `evaluation/real_benchmark_reporting.py`：指标汇总、报告渲染与 artifact 对比。
 
-`evaluation/` 是源码仓库的验证资产，不属于 PyPI runtime 发布包。
+`evaluation/` 是源码仓库的验证资产，不属于本地构建的 runtime wheel/sdist。
 
 ## 可视化报告
 
@@ -364,7 +349,7 @@ pico 的 Agent 效果评测强制调用真实模型 API，不提供 FakeModelCli
 所有已发布结果、状态和归档关系见 [Metrics evidence map](docs/metrics/README.md)，完整口径见
 [Real-model evaluation methodology](docs/metrics/evaluation-methodology.md)。
 
-### 当前主证据：冻结 V3
+### 最新已发布评测证据：冻结 V3（commit `0897195`）
 
 [V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
 和隐藏 verifier 在首次真实模型运行前提交为 `0897195`，运行前工作区干净，期间未据此调整
@@ -373,7 +358,8 @@ artifact 记录了 0 次模型失败和 0 次 Action 拒绝。两次失败产出
 ready 顺序的 DFS，失败输出与实现缺陷一致；旧 artifact 没有汇总全部 tool status，因此这里不把
 “所有工具调用成功”作为可由发布 JSON 独立验证的结论。见
 [完整报告](docs/metrics/real-world-benchmark-v3-first-3x.md)和
-[原始 JSON artifact](artifacts/real-world-benchmark-v3-first-3x.json)。V3 在这次运行后也只作为回归集。
+[原始 JSON artifact](artifacts/real-world-benchmark-v3-first-3x.json)。V3 在这次运行后也只作为回归集；
+该结果没有覆盖 `v0.1.0` 或当前 `master` 的完整 3× 复测。
 
 一次后续实验在系统提示中加入了通用的“为交互约束编写区分性测试”要求，但 V3 回归降至
 12/15，依赖排序题为 0/3，平均模型调用和耗时也上升；没有观察到收益，因此该提示修改已回滚。
@@ -393,15 +379,29 @@ artifact 和适用边界均未删除，统一从 [Historical metrics archive](do
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --variant full \
-  --benchmark-path benchmarks/real_world_tasks_v2.json \
+  --benchmark-path benchmarks/real_world_tasks_v3.json \
   --repetitions 3 \
   --require-clean-worktree \
-  --artifact-path artifacts/real-world-benchmark-v2-3x.json \
-  --report-path docs/metrics/real-world-benchmark-v2-3x.md
+  --artifact-path artifacts/real-world-benchmark-v3-rerun-3x.json \
+  --report-path docs/metrics/real-world-benchmark-v3-rerun-3x.md
 ```
 
-该命令与 `pico` 一样，只读取项目根目录 `.env.local` 中的 `OPENAI_API_BASE`、
-`OPENAI_API_KEY` 和 `OPENAI_MODEL`。`--model` 与 `--base-url` 只用于一次性显式覆盖。
+benchmark runner 只读取 `pico` 仓库根目录 `.env.local` 中的 `OPENAI_API_BASE`、
+`OPENAI_API_KEY` 和 `OPENAI_MODEL`；这与 CLI 读取 `--cwd/.env.local` 不同。复现前需在 `pico`
+仓库中单独准备该文件，`--model` 与 `--base-url` 只用于一次性显式覆盖。上述输出名故意使用
+`rerun`，避免覆盖仓库中的首次运行证据；重复 V3 是回归，不会重新获得 held-out 身份。
+
+首次检查环境时，建议先运行一个低成本 smoke：
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant full \
+  --benchmark-path benchmarks/real_world_tasks_v2.json \
+  --task url_query_before_fragment \
+  --repetitions 1 \
+  --artifact-path /tmp/pico-real-world-smoke.json \
+  --report-path /tmp/pico-real-world-smoke.md
+```
 
 并发委派另有一个非 held-out 的在线回归任务，既检查代码验收，也要求 trace 中恰好一次
 `delegate_many` 请求两个子任务，并将结构化终态与两个真实 child run 的 agent id 交叉核对：
@@ -421,10 +421,9 @@ PICO_RUN_LIVE_TESTS=1 uv run pytest -m live tests/test_live_delegate_smoke.py -q
 ```
 
 使用 `scripts/compare_real_world_benchmarks.py BASELINE CANDIDATE` 可生成同快照协议对比；比较器
-会拒绝 provider、model、任务集合或完整评测快照不一致的输入。建议先加
-`--task url_query_before_fragment --repetitions 1` 做低成本 smoke run。仓库只提交经过检查的
-JSON/Markdown 指标，工作区副本继续被 `.gitignore` 忽略；API Key 只留在未提交的 `.env.local`，
-不会被复制到 artifact。
+会拒绝 provider、model、任务集合或完整评测快照不一致的输入。仓库只提交经过检查的 JSON/Markdown
+指标，工作区副本继续被 `.gitignore` 忽略；API Key 只留在未提交的 `.env.local`，不会被复制到
+artifact。
 重复运行同一批任务并不等于增加了独立样本，报告中的
 标准差只描述固定任务集上的运行波动。
 

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pico"
 version = "0.1.0"
 description = "Auditable, sandboxed local coding-agent runtime for OpenAI-compatible Responses models"
-readme = "README.pypi.md"
+readme = "README.package.md"
 requires-python = ">=3.10"
 dependencies = []
 keywords = ["ai-agent", "coding-agent", "llm", "sandbox", "evaluation"]
