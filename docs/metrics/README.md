@@ -6,14 +6,20 @@ an archived report is not a current benchmark claim.
 
 ## Current evidence
 
-1. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
+1. [`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md) —
+   primary localization result for clean commit `016c618`: `full` passed 13/15
+   attempts and `no_repo_map` passed 6/15, an observed +46.7 percentage-point
+   difference on the frozen five-task suite. `full` used 33.8% more tokens per
+   attempt and 22.1% more wall time, but 38.3% fewer tokens per passing attempt.
+   This is a targeted Repo Map benchmark, not a universal coding-agent claim.
+2. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
    primary published result for commit `0897195`: 13/15 attempts across three
    clean-worktree repetitions; four of five tasks passed 3/3. It is not validation
    of later runtime revisions.
-2. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
+3. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
    negative follow-up: a prompt change regressed the same frozen suite to 12/15 and
    was rolled back.
-3. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
+4. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
    repetition semantics, hidden-verifier isolation, delegation cost accounting, and
    interpretation limits.
 

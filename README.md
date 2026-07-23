@@ -32,8 +32,8 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前 `master` 工程回归 | 282 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
-| 最新已发布 LLM 微基准 | commit `0897195` 三轮通过 13/15，4/5 任务稳定 3/3；**不是当前 tag 的完整复测** |
+| 当前分支工程回归 | 282 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 最新已发布 LLM 微基准 | commit `016c618` 的 V4 定位专项：Repo Map 13/15，关闭后 6/15；仅代表该冻结套件 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
@@ -396,7 +396,21 @@ pico 的 Agent 效果评测强制调用真实模型 API，不提供 FakeModelCli
 所有已发布结果、状态和归档关系见 [Metrics evidence map](docs/metrics/README.md)，完整口径见
 [Real-model evaluation methodology](docs/metrics/evaluation-methodology.md)。
 
-### 最新已发布评测证据：冻结 V3（commit `0897195`）
+### 最新已发布评测证据：Repo Map 定位专项 V4（commit `016c618`）
+
+[V4 localization suite](benchmarks/real_world_tasks_v4.json) 在首次真实运行前提交并冻结。它让五个
+任务共享一个多 package 服务仓库，每题跨越 API、service、policy/store，并包含同名的
+legacy/experimental 干扰实现。`gpt-5.4`、temperature 0、clean worktree 下各跑三轮，
+`full` 通过 13/15（86.7%），`no_repo_map` 通过 6/15（40.0%），观察到 +46.7 个百分点差值。
+四题在 `full` 下稳定通过 3/3；关闭 Repo Map 后出现 7 次 `step_limit_reached`。
+
+Repo Map 不是免费的：`full` 每 attempt 的总 token 高 33.8%，平均耗时高 22.1%；但按成功
+attempt 计算的 token 低 38.3%。这说明它在该定位专项上用更多初始上下文减少了目录探索并提高
+完成率，不构成对任意仓库或模型的通用因果结论。见
+[完整报告](docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md)和
+[原始 JSON artifact](artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json)。
+
+### 此前发布评测证据：冻结 V3（commit `0897195`）
 
 [V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
 和隐藏 verifier 在首次真实模型运行前提交为 `0897195`，运行前工作区干净，期间未据此调整
@@ -449,8 +463,8 @@ benchmark runner 只读取 `pico` 仓库根目录 `.env.local` 中的 `OPENAI_AP
 分别验证区域运费、租户级 webhook 去重、角色继承、缓存失效和 locale fallback；未修改 fixture
 会被每组隐藏验证拒绝。
 
-V4 用于比较定位能力，不替代通用 coding benchmark。首次真实运行前应先提交并冻结
-prompt、fixture、verifier 和 runtime，然后在 clean worktree 上运行：
+V4 用于比较定位能力，不替代通用 coding benchmark。首次真实运行已从冻结 commit `016c618`
+和 clean worktree 完成；以下命令用于重复回归，不会重新获得 held-out 身份：
 
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
