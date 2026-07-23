@@ -10,6 +10,7 @@ from .common import safe_mean as _safe_mean
 from .common import safe_ratio as _safe_ratio
 from .common import utc_timestamp as _utc_timestamp
 from .real_benchmark_contract import (
+    REPO_MAP_BUDGET_VARIANTS,
     SUPPORTED_VARIANTS,
     VARIANT_FULL,
     VARIANT_NO_MEMORY_CONTEXT,
@@ -94,6 +95,9 @@ def summarize_real_rows(rows):
         repetition_pass_rates = [item["pass_rate"] for item in repetition_summaries]
         passed = sum(1 for row in variant_rows if row["passed"])
         variants[variant] = {
+            "repo_map_budget_cap_tokens": variant_rows[0].get(
+                "repo_map_budget_cap_tokens"
+            ),
             "task_count": len(task_stability),
             "attempt_count": len(variant_rows),
             "repetition_count": len(repetition_summaries),
@@ -276,6 +280,19 @@ def summarize_real_rows(rows):
                 - variants[VARIANT_NO_REPO_MAP]["avg_tool_steps"],
             }
         )
+    repo_map_budget_comparisons = {}
+    if VARIANT_FULL in variants:
+        for variant in REPO_MAP_BUDGET_VARIANTS:
+            if variant not in variants:
+                continue
+            repo_map_budget_comparisons[variant] = {
+                "pass_rate_delta": variants[VARIANT_FULL]["pass_rate"]
+                - variants[variant]["pass_rate"],
+                "avg_tool_steps_delta": variants[VARIANT_FULL]["avg_tool_steps"]
+                - variants[variant]["avg_tool_steps"],
+            }
+    if repo_map_budget_comparisons:
+        comparison["repo_map_budget_variants"] = repo_map_budget_comparisons
     return {
         "row_count": len(rows),
         "category_counts": {
@@ -333,8 +350,8 @@ def render_real_benchmark_markdown(artifact):
         "",
         "## Results",
         "",
-        "| Variant | Protocols (all) | Pass rate | Passed | Avg tools | Avg calls P/D/T | Avg delegates | Avg failures P/D/T | Avg rejects P/D/T | Input P/D/T | Cached P/D/T | Output P/D/T | Model time P/D/T | Avg duration |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Variant | Map cap | Protocols (all) | Pass rate | Passed | Avg tools | Avg calls P/D/T | Avg delegates | Avg failures P/D/T | Avg rejects P/D/T | Input P/D/T | Cached P/D/T | Output P/D/T | Model time P/D/T | Avg duration |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for variant, metrics in summary["variants"].items():
         avg_model_calls = metrics["avg_model_calls"]
@@ -374,8 +391,16 @@ def render_real_benchmark_markdown(artifact):
         total_model_duration_ms = metrics.get(
             "avg_total_model_duration_ms", parent_model_duration_ms
         )
+        repo_map_budget_cap = metrics.get("repo_map_budget_cap_tokens")
+        if repo_map_budget_cap == 0:
+            repo_map_budget_label = "disabled"
+        elif repo_map_budget_cap is None:
+            repo_map_budget_label = "dynamic"
+        else:
+            repo_map_budget_label = str(repo_map_budget_cap)
         lines.append(
-            f"| {variant} | {', '.join(metrics.get('action_protocols', [])) or '-'} "
+            f"| {variant} | {repo_map_budget_label} "
+            f"| {', '.join(metrics.get('action_protocols', [])) or '-'} "
             f"| {metrics['pass_rate']:.1%} | {metrics['passed']}/{metrics.get('attempt_count', metrics['task_count'])} "
             f"| {metrics['avg_tool_steps']:.2f} "
             f"| {parent_calls:.2f}/{delegate_calls:.2f}/{total_calls:.2f} "
@@ -454,6 +479,15 @@ def render_real_benchmark_markdown(artifact):
                 [
                     f"- Pass-rate delta (full - no_repo_map): {summary['comparison']['repo_map_pass_rate_delta']:+.1%}",
                     f"- Avg tool-step delta (full - no_repo_map): {summary['comparison']['repo_map_avg_tool_steps_delta']:+.2f}",
+                ]
+            )
+        for variant, deltas in summary["comparison"].get(
+            "repo_map_budget_variants", {}
+        ).items():
+            lines.extend(
+                [
+                    f"- Pass-rate delta (full - {variant}): {deltas['pass_rate_delta']:+.1%}",
+                    f"- Avg tool-step delta (full - {variant}): {deltas['avg_tool_steps_delta']:+.2f}",
                 ]
             )
     if summary["failure_category_counts"]:

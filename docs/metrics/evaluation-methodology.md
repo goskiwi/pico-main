@@ -131,6 +131,14 @@ no_repo_map`. Because variants call a remote model sequentially, the comparison 
 not paired deterministic inference. Interpret it together with per-task stability,
 token totals, and latency rather than as a causal claim from one run.
 
+The runner also exposes `repo_map_600`, `repo_map_1000`, and `repo_map_1600`.
+Each sets the automatic Repo Map section to an auditable hard token cap; dynamic
+budget adjustment cannot exceed that cap. A budget study should use one repetition
+to screen all three candidates, choose by pass rate first and cost second, and then
+run `full` against only the selected candidate for at least three repetitions.
+Because candidate selection consumes V4 outcomes, the confirmation remains tuning
+and regression evidence on V4 rather than a new held-out result.
+
 ### Localization-heavy V4 suite
 
 `benchmarks/real_world_tasks_v4.json` isolates the use case Repo Map is intended to

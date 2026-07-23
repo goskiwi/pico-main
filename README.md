@@ -32,7 +32,7 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前分支工程回归 | 282 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 当前分支工程回归 | 289 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 微基准 | commit `016c618` 的 V4 定位专项：Repo Map 13/15，关闭后 6/15；仅代表该冻结套件 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
@@ -220,7 +220,9 @@ tree-sitter；没有 AST/正则兼容降级。算法与限制见
 [Repo Map architecture](docs/architecture/repo-map.md)。
 
 真实模型回归支持 `--variant no_repo_map`，可在同一冻结任务快照上与 `full` 比较通过率、工具步数、
-token 和时延。加入新检索策略后应先跑这个 ablation，再决定是否扩大默认预算。
+token 和时延。`repo_map_600`、`repo_map_1000`、`repo_map_1600` 三个变体会把自动注入的
+Repo Map section 设为相应的 token 硬上限；动态预算不能突破该上限，报告会记录 cap。加入新检索
+策略后应先跑这个 ablation，再决定是否扩大默认预算。
 
 ## 安全与持久化
 
@@ -475,6 +477,19 @@ uv run python scripts/run_real_world_benchmark.py \
   --require-clean-worktree \
   --artifact-path artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json \
   --report-path docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md
+```
+
+预算调优应先用单轮筛选缩小候选，再让选中的低预算档与 `full` 各跑至少三轮。由于 V4 结果已经
+参与档位选择，这一过程只能回答固定回归集上的成本/成功率取舍，不能作为新的 held-out 泛化证据：
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant repo_map_600 \
+  --variant repo_map_1000 \
+  --variant repo_map_1600 \
+  --benchmark-path benchmarks/real_world_tasks_v4.json \
+  --repetitions 1 \
+  --require-clean-worktree
 ```
 
 首次检查环境时，建议先运行一个低成本 smoke：

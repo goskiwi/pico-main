@@ -52,6 +52,13 @@ class ContextManager:
         self.section_budgets = dict(DEFAULT_SECTION_BUDGETS)
         if section_budgets:
             self.section_budgets.update({str(key): int(value) for key, value in section_budgets.items()})
+        self.repo_map_budget_cap_tokens = getattr(
+            agent, "repo_map_budget_tokens", None
+        )
+        if self.repo_map_budget_cap_tokens is not None:
+            self.section_budgets["repo_map"] = int(
+                self.repo_map_budget_cap_tokens
+            )
         self._section_floor_overrides = {str(key): int(value) for key, value in (section_floors or {}).items()}
         self.section_floors = self._compute_section_floors()
         self.reduction_order = tuple(reduction_order or DEFAULT_REDUCTION_ORDER)
@@ -132,6 +139,19 @@ class ContextManager:
         dynamic_adjustment = {}
         if dynamic_budget_enabled:
             budgets, dynamic_adjustment = self._dynamic_budget_adjust(budgets, user_message)
+        if self.repo_map_budget_cap_tokens is not None:
+            repo_map_budget_before_cap = int(budgets.get("repo_map", 0))
+            budgets["repo_map"] = min(
+                repo_map_budget_before_cap,
+                int(self.repo_map_budget_cap_tokens),
+            )
+            dynamic_adjustment = {
+                **dynamic_adjustment,
+                "repo_map_budget_cap_tokens": int(
+                    self.repo_map_budget_cap_tokens
+                ),
+                "repo_map_budget_before_cap_tokens": repo_map_budget_before_cap,
+            }
         dedup_file_paths = set()
         if cross_section_dedup_enabled and memory_enabled:
             memory_state = self.agent.memory.to_dict()

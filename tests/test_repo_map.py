@@ -158,6 +158,25 @@ def test_context_manager_injects_ranked_repo_map_and_metadata(tmp_path):
     assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
 
 
+def test_context_manager_enforces_explicit_repo_map_budget_cap(tmp_path):
+    _write_python_repo(tmp_path)
+    agent = build_agent(tmp_path, [])
+    agent.repo_map_budget_tokens = 600
+    manager = ContextManager(agent)
+
+    _, metadata = manager.build("Fix UserService.create_user in app/services.py")
+
+    assert metadata["section_budgets_tokens"]["repo_map"] == 600
+    assert metadata["sections"]["repo_map"]["budget_tokens"] == 600
+    assert metadata["repo_map"]["rendered_estimated_tokens"] <= 600
+    assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
+    assert metadata["dynamic_adjustment"]["repo_map_budget_cap_tokens"] == 600
+    assert (
+        metadata["dynamic_adjustment"]["repo_map_budget_before_cap_tokens"]
+        > 600
+    )
+
+
 def test_query_repo_map_tool_returns_ranked_symbols_and_cache_evidence(tmp_path):
     _write_python_repo(tmp_path)
     agent = build_agent(tmp_path, [])

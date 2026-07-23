@@ -51,6 +51,11 @@ Requests that name a file or dotted symbol borrow additional budget from older
 history. During a run, `query_repo_map` can refresh the graph after edits and rank a
 new sub-question without rebuilding the model's full prompt.
 
+An explicit `repo_map_budget_tokens` runtime value changes that section from the
+normal dynamically adjusted budget to a hard upper bound. Benchmark variants use
+this path for 600, 1000, and 1600-token budget studies, and retain the configured cap
+in artifact rows and reports.
+
 Prompt metadata and the final report retain:
 
 - graph node and edge counts;
