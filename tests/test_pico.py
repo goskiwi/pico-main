@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from pico.actions import ModelAction
 from pico.models import FakeModelClient
 from pico.runtime import Pico
@@ -8,6 +10,28 @@ def write_skill(root, name, text):
     path = root / ".pico" / "skills" / name
     path.mkdir(parents=True, exist_ok=True)
     (path / "SKILL.md").write_text(text, encoding="utf-8")
+
+
+def test_agent_graph_disables_ambient_langsmith_tracing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    agent = build_agent(tmp_path, ["<final>Private result.</final>"])
+
+    with patch("langchain_core.tracers.langchain.LangChainTracer") as tracer:
+        assert agent.ask("Do not trace this request") == "Private result."
+
+    tracer.assert_not_called()
+
+
+def test_agent_graph_stops_at_exact_retry_limit(tmp_path):
+    malformed = '<tool>{"name":"read_file","args":"bad"}</tool>'
+    agent = build_agent(tmp_path, [malformed] * 5, max_steps=1)
+
+    answer = agent.ask("Keep returning malformed actions")
+
+    assert answer.startswith("Stopped after too many malformed model responses")
+    assert agent.current_task_state.attempts == 5
+    assert agent.current_task_state.stop_reason == "retry_limit_reached"
 
 
 def test_agent_runs_tool_then_final(tmp_path):

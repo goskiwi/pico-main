@@ -44,6 +44,9 @@ replace local validation or authorization.
   to the model client as an explicit mapping. Pico does not bulk-export those
   assignments into `os.environ`.
 - API keys are not written to session, trace, report, or benchmark artifacts.
+- LangChain and LangGraph tracing is disabled in code, even when ambient
+  LangSmith tracing environment variables are set, so framework telemetry does
+  not create an additional prompt or tool-output destination.
 - A custom endpoint can observe repository information sent through prompts and
   tool outputs. Users must evaluate that endpoint's retention and access policy.
 

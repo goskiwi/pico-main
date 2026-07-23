@@ -80,6 +80,14 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     mock_input.assert_not_called()
 
 
+def test_local_tool_validation_rejects_provider_bypassed_extra_arguments(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("list_files", {"path": ".", "unexpected": "value"})
+
+    assert result.startswith("error: invalid arguments for list_files: unexpected argument")
+
+
 def test_list_files_hides_internal_agent_state(tmp_path):
     agent = build_agent(tmp_path, [])
     (tmp_path / ".pico").mkdir(exist_ok=True)

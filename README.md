@@ -38,8 +38,8 @@
 ```mermaid
 flowchart LR
     U["User request"] --> C["ContextManager"]
-    C --> M["Responses function call"]
-    M --> L["Bounded agent loop"]
+    C --> M["LangChain Responses adapter"]
+    M --> L["LangGraph bounded loop"]
     L --> P["Schema / capability / approval"]
     P --> T["File tools or Docker sandbox"]
     T --> L

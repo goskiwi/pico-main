@@ -1,6 +1,11 @@
 """Execution lifecycle for one complete agent turn."""
 
 import time
+from typing import Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
+from langsmith import tracing_context
 
 from . import memory_runtime, report, security
 from . import tools as toolkit
@@ -13,6 +18,15 @@ from .checkpoints import (
 from .parser import retry_notice
 from .task_state import TaskState
 from .workspace import clip, now
+
+
+class AgentTurnState(TypedDict, total=False):
+    """Transient routing state; durable audit/resume state stays in ``TaskState``."""
+
+    native_prompt: tuple[str, dict[str, Any]] | None
+    finalization_attempted: bool
+    action: ModelAction
+    result: str
 
 
 def run_agent_turn(agent, user_message):
@@ -175,24 +189,37 @@ def _run_agent_turn(agent, user_message):
         },
     )
 
-    tool_steps = 0
-    attempts = 0
     max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
     native_actions = bool(getattr(agent.model_client, "supports_native_actions", False))
-    native_prompt = None
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
-    finalization_attempted = False
 
-    while attempts < max_attempts:
-        finalization_only = tool_steps >= agent.max_steps
+    def finish_stopped():
+        if task_state.attempts >= max_attempts and task_state.tool_steps < agent.max_steps:
+            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+            task_state.stop_retry_limit(final)
+        else:
+            final = "Stopped after reaching the step limit without a final answer."
+            task_state.stop_step_limit(final)
+        agent.mark_work_finished(final, stopped=True)
+        agent.record({"role": "assistant", "content": final, "created_at": now()})
+        _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
+        return _write_finished_run(agent, task_state, final, run_started_at)
+
+    def call_model(state: AgentTurnState):
+        if task_state.attempts >= max_attempts:
+            return Command(update={"result": finish_stopped()}, goto=END)
+
+        finalization_only = task_state.tool_steps >= agent.max_steps
+        finalization_attempted = bool(state.get("finalization_attempted", False))
         if finalization_only:
             if not native_actions or finalization_attempted:
-                break
+                return Command(update={"result": finish_stopped()}, goto=END)
             finalization_attempted = True
-        attempts += 1
+
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
+        native_prompt = state.get("native_prompt")
         prompt, prompt_metadata = _prompt_for_attempt(
             agent,
             task_state,
@@ -231,7 +258,9 @@ def _run_agent_turn(agent, user_message):
                 require_explicit_final=agent.feature_enabled("require_explicit_final"),
             )
         except Exception as exc:
-            final = f"Stopped after model error: {type(exc).__name__}: {exc}"
+            error_type = type(exc).__name__
+            error = str(exc)
+            final = f"Stopped after model error: {error_type}: {error}"
             agent.mark_work_finished(final, stopped=True)
             agent.record({"role": "assistant", "content": final, "created_at": now()})
             task_state.stop_model_error(final)
@@ -242,12 +271,13 @@ def _run_agent_turn(agent, user_message):
                 task_state,
                 "model_failed",
                 {
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error_type": error_type,
+                    "error": error,
                     "duration_ms": int((time.monotonic() - model_started_at) * 1000),
                 },
             )
-            return _write_finished_run(agent, task_state, final, run_started_at)
+            result = _write_finished_run(agent, task_state, final, run_started_at)
+            return Command(update={"result": result}, goto=END)
 
         completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
         if completion_metadata:
@@ -311,17 +341,18 @@ def _run_agent_turn(agent, user_message):
             },
         )
 
+        next_state = {
+            "native_prompt": native_prompt,
+            "finalization_attempted": finalization_attempted,
+        }
         if kind == ACTION_TOOL:
-            tool_steps += 1
-            _execute_tool_action(agent, task_state, user_message, action)
-            continue
-
+            return Command(update={**next_state, "action": action}, goto="execute_tool")
         if kind == ACTION_RETRY:
             _record_action_result(agent, action, payload)
             agent.mark_retry_needed(payload)
             agent.record({"role": "assistant", "content": payload, "created_at": now()})
             agent.run_store.write_task_state(task_state)
-            continue
+            return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
         agent.mark_work_finished(final)
@@ -330,15 +361,24 @@ def _run_agent_turn(agent, user_message):
         memory_runtime.promote_durable_memory(agent, user_message, final)
         memory_runtime.llm_promote_durable_memory(agent, user_message, final)
         _create_checkpoint(agent, task_state, user_message, "run_finished")
-        return _write_finished_run(agent, task_state, final, run_started_at)
+        result = _write_finished_run(agent, task_state, final, run_started_at)
+        return Command(update={"result": result}, goto=END)
 
-    if attempts >= max_attempts and tool_steps < agent.max_steps:
-        final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-        task_state.stop_retry_limit(final)
-    else:
-        final = "Stopped after reaching the step limit without a final answer."
-        task_state.stop_step_limit(final)
-    agent.mark_work_finished(final, stopped=True)
-    agent.record({"role": "assistant", "content": final, "created_at": now()})
-    _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
-    return _write_finished_run(agent, task_state, final, run_started_at)
+    def execute_tool(state: AgentTurnState):
+        _execute_tool_action(agent, task_state, user_message, state["action"])
+        return Command(goto="call_model")
+
+    workflow = StateGraph(AgentTurnState)
+    workflow.add_node(
+        "call_model", call_model, destinations=("call_model", "execute_tool", END)
+    )
+    workflow.add_node("execute_tool", execute_tool, destinations=("call_model",))
+    workflow.add_edge(START, "call_model")
+
+    graph = workflow.compile()
+    with tracing_context(enabled=False):
+        result = graph.invoke(
+            {"finalization_attempted": False},
+            config={"recursion_limit": max(32, max_attempts * 4 + 16)},
+        )
+    return result["result"]

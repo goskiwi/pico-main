@@ -85,8 +85,8 @@ ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _load_workspace_env(cwd):
     """Read ``<cwd>/.env.local`` into a mapping for one Pico startup.
 
-    Pico intentionally keeps zero production dependencies, so this is a small
-    dotenv-compatible reader rather than a dependency on ``python-dotenv``.
+    Keep startup configuration narrow and auditable with this small
+    dotenv-compatible reader rather than adding a general environment loader.
     The model client uses this mapping instead of ambient process variables.
     """
     env_path = Path(cwd).expanduser().resolve() / ENV_LOCAL_FILENAME

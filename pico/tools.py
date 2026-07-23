@@ -8,8 +8,12 @@ import re
 import shlex
 import shutil
 import subprocess
+from enum import Enum
 from functools import partial
 from pathlib import Path
+
+from langchain_core.utils.function_calling import convert_to_openai_function
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from . import security
 from .delegate_scheduler import DelegateOutcome, DelegateScheduler
@@ -27,107 +31,209 @@ DANGEROUS_SHELL_PATTERNS = tuple(
     (reason, re.compile(pattern)) for reason, pattern in _DANGEROUS_SHELL_PATTERNS_RAW
 )
 
-BASE_TOOL_SPECS = {
-    "list_files": {
-        "schema": {
-            "path": {"type": "str", "default": "."},
-        },
-        "capability": "read",
-        "risky": False,
-        "description": "List files in the workspace.",
-    },
-    "read_file": {
-        "schema": {
-            "path": {"type": "str", "required": True, "min_length": 1},
-            "start": {"type": "int", "default": 1, "min": 1},
-            "end": {"type": "int", "default": 200, "min": 1},
-        },
-        "capability": "read",
-        "risky": False,
-        "description": "Read a UTF-8 file by line range.",
-    },
-    "read_tool_output": {
-        "schema": {
-            "node_id": {"type": "str", "required": True, "min_length": 1},
-            "run_id": {"type": "str", "default": ""},
-        },
-        "capability": "read",
-        "risky": False,
-        "description": "Read full saved tool output by task graph node id.",
-    },
-    "search": {
-        "schema": {
-            "pattern": {"type": "str", "required": True, "min_length": 1},
-            "path": {"type": "str", "default": "."},
-        },
-        "capability": "read",
-        "risky": False,
-        "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "run_shell": {
-        "schema": {
-            "command": {"type": "str", "required": True, "min_length": 1},
-            "timeout": {"type": "int", "default": 20, "min": 1, "max": 120},
-        },
-        "capability": "execute",
-        "risky": True,
-        "description": "Run a shell command in the mandatory isolated Docker sandbox.",
-    },
-    "write_file": {
-        "schema": {
-            "path": {"type": "str", "required": True, "min_length": 1},
-            "content": {"type": "str", "required": True},
-        },
-        "capability": "write",
-        "risky": True,
-        "description": "Write a text file.",
-    },
-    "patch_file": {
-        "schema": {
-            "path": {"type": "str", "required": True, "min_length": 1},
-            "old_text": {"type": "str", "required": True, "min_length": 1},
-            "new_text": {"type": "str", "required": True},
-        },
-        "capability": "write",
-        "risky": True,
-        "description": "Replace one exact text block in a file.",
-    },
-}
 
-DELEGATE_TOOL_SPEC = {
-    "schema": {
-        "role": {"type": "str", "required": True, "min_length": 1},
-        "task": {"type": "str", "required": True, "min_length": 1},
-        "max_steps": {"type": "int", "default": 3, "min": 1, "max": 12},
-    },
-    "capability": "delegate",
-    "risky": False,
-    "description": "Ask a bounded read-only child agent with a specific role to investigate.",
-}
+class DelegateRole(str, Enum):
+    EXPLORE = "explore"
+    REVIEW = "review"
+    VERIFY = "verify"
 
-DELEGATE_MANY_TOOL_SPEC = {
-    "schema": {
-        "tasks": {"type": "list", "required": True, "min_length": 1, "max_length": 6},
-    },
-    "capability": "delegate",
-    "risky": False,
-    "description": "Ask several bounded read-only child agents to investigate separate tasks.",
-}
 
 DELEGATE_ROLES = {
-    "explore": {
+    DelegateRole.EXPLORE.value: {
         "allowed_tools": ("list_files", "read_file", "search"),
         "instruction": "Explore the repository for facts relevant to the task. Do not propose edits unless asked to report risks.",
     },
-    "review": {
+    DelegateRole.REVIEW.value: {
         "allowed_tools": ("list_files", "read_file", "search"),
         "instruction": "Review the relevant code for bugs, regressions, missing tests, and safety issues. Report findings with file references when possible.",
     },
-    "verify": {
+    DelegateRole.VERIFY.value: {
         "allowed_tools": ("list_files", "read_file", "search"),
         "instruction": "Verify the current state by inspecting files, test output, and evidence. Report what is confirmed and what remains uncertain.",
     },
 }
+
+
+class ToolArgs(BaseModel):
+    """Pydantic source of truth for one tool's model-visible arguments."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+_MISSING = object()
+
+
+def _arg(annotation, default=_MISSING, **constraints):
+    field = Field(**constraints) if default is _MISSING else Field(default=default, **constraints)
+    return annotation, field
+
+
+def _tool(model_name, description, *, capability="read", risky=False, **fields):
+    return {
+        "args_schema": create_model(model_name, __base__=ToolArgs, **fields),
+        "capability": capability,
+        "risky": risky,
+        "description": description,
+    }
+
+
+DelegateTaskArgs = create_model(
+    "DelegateTaskArgs",
+    __base__=ToolArgs,
+    role=_arg(DelegateRole),
+    task=_arg(str, min_length=1),
+    # Native strict schemas require this field; the text protocol retains the
+    # runtime default in validate_delegate_task().
+    max_steps=_arg(int, ge=1, le=12),
+)
+
+
+TOOL_DEFINITIONS = {
+    "list_files": _tool(
+        "ListFilesArgs", "List files in the workspace.", path=_arg(str, ".")
+    ),
+    "read_file": _tool(
+        "ReadFileArgs",
+        "Read a UTF-8 file by line range.",
+        path=_arg(str, min_length=1, description="Workspace-relative file path."),
+        start=_arg(int, 1, ge=1),
+        end=_arg(int, 200, ge=1),
+    ),
+    "read_tool_output": _tool(
+        "ReadToolOutputArgs",
+        "Read full saved tool output by task graph node id.",
+        node_id=_arg(str, min_length=1),
+        run_id=_arg(str, ""),
+    ),
+    "search": _tool(
+        "SearchArgs",
+        "Search the workspace with rg or a simple fallback.",
+        pattern=_arg(str, min_length=1),
+        path=_arg(str, "."),
+    ),
+    "run_shell": _tool(
+        "RunShellArgs",
+        "Run a shell command in the mandatory isolated Docker sandbox.",
+        capability="execute",
+        risky=True,
+        command=_arg(
+            str,
+            min_length=1,
+            description="Shell command to run inside the isolated workspace sandbox.",
+        ),
+        timeout=_arg(int, 20, ge=1, le=120),
+    ),
+    "write_file": _tool(
+        "WriteFileArgs",
+        "Write a text file.",
+        capability="write",
+        risky=True,
+        path=_arg(
+            str,
+            min_length=1,
+            description="Workspace-relative path to create or replace.",
+        ),
+        content=_arg(
+            str,
+            description=(
+                "Complete file content to write, including imports and final newline "
+                "when appropriate."
+            ),
+        ),
+    ),
+    "patch_file": _tool(
+        "PatchFileArgs",
+        "Replace one exact text block in a file.",
+        capability="write",
+        risky=True,
+        path=_arg(str, min_length=1, description="Workspace-relative path to edit."),
+        old_text=_arg(
+            str,
+            min_length=1,
+            description=(
+                "Exact existing file text without read_file metadata or display line "
+                "numbers; it must occur exactly once."
+            ),
+        ),
+        new_text=_arg(str, description="Complete replacement for old_text."),
+    ),
+    "delegate": _tool(
+        "DelegateArgs",
+        "Ask a bounded read-only child agent with a specific role to investigate.",
+        capability="delegate",
+        # Keep role as str so the domain validator owns the stable unsupported-role error.
+        role=_arg(str, min_length=1),
+        task=_arg(str, min_length=1),
+        max_steps=_arg(int, 3, ge=1, le=12),
+    ),
+    "delegate_many": _tool(
+        "DelegateManyArgs",
+        "Ask several bounded read-only child agents to investigate separate tasks.",
+        capability="delegate",
+        tasks=_arg(list[DelegateTaskArgs], min_length=1, max_length=6),
+    ),
+}
+SUBMIT_FINAL_DEFINITION = _tool(
+    "SubmitFinalArgs",
+    "Finish the task only after all required workspace work is complete.",
+    answer=_arg(
+        str,
+        min_length=1,
+        description="Concise final answer describing completed work and verification.",
+    ),
+)
+
+
+def _legacy_schema(args_schema):
+    """Derive Pico's stable validation/display schema from a Pydantic model."""
+    model_schema = args_schema.model_json_schema()
+    required = set(model_schema.get("required", []))
+    type_names = {"string": "str", "integer": "int", "array": "list"}
+    constraint_names = {
+        "minLength": "min_length",
+        "maxLength": "max_length",
+        "minimum": "min",
+        "maximum": "max",
+        "minItems": "min_length",
+        "maxItems": "max_length",
+    }
+    schema = {}
+    for name, property_schema in model_schema.get("properties", {}).items():
+        field_schema = {"type": type_names[property_schema["type"]]}
+        if name in required:
+            field_schema["required"] = True
+        if "default" in property_schema:
+            field_schema["default"] = property_schema["default"]
+        for source, target in constraint_names.items():
+            if source in property_schema:
+                field_schema[target] = property_schema[source]
+        schema[name] = field_schema
+    return schema
+
+
+def _tool_spec(definition):
+    args_schema = definition["args_schema"]
+    return {
+        "schema": _legacy_schema(args_schema),
+        "args_schema": args_schema,
+        "capability": definition["capability"],
+        "risky": definition["risky"],
+        "description": definition["description"],
+    }
+
+
+BASE_TOOL_NAMES = (
+    "list_files",
+    "read_file",
+    "read_tool_output",
+    "search",
+    "run_shell",
+    "write_file",
+    "patch_file",
+)
+BASE_TOOL_SPECS = {name: _tool_spec(TOOL_DEFINITIONS[name]) for name in BASE_TOOL_NAMES}
+DELEGATE_TOOL_SPEC = _tool_spec(TOOL_DEFINITIONS["delegate"])
+DELEGATE_MANY_TOOL_SPEC = _tool_spec(TOOL_DEFINITIONS["delegate_many"])
 
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
@@ -181,99 +287,50 @@ def schema_display(schema):
 
 def responses_action_tools(tool_registry):
     """Build strict Responses API function definitions for one agent turn."""
-    definitions = []
-    for name, tool in sorted(dict(tool_registry).items()):
-        properties = {
-            field_name: _responses_schema_property(name, field_name, field_spec)
-            for field_name, field_spec in tool["schema"].items()
-        }
-        definitions.append(
-            {
-                "type": "function",
-                "name": name,
-                "description": str(tool.get("description", "")),
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": list(properties),
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            }
-        )
-    definitions.append(
-        {
-            "type": "function",
-            "name": "submit_final",
-            "description": "Finish the task only after all required workspace work is complete.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "answer": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Concise final answer describing completed work and verification.",
-                    }
-                },
-                "required": ["answer"],
-                "additionalProperties": False,
-            },
-            "strict": True,
-        }
-    )
+    definitions = [
+        _responses_tool_definition(name, tool)
+        for name, tool in sorted(dict(tool_registry).items())
+    ]
+    definitions.append(_responses_tool_definition("submit_final", SUBMIT_FINAL_DEFINITION))
     return definitions
 
 
-def _responses_schema_property(tool_name, field_name, spec):
-    field_type = str(spec.get("type", "str"))
-    if field_type == "str":
-        result = {"type": "string"}
-        if int(spec.get("min_length", 0) or 0) > 0:
-            result["minLength"] = int(spec["min_length"])
-    elif field_type == "int":
-        result = {"type": "integer"}
-        if "min" in spec:
-            result["minimum"] = int(spec["min"])
-        if "max" in spec:
-            result["maximum"] = int(spec["max"])
-    elif field_type == "list":
-        result = {"type": "array"}
-        if tool_name == "delegate_many" and field_name == "tasks":
-            result["items"] = {
-                "type": "object",
-                "properties": {
-                    "role": {"type": "string", "enum": sorted(DELEGATE_ROLES)},
-                    "task": {"type": "string", "minLength": 1},
-                    "max_steps": {"type": "integer", "minimum": 1, "maximum": 12},
-                },
-                "required": ["role", "task", "max_steps"],
-                "additionalProperties": False,
-            }
-        else:
-            result["items"] = {}
-        if int(spec.get("min_length", 0) or 0) > 0:
-            result["minItems"] = int(spec["min_length"])
-        if spec.get("max_length") is not None:
-            result["maxItems"] = int(spec["max_length"])
-    else:
-        raise ValueError(f"unsupported Responses schema type: {field_type}")
-    descriptions = {
-        ("write_file", "path"): "Workspace-relative path to create or replace.",
-        ("write_file", "content"): "Complete file content to write, including imports and final newline when appropriate.",
-        ("patch_file", "path"): "Workspace-relative path to edit.",
-        ("patch_file", "old_text"): "Exact existing file text without read_file metadata or display line numbers; it must occur exactly once.",
-        ("patch_file", "new_text"): "Complete replacement for old_text.",
-        ("read_file", "path"): "Workspace-relative file path.",
-        ("run_shell", "command"): "Shell command to run inside the isolated workspace sandbox.",
+def _responses_tool_definition(name, definition):
+    return {
+        "type": "function",
+        "name": name,
+        "description": str(definition.get("description", "")),
+        "parameters": _strict_response_schema(definition["args_schema"]),
+        "strict": True,
     }
-    notes = []
-    if descriptions.get((tool_name, field_name)):
-        notes.append(descriptions[(tool_name, field_name)])
-    if "default" in spec:
-        notes.append(f"Use {spec['default']!r} when the default behavior is intended.")
-    if notes:
-        result["description"] = " ".join(notes)
-    return result
+
+
+def _strict_response_schema(args_schema):
+    """Convert a model to Pico's established strict Responses schema."""
+    function = convert_to_openai_function(args_schema, strict=True)
+    return _render_runtime_defaults(function["parameters"])
+
+
+def _render_runtime_defaults(schema):
+    rendered = {}
+    for key, value in schema.items():
+        if key == "default":
+            continue
+        if isinstance(value, dict):
+            rendered[key] = _render_runtime_defaults(value)
+        elif isinstance(value, list):
+            rendered[key] = [
+                _render_runtime_defaults(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            rendered[key] = value
+    if "default" in schema:
+        note = f"Use {schema['default']!r} when the default behavior is intended."
+        rendered["description"] = " ".join(
+            item for item in (str(rendered.get("description", "")).strip(), note) if item
+        )
+    return rendered
 
 
 def validate_schema(schema, args):
@@ -388,6 +445,18 @@ def validate_tool(agent, name, args):
     args = args or {}
     tool = agent.tools.get(name, {})
     validate_schema(tool.get("schema", {}), args)
+    args_schema = tool.get("args_schema")
+    if args_schema is not None:
+        try:
+            args_schema.model_validate(args)
+        except ValidationError as exc:
+            extra = next(
+                (error for error in exc.errors(include_url=False) if error["type"] == "extra_forbidden"),
+                None,
+            )
+            if extra is not None:
+                location = ".".join(str(part) for part in extra["loc"])
+                raise ValueError(f"unexpected argument: {location}") from exc
 
     if name == "list_files":
         path = agent.path(args.get("path", "."))
