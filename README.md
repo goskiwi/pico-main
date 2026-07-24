@@ -33,7 +33,7 @@
 | 证据 | 结果与边界 |
 |---|---|
 | 当前分支工程回归 | 289 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
-| 最新已发布 LLM 微基准 | commit `016c618` 的 V4 定位专项：Repo Map 13/15，关闭后 6/15；仅代表该冻结套件 |
+| 最新已发布 LLM 回归 | commit `f69cb8e` 的 V4 预算复测：600-token cap 15/15，动态预算 14/15；这是调参集证据，不是新盲测 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
@@ -411,6 +411,24 @@ attempt 计算的 token 低 38.3%。这说明它在该定位专项上用更多�
 完成率，不构成对任意仓库或模型的通用因果结论。见
 [完整报告](docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md)和
 [原始 JSON artifact](artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json)。
+
+### V4 预算调优复测（commit `f69cb8e`）
+
+在已经进入开发反馈的 V4 上，先对 600/1000/1600-token hard cap 各跑一轮。600 为 5/5，
+另外两档各 4/5；但两次失败都是远端 `model_error`，不是 verifier 失败，所以这轮筛选只用于按
+预先规则选出 600，不能证明 600 在语义上优于另外两档。
+
+随后从 clean worktree 将 `repo_map_600` 与动态预算 `full` 各跑三轮。600 为 15/15、3/3 轮
+全过；`full` 为 14/15、2/3 轮全过，唯一失败是 catalog rename 任务生成了未完成实现并被隐藏
+verifier 拒绝。600 相对 `full` 的输入 token 下降 9.5%、输出下降 11.1%、平均工具步下降 5.8%、
+平均耗时下降 2.6%；按成功 attempt 计算的输入+输出 token 下降 15.6%。确认阶段两档均为
+0 次 model failure。
+
+这是固定回归集上的调参与复测，不是新的 held-out 泛化证据，因此默认动态预算暂不改为 600；
+下一步需要全新、未用于选档的定位任务验证。见[单轮筛选报告](docs/metrics/real-world-benchmark-v4-repo-map-budget-screen-1x.md)、
+[三轮确认报告](docs/metrics/real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md)和对应
+[筛选 JSON](artifacts/real-world-benchmark-v4-repo-map-budget-screen-1x.json)、
+[确认 JSON](artifacts/real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.json)。
 
 ### 此前发布评测证据：冻结 V3（commit `0897195`）
 
