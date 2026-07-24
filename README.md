@@ -32,7 +32,7 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前分支工程回归 | 301 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 当前分支工程回归 | 306 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 盲测 | commit `363a8e8` 的首次 V5：600 与动态预算均 14/15；每次成功 token 仅降 3.4%，未过预注册 5% 门槛，默认不改 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
@@ -200,6 +200,16 @@ Repo Map 有两条使用路径：
 
 1. 每轮 prompt 在 `repo_map` section 中自动获得一份受 token 预算约束的签名地图。
 2. 模型可以调用只读的 `query_repo_map`，针对新的子问题重新排序。
+
+默认自动 section 使用动态预算。需要更低上下文成本时，可以显式设置正整数 hard cap：
+
+```bash
+uv run pico --cwd /path/to/target-repo \
+  --repo-map-budget 600
+```
+
+该参数只限制自动注入 section，动态预算不能突破它；不传时保持动态默认。它不会限制模型显式调用
+`query_repo_map` 时传入的工具预算。最终 `report.json` 和 checkpoint runtime identity 会记录该值。
 
 工具参数示意：
 

@@ -323,6 +323,7 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
         approval_policy="never",
         max_steps=9,
         max_new_tokens=1024,
+        repo_map_budget_tokens=600,
         feature_flags={"memory": True, "relevant_memory": False},
     )
 
@@ -334,6 +335,7 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     assert runtime_identity["read_only"] is False
     assert runtime_identity["max_steps"] == 9
     assert runtime_identity["max_new_tokens"] == 1024
+    assert runtime_identity["repo_map_budget_tokens"] == 600
     assert runtime_identity["feature_flags"]["memory"] is True
     assert runtime_identity["feature_flags"]["relevant_memory"] is False
     assert runtime_identity["shell_env_allowlist"] == list(agent.shell_env_allowlist)

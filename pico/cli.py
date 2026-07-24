@@ -82,6 +82,20 @@ ENV_LOCAL_FILENAME = ".env.local"
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _positive_repo_map_budget(value):
+    try:
+        budget = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "repo map budget must be a positive integer"
+        ) from exc
+    if budget <= 0:
+        raise argparse.ArgumentTypeError(
+            "repo map budget must be a positive integer"
+        )
+    return budget
+
+
 def _load_workspace_env(cwd):
     """Read ``<cwd>/.env.local`` into a mapping for one Pico startup.
 
@@ -292,6 +306,7 @@ def build_agent(args):
             approval_policy=args.approval,
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
+            repo_map_budget_tokens=args.repo_map_budget,
             dry_run=dry_run,
             secret_env_names=configured_secret_names,
             sandbox=sandbox,
@@ -305,6 +320,7 @@ def build_agent(args):
         approval_policy=args.approval,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
+        repo_map_budget_tokens=args.repo_map_budget,
         dry_run=dry_run,
         secret_env_names=configured_secret_names,
         sandbox=sandbox,
@@ -378,6 +394,15 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
+    parser.add_argument(
+        "--repo-map-budget",
+        type=_positive_repo_map_budget,
+        default=None,
+        help=(
+            "Hard token cap for the automatically injected Repo Map section. "
+            "Omit to keep dynamic budgeting."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the model.")
     return parser
 

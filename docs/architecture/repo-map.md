@@ -56,6 +56,11 @@ normal dynamically adjusted budget to a hard upper bound. Benchmark variants use
 this path for 600, 1000, and 1600-token budget studies, and retain the configured cap
 in artifact rows and reports.
 
+CLI users can select the same behavior with `--repo-map-budget <positive-int>`.
+Omitting the option preserves dynamic budgeting. The option affects automatic
+context injection only; the read-only `query_repo_map` tool keeps its own explicit
+per-call budget.
+
 Prompt metadata and the final report retain:
 
 - graph node and edge counts;
