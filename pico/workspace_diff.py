@@ -14,11 +14,7 @@ class SnapshotCacheEntry:
 
 
 def _snapshot_cache(agent):
-    cache = getattr(agent, "_workspace_snapshot_hash_cache", None)
-    if not isinstance(cache, dict):
-        cache = {}
-        setattr(agent, "_workspace_snapshot_hash_cache", cache)
-    return cache
+    return agent._workspace_snapshot_hash_cache
 
 
 def _ignored_relative_parts(relative_parts):

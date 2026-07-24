@@ -24,7 +24,7 @@ def promote_durable_memory(agent, user_message, final_answer):
 
 
 def llm_memory_index_text(agent):
-    if not getattr(agent.memory, "durable_store", None):
+    if agent.memory.durable_store is None:
         return "- none"
     entries = agent.memory.durable_store.load_index()
     if not entries:

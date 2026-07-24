@@ -37,9 +37,7 @@ class SessionStore:
         """Return the newest resumable session.
 
         Delegate sessions are audit artifacts, not interactive conversations,
-        so ``--resume latest`` must not select them.  Sessions written before
-        ``session_kind`` existed remain resumable and are treated as main
-        sessions for backward compatibility.
+        so ``--resume latest`` must not select them.
         """
         files = sorted(
             self.root.glob("*.json"),
@@ -55,7 +53,6 @@ class SessionStore:
                 continue
             if not isinstance(session, dict):
                 continue
-            session_kind = session.get("session_kind")
-            if session_kind is None or session_kind == "main":
+            if session.get("session_kind") == "main":
                 return path.stem
         return None

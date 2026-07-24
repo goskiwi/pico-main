@@ -77,7 +77,6 @@ DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # 环境变量名称常量
-LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
 ENV_LOCAL_FILENAME = ".env.local"
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -138,7 +137,7 @@ def _effective_model(args, env=None):
     3. 代码里的默认值
     """
     env = os.environ if env is None else env
-    explicit_model = getattr(args, "model", None)
+    explicit_model = args.model
     if explicit_model:
         logger.info(f"使用用户指定的模型: {explicit_model}")
         return explicit_model
@@ -158,8 +157,6 @@ def _configured_secret_names(args, env=None):
     configured_secret_names = set(DEFAULT_SECRET_ENV_NAMES)
     configured_secret_names.update(str(name).upper() for name in args.secret_env_names)
     extra_names = env.get(SECRET_ENV_NAMES_VAR, "")
-    if not extra_names.strip():
-        extra_names = env.get(LEGACY_SECRET_ENV_NAMES_VAR, "")
     if extra_names.strip():
         configured_secret_names.update(
             item.strip().upper()
@@ -174,7 +171,7 @@ def _build_model_client(args, env=None):
     """Build Pico's sole OpenAI-compatible model client."""
     env = os.environ if env is None else env
     model = _effective_model(args, env=env)
-    base_url = getattr(args, "base_url", None) or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
+    base_url = args.base_url or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
     api_key = env.get("OPENAI_API_KEY", "")
     logger.info(f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}")
     return OpenAICompatibleModelClient(
@@ -277,18 +274,18 @@ def build_agent(args):
     # 构建模型客户端
     model = _build_model_client(args, env=workspace_env)
     sandbox_config = DockerSandboxConfig(
-        image=getattr(args, "sandbox_image", None)
+        image=args.sandbox_image
         or os.environ.get("PICO_SANDBOX_IMAGE")
         or DEFAULT_SANDBOX_IMAGE,
-        cpus=float(getattr(args, "sandbox_cpus", DEFAULT_SANDBOX_CPUS)),
-        memory=str(getattr(args, "sandbox_memory", DEFAULT_SANDBOX_MEMORY)),
-        pids_limit=int(getattr(args, "sandbox_pids_limit", DEFAULT_SANDBOX_PIDS_LIMIT)),
+        cpus=float(args.sandbox_cpus),
+        memory=str(args.sandbox_memory),
+        pids_limit=int(args.sandbox_pids_limit),
     )
     sandbox = DockerSandbox(workspace.repo_root, config=sandbox_config)
 
     # 判断是恢复旧 session 还是创建新 session
     session_id = args.resume
-    dry_run = bool(getattr(args, "dry_run", False))
+    dry_run = bool(args.dry_run)
 
     if session_id == "latest":
         session_id = store.latest()
@@ -493,8 +490,8 @@ def main(argv=None):
     agent = build_agent(args)
     logger.info("Pico agent 构建完成")
 
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL))
-    base_url = getattr(agent.model_client, "base_url", getattr(args, "base_url", DEFAULT_OPENAI_BASE_URL))
+    model = agent.model_client.model
+    base_url = agent.model_client.base_url
     print(build_welcome(agent, model=model, host=base_url))
 
     if args.prompt:

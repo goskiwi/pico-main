@@ -16,7 +16,6 @@ from .checkpoints import (
     CHECKPOINT_PARTIAL_STALE_STATUS,
     CHECKPOINT_WORKSPACE_MISMATCH_STATUS,
 )
-from .parser import retry_notice
 from .task_state import TaskState
 from .workspace import clip, now
 
@@ -30,7 +29,7 @@ _PROGRESS_NUDGE = (
 class AgentTurnState(TypedDict, total=False):
     """Transient routing state; durable audit/resume state stays in ``TaskState``."""
 
-    native_prompt: tuple[str, dict[str, Any]] | None
+    prompt_snapshot: tuple[str, dict[str, Any]] | None
     finalization_attempted: bool
     action: ModelAction
     result: str
@@ -67,12 +66,12 @@ def _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
         _create_checkpoint(agent, task_state, user_message, "context_reduction")
 
 
-def _prompt_for_attempt(agent, task_state, user_message, native_prompt):
-    """Build text prompts each attempt; reuse the first prompt for native Actions."""
+def _prompt_for_attempt(agent, task_state, user_message, prompt_snapshot):
+    """Build the first prompt once and reuse it for the Responses conversation."""
     started_at = time.monotonic()
-    reused = native_prompt is not None
+    reused = prompt_snapshot is not None
     if reused:
-        prompt, original_metadata = native_prompt
+        prompt, original_metadata = prompt_snapshot
         prompt_metadata = dict(original_metadata)
     else:
         prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
@@ -99,9 +98,11 @@ def _action_payload(action):
 
 
 def _record_action_result(agent, action, result):
-    recorder = getattr(agent.model_client, "record_action_result", None)
-    if recorder is not None:
-        recorder(action, result)
+    agent.model_client.record_action_result(action, result)
+
+
+def _retry_notice(problem):
+    return f"Runtime notice: {problem}. Return exactly one valid function call."
 
 
 def _stagnation_nudge(progress_tracker, name, args, metadata):
@@ -157,7 +158,7 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     tool_status = str(metadata.get("tool_status", "")).strip() or "ok"
     safe_name = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name or "tool"))
     node_id = f"t{task_state.tool_steps:03d}_{safe_name}"
-    full_result = getattr(agent, "_last_tool_full_result", None)
+    full_result = agent._last_tool_full_result
     if full_result is None:
         full_result = result
     full_result = security.redact_text(agent, full_result)
@@ -242,9 +243,7 @@ def _run_agent_turn(agent, user_message):
     agent.current_undo_journal.start()
     agent.tool_audit_log = []
     agent.model_action_rejections = []
-    reset_action_session = getattr(agent.model_client, "reset_action_session", None)
-    if reset_action_session is not None:
-        reset_action_session()
+    agent.model_client.reset_action_session()
     agent.emit_trace(
         task_state,
         "run_started",
@@ -257,13 +256,12 @@ def _run_agent_turn(agent, user_message):
 
     max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
     progress_tracker = {"recent": [], "nudged": set()}
-    native_actions = bool(getattr(agent.model_client, "supports_native_actions", False))
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
 
     def finish_stopped():
         if task_state.attempts >= max_attempts and task_state.tool_steps < agent.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+            final = "Stopped after too many rejected model actions without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:
             final = "Stopped after reaching the step limit without a final answer."
@@ -280,21 +278,21 @@ def _run_agent_turn(agent, user_message):
         finalization_only = task_state.tool_steps >= agent.max_steps
         finalization_attempted = bool(state.get("finalization_attempted", False))
         if finalization_only:
-            if not native_actions or finalization_attempted:
+            if finalization_attempted:
                 return Command(update={"result": finish_stopped()}, goto=END)
             finalization_attempted = True
 
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
-        native_prompt = state.get("native_prompt")
+        prompt_snapshot = state.get("prompt_snapshot")
         prompt, prompt_metadata = _prompt_for_attempt(
             agent,
             task_state,
             user_message,
-            native_prompt if native_actions else None,
+            prompt_snapshot,
         )
-        if native_actions and native_prompt is None:
-            native_prompt = (prompt, dict(prompt_metadata))
+        if prompt_snapshot is None:
+            prompt_snapshot = (prompt, dict(prompt_metadata))
 
         agent.emit_trace(
             task_state,
@@ -308,9 +306,7 @@ def _run_agent_turn(agent, user_message):
         )
         prompt_cache_key = None
         prompt_cache_retention = None
-        if agent.feature_enabled("prompt_cache") and getattr(
-            agent.model_client, "supports_prompt_cache", False
-        ):
+        if agent.feature_enabled("prompt_cache") and agent.model_client.supports_prompt_cache:
             prompt_cache_key = prompt_metadata.get("prompt_cache_key")
             prompt_cache_retention = "in_memory"
 
@@ -322,7 +318,6 @@ def _run_agent_turn(agent, user_message):
                 action_tools=final_action_tools if finalization_only else action_tools,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
-                require_explicit_final=agent.feature_enabled("require_explicit_final"),
             )
         except Exception as exc:
             error_type = type(exc).__name__
@@ -346,7 +341,7 @@ def _run_agent_turn(agent, user_message):
             result = _write_finished_run(agent, task_state, final, run_started_at)
             return Command(update={"result": result}, goto=END)
 
-        completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
+        completion_metadata = dict(agent.model_client.last_completion_metadata or {})
         if completion_metadata:
             prompt_metadata.update(completion_metadata)
         agent.last_completion_metadata = completion_metadata
@@ -356,7 +351,7 @@ def _run_agent_turn(agent, user_message):
 
         if finalization_only and kind == ACTION_TOOL:
             rejected_tool_name = action.name
-            payload = retry_notice(
+            payload = _retry_notice(
                 "the tool step budget is exhausted; only submit_final is allowed"
             )
             action = ModelAction.retry(
@@ -377,7 +372,7 @@ def _run_agent_turn(agent, user_message):
             and agent.feature_enabled("require_workspace_change")
             and not any(entry.get("workspace_changed") for entry in agent.tool_audit_log)
         ):
-            payload = retry_notice(
+            payload = _retry_notice(
                 "the task requires a workspace change, but no effective file change was recorded"
             )
             action = ModelAction.retry(
@@ -409,7 +404,7 @@ def _run_agent_turn(agent, user_message):
         )
 
         next_state = {
-            "native_prompt": native_prompt,
+            "prompt_snapshot": prompt_snapshot,
             "finalization_attempted": finalization_attempted,
         }
         if kind == ACTION_TOOL:

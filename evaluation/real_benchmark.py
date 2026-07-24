@@ -245,7 +245,6 @@ def _variant_feature_flags(variant):
     ):
         return {
             "llm_memory_extract": False,
-            "require_explicit_final": True,
             "require_workspace_change": True,
         }
     if variant == contract.VARIANT_NO_MEMORY_CONTEXT:
@@ -257,14 +256,12 @@ def _variant_feature_flags(variant):
             "llm_history_compaction": False,
             "dynamic_budget": False,
             "cross_section_dedup": False,
-            "require_explicit_final": True,
             "require_workspace_change": True,
         }
     if variant == contract.VARIANT_NO_REPO_MAP:
         return {
             "repo_map": False,
             "llm_memory_extract": False,
-            "require_explicit_final": True,
             "require_workspace_change": True,
         }
     raise ValueError(f"unsupported benchmark variant: {variant}")
@@ -444,7 +441,7 @@ class RealWorldBenchmarkRunner:
             if path.is_dir() and path.name not in existing_run_ids
         ]
         attempt_trace = evidence._attempt_trace_metrics(
-            run_store.run_dir(task_state),
+            run_store.run_dir(task_state.run_id),
             run_dirs,
             workspace_root,
         )
@@ -522,7 +519,6 @@ class RealWorldBenchmarkRunner:
             "parent_model_calls": int(attempt_trace["parent"]["model_calls"]),
             "delegate_model_calls": int(attempt_trace["delegate"]["model_calls"]),
             "total_model_calls": int(attempt_trace["total"]["model_calls"]),
-            "model_calls": int(attempt_trace["total"]["model_calls"]),
             "parent_model_duration_ms": int(
                 attempt_trace["parent"]["model_duration_ms"]
             ),
@@ -533,7 +529,6 @@ class RealWorldBenchmarkRunner:
             "parent_model_failures": int(attempt_trace["parent"]["model_failures"]),
             "delegate_model_failures": int(attempt_trace["delegate"]["model_failures"]),
             "total_model_failures": int(attempt_trace["total"]["model_failures"]),
-            "model_failures": int(attempt_trace["total"]["model_failures"]),
             "parent_model_action_rejections": int(
                 attempt_trace["parent"]["model_action_rejections"]
             ),
@@ -543,9 +538,6 @@ class RealWorldBenchmarkRunner:
             "total_model_action_rejections": int(
                 attempt_trace["total"]["model_action_rejections"]
             ),
-            "model_action_rejections": int(
-                attempt_trace["total"]["model_action_rejections"]
-            ),
             "parent_action_protocols": list(
                 attempt_trace["parent"]["action_protocols"]
             ),
@@ -553,7 +545,6 @@ class RealWorldBenchmarkRunner:
                 attempt_trace["delegate"]["action_protocols"]
             ),
             "total_action_protocols": list(attempt_trace["total"]["action_protocols"]),
-            "action_protocols": list(attempt_trace["total"]["action_protocols"]),
             "executed_tools": list(trace["executed_tools"]),
             "required_tools": required_tools,
             "missing_required_tools": missing_required_tools,
@@ -569,15 +560,12 @@ class RealWorldBenchmarkRunner:
             "parent_input_tokens": int(attempt_trace["parent"]["input_tokens"]),
             "delegate_input_tokens": int(attempt_trace["delegate"]["input_tokens"]),
             "total_input_tokens": int(attempt_trace["total"]["input_tokens"]),
-            "input_tokens": int(attempt_trace["total"]["input_tokens"]),
             "parent_output_tokens": int(attempt_trace["parent"]["output_tokens"]),
             "delegate_output_tokens": int(attempt_trace["delegate"]["output_tokens"]),
             "total_output_tokens": int(attempt_trace["total"]["output_tokens"]),
-            "output_tokens": int(attempt_trace["total"]["output_tokens"]),
             "parent_cached_tokens": int(attempt_trace["parent"]["cached_tokens"]),
             "delegate_cached_tokens": int(attempt_trace["delegate"]["cached_tokens"]),
             "total_cached_tokens": int(attempt_trace["total"]["cached_tokens"]),
-            "cached_tokens": int(attempt_trace["total"]["cached_tokens"]),
             "agent_duration_ms": agent_duration_ms,
             "verifier_duration_ms": verifier_duration_ms,
             "total_duration_ms": agent_duration_ms + verifier_duration_ms,

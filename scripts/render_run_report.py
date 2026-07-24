@@ -5,14 +5,6 @@ import json
 from pathlib import Path
 
 
-STATUS_CLASS = {
-    "completed": "ok",
-    "running": "warn",
-    "stopped": "warn",
-    "failed": "bad",
-}
-
-
 def load_json(path, default=None):
     if not path.exists():
         return default

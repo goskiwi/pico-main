@@ -147,4 +147,3 @@ _DANGEROUS_SHELL_PATTERNS_RAW: Tuple[Tuple[str, str], ...] = (
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL_MAX_RETRIES: int = 2
-DEFAULT_MODEL_RETRY_BACKOFF: float = 0.5

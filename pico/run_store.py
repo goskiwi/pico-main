@@ -9,19 +9,8 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 from pathlib import Path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
-    fcntl = None
-
-
-def _run_id(value):
-    if hasattr(value, "run_id"):
-        return value.run_id
-    return str(value)
-
 
 class RunStore:
     # Delegate children share a run root but may receive distinct RunStore
@@ -46,7 +35,7 @@ class RunStore:
             return lock
 
     def run_dir(self, run_id):
-        return self.root / _run_id(run_id)
+        return self.root / run_id
 
     def task_state_path(self, run_id):
         return self.run_dir(run_id) / "task_state.json"
@@ -69,20 +58,20 @@ class RunStore:
     def start_run(self, task_state):
         # 每次 ask() 都会生成一个 run 目录。
         # 这样一次用户请求对应一组独立工件，后续排查更容易。
-        run_dir = self.run_dir(task_state)
+        run_dir = self.run_dir(task_state.run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         self.write_task_state(task_state)
         self.write_task_graph(task_state, self.initial_task_graph(task_state))
         return run_dir
 
     def write_task_state(self, task_state):
-        path = self.task_state_path(task_state)
+        path = self.task_state_path(task_state.run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._write_json_atomic(path, task_state.to_dict())
         return path
 
     def append_trace(self, task_state, event):
-        path = self.trace_path(task_state)
+        path = self.trace_path(task_state.run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         # trace 采用 jsonl 追加写入，原因是 agent 运行过程是流式事件序列，
         # 逐条落盘比“最后一次性写整份 trace”更稳，也更适合调试。
@@ -92,7 +81,7 @@ class RunStore:
         return path
 
     def write_report(self, task_state, report):
-        path = self.report_path(task_state)
+        path = self.report_path(task_state.run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._write_json_atomic(path, report)
         self.update_index(task_state)
@@ -111,12 +100,12 @@ class RunStore:
         返回相对路径（如 tool_outputs/0001_read_file.txt），
         既短又避免把绝对路径写进 task_graph.mmd。
         """
-        output_dir = self.tool_output_dir(task_state)
+        output_dir = self.tool_output_dir(task_state.run_id)
         safe_name = str(tool_name).replace("/", "_").replace("\\", "_")
         filename = f"{step_index:04d}_{safe_name}.txt"
         path = output_dir / filename
         path.write_text(str(content or ""), encoding="utf-8")
-        return str(path.relative_to(self.run_dir(task_state)))
+        return str(path.relative_to(self.run_dir(task_state.run_id)))
 
     def initial_task_graph(self, task_state):
         return "\n".join(
@@ -127,7 +116,7 @@ class RunStore:
         )
 
     def append_task_graph_tool(self, task_state, node_id, tool_name, args, status, content_ref):
-        path = self.task_graph_path(task_state)
+        path = self.task_graph_path(task_state.run_id)
         existing = path.read_text(encoding="utf-8") if path.exists() else self.initial_task_graph(task_state)
         graph_lines = [line.rstrip() for line in existing.splitlines() if line.strip()]
         node_label = self._tool_node_label(tool_name, args, status)
@@ -141,7 +130,7 @@ class RunStore:
         return path
 
     def write_task_graph(self, task_state, content):
-        path = self.task_graph_path(task_state)
+        path = self.task_graph_path(task_state.run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(content or "").rstrip() + "\n", encoding="utf-8")
         return path
@@ -168,8 +157,8 @@ class RunStore:
                     "task_goal": str(task_state.user_request),
                     "status": task_state.status,
                     "stop_reason": task_state.stop_reason,
-                    "agent_mode": str(getattr(task_state, "agent_mode", "main") or "main"),
-                    "parent_agent_id": str(getattr(task_state, "parent_agent_id", "") or ""),
+                    "agent_mode": str(task_state.agent_mode),
+                    "parent_agent_id": str(task_state.parent_agent_id),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "task_graph_path": str(self.task_graph_path(task_state.run_id)),
                     "report_path": str(self.report_path(task_state.run_id)),
@@ -182,13 +171,6 @@ class RunStore:
     @contextmanager
     def _process_index_lock(self):
         """Serialize index transactions across Pico processes on POSIX hosts."""
-        if fcntl is None:
-            # Non-POSIX platforms retain the process-local thread lock and
-            # atomic replacement.  Callers still get valid JSON, but launching
-            # multiple writers for one run root is not supported there.
-            yield
-            return
-
         lock_path = self.index_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as handle:
@@ -210,14 +192,11 @@ class RunStore:
             return []
         entries = [item for item in loaded if isinstance(item, dict)]
         if not include_children:
-            # Entries produced before agent identity was indexed are main runs
-            # by default.  New delegate runs are excluded even if either
-            # identity field is accidentally absent.
             entries = [
                 item
                 for item in entries
-                if not str(item.get("parent_agent_id", "") or "").strip()
-                and str(item.get("agent_mode", "main") or "main") == "main"
+                if item.get("parent_agent_id") == ""
+                and item.get("agent_mode") == "main"
             ]
         entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
         return entries[: max(0, int(limit))]

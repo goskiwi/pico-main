@@ -80,11 +80,9 @@ def _tool(model_name, description, *, capability="read", risky=False, **fields):
 DelegateTaskArgs = create_model(
     "DelegateTaskArgs",
     __base__=ToolArgs,
-    role=_arg(DelegateRole),
+    role=_arg(str, min_length=1),
     task=_arg(str, min_length=1),
-    # Native strict schemas require this field; the text protocol retains the
-    # runtime default in validate_delegate_task().
-    max_steps=_arg(int, ge=1, le=12),
+    max_steps=_arg(int, 3, ge=1, le=12),
 )
 
 
@@ -194,38 +192,9 @@ SUBMIT_FINAL_DEFINITION = _tool(
 )
 
 
-def _legacy_schema(args_schema):
-    """Derive Pico's stable validation/display schema from a Pydantic model."""
-    model_schema = args_schema.model_json_schema()
-    required = set(model_schema.get("required", []))
-    type_names = {"string": "str", "integer": "int", "array": "list"}
-    constraint_names = {
-        "minLength": "min_length",
-        "maxLength": "max_length",
-        "minimum": "min",
-        "maximum": "max",
-        "minItems": "min_length",
-        "maxItems": "max_length",
-    }
-    schema = {}
-    for name, property_schema in model_schema.get("properties", {}).items():
-        field_schema = {"type": type_names[property_schema["type"]]}
-        if name in required:
-            field_schema["required"] = True
-        if "default" in property_schema:
-            field_schema["default"] = property_schema["default"]
-        for source, target in constraint_names.items():
-            if source in property_schema:
-                field_schema[target] = property_schema[source]
-        schema[name] = field_schema
-    return schema
-
-
 def _tool_spec(definition):
-    args_schema = definition["args_schema"]
     return {
-        "schema": _legacy_schema(args_schema),
-        "args_schema": args_schema,
+        "args_schema": definition["args_schema"],
         "capability": definition["capability"],
         "risky": definition["risky"],
         "description": definition["description"],
@@ -246,20 +215,6 @@ BASE_TOOL_SPECS = {name: _tool_spec(TOOL_DEFINITIONS[name]) for name in BASE_TOO
 DELEGATE_TOOL_SPEC = _tool_spec(TOOL_DEFINITIONS["delegate"])
 DELEGATE_MANY_TOOL_SPEC = _tool_spec(TOOL_DEFINITIONS["delegate_many"])
 
-TOOL_EXAMPLES = {
-    "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-    "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-    "read_tool_output": '<tool>{"name":"read_tool_output","args":{"node_id":"t001_read_file"}}</tool>',
-    "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-    "query_repo_map": '<tool>{"name":"query_repo_map","args":{"query":"binary search callers and tests","budget_tokens":1200,"max_results":24}}</tool>',
-    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-    "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-    "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"role":"explore","task":"inspect README.md","max_steps":3}}</tool>',
-    "delegate_many": '<tool>{"name":"delegate_many","args":{"tasks":[{"role":"explore","task":"inspect runtime.py","max_steps":3},{"role":"review","task":"review tool safety","max_steps":3}]}}</tool>',
-}
-
-
 def build_tool_registry(agent):
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
@@ -279,24 +234,26 @@ def build_tool_registry(agent):
         tools = {name: tool for name, tool in tools.items() if name in allowed}
     return tools
 
-
-def tool_example(name):
-    return TOOL_EXAMPLES.get(name, "")
-
-
-def schema_field_display(spec):
-    field_type = str(spec.get("type", "str"))
-    required = bool(spec.get("required", False))
-    default = spec.get("default")
+def schema_field_display(spec, *, required):
+    field_type = {
+        "array": "list",
+        "integer": "int",
+        "string": "str",
+    }.get(str(spec.get("type", "")), str(spec.get("type", "value")))
     if required:
         return field_type
-    if default is not None:
-        return f"{field_type}={default!r}"
+    if "default" in spec:
+        return f"{field_type}={spec['default']!r}"
     return field_type
 
 
-def schema_display(schema):
-    return {name: schema_field_display(spec) for name, spec in schema.items()}
+def schema_display(args_schema):
+    schema = args_schema.model_json_schema()
+    required = set(schema.get("required", []))
+    return {
+        name: schema_field_display(spec, required=name in required)
+        for name, spec in schema.get("properties", {}).items()
+    }
 
 
 def responses_action_tools(tool_registry):
@@ -314,12 +271,12 @@ def _responses_tool_definition(name, definition):
         "type": "function",
         "name": name,
         "description": str(definition.get("description", "")),
-        "parameters": _strict_response_schema(definition["args_schema"]),
+        "parameters": strict_response_schema(definition["args_schema"]),
         "strict": True,
     }
 
 
-def _strict_response_schema(args_schema):
+def strict_response_schema(args_schema):
     """Convert a model to Pico's established strict Responses schema."""
     function = convert_to_openai_function(args_schema, strict=True)
     return _render_runtime_defaults(function["parameters"])
@@ -344,47 +301,46 @@ def _render_runtime_defaults(schema):
         rendered["description"] = " ".join(
             item for item in (str(rendered.get("description", "")).strip(), note) if item
         )
+    if rendered.get("type") == "object" and isinstance(rendered.get("properties"), dict):
+        rendered["required"] = list(rendered["properties"])
     return rendered
 
 
-def validate_schema(schema, args):
-    args = args or {}
-    if not isinstance(args, dict):
-        raise ValueError("args must be an object")
-    for name, spec in schema.items():
-        required = bool(spec.get("required", False))
-        if required and name not in args:
-            raise ValueError(f"missing required argument: {name}")
-        if name not in args:
-            continue
-        value = args.get(name)
-        expected_type = str(spec.get("type", "str"))
-        if expected_type == "str":
-            if not isinstance(value, str):
-                raise ValueError(f"{name} must be a string")
-            min_length = int(spec.get("min_length", 0) or 0)
-            if min_length and len(value.strip()) < min_length:
-                raise ValueError(f"{name} must not be empty")
-        elif expected_type == "int":
-            try:
-                int_value = int(value)
-            except Exception as exc:
-                raise ValueError(f"{name} must be an integer") from exc
-            if "min" in spec and int_value < int(spec["min"]):
-                raise ValueError(f"{name} must be >= {spec['min']}")
-            if "max" in spec and int_value > int(spec["max"]):
-                raise ValueError(f"{name} must be <= {spec['max']}")
-        elif expected_type == "list":
-            if not isinstance(value, list):
-                raise ValueError(f"{name} must be a list")
-            min_length = int(spec.get("min_length", 0) or 0)
-            if min_length and len(value) < min_length:
-                raise ValueError(f"{name} must contain at least {min_length} item(s)")
-            max_length = spec.get("max_length")
-            if max_length is not None and len(value) > int(max_length):
-                raise ValueError(f"{name} must contain at most {max_length} item(s)")
+def _validation_location(parts):
+    location = ""
+    for part in parts:
+        if isinstance(part, int):
+            location += f"[{part + 1}]"
         else:
-            raise ValueError(f"unsupported schema type for {name}: {expected_type}")
+            location += ("." if location else "") + str(part)
+    return location
+
+
+def _validation_error_message(error):
+    location = _validation_location(error.get("loc", ()))
+    error_type = str(error.get("type", ""))
+    context = error.get("ctx", {})
+    if error_type == "missing":
+        return f"missing required argument: {location}"
+    if error_type == "extra_forbidden":
+        return f"unexpected argument: {location}"
+    if error_type == "string_type":
+        return f"{location} must be a string"
+    if error_type in {"int_type", "int_parsing"}:
+        return f"{location} must be an integer"
+    if error_type == "list_type":
+        return f"{location} must be a list"
+    if error_type == "string_too_short" and int(context.get("min_length", 0)) == 1:
+        return f"{location} must not be empty"
+    if error_type == "too_short":
+        return f"{location} must contain at least {context['min_length']} item(s)"
+    if error_type == "too_long":
+        return f"{location} must contain at most {context['max_length']} item(s)"
+    if error_type == "greater_than_equal":
+        return f"{location} must be >= {context['ge']}"
+    if error_type == "less_than_equal":
+        return f"{location} must be <= {context['le']}"
+    return f"{location}: {error.get('msg', 'invalid value')}".strip(": ")
 
 
 def detect_dangerous_shell_command(command):
@@ -458,19 +414,13 @@ def protected_read_reason(agent, raw_path):
 def validate_tool(agent, name, args):
     args = args or {}
     tool = agent.tools.get(name, {})
-    validate_schema(tool.get("schema", {}), args)
     args_schema = tool.get("args_schema")
     if args_schema is not None:
         try:
             args_schema.model_validate(args)
         except ValidationError as exc:
-            extra = next(
-                (error for error in exc.errors(include_url=False) if error["type"] == "extra_forbidden"),
-                None,
-            )
-            if extra is not None:
-                location = ".".join(str(part) for part in extra["loc"])
-                raise ValueError(f"unexpected argument: {location}") from exc
+            error = exc.errors(include_url=False)[0]
+            raise ValueError(_validation_error_message(error)) from exc
 
     if name == "list_files":
         path = agent.path(args.get("path", "."))
@@ -616,8 +566,8 @@ def tool_read_tool_output(agent, args):
     node_id = str(args.get("node_id", "")).strip()
     run_id = str(args.get("run_id", "")).strip()
     if not run_id:
-        task_state = getattr(agent, "current_task_state", None)
-        run_id = str(getattr(task_state, "run_id", "") or "")
+        task_state = agent.current_task_state
+        run_id = str(task_state.run_id if task_state is not None else "")
     if not run_id:
         raise ValueError("run_id is required when no current run is active")
 
@@ -759,9 +709,7 @@ def run_delegate_child(agent, args):
 
     role_config = DELEGATE_ROLES[role]
     child_task = f"{role_config['instruction']}\n\nTask:\n{task}"
-    child_model_client = agent.model_client
-    if getattr(agent.model_client, "supports_native_actions", False):
-        child_model_client = agent.model_client.fork_for_delegate()
+    child_model_client = agent.model_client.fork_for_delegate()
     child_feature_flags = dict(agent.feature_flags)
     # Delegate children are intentionally read-only. Requiring a workspace
     # change would reject their valid investigation final answers forever, and

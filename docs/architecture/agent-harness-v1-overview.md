@@ -25,7 +25,7 @@ the ranked signatures enter a dedicated ContextManager budget. The same graph is
 available through the read-only `query_repo_map` tool, which refreshes changed files
 before answering. Ranking evidence is stored in prompt metadata and `report.json`.
 
-The tool layer is intentionally explicit. Pydantic argument models are the single schema source used to derive both the legacy registry view and strict Responses functions. The model can only request registered tools, every tool has argument validation, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
+The tool layer is intentionally explicit. Pydantic argument models are the single schema source for prompt signatures, local validation, tool identity, and strict Responses functions. The model can only request registered tools, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
 
 Risky workspace actions also pass through `run_undo.py`. Path-specific tools stage
 their target and its parent directories; shell actions stage the workspace scope

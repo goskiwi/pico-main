@@ -23,7 +23,7 @@ def build_report(agent, task_state):
         "repo_map": dict((agent.last_prompt_metadata or {}).get("repo_map", {})),
         "undo": (
             agent.current_undo_journal.summary()
-            if getattr(agent, "current_undo_journal", None) is not None
+            if agent.current_undo_journal is not None
             else {
                 "schema_version": "run-undo-v1",
                 "status": "unavailable",
@@ -35,16 +35,16 @@ def build_report(agent, task_state):
             }
         ),
         "tool_audit": list(agent.tool_audit_log),
-        "model_action_rejections": list(getattr(agent, "model_action_rejections", [])),
+        "model_action_rejections": list(agent.model_action_rejections),
         "task_state": task_state.to_dict(),
         "prompt_metadata": agent.last_prompt_metadata,
         "durable_promotions": list(agent.last_durable_promotions),
         "durable_rejections": list(agent.last_durable_rejections),
         "durable_superseded": list(agent.last_durable_superseded),
-        "llm_durable_promotions": list(getattr(agent, "last_llm_durable_promotions", [])),
-        "llm_durable_rejections": list(getattr(agent, "last_llm_durable_rejections", [])),
-        "llm_durable_superseded": list(getattr(agent, "last_llm_durable_superseded", [])),
-        "llm_memory_extractor_error": str(getattr(agent, "last_llm_memory_extractor_error", "")),
+        "llm_durable_promotions": list(agent.last_llm_durable_promotions),
+        "llm_durable_rejections": list(agent.last_llm_durable_rejections),
+        "llm_durable_superseded": list(agent.last_llm_durable_superseded),
+        "llm_memory_extractor_error": str(agent.last_llm_memory_extractor_error),
         "redacted_env": security.detected_secret_env_summary(agent),
     }
 
@@ -118,7 +118,7 @@ def build_run_summary(agent, task_state):
         for entry in agent.tool_audit_log
         if entry.get("security_event_type")
     ]
-    action_rejections = list(getattr(agent, "model_action_rejections", []))
+    action_rejections = list(agent.model_action_rejections)
     return {
         "task": clip(task_state.user_request, 300),
         "status": task_state.status,

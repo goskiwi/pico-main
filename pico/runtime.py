@@ -111,19 +111,28 @@ class Pico:
             if self.repo_map_budget_tokens <= 0:
                 raise ValueError("repo_map_budget_tokens must be a positive integer")
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
-        self.session = session or {
-            "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
-            "created_at": now(),
-            "workspace_root": workspace.repo_root,
-            "session_kind": "delegate" if self.parent_agent_id else "main",
-            "agent_mode": self.agent_mode,
-            "parent_agent_id": self.parent_agent_id,
-            "history": [],
-            "memory": memorylib.default_memory_state(),
-        }
+        self.session = (
+            session
+            if session is not None
+            else {
+                "id": datetime.now().strftime("%Y%m%d-%H%M%S")
+                + "-"
+                + uuid.uuid4().hex[:6],
+                "created_at": now(),
+                "workspace_root": workspace.repo_root,
+                "session_kind": "delegate" if self.parent_agent_id else "main",
+                "agent_mode": self.agent_mode,
+                "parent_agent_id": self.parent_agent_id,
+                "history": [],
+                "memory": memorylib.default_memory_state(),
+                "checkpoints": {"current_id": "", "items": {}},
+                "runtime_identity": {},
+                "resume_state": {},
+            }
+        )
         self._ensure_session_shape()
         self.memory = memorylib.LayeredMemory(
-            self.session.setdefault("memory", memorylib.default_memory_state()),
+            self.session["memory"],
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
@@ -161,6 +170,7 @@ class Pico:
             "workspace_changed": False,
             "prefix_changed": False,
         }
+        self._workspace_snapshot_hash_cache = {}
 
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
@@ -181,23 +191,26 @@ class Pico:
         return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
     def _ensure_session_shape(self):
-        self.session.setdefault("session_kind", "delegate" if self.parent_agent_id else "main")
-        self.session.setdefault("agent_mode", self.agent_mode)
-        self.session.setdefault("parent_agent_id", self.parent_agent_id)
-        self.session.setdefault("history", [])
-        self.session.setdefault("memory", memorylib.default_memory_state())
-        checkpoints = self.session.setdefault("checkpoints", {})
-        if not isinstance(checkpoints, dict):
-            checkpoints = {}
-            self.session["checkpoints"] = checkpoints
-        checkpoints.setdefault("current_id", "")
-        checkpoints.setdefault("items", {})
-        runtime_identity = self.session.setdefault("runtime_identity", {})
-        if not isinstance(runtime_identity, dict):
-            self.session["runtime_identity"] = {}
-        resume_state = self.session.setdefault("resume_state", {})
-        if not isinstance(resume_state, dict):
-            self.session["resume_state"] = {}
+        if self.session.get("session_kind") not in {"main", "delegate"}:
+            raise ValueError("session_kind must be 'main' or 'delegate'")
+        expected_types = {
+            "id": str,
+            "agent_mode": str,
+            "parent_agent_id": str,
+            "history": list,
+            "memory": dict,
+            "checkpoints": dict,
+            "runtime_identity": dict,
+            "resume_state": dict,
+        }
+        for name, expected_type in expected_types.items():
+            if not isinstance(self.session.get(name), expected_type):
+                raise ValueError(f"invalid session field: {name}")
+        checkpoints = self.session["checkpoints"]
+        if not isinstance(checkpoints.get("current_id"), str):
+            raise ValueError("invalid session field: checkpoints.current_id")
+        if not isinstance(checkpoints.get("items"), dict):
+            raise ValueError("invalid session field: checkpoints.items")
 
     def evaluate_resume_state(self):
         return checkpoints.evaluate_resume_state(self)
@@ -265,7 +278,7 @@ class Pico:
             payload.append(
                 {
                     "name": name,
-                    "schema": tool["schema"],
+                    "schema": toolkit.strict_response_schema(tool["args_schema"]),
                     "capability": tool.get("capability", ""),
                     "risky": tool["risky"],
                     "description": tool["description"],
@@ -276,38 +289,19 @@ class Pico:
     def build_prefix(self):
         tool_lines = []
         for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in toolkit.schema_display(tool["schema"]).items())
+            fields = ", ".join(
+                f"{key}: {value}"
+                for key, value in toolkit.schema_display(tool["args_schema"]).items()
+            )
             risk = "approval required" if tool["risky"] else "safe"
             capability = tool.get("capability", "read")
             tool_lines.append(f"- {name}({fields}) [{risk}; capability={capability}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
-        native_actions = bool(getattr(self.model_client, "supports_native_actions", False))
-        if native_actions:
-            action_rules = """\
+        action_rules = """\
             - Call exactly one provided function in every response.
             - Use submit_final only after the requested work and verification are complete.
             - Do not narrate outside a function call.
             - Supply every function argument; use the documented default value when appropriate."""
-            examples = "Use the provider's strict function-calling interface."
-        else:
-            action_rules = """\
-            - Return exactly one <tool>...</tool> or one <final>...</final>.
-            - Tool calls must look like:
-              <tool>{"name":"tool_name","args":{...}}</tool>
-            - For write_file and patch_file with multi-line text, prefer XML style:
-              <tool name="write_file" path="file.py"><content>...</content></tool>
-            - Final answers must look like:
-              <final>your answer</final>"""
-            examples = "\n".join(
-                [
-                    '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                    '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                    '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                    '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                    '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                    "<final>Done.</final>",
-                ]
-            )
         # prefix 可以理解成 agent 的“工作手册”：
         # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
         text = textwrap.dedent(
@@ -338,8 +332,8 @@ class Pico:
             Tools:
             {tool_text}
 
-            Valid response examples:
-            {examples}
+            Action protocol:
+            Use the provider's strict function-calling interface.
 
             {self.workspace.text()}
             """
@@ -356,8 +350,8 @@ class Pico:
         self.prefix = prefix_state.text
 
     def refresh_prefix(self, force=False):
-        previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
-        previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
+        previous_hash = self.prefix_state.hash
+        previous_workspace_fingerprint = self.prefix_state.workspace_fingerprint
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
@@ -476,7 +470,7 @@ class Pico:
                 "tool_count": len(self.tools),
                 "active_tool_names": sorted(self.active_tool_names) if self.active_tool_names is not None else None,
                 "active_tools_strict": bool(self.active_tools_strict),
-                "skill_count": len(getattr(self, "skills", []) or []),
+                "skill_count": len(self.skills),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
@@ -485,7 +479,7 @@ class Pico:
                 "tool_signature": self.prefix_state.tool_signature,
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
-                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
+                "prompt_cache_supported": bool(self.model_client.supports_prompt_cache),
                 "resume_status": self.resume_state.get("status", CHECKPOINT_NONE_STATUS),
                 "stale_summary_invalidations": int(self.resume_state.get("stale_summary_invalidations", 0)),
                 "stale_paths": list(self.resume_state.get("stale_paths", [])),
@@ -580,8 +574,8 @@ class Pico:
 
     def mark_retry_needed(self, notice):
         self.update_working_state(
-            current_subtask="recovering from malformed model output",
-            next_action="ask the model for a valid tool call or final answer",
+            current_subtask="recovering from a rejected model action",
+            next_action="ask the model for one valid function call",
             last_error=clip(notice, 240),
         )
 
@@ -597,9 +591,6 @@ class Pico:
 
     def run_tool(self, name, args):
         return tool_runtime.run_tool(self, name, args)
-
-    def tool_example(self, name):
-        return toolkit.tool_example(name)
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""

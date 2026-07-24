@@ -52,9 +52,7 @@ class ContextManager:
         self.section_budgets = dict(DEFAULT_SECTION_BUDGETS)
         if section_budgets:
             self.section_budgets.update({str(key): int(value) for key, value in section_budgets.items()})
-        self.repo_map_budget_cap_tokens = getattr(
-            agent, "repo_map_budget_tokens", None
-        )
+        self.repo_map_budget_cap_tokens = agent.repo_map_budget_tokens
         if self.repo_map_budget_cap_tokens is not None:
             self.section_budgets["repo_map"] = int(
                 self.repo_map_budget_cap_tokens

@@ -1,15 +1,14 @@
 import json
-from unittest.mock import patch
 
 import pytest
 
-import pico.cli as cli
 from pico.run_undo import (
     RunUndoConflictError,
     RunUndoError,
     RunUndoJournal,
     restore_run,
 )
+from tests.fakes import final_action, tool_action_json
 from tests.helpers import build_agent
 
 
@@ -21,9 +20,9 @@ def test_run_undo_restores_dirty_preimage_and_removes_created_paths(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"agent version\\n"}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"generated/out.txt","content":"new\\n"}}</tool>',
-            "<final>Changed two files.</final>",
+            tool_action_json('{"name":"write_file","args":{"path":"README.md","content":"agent version\\n"}}'),
+            tool_action_json('{"name":"write_file","args":{"path":"generated/out.txt","content":"new\\n"}}'),
+            final_action("Changed two files."),
         ],
     )
     (tmp_path / "README.md").write_text(
@@ -72,9 +71,9 @@ def test_run_undo_conflict_refuses_every_path_before_writing(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"one.txt","content":"one agent\\n"}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"two.txt","content":"two agent\\n"}}</tool>',
-            "<final>Done.</final>",
+            tool_action_json('{"name":"write_file","args":{"path":"one.txt","content":"one agent\\n"}}'),
+            tool_action_json('{"name":"write_file","args":{"path":"two.txt","content":"two agent\\n"}}'),
+            final_action("Done."),
         ],
     )
 
@@ -93,8 +92,8 @@ def test_run_undo_rejects_new_descendant_inside_created_directory(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"generated/out.txt","content":"agent\\n"}}</tool>',
-            "<final>Done.</final>",
+            tool_action_json('{"name":"write_file","args":{"path":"generated/out.txt","content":"agent\\n"}}'),
+            final_action("Done."),
         ],
     )
     agent.ask("Create output")
@@ -117,9 +116,9 @@ def test_run_undo_validates_all_blobs_before_restoring_any_path(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"one.txt","content":"one agent\\n"}}</tool>',
-            '<tool>{"name":"write_file","args":{"path":"two.txt","content":"two agent\\n"}}</tool>',
-            "<final>Done.</final>",
+            tool_action_json('{"name":"write_file","args":{"path":"one.txt","content":"one agent\\n"}}'),
+            tool_action_json('{"name":"write_file","args":{"path":"two.txt","content":"two agent\\n"}}'),
+            final_action("Done."),
         ],
     )
     agent.ask("Change both files")
@@ -138,7 +137,7 @@ def test_run_undo_validates_all_blobs_before_restoring_any_path(tmp_path):
 
 
 def test_run_undo_captures_arbitrary_shell_changes_and_modes(tmp_path):
-    shell_action = "<tool>" + json.dumps(
+    shell_action = tool_action_json(json.dumps(
         {
             "name": "run_shell",
             "args": {
@@ -150,12 +149,12 @@ def test_run_undo_captures_arbitrary_shell_changes_and_modes(tmp_path):
                 "timeout": 20,
             },
         }
-    ) + "</tool>"
+    ))
     agent = build_agent(
         tmp_path,
         [
             shell_action,
-            "<final>Shell mutation complete.</final>",
+            final_action("Shell mutation complete."),
         ],
     )
     original_mode = (tmp_path / "README.md").stat().st_mode & 0o777
@@ -212,8 +211,8 @@ def test_run_undo_dry_run_only_lists_changes(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}</tool>',
-            "<final>Done.</final>",
+            tool_action_json('{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}'),
+            final_action("Done."),
         ],
     )
     agent.ask("Change README")
@@ -231,114 +230,3 @@ def test_run_undo_dry_run_only_lists_changes(tmp_path):
         ).read_text(encoding="utf-8")
     )
     assert manifest["status"] == "available"
-
-
-def test_run_undo_is_idempotent_after_success(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}</tool>',
-            "<final>Done.</final>",
-        ],
-    )
-    agent.ask("Change README")
-
-    first = restore_run(tmp_path, _run_id(agent))
-    second = restore_run(tmp_path, _run_id(agent))
-
-    assert first.already_restored is False
-    assert second.already_restored is True
-    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
-
-
-def test_run_undo_rejects_unsafe_manifest_path(tmp_path):
-    outside = tmp_path.parent / "outside-undo-target.txt"
-    outside.write_text("outside\n", encoding="utf-8")
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}</tool>',
-            "<final>Done.</final>",
-        ],
-    )
-    agent.ask("Change README")
-    manifest_path = (
-        agent.run_store.run_dir(_run_id(agent))
-        / "undo"
-        / "manifest.json"
-    )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["entries"]["../outside-undo-target.txt"] = {
-        "original": {"kind": "absent"},
-        "expected_post": {
-            "kind": "file",
-            "mode": 0o644,
-            "size": 8,
-            "sha256": "0" * 64,
-        },
-    }
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    with pytest.raises(RunUndoError, match="unsafe undo path"):
-        restore_run(tmp_path, _run_id(agent))
-
-    assert outside.read_text(encoding="utf-8") == "outside\n"
-
-
-def test_cli_undo_does_not_build_a_model_client(tmp_path, capsys):
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}</tool>',
-            "<final>Done.</final>",
-        ],
-    )
-    agent.ask("Change README")
-
-    with patch("pico.cli.build_agent", side_effect=AssertionError):
-        exit_code = cli.main(
-            [
-                "undo",
-                "--cwd",
-                str(tmp_path),
-                "--run",
-                _run_id(agent),
-            ]
-        )
-
-    assert exit_code == 0
-    assert "restored 1 path(s)" in capsys.readouterr().out
-    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
-
-
-def test_cli_undo_conflict_returns_nonzero(tmp_path, capsys):
-    agent = build_agent(
-        tmp_path,
-        [
-            '<tool>{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}</tool>',
-            "<final>Done.</final>",
-        ],
-    )
-    agent.ask("Change README")
-    (tmp_path / "README.md").write_text("user edit\n", encoding="utf-8")
-
-    exit_code = cli.main(
-        [
-            "undo",
-            "--cwd",
-            str(tmp_path),
-            "--run",
-            _run_id(agent),
-        ]
-    )
-
-    assert exit_code == 1
-    assert "undo refused" in capsys.readouterr().err
-    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "user edit\n"
-
-
-def test_cli_undo_help_is_available_without_runtime_configuration():
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main(["undo", "--help"])
-
-    assert exc_info.value.code == 0

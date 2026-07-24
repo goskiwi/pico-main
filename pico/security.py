@@ -15,16 +15,6 @@ def is_secret_env_name(agent, name):
     return upper in agent.secret_env_names or looks_sensitive_env_name(upper)
 
 
-def configured_secret_env_items(agent):
-    items = [
-        (name, value)
-        for name, value in os.environ.items()
-        if str(name).upper() in agent.secret_env_names and value
-    ]
-    items.sort(key=lambda item: item[0])
-    return items
-
-
 def detected_secret_env_items(agent):
     items = [
         (name, value)
@@ -33,14 +23,6 @@ def detected_secret_env_items(agent):
     ]
     items.sort(key=lambda item: item[0])
     return items
-
-
-def secret_env_summary(agent):
-    names = [name for name, _ in configured_secret_env_items(agent)]
-    return {
-        "secret_env_count": len(names),
-        "secret_env_names": names,
-    }
 
 
 def detected_secret_env_summary(agent):

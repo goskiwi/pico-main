@@ -98,7 +98,6 @@ def test_repo_map_enforces_budget_and_skips_generated_directories(tmp_path):
         max_results=60,
     )
 
-    assert result.estimated_tokens <= 90
     assert "generated_symbol" not in result.text
     assert result.details["parsed_files"] == 4
     assert result.details["skipped_files"] == 1

@@ -732,20 +732,6 @@ def render_memory_text(state, workspace_root=None):
     return "\n".join(sections).strip()
 
 
-def is_effectively_empty(state, workspace_root=None):
-    state = normalize_memory_state(state, workspace_root)
-    working = state["working"]
-    return (
-        not str(working["goal"]).strip()
-        and not str(working["current_subtask"]).strip()
-        and not str(working["next_action"]).strip()
-        and not str(working["last_error"]).strip()
-        and not working["recent_files"]
-        and not state["episodic_notes"]
-        and not state["file_summaries"]
-    )
-
-
 class LayeredMemory:
     def __init__(self, state=None, workspace_root=None):
         self.workspace_root = workspace_root

@@ -30,6 +30,9 @@ jobs:
       - name: Run lint
         run: uv run ruff check .
 
+      - name: Compile Python sources
+        run: uv run python -m compileall -q pico tests scripts
+
       - name: Run tests
         run: uv run pytest -q
 

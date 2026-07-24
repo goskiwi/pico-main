@@ -20,7 +20,6 @@ dist/
 htmlcov/
 
 # Temporary files
-.mini-coding-agent
 *.tmp
 *.temp
 *.swp
@@ -36,10 +35,12 @@ tmp/
 # Live benchmark outputs are ignored by default because provider-backed runs
 # may contain local metadata. Keep only reviewed result summaries.
 artifacts/*
-!artifacts/real-world-benchmark-v1.json
-!artifacts/real-world-benchmark-v1-structured.json
-!artifacts/real-world-benchmark-v2-heldout.json
-!artifacts/structured-action-comparison.json
+!artifacts/progress-feedback-live-ab-baseline-3x.json
+!artifacts/progress-feedback-live-ab-candidate-3x.json
+!artifacts/progress-feedback-live-ab-comparison.json
+!artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json
+!artifacts/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.json
+!artifacts/reliability-benchmark-v1-live-3x.json
 readme_intro_locked/
 .idea/
 .claude/settings.local.json

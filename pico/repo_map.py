@@ -153,9 +153,7 @@ class Symbol:
     qualified_name: str
     kind: str
     line: int
-    end_line: int
     signature: str
-    parent_id: str = ""
 
     @property
     def is_renderable(self):
@@ -208,10 +206,6 @@ class RankedSymbol:
 @dataclass(frozen=True)
 class RepoMapRender:
     text: str
-    selected: tuple[RankedSymbol, ...]
-    budget_tokens: int
-    estimated_tokens: int
-    truncated: bool
     details: dict = field(default_factory=dict)
 
 
@@ -228,10 +222,6 @@ class RepoMapQuery:
         if budget_tokens == 0:
             return RepoMapRender(
                 text="",
-                selected=(),
-                budget_tokens=0,
-                estimated_tokens=0,
-                truncated=bool(self.ranked),
                 details=self._details((), truncated=bool(self.ranked)),
             )
 
@@ -243,10 +233,6 @@ class RepoMapQuery:
             text = _token_clip(header + "\n- no Python symbols found", budget_tokens)
             return RepoMapRender(
                 text=text,
-                selected=(),
-                budget_tokens=budget_tokens,
-                estimated_tokens=_estimate_tokens(text),
-                truncated=False,
                 details=self._details((), truncated=False),
             )
 
@@ -277,10 +263,6 @@ class RepoMapQuery:
         accepted_tuple = tuple(accepted)
         return RepoMapRender(
             text=text,
-            selected=accepted_tuple,
-            budget_tokens=budget_tokens,
-            estimated_tokens=_estimate_tokens(text),
-            truncated=truncated,
             details=self._details(accepted_tuple, truncated=truncated),
         )
 
@@ -506,7 +488,6 @@ class RepoMap:
                 qualified_name=module_name,
                 kind="module",
                 line=1,
-                end_line=max(1, tree.root_node.end_point.row + 1),
                 signature=f"module {module_name}",
             )
         ]
@@ -536,9 +517,7 @@ class RepoMap:
                     qualified_name=qualified_name,
                     kind=kind,
                     line=node.start_point.row + 1,
-                    end_line=node.end_point.row + 1,
                     signature=signature,
-                    parent_id=current_id,
                 )
                 symbols.append(symbol)
                 references.append(

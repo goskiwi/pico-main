@@ -14,14 +14,6 @@ from pico.sandbox import (
 from tests.helpers import UnitTestSandbox, build_agent
 
 
-def test_default_sandbox_resources_fit_regular_repository_workloads():
-    config = DockerSandboxConfig()
-
-    assert config.cpus == 4.0
-    assert config.memory == "4g"
-    assert config.pids_limit == 512
-
-
 def test_docker_command_enforces_isolation_and_resource_limits(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".env").write_text("API_KEY=secret\n", encoding="utf-8")

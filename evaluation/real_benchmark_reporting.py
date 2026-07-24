@@ -1,14 +1,11 @@
-"""Artifact aggregation, comparison, and Markdown rendering."""
+"""Real benchmark aggregation and Markdown rendering."""
 
 from __future__ import annotations
 
-import json
 import statistics
-from pathlib import Path
 
 from .common import safe_mean as _safe_mean
 from .common import safe_ratio as _safe_ratio
-from .common import utc_timestamp as _utc_timestamp
 from .real_benchmark_contract import (
     REPO_MAP_BUDGET_VARIANTS,
     SUPPORTED_VARIANTS,
@@ -19,22 +16,11 @@ from .real_benchmark_contract import (
 
 
 def _scoped_row_metric(row, scope, metric):
-    """Read schema-v3 aggregate fields with a parent-only fallback for old rows."""
-    scoped_key = f"{scope}_{metric}"
-    if scoped_key in row:
-        return int(row[scoped_key])
-    if scope == "delegate":
-        return 0
-    return int(row.get(metric, 0))
+    return int(row[f"{scope}_{metric}"])
 
 
 def _scoped_row_protocols(row, scope):
-    scoped_key = f"{scope}_action_protocols"
-    if scoped_key in row:
-        return list(row[scoped_key])
-    if scope == "delegate":
-        return []
-    return list(row.get("action_protocols", []))
+    return list(row[f"{scope}_action_protocols"])
 
 
 def summarize_real_rows(rows):
@@ -63,7 +49,7 @@ def summarize_real_rows(rows):
                     "avg_tool_steps": _safe_mean(
                         row["tool_steps"] for row in repetition_rows
                     ),
-                    "avg_model_calls": _safe_mean(
+                    "avg_total_model_calls": _safe_mean(
                         _scoped_row_metric(row, "total", "model_calls")
                         for row in repetition_rows
                     ),
@@ -129,9 +115,6 @@ def summarize_real_rows(rows):
             "avg_total_model_calls": _safe_mean(
                 _scoped_row_metric(row, "total", "model_calls") for row in variant_rows
             ),
-            "avg_model_calls": _safe_mean(
-                _scoped_row_metric(row, "total", "model_calls") for row in variant_rows
-            ),
             "avg_parent_model_failures": _safe_mean(
                 _scoped_row_metric(row, "parent", "model_failures")
                 for row in variant_rows
@@ -141,10 +124,6 @@ def summarize_real_rows(rows):
                 for row in variant_rows
             ),
             "avg_total_model_failures": _safe_mean(
-                _scoped_row_metric(row, "total", "model_failures")
-                for row in variant_rows
-            ),
-            "avg_model_failures": _safe_mean(
                 _scoped_row_metric(row, "total", "model_failures")
                 for row in variant_rows
             ),
@@ -160,10 +139,6 @@ def summarize_real_rows(rows):
                 _scoped_row_metric(row, "total", "model_action_rejections")
                 for row in variant_rows
             ),
-            "avg_model_action_rejections": _safe_mean(
-                _scoped_row_metric(row, "total", "model_action_rejections")
-                for row in variant_rows
-            ),
             "avg_agent_duration_ms": _safe_mean(
                 row["agent_duration_ms"] for row in variant_rows
             ),
@@ -174,9 +149,6 @@ def summarize_real_rows(rows):
                 int(row.get("delegate_run_count", 0)) for row in variant_rows
             ),
             "total_delegate_run_count": sum(
-                int(row.get("delegate_run_count", 0)) for row in variant_rows
-            ),
-            "delegate_run_count": sum(
                 int(row.get("delegate_run_count", 0)) for row in variant_rows
             ),
             "total_parent_input_tokens": sum(
@@ -247,13 +219,6 @@ def summarize_real_rows(rows):
                     for protocol in _scoped_row_protocols(row, "total")
                 }
             ),
-            "action_protocols": sorted(
-                {
-                    protocol
-                    for row in variant_rows
-                    for protocol in _scoped_row_protocols(row, "total")
-                }
-            ),
         }
     category_task_ids = {}
     failure_counts = {}
@@ -305,21 +270,10 @@ def summarize_real_rows(rows):
     }
 
 
-def _artifact_model_cost_scope(artifact):
-    configured = str(
-        (artifact.get("run_config") or {}).get("model_cost_scope", "")
-    ).strip()
-    if configured:
-        return configured
-    if int(artifact.get("schema_version", 0) or 0) >= 3:
-        return "attempt_parent_and_related_delegates"
-    return "parent_run_only"
-
-
 def render_real_benchmark_markdown(artifact):
     summary = artifact["summary"]
     benchmark_name = artifact["benchmark"].get("name") or "Pico Real-world Benchmark"
-    model_cost_scope = _artifact_model_cost_scope(artifact)
+    model_cost_scope = artifact["run_config"]["model_cost_scope"]
     lines = [
         f"# {benchmark_name}",
         "",
@@ -354,43 +308,25 @@ def render_real_benchmark_markdown(artifact):
         "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for variant, metrics in summary["variants"].items():
-        avg_model_calls = metrics["avg_model_calls"]
-        parent_calls = metrics.get("avg_parent_model_calls", avg_model_calls)
-        delegate_calls = metrics.get("avg_delegate_model_calls", 0.0)
-        total_calls = metrics.get("avg_total_model_calls", avg_model_calls)
-        parent_failures = metrics.get("avg_parent_model_failures", 0.0)
-        delegate_failures = metrics.get("avg_delegate_model_failures", 0.0)
-        total_failures = metrics.get("avg_total_model_failures", parent_failures)
-        avg_rejections = metrics.get("avg_model_action_rejections", 0.0)
-        parent_rejections = metrics.get(
-            "avg_parent_model_action_rejections", avg_rejections
-        )
-        delegate_rejections = metrics.get("avg_delegate_model_action_rejections", 0.0)
-        total_rejections = metrics.get(
-            "avg_total_model_action_rejections", avg_rejections
-        )
-        attempt_count = max(1, int(metrics.get("attempt_count", 1)))
-        avg_delegate_runs = metrics.get(
-            "avg_delegate_run_count",
-            metrics.get("delegate_run_count", 0) / attempt_count,
-        )
-        parent_input = metrics.get(
-            "total_parent_input_tokens", metrics["total_input_tokens"]
-        )
-        delegate_input = metrics.get("total_delegate_input_tokens", 0)
-        parent_cached = metrics.get(
-            "total_parent_cached_tokens", metrics["total_cached_tokens"]
-        )
-        delegate_cached = metrics.get("total_delegate_cached_tokens", 0)
-        parent_output = metrics.get(
-            "total_parent_output_tokens", metrics["total_output_tokens"]
-        )
-        delegate_output = metrics.get("total_delegate_output_tokens", 0)
-        parent_model_duration_ms = metrics.get("avg_parent_model_duration_ms", 0.0)
-        delegate_model_duration_ms = metrics.get("avg_delegate_model_duration_ms", 0.0)
-        total_model_duration_ms = metrics.get(
-            "avg_total_model_duration_ms", parent_model_duration_ms
-        )
+        parent_calls = metrics["avg_parent_model_calls"]
+        delegate_calls = metrics["avg_delegate_model_calls"]
+        total_calls = metrics["avg_total_model_calls"]
+        parent_failures = metrics["avg_parent_model_failures"]
+        delegate_failures = metrics["avg_delegate_model_failures"]
+        total_failures = metrics["avg_total_model_failures"]
+        parent_rejections = metrics["avg_parent_model_action_rejections"]
+        delegate_rejections = metrics["avg_delegate_model_action_rejections"]
+        total_rejections = metrics["avg_total_model_action_rejections"]
+        avg_delegate_runs = metrics["avg_delegate_run_count"]
+        parent_input = metrics["total_parent_input_tokens"]
+        delegate_input = metrics["total_delegate_input_tokens"]
+        parent_cached = metrics["total_parent_cached_tokens"]
+        delegate_cached = metrics["total_delegate_cached_tokens"]
+        parent_output = metrics["total_parent_output_tokens"]
+        delegate_output = metrics["total_delegate_output_tokens"]
+        parent_model_duration_ms = metrics["avg_parent_model_duration_ms"]
+        delegate_model_duration_ms = metrics["avg_delegate_model_duration_ms"]
+        total_model_duration_ms = metrics["avg_total_model_duration_ms"]
         repo_map_budget_cap = metrics.get("repo_map_budget_cap_tokens")
         if repo_map_budget_cap == 0:
             repo_map_budget_label = "disabled"
@@ -400,8 +336,8 @@ def render_real_benchmark_markdown(artifact):
             repo_map_budget_label = str(repo_map_budget_cap)
         lines.append(
             f"| {variant} | {repo_map_budget_label} "
-            f"| {', '.join(metrics.get('action_protocols', [])) or '-'} "
-            f"| {metrics['pass_rate']:.1%} | {metrics['passed']}/{metrics.get('attempt_count', metrics['task_count'])} "
+            f"| {', '.join(metrics['total_action_protocols']) or '-'} "
+            f"| {metrics['pass_rate']:.1%} | {metrics['passed']}/{metrics['attempt_count']} "
             f"| {metrics['avg_tool_steps']:.2f} "
             f"| {parent_calls:.2f}/{delegate_calls:.2f}/{total_calls:.2f} "
             f"| {avg_delegate_runs:.2f} "
@@ -447,7 +383,7 @@ def render_real_benchmark_markdown(artifact):
                 lines.append(
                     f"| {variant} | {item['repetition']} | {item['pass_rate']:.1%} "
                     f"| {item['passed']}/{item['attempt_count']} "
-                    f"| {item['avg_model_calls']:.2f} "
+                    f"| {item['avg_total_model_calls']:.2f} "
                     f"| {item['avg_total_duration_ms'] / 1000:.2f}s |"
                 )
         lines.extend(
@@ -554,180 +490,12 @@ def render_real_benchmark_markdown(artifact):
             "",
             "- These are real model runs over fresh repository copies; hidden verifier tests are injected only after the agent stops.",
             "- Parent and child run roots, file-tool paths, search results, and verifier-source exposure are audited before hidden verifier injection; failures skip verification.",
-            "- In schema v3, compatibility fields for model calls, tokens, failures, rejections, and protocols cover the parent plus related delegates; explicit P/D/T fields retain the breakdown.",
+            "- Model calls, tokens, failures, rejections, protocols, and duration are reported explicitly for parent, delegates, and their total.",
             "- Required/executed tools and structured delegate outcomes remain parent-trace checks; related child identities and completion are cross-checked from child traces, whose model events also contribute to aggregate behavior and cost metrics.",
             "- Cumulative model-call duration is a workload indicator, not wall latency; concurrent child durations can overlap. Agent duration is the parent attempt's end-to-end wall time.",
             "- Verifiers run inside the mandatory Docker sandbox with networking disabled.",
             "- Results are model-, prompt-, and fixture-snapshot-specific; they are not a universal coding benchmark claim.",
             "- Repeated attempts over the same tasks are not independent task samples; standard deviation is calculated across full-suite repetitions.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def compare_real_benchmark_artifacts(baseline, candidate):
-    """Compare two runs over the exact same benchmark snapshot and task set."""
-    baseline = _load_artifact_value(baseline)
-    candidate = _load_artifact_value(candidate)
-    baseline_benchmark = baseline.get("benchmark") or {}
-    candidate_benchmark = candidate.get("benchmark") or {}
-    baseline_snapshot = baseline_benchmark.get(
-        "evaluation_snapshot_id"
-    ) or baseline_benchmark.get("fixture_snapshot_id")
-    candidate_snapshot = candidate_benchmark.get(
-        "evaluation_snapshot_id"
-    ) or candidate_benchmark.get("fixture_snapshot_id")
-    if not baseline_snapshot or baseline_snapshot != candidate_snapshot:
-        raise ValueError("benchmark evaluation snapshots do not match")
-    if baseline.get("provider") != candidate.get("provider"):
-        raise ValueError("benchmark providers do not match")
-    if baseline.get("model") != candidate.get("model"):
-        raise ValueError("benchmark models do not match")
-    baseline_cost_scope = _artifact_model_cost_scope(baseline)
-    candidate_cost_scope = _artifact_model_cost_scope(candidate)
-    if baseline_cost_scope != candidate_cost_scope:
-        raise ValueError("benchmark model-cost scopes do not match")
-    baseline_rows = _full_rows_by_task(baseline)
-    candidate_rows = _full_rows_by_task(candidate)
-    if set(baseline_rows) != set(candidate_rows):
-        raise ValueError("benchmark task sets do not match")
-
-    task_rows = []
-    for task_id in sorted(baseline_rows):
-        before = baseline_rows[task_id]
-        after = candidate_rows[task_id]
-        task_rows.append(
-            {
-                "task_id": task_id,
-                "baseline_passed": bool(before["passed"]),
-                "candidate_passed": bool(after["passed"]),
-                "pass_change": int(bool(after["passed"])) - int(bool(before["passed"])),
-                "baseline_model_calls": int(before["model_calls"]),
-                "candidate_model_calls": int(after["model_calls"]),
-                "model_calls_delta": int(after["model_calls"])
-                - int(before["model_calls"]),
-                "baseline_action_rejections": (
-                    int(before["model_action_rejections"])
-                    if "model_action_rejections" in before
-                    else None
-                ),
-                "candidate_action_rejections": (
-                    int(after["model_action_rejections"])
-                    if "model_action_rejections" in after
-                    else None
-                ),
-            }
-        )
-    count = len(task_rows)
-    baseline_passed = sum(row["baseline_passed"] for row in task_rows)
-    candidate_passed = sum(row["candidate_passed"] for row in task_rows)
-    return {
-        "schema_version": 1,
-        "artifact_type": "real-world-benchmark-comparison",
-        "captured_at": _utc_timestamp(),
-        "provider": baseline.get("provider", ""),
-        "model": baseline.get("model", ""),
-        "model_cost_scope": baseline_cost_scope,
-        "evaluation_snapshot_id": baseline_snapshot,
-        "snapshot_type": (
-            "evaluation"
-            if baseline_benchmark.get("evaluation_snapshot_id")
-            else "fixture_legacy"
-        ),
-        "task_count": count,
-        "summary": {
-            "baseline_pass_rate": _safe_ratio(baseline_passed, count),
-            "candidate_pass_rate": _safe_ratio(candidate_passed, count),
-            "pass_rate_delta": _safe_ratio(candidate_passed - baseline_passed, count),
-            "baseline_avg_model_calls": _safe_mean(
-                row["baseline_model_calls"] for row in task_rows
-            ),
-            "candidate_avg_model_calls": _safe_mean(
-                row["candidate_model_calls"] for row in task_rows
-            ),
-            "avg_model_calls_delta": _safe_mean(
-                row["model_calls_delta"] for row in task_rows
-            ),
-            "baseline_action_rejections": _optional_sum(
-                row["baseline_action_rejections"] for row in task_rows
-            ),
-            "candidate_action_rejections": _optional_sum(
-                row["candidate_action_rejections"] for row in task_rows
-            ),
-        },
-        "rows": task_rows,
-    }
-
-
-def _load_artifact_value(value):
-    if isinstance(value, dict):
-        return value
-    return json.loads(Path(value).read_text(encoding="utf-8"))
-
-
-def _full_rows_by_task(artifact):
-    full_rows = [
-        row for row in artifact.get("rows", []) if row.get("variant") == VARIANT_FULL
-    ]
-    if any(int(row.get("repetition", 1)) != 1 for row in full_rows):
-        raise ValueError("comparison accepts only single-repetition artifacts")
-    rows = full_rows
-    result = {str(row["task_id"]): row for row in rows}
-    if len(result) != len(rows) or not result:
-        raise ValueError("comparison needs one full-variant row per task")
-    return result
-
-
-def _optional_sum(values):
-    values = list(values)
-    if not values or any(value is None for value in values):
-        return None
-    return sum(values)
-
-
-def render_real_benchmark_comparison_markdown(comparison):
-    summary = comparison["summary"]
-    baseline_rejections = summary["baseline_action_rejections"]
-    candidate_rejections = summary["candidate_action_rejections"]
-    rejection_delta = (
-        f"{candidate_rejections - baseline_rejections:+d}"
-        if baseline_rejections is not None and candidate_rejections is not None
-        else "n/a"
-    )
-    lines = [
-        "# Structured Action Protocol Comparison",
-        "",
-        f"- Captured at: `{comparison['captured_at']}`",
-        f"- Provider: `{comparison.get('provider', 'not-recorded')}`",
-        f"- Model: `{comparison['model']}`",
-        f"- Model cost scope: `{comparison.get('model_cost_scope', 'parent_run_only')}`",
-        f"- Matched tasks: {comparison['task_count']}",
-        f"- Snapshot ({comparison.get('snapshot_type', 'unknown')}): `{comparison['evaluation_snapshot_id']}`",
-        "",
-        "| Metric | Text protocol | Structured actions | Delta |",
-        "|---|---:|---:|---:|",
-        f"| Pass rate | {summary['baseline_pass_rate']:.1%} | {summary['candidate_pass_rate']:.1%} | {summary['pass_rate_delta']:+.1%} |",
-        f"| Avg model calls | {summary['baseline_avg_model_calls']:.2f} | {summary['candidate_avg_model_calls']:.2f} | {summary['avg_model_calls_delta']:+.2f} |",
-        f"| Action rejections | {baseline_rejections if baseline_rejections is not None else 'not recorded'} "
-        f"| {candidate_rejections if candidate_rejections is not None else 'not recorded'} "
-        f"| {rejection_delta} |",
-        "",
-        "## Task details",
-        "",
-        "| Task | Text | Structured | Calls before | Calls after |",
-        "|---|---:|---:|---:|---:|",
-    ]
-    for row in comparison["rows"]:
-        lines.append(
-            f"| {row['task_id']} | {'PASS' if row['baseline_passed'] else 'FAIL'} "
-            f"| {'PASS' if row['candidate_passed'] else 'FAIL'} "
-            f"| {row['baseline_model_calls']} | {row['candidate_model_calls']} |"
-        )
-    lines.extend(
-        [
-            "",
-            "The comparison is accepted only when provider, model, task IDs, and the full evaluation snapshot are identical.",
             "",
         ]
     )

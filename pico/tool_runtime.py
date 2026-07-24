@@ -51,7 +51,7 @@ def _merge_unique(left, right):
 def _record_undo_changes(agent, token, affected_paths, diff_summary):
     if not token:
         return list(affected_paths or []), list(diff_summary or []), []
-    journal = getattr(agent, "current_undo_journal", None)
+    journal = agent.current_undo_journal
     if journal is None:
         return list(affected_paths or []), list(diff_summary or []), []
     try:
@@ -141,7 +141,7 @@ def _result_metadata(
 def _store_outcome(agent, name, tool, *, record_note=False, **updates):
     if name in {"delegate", "delegate_many"} and "delegate_outcome" not in updates:
         updates["delegate_outcome"] = dict(
-            getattr(agent, "_delegate_outcome_metadata", {}) or {}
+            agent._delegate_outcome_metadata or {}
         )
     metadata = _result_metadata(agent, tool, **updates)
     agent._last_tool_result_metadata = metadata
@@ -162,10 +162,7 @@ def run_tool(agent, name, args):
     try:
         agent.validate_tool(name, args)
     except Exception as exc:
-        example = agent.tool_example(name)
         message = f"error: invalid arguments for {name}: {exc}"
-        if example:
-            message += f"\nexample: {example}"
         security_event_type = ""
         if "path escapes workspace" in str(exc):
             security_event_type = "path_escape"
@@ -240,7 +237,7 @@ def run_tool(agent, name, args):
         )
         return f"error: approval denied for {name}"
     undo_token = None
-    undo_journal = getattr(agent, "current_undo_journal", None)
+    undo_journal = agent.current_undo_journal
     if undo_journal is not None:
         try:
             undo_token = undo_journal.prepare(agent, name, args, tool)

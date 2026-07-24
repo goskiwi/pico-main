@@ -14,7 +14,7 @@ from evaluation.reliability_benchmark import (
     summarize_reliability_rows,
     validate_reliability_benchmark,
 )
-from pico.models import FakeModelClient
+from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import UnitTestSandbox
 
 
@@ -162,17 +162,17 @@ def test_summary_and_markdown_report_recovery_and_dirty_preservation():
             "undo_rejected_multifile_change",
             [
                 (
-                    '<tool>{"name":"patch_file","args":{"path":'
+                    tool_action_json('{"name":"patch_file","args":{"path":'
                     '"checkout/pricing.py","old_text":"return amount * 2",'
-                    '"new_text":"return amount * 3"}}</tool>'
+                    '"new_text":"return amount * 3"}}')
                 ),
                 (
-                    '<tool>{"name":"patch_file","args":{"path":'
+                    tool_action_json('{"name":"patch_file","args":{"path":'
                     '"checkout/service.py","old_text":'
                     '"\\"label\\": \\"standard\\"","new_text":'
-                    '"\\"label\\": \\"experimental\\""}}</tool>'
+                    '"\\"label\\": \\"experimental\\""}}')
                 ),
-                "<final>Applied both experimental changes.</final>",
+                final_action("Applied both experimental changes."),
             ],
             False,
         ),
@@ -180,16 +180,16 @@ def test_summary_and_markdown_report_recovery_and_dirty_preservation():
             "undo_preserves_preexisting_dirty_file",
             [
                 (
-                    '<tool>{"name":"patch_file","args":{"path":'
+                    tool_action_json('{"name":"patch_file","args":{"path":'
                     '"README.md","old_text":"# Checkout App",'
-                    '"new_text":"# Experimental Checkout"}}</tool>'
+                    '"new_text":"# Experimental Checkout"}}')
                 ),
                 (
-                    '<tool>{"name":"patch_file","args":{"path":'
+                    tool_action_json('{"name":"patch_file","args":{"path":'
                     '"checkout/pricing.py","old_text":"return amount * 2",'
-                    '"new_text":"return amount * 4"}}</tool>'
+                    '"new_text":"return amount * 4"}}')
                 ),
-                "<final>Applied both experimental changes.</final>",
+                final_action("Applied both experimental changes."),
             ],
             True,
         ),
