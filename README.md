@@ -33,7 +33,7 @@
 | 证据 | 结果与边界 |
 |---|---|
 | 当前分支工程回归 | 301 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
-| 最新已发布 LLM 回归 | commit `f69cb8e` 的 V4 预算复测：600-token cap 15/15，动态预算 14/15；这是调参集证据，不是新盲测 |
+| 最新已发布 LLM 盲测 | commit `363a8e8` 的首次 V5：600 与动态预算均 14/15；每次成功 token 仅降 3.4%，未过预注册 5% 门槛，默认不改 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
@@ -510,16 +510,24 @@ uv run python scripts/run_real_world_benchmark.py \
   --require-clean-worktree
 ```
 
-### Repo Map 预算盲测：冻结 V5
+### Repo Map 预算盲测：V5 首次运行
 
 `benchmarks/real_world_tasks_v5.json` 使用全新的 `ops_center` fixture，五题覆盖区域库存分配、
 跨午夜维护窗口、折扣优先级、租户隔离的 rollout assignment 和事故依赖关闭。每题都经过新的
 API/service/helper 调用链，并包含未接入公共入口的 legacy/experiments 同名干扰实现。
 
-V5 的任务、隐藏 verifier、三轮运行方式和默认值修改门槛会在首次真实模型调用前一起提交冻结。
-只有 600-token hard cap 至少通过 13/15、通过数不低于 `full`、每次成功 token 至少降低 5%，
-且没有模型/隔离错误时，才修改默认预算。完整预注册条件见
-[V5 budget decision protocol](docs/metrics/v5-repo-map-budget-decision-protocol.md)。
+V5 的任务、隐藏 verifier、三轮运行方式和默认值修改门槛已在首次真实模型调用前提交为
+`363a8e8`。首次 `gpt-5.4`、clean-worktree 三轮结果中，600-token hard cap 与动态 `full`
+均通过 14/15，且模型失败、Action 拒绝和隔离失败均为 0。两档各在跨午夜维护窗口题失败一次，
+但出现在不同轮次。
+
+600 的输入 token 下降 3.8%，输出 token 增加 6.4%；按成功 attempt 计算的输入+输出 token
+从 42,845 降至 41,407，仅下降 3.36%，未达到预注册的 5% 成本门槛。平均工具步和模型调用基本
+持平，平均耗时增加 6.9%。因此严格按预注册协议保留动态默认，不把 600 设为项目默认值。见
+[决策协议](docs/metrics/v5-repo-map-budget-decision-protocol.md)、
+[首次运行报告](docs/metrics/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md)和
+[原始 JSON artifact](artifacts/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.json)。
+V5 从这次结果被检查后转为回归集，不再是 held-out。
 
 首次检查环境时，建议先运行一个低成本 smoke：
 
