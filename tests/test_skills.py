@@ -290,7 +290,15 @@ Write a failing test before production code.
     assert "Write a failing test before production code." in prompt
     assert metadata["skills"]["selected_names"] == ["tdd"]
     assert metadata["sections"]["skills"]["rendered_estimated_tokens"] <= metadata["sections"]["skills"]["budget_tokens"]
-    assert metadata["section_order"] == ["prefix", "memory", "skills", "relevant_memory", "history", "current_request"]
+    assert metadata["section_order"] == [
+        "prefix",
+        "memory",
+        "skills",
+        "repo_map",
+        "relevant_memory",
+        "history",
+        "current_request",
+    ]
 
 
 def test_context_manager_omits_skills_when_none_match(tmp_path):

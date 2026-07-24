@@ -3,6 +3,8 @@ import subprocess
 import sys
 from unittest.mock import patch
 
+import pytest
+
 import pico.cli as cli
 
 
@@ -40,6 +42,73 @@ def test_build_arg_parser_defaults_to_openai_compatible_runtime(tmp_path):
 
     assert not hasattr(args, "provider")
     assert args.openai_timeout == 300
+    assert args.repo_map_budget is None
+
+
+def test_build_agent_applies_explicit_repo_map_budget_cap(tmp_path):
+    args = cli.build_arg_parser().parse_args(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--repo-map-budget",
+            "600",
+        ]
+    )
+
+    with patch.dict(os.environ, {}, clear=True), patch(
+        "pico.cli.OpenAICompatibleModelClient"
+    ):
+        agent = cli.build_agent(args)
+
+    _, metadata = agent.context_manager.build(
+        "Fix the implementation in service.py"
+    )
+
+    assert agent.repo_map_budget_tokens == 600
+    assert metadata["section_budgets_tokens"]["repo_map"] == 600
+    assert (
+        metadata["dynamic_adjustment"]["repo_map_budget_cap_tokens"]
+        == 600
+    )
+
+
+def test_build_agent_passes_repo_map_budget_when_resuming(tmp_path):
+    args = cli.build_arg_parser().parse_args(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--resume",
+            "existing-session",
+            "--repo-map-budget",
+            "600",
+        ]
+    )
+    resumed_agent = object()
+
+    with patch.dict(os.environ, {}, clear=True), patch(
+        "pico.cli.OpenAICompatibleModelClient"
+    ), patch.object(
+        cli.Pico,
+        "from_session",
+        return_value=resumed_agent,
+    ) as from_session:
+        result = cli.build_agent(args)
+
+    assert result is resumed_agent
+    assert (
+        from_session.call_args.kwargs["repo_map_budget_tokens"]
+        == 600
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+def test_build_arg_parser_rejects_invalid_repo_map_budget(value):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_arg_parser().parse_args(
+            ["--repo-map-budget", value]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_build_agent_uses_official_openai_defaults(tmp_path):
@@ -54,6 +123,7 @@ def test_build_agent_uses_official_openai_defaults(tmp_path):
     assert mock_openai.call_args.kwargs["base_url"] == "https://api.openai.com/v1"
     assert mock_openai.call_args.kwargs["api_key"] == ""
     assert agent.model_client is mock_openai.return_value
+    assert agent.repo_map_budget_tokens is None
 
 
 def test_build_agent_uses_workspace_env_instead_of_process_env(tmp_path):
@@ -122,6 +192,7 @@ def test_module_execution_help_works():
     assert result.returncode == 0
     assert "usage:" in result.stdout.lower()
     assert "--provider" not in result.stdout
+    assert "--repo-map-budget" in result.stdout
     assert "启动中" not in result.stderr
 
 

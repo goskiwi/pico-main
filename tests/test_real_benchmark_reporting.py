@@ -1,6 +1,10 @@
 import pytest
 
-from evaluation.real_benchmark_contract import VARIANT_FULL
+from evaluation.real_benchmark_contract import (
+    VARIANT_FULL,
+    VARIANT_NO_REPO_MAP,
+    VARIANT_REPO_MAP_600,
+)
 from evaluation.real_benchmark_reporting import (
     compare_real_benchmark_artifacts,
     render_real_benchmark_markdown,
@@ -127,6 +131,54 @@ def test_summary_and_report_expose_parent_delegate_total_costs():
     assert "1.00/2.00/3.00" in report
     assert "10/20/30" in report
     assert "0.10s/0.25s/0.35s" in report
+
+
+def test_summary_and_report_compare_repo_map_ablation():
+    full = _benchmark_row(variant=VARIANT_FULL, passed=True, tool_steps=2)
+    ablated = _benchmark_row(
+        variant=VARIANT_NO_REPO_MAP,
+        passed=False,
+        tool_steps=5,
+    )
+
+    summary = summarize_real_rows([full, ablated])
+    artifact = _benchmark_artifact(full, schema_version=3)
+    artifact["rows"] = [full, ablated]
+    artifact["summary"] = summary
+    report = render_real_benchmark_markdown(artifact)
+
+    assert summary["comparison"]["repo_map_pass_rate_delta"] == 1.0
+    assert summary["comparison"]["repo_map_avg_tool_steps_delta"] == -3.0
+    assert "full - no_repo_map" in report
+
+
+def test_summary_and_report_compare_repo_map_budget_variant():
+    full = _benchmark_row(
+        variant=VARIANT_FULL,
+        passed=True,
+        tool_steps=2,
+        repo_map_budget_cap_tokens=None,
+    )
+    capped = _benchmark_row(
+        variant=VARIANT_REPO_MAP_600,
+        passed=False,
+        tool_steps=4,
+        repo_map_budget_cap_tokens=600,
+    )
+
+    summary = summarize_real_rows([full, capped])
+    artifact = _benchmark_artifact(full, schema_version=3)
+    artifact["rows"] = [full, capped]
+    artifact["summary"] = summary
+    report = render_real_benchmark_markdown(artifact)
+
+    deltas = summary["comparison"]["repo_map_budget_variants"][
+        VARIANT_REPO_MAP_600
+    ]
+    assert deltas["pass_rate_delta"] == 1.0
+    assert deltas["avg_tool_steps_delta"] == -2.0
+    assert "| repo_map_600 | 600 |" in report
+    assert "full - repo_map_600" in report
 
 
 def test_report_keeps_schema_v2_parent_only_artifacts_renderable():

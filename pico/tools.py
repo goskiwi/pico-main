@@ -40,15 +40,15 @@ class DelegateRole(str, Enum):
 
 DELEGATE_ROLES = {
     DelegateRole.EXPLORE.value: {
-        "allowed_tools": ("list_files", "read_file", "search"),
+        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
         "instruction": "Explore the repository for facts relevant to the task. Do not propose edits unless asked to report risks.",
     },
     DelegateRole.REVIEW.value: {
-        "allowed_tools": ("list_files", "read_file", "search"),
+        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
         "instruction": "Review the relevant code for bugs, regressions, missing tests, and safety issues. Report findings with file references when possible.",
     },
     DelegateRole.VERIFY.value: {
-        "allowed_tools": ("list_files", "read_file", "search"),
+        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
         "instruction": "Verify the current state by inspecting files, test output, and evidence. Report what is confirmed and what remains uncertain.",
     },
 }
@@ -110,6 +110,16 @@ TOOL_DEFINITIONS = {
         "Search the workspace with rg or a simple fallback.",
         pattern=_arg(str, min_length=1),
         path=_arg(str, "."),
+    ),
+    "query_repo_map": _tool(
+        "QueryRepoMapArgs",
+        (
+            "Rank Python classes, functions, methods, imports, calls, inheritance, "
+            "and test relations for a focused repository question."
+        ),
+        query=_arg(str, min_length=1),
+        budget_tokens=_arg(int, 1200, ge=64, le=4000),
+        max_results=_arg(int, 24, ge=1, le=60),
     ),
     "run_shell": _tool(
         "RunShellArgs",
@@ -227,6 +237,7 @@ BASE_TOOL_NAMES = (
     "read_file",
     "read_tool_output",
     "search",
+    "query_repo_map",
     "run_shell",
     "write_file",
     "patch_file",
@@ -240,6 +251,7 @@ TOOL_EXAMPLES = {
     "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
     "read_tool_output": '<tool>{"name":"read_tool_output","args":{"node_id":"t001_read_file"}}</tool>',
     "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
+    "query_repo_map": '<tool>{"name":"query_repo_map","args":{"query":"binary search callers and tests","budget_tokens":1200,"max_results":24}}</tool>',
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
@@ -260,6 +272,8 @@ def build_tool_registry(agent):
     if agent.depth < agent.max_depth:
         tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, agent)}
         tools["delegate_many"] = {**DELEGATE_MANY_TOOL_SPEC, "run": partial(tool_delegate_many, agent)}
+    if not agent.feature_enabled("repo_map"):
+        tools.pop("query_repo_map", None)
     if agent.allowed_tools is not None:
         allowed = set(agent.allowed_tools)
         tools = {name: tool for name, tool in tools.items() if name in allowed}
@@ -673,6 +687,25 @@ def tool_search(agent, args):
     return "\n".join(matches) or "(no matches)"
 
 
+def tool_query_repo_map(agent, args):
+    rendered = agent.repo_map.render(
+        str(args["query"]).strip(),
+        budget_tokens=int(args.get("budget_tokens", 1200)),
+        max_results=int(args.get("max_results", 24)),
+    )
+    details = rendered.details
+    evidence = (
+        "repo_map_stats: "
+        f"files={details.get('parsed_files', 0)} "
+        f"nodes={details.get('graph_nodes', 0)} "
+        f"edges={details.get('graph_edges', 0)} "
+        f"selected={details.get('selected_count', 0)} "
+        f"cache_hits={details.get('cache_hits', 0)} "
+        f"cache_misses={details.get('cache_misses', 0)}"
+    )
+    return f"{rendered.text}\n\n{evidence}".strip()
+
+
 def tool_run_shell(agent, args):
     command = str(args.get("command", "")).strip()
     timeout = int(args.get("timeout", 20))
@@ -858,6 +891,7 @@ _TOOL_RUNNERS = {
     "read_file": tool_read_file,
     "read_tool_output": tool_read_tool_output,
     "search": tool_search,
+    "query_repo_map": tool_query_repo_map,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,

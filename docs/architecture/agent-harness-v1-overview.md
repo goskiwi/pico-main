@@ -6,7 +6,8 @@
 user request
   -> CLI builds Pico runtime
   -> task state and run directory are created
-  -> ContextManager builds the prompt
+  -> RepoMap refreshes the task-ranked Python symbol graph
+  -> ContextManager budgets the map and builds the prompt
   -> model client returns a normalized ModelAction
   -> a transient LangGraph routes model, tool, retry, and final transitions
   -> LangChain replays native function_call / function_call_output messages
@@ -15,6 +16,13 @@ user request
 ```
 
 The runtime keeps the task state separate from the session. The session stores recoverable conversation and memory, while task state records the status of a single `ask()` run: attempts, tool steps, last tool, stop reason, checkpoint id, and final answer. LangGraph is deliberately an in-process router here; Pico's existing `TaskState`, checkpoints, trace, and reports remain the durable audit and resume boundary.
+
+Repository retrieval is a separate layer. Tree-sitter extracts Python modules,
+classes, functions, and methods; import, call, inheritance, containment, and test
+relations form a weighted graph. Query identifiers seed Personalized PageRank, and
+the ranked signatures enter a dedicated ContextManager budget. The same graph is
+available through the read-only `query_repo_map` tool, which refreshes changed files
+before answering. Ranking evidence is stored in prompt metadata and `report.json`.
 
 The tool layer is intentionally explicit. Pydantic argument models are the single schema source used to derive both the legacy registry view and strict Responses functions. The model can only request registered tools, every tool has argument validation, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
 

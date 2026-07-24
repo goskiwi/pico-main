@@ -28,6 +28,7 @@ DELEGATE_BATCH_TIMEOUT_SECONDS: float = 180.0
 DEFAULT_FEATURE_FLAGS: dict = {
     "memory": True,
     "relevant_memory": True,
+    "repo_map": True,
     "durable_memory_promotion": True,
     "context_reduction": True,
     "prompt_cache": True,
@@ -62,17 +63,34 @@ REDACTED_VALUE: str = "<redacted>"
 
 DEFAULT_TOTAL_BUDGET: int = 12000
 DEFAULT_SECTION_BUDGETS: dict = {
-    "prefix": 3600,
-    "memory": 1600,
-    "skills": 1200,
-    "relevant_memory": 1200,
-    "history": 5200,
+    "prefix": 3000,
+    "memory": 1200,
+    "skills": 900,
+    "repo_map": 1800,
+    "relevant_memory": 900,
+    "history": 4200,
 }
-DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = ("relevant_memory", "skills", "history", "memory", "prefix")
+DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = (
+    "relevant_memory",
+    "skills",
+    "history",
+    "repo_map",
+    "memory",
+    "prefix",
+)
 HISTORY_RECENT_WINDOW: int = 6
 RELEVANT_MEMORY_LIMIT: int = 3
 LLM_COMPACT_MAX_INPUT_CHARS: int = 12000
 LLM_COMPACT_MAX_OUTPUT_TOKENS: int = 700
+
+# ---------------------------------------------------------------------------
+# Task-aware Python repository map
+# ---------------------------------------------------------------------------
+
+REPO_MAP_MAX_FILES: int = 2000
+REPO_MAP_MAX_FILE_BYTES: int = 512_000
+REPO_MAP_PAGE_RANK_ITERATIONS: int = 32
+REPO_MAP_DAMPING: float = 0.85
 
 # ---------------------------------------------------------------------------
 # 工作记忆 / 持久记忆

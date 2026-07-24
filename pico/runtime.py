@@ -29,6 +29,7 @@ from .config import (
     DEFAULT_SHELL_ENV_ALLOWLIST,
 )
 from .context_manager import ContextManager
+from .repo_map import RepoMap
 from .run_store import RunStore
 from .sandbox import DockerSandbox
 from . import tools as toolkit
@@ -67,6 +68,7 @@ class Pico:
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
+        repo_map_budget_tokens=None,
         agent_mode="main",
         agent_id=None,
         parent_agent_id=None,
@@ -95,6 +97,19 @@ class Pico:
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
+        if repo_map_budget_tokens is None:
+            self.repo_map_budget_tokens = None
+        else:
+            if isinstance(repo_map_budget_tokens, bool):
+                raise ValueError("repo_map_budget_tokens must be a positive integer")
+            try:
+                self.repo_map_budget_tokens = int(repo_map_budget_tokens)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "repo_map_budget_tokens must be a positive integer"
+                ) from exc
+            if self.repo_map_budget_tokens <= 0:
+                raise ValueError("repo_map_budget_tokens must be a positive integer")
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
@@ -112,6 +127,7 @@ class Pico:
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
+        self.repo_map = RepoMap(self.root)
         self.tools = self.build_tools()
         self.all_tools = dict(self.tools)
         self.skills = self.load_skills()
@@ -223,6 +239,7 @@ class Pico:
             "depth": self.depth,
             "max_depth": self.max_depth,
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
+            "repo_map_budget_tokens": self.repo_map_budget_tokens,
             "read_only": bool(self.read_only),
             "workspace_root": str(self.root.resolve()),
             "sandbox": self.sandbox.identity(),

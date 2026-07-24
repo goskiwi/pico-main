@@ -6,19 +6,51 @@ an archived report is not a current benchmark claim.
 
 ## Current evidence
 
-1. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
+1. [`real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md`](real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md) —
+   first live-model result over the new V5 `ops_center` suite, frozen with its
+   [decision protocol](v5-repo-map-budget-decision-protocol.md) at clean commit
+   `363a8e8`. Both dynamic `full` and the 600-token hard cap passed 14/15 attempts.
+   The cap reduced reported input-plus-output tokens per passing attempt by 3.36%,
+   below the pre-registered 5% default-change threshold, so the dynamic default was
+   retained. Neither variant recorded model failures, action rejections, or
+   isolation failures. V5 became a regression suite after this result was inspected.
+2. [`real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md`](real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md) —
+   budget-tuning confirmation for clean commit `f69cb8e`: the 600-token cap passed
+   15/15 attempts and dynamic `full` passed 14/15. The cap used 9.5% fewer input
+   tokens, 11.1% fewer output tokens, and 15.6% fewer reported input-plus-output
+   tokens per passing attempt. This is confirmation on the V4 tuning/regression
+   suite, not a new held-out result, so it does not by itself justify changing the
+   runtime default. The preceding
+   [`single-repetition screen`](real-world-benchmark-v4-repo-map-budget-screen-1x.md)
+   selected 600 by the declared pass-rate-first rule, but both competing failures
+   were remote `model_error` events rather than verifier failures.
+3. [`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md) —
+   primary localization result for clean commit `016c618`: `full` passed 13/15
+   attempts and `no_repo_map` passed 6/15, an observed +46.7 percentage-point
+   difference on the frozen five-task suite. `full` used 33.8% more tokens per
+   attempt and 22.1% more wall time, but 38.3% fewer tokens per passing attempt.
+   This is a targeted Repo Map benchmark, not a universal coding-agent claim.
+4. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
    primary published result for commit `0897195`: 13/15 attempts across three
    clean-worktree repetitions; four of five tasks passed 3/3. It is not validation
    of later runtime revisions.
-2. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
+5. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
    negative follow-up: a prompt change regressed the same frozen suite to 12/15 and
    was rolled back.
-3. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
+6. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
    repetition semantics, hidden-verifier isolation, delegation cost accounting, and
    interpretation limits.
 
 The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
 fixtures and hidden verifiers remain under `benchmarks/`.
+
+## Development-only evidence
+
+1. [`real-world-benchmark-v3-repo-map-ablation-live-1x.md`](real-world-benchmark-v3-repo-map-ablation-live-1x.md) —
+   a single-repetition live A/B on the frozen V3 suite comparing `full` with
+   `no_repo_map`. Both variants passed 4/5 tasks; `full` used 1.8 fewer tool steps
+   per task on average. This run was captured from a dirty working tree, so it is
+   directional regression evidence rather than a publishable benchmark claim.
 
 ## Historical / archive evidence
 

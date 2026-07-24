@@ -239,7 +239,10 @@ def build_real_model_client(model, base_url=None, timeout=300, *, env):
 
 
 def _variant_feature_flags(variant):
-    if variant == contract.VARIANT_FULL:
+    if (
+        variant == contract.VARIANT_FULL
+        or variant in contract.REPO_MAP_BUDGET_VARIANTS
+    ):
         return {
             "llm_memory_extract": False,
             "require_explicit_final": True,
@@ -257,7 +260,20 @@ def _variant_feature_flags(variant):
             "require_explicit_final": True,
             "require_workspace_change": True,
         }
+    if variant == contract.VARIANT_NO_REPO_MAP:
+        return {
+            "repo_map": False,
+            "llm_memory_extract": False,
+            "require_explicit_final": True,
+            "require_workspace_change": True,
+        }
     raise ValueError(f"unsupported benchmark variant: {variant}")
+
+
+def _variant_repo_map_budget(variant):
+    if variant not in contract.SUPPORTED_VARIANTS:
+        raise ValueError(f"unsupported benchmark variant: {variant}")
+    return contract.REPO_MAP_BUDGET_VARIANTS.get(variant)
 
 
 @dataclass
@@ -366,6 +382,10 @@ class RealWorldBenchmarkRunner:
                 "agent_duration_semantics": (
                     "parent_attempt_wall_clock_including_delegate_wait"
                 ),
+                "repo_map_budget_cap_tokens_by_variant": {
+                    variant: _variant_repo_map_budget(variant)
+                    for variant in self.variants
+                },
             },
             "sandbox": (self.sandbox_config or DockerSandboxConfig()).__dict__,
             "summary": summary,
@@ -410,6 +430,7 @@ class RealWorldBenchmarkRunner:
             max_new_tokens=int(self.max_new_tokens),
             allowed_tools=tuple(task["allowed_tools"]),
             feature_flags=_variant_feature_flags(variant),
+            repo_map_budget_tokens=_variant_repo_map_budget(variant),
             sandbox=sandbox,
         )
         started = time.monotonic()
@@ -487,6 +508,11 @@ class RealWorldBenchmarkRunner:
             "task_id": task["id"],
             "category": task["category"],
             "variant": variant,
+            "repo_map_budget_cap_tokens": (
+                0
+                if variant == contract.VARIANT_NO_REPO_MAP
+                else _variant_repo_map_budget(variant)
+            ),
             "repetition": repetition,
             "passed": passed,
             "failure_category": failure_category,

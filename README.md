@@ -19,6 +19,8 @@
 
 - **结构化控制流**：OpenAI-compatible 主路径使用 strict function calling；工具额度与结束协议
   分离，额度耗尽后只能进入一次 final-only 收尾，不能借机继续修改工作区。
+- **任务相关仓库检索**：tree-sitter 提取 Python 类、函数和方法，导入、调用、继承与测试关系组成
+  符号图；Personalized PageRank 按当前请求排序，并在独立 token 预算内注入函数签名。
 - **强制执行边界**：文件工具限制敏感路径；`run_shell` 只能进入无网络、只读 RootFS、移除
   capabilities 且限制 CPU、内存和 PIDs 的 Docker 容器，没有宿主机回退。
 - **可恢复、可审计**：session、checkpoint、任务图、完整工具输出和逐事件 trace 分层存储，既能
@@ -30,14 +32,16 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| `v0.1.0` 工程回归 | 252 passed，4 个 opt-in 测试默认跳过；Docker integration 9/9 |
-| 最新已发布 LLM 微基准 | commit `0897195` 三轮通过 13/15，4/5 任务稳定 3/3；**不是当前 tag 的完整复测** |
+| 当前分支工程回归 | 306 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 最新已发布 LLM 盲测 | commit `363a8e8` 的首次 V5：600 与动态预算均 14/15；每次成功 token 仅降 3.4%，未过预注册 5% 门槛，默认不改 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
 
 ```mermaid
 flowchart LR
-    U["User request"] --> C["ContextManager"]
+    U["User request"] --> R["tree-sitter symbol graph + task PageRank"]
+    U --> C["ContextManager"]
+    R --> C
     C --> M["LangChain Responses adapter"]
     M --> L["LangGraph bounded loop"]
     L --> P["Schema / capability / approval"]
@@ -177,6 +181,59 @@ Review the change as production code.
 
 `.pico/` 是本地运行时目录，默认不提交；`examples/skills/` 用来保存可复用模板。
 
+## Task-aware Repo Map
+
+每轮请求进入 `ContextManager` 前，`pico` 会增量扫描工作区中的 Python 文件。它不是把源码全文
+塞进 prompt，而是只提取模块、类、函数、方法和签名，再把以下关系建成带权图：
+
+- `import` / `from ... import ...`
+- 函数与方法调用
+- 类继承
+- 模块、类与内部定义的包含关系
+- 测试函数与被测符号的名称关联
+
+当前请求中的标识符、文件路径和测试意图形成 Personalized PageRank 的 personalization vector。
+最终结果还会结合词法命中分数，并对同一文件做多样性惩罚，避免一个大文件独占全部预算。
+`build/`、`dist/`、`artifacts/`、虚拟环境、缓存、依赖目录、超大文件和 symlink 不进入图。
+
+Repo Map 有两条使用路径：
+
+1. 每轮 prompt 在 `repo_map` section 中自动获得一份受 token 预算约束的签名地图。
+2. 模型可以调用只读的 `query_repo_map`，针对新的子问题重新排序。
+
+默认自动 section 使用动态预算。需要更低上下文成本时，可以显式设置正整数 hard cap：
+
+```bash
+uv run pico --cwd /path/to/target-repo \
+  --repo-map-budget 600
+```
+
+该参数只限制自动注入 section，动态预算不能突破它；不传时保持动态默认。它不会限制模型显式调用
+`query_repo_map` 时传入的工具预算。最终 `report.json` 和 checkpoint runtime identity 会记录该值。
+
+工具参数示意：
+
+```json
+{
+  "name": "query_repo_map",
+  "args": {
+    "query": "UserService.create_user callers and tests",
+    "budget_tokens": 1200,
+    "max_results": 24
+  }
+}
+```
+
+每次 prompt 的 `prompt_metadata.repo_map` 和最终 `report.json` 都会记录图节点/边数量、解析错误
+文件数、缓存命中、入选文件、符号分数与命中原因。当前实现有意只支持 Python，并强依赖
+tree-sitter；没有 AST/正则兼容降级。算法与限制见
+[Repo Map architecture](docs/architecture/repo-map.md)。
+
+真实模型回归支持 `--variant no_repo_map`，可在同一冻结任务快照上与 `full` 比较通过率、工具步数、
+token 和时延。`repo_map_600`、`repo_map_1000`、`repo_map_1600` 三个变体会把自动注入的
+Repo Map section 设为相应的 token 硬上限；动态预算不能突破该上限，报告会记录 cap。加入新检索
+策略后应先跑这个 ablation，再决定是否扩大默认预算。
+
 ## 安全与持久化
 
 `pico` 不会默认把所有动作都放开。像 shell 执行、文件写入这类高风险操作，会受审批模式控制：
@@ -291,7 +348,8 @@ tool_outputs/*.txt
 用户输入
   -> pico.cli 构造 Pico runtime
   -> Pico.ask() 创建 task_state 和 run 目录
-  -> ContextManager 组装 prompt
+  -> RepoMap 按当前任务构建/刷新 Python 符号图
+  -> ContextManager 按预算注入任务相关签名并组装 prompt
   -> model_client.complete_action() 返回统一 ModelAction
   -> Responses function_call / function_call_output 组成结构化工具循环
   -> Pico.run_tool() 校验、审批、执行工具
@@ -309,6 +367,7 @@ tool_outputs/*.txt
 - `pico/delegate_scheduler.py`：只读子 agent 的并发调度、总步骤预算和 outcome 核算。
 - `pico/sandbox.py`：强制 Docker Shell 沙箱、资源限制、超时回收和审计元数据。
 - `pico/context_manager.py`：prompt 分区组装和上下文预算分配。
+- `pico/repo_map.py`：tree-sitter 符号提取、引用图、增量缓存、Personalized PageRank 和预算渲染。
 - `pico/context_history.py`：历史摘要、任务图压缩和 transcript 渲染。
 - `pico/context_types.py`：token 估算、语义截断和 section 数据结构。
 - `pico/memory.py`：短期工作记忆和可持久化记忆。
@@ -349,7 +408,39 @@ pico 的 Agent 效果评测强制调用真实模型 API，不提供 FakeModelCli
 所有已发布结果、状态和归档关系见 [Metrics evidence map](docs/metrics/README.md)，完整口径见
 [Real-model evaluation methodology](docs/metrics/evaluation-methodology.md)。
 
-### 最新已发布评测证据：冻结 V3（commit `0897195`）
+### 最新已发布评测证据：Repo Map 定位专项 V4（commit `016c618`）
+
+[V4 localization suite](benchmarks/real_world_tasks_v4.json) 在首次真实运行前提交并冻结。它让五个
+任务共享一个多 package 服务仓库，每题跨越 API、service、policy/store，并包含同名的
+legacy/experimental 干扰实现。`gpt-5.4`、temperature 0、clean worktree 下各跑三轮，
+`full` 通过 13/15（86.7%），`no_repo_map` 通过 6/15（40.0%），观察到 +46.7 个百分点差值。
+四题在 `full` 下稳定通过 3/3；关闭 Repo Map 后出现 7 次 `step_limit_reached`。
+
+Repo Map 不是免费的：`full` 每 attempt 的总 token 高 33.8%，平均耗时高 22.1%；但按成功
+attempt 计算的 token 低 38.3%。这说明它在该定位专项上用更多初始上下文减少了目录探索并提高
+完成率，不构成对任意仓库或模型的通用因果结论。见
+[完整报告](docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md)和
+[原始 JSON artifact](artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json)。
+
+### V4 预算调优复测（commit `f69cb8e`）
+
+在已经进入开发反馈的 V4 上，先对 600/1000/1600-token hard cap 各跑一轮。600 为 5/5，
+另外两档各 4/5；但两次失败都是远端 `model_error`，不是 verifier 失败，所以这轮筛选只用于按
+预先规则选出 600，不能证明 600 在语义上优于另外两档。
+
+随后从 clean worktree 将 `repo_map_600` 与动态预算 `full` 各跑三轮。600 为 15/15、3/3 轮
+全过；`full` 为 14/15、2/3 轮全过，唯一失败是 catalog rename 任务生成了未完成实现并被隐藏
+verifier 拒绝。600 相对 `full` 的输入 token 下降 9.5%、输出下降 11.1%、平均工具步下降 5.8%、
+平均耗时下降 2.6%；按成功 attempt 计算的输入+输出 token 下降 15.6%。确认阶段两档均为
+0 次 model failure。
+
+这是固定回归集上的调参与复测，不是新的 held-out 泛化证据，因此默认动态预算暂不改为 600；
+下一步需要全新、未用于选档的定位任务验证。见[单轮筛选报告](docs/metrics/real-world-benchmark-v4-repo-map-budget-screen-1x.md)、
+[三轮确认报告](docs/metrics/real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md)和对应
+[筛选 JSON](artifacts/real-world-benchmark-v4-repo-map-budget-screen-1x.json)、
+[确认 JSON](artifacts/real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.json)。
+
+### 此前发布评测证据：冻结 V3（commit `0897195`）
 
 [V3 frozen suite](benchmarks/real_world_tasks_v3.json) 包含 5 个全新实现任务。它的 prompt、fixture
 和隐藏 verifier 在首次真实模型运行前提交为 `0897195`，运行前工作区干净，期间未据此调整
@@ -379,6 +470,7 @@ artifact 和适用边界均未删除，统一从 [Historical metrics archive](do
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --variant full \
+  --variant no_repo_map \
   --benchmark-path benchmarks/real_world_tasks_v3.json \
   --repetitions 3 \
   --require-clean-worktree \
@@ -390,6 +482,62 @@ benchmark runner 只读取 `pico` 仓库根目录 `.env.local` 中的 `OPENAI_AP
 `OPENAI_API_KEY` 和 `OPENAI_MODEL`；这与 CLI 读取 `--cwd/.env.local` 不同。复现前需在 `pico`
 仓库中单独准备该文件，`--model` 与 `--base-url` 只用于一次性显式覆盖。上述输出名故意使用
 `rerun`，避免覆盖仓库中的首次运行证据；重复 V3 是回归，不会重新获得 held-out 身份。
+同时指定 `full` 与 `no_repo_map` 会在报告的 Ablation 部分生成 Repo Map 通过率和平均工具步数
+差值；两个 variant 仍会受到远端模型波动影响，因此应至少跑三轮并检查逐任务稳定性。
+
+### Repo Map 定位专项：冻结 V4
+
+[V4 localization suite](benchmarks/real_world_tasks_v4.json) 专门覆盖 Repo Map 的目标场景：
+五个任务共享一个多 package 的服务仓库，每题都跨越 API、service、policy/store 等模块，并包含
+同名的 legacy/experimental 干扰实现。公开 smoke tests 在未修改 fixture 上通过，五组隐藏 verifier
+分别验证区域运费、租户级 webhook 去重、角色继承、缓存失效和 locale fallback；未修改 fixture
+会被每组隐藏验证拒绝。
+
+V4 用于比较定位能力，不替代通用 coding benchmark。首次真实运行已从冻结 commit `016c618`
+和 clean worktree 完成；以下命令用于重复回归，不会重新获得 held-out 身份：
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant full \
+  --variant no_repo_map \
+  --benchmark-path benchmarks/real_world_tasks_v4.json \
+  --repetitions 3 \
+  --require-clean-worktree \
+  --artifact-path artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json \
+  --report-path docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md
+```
+
+预算调优应先用单轮筛选缩小候选，再让选中的低预算档与 `full` 各跑至少三轮。由于 V4 结果已经
+参与档位选择，这一过程只能回答固定回归集上的成本/成功率取舍，不能作为新的 held-out 泛化证据：
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant repo_map_600 \
+  --variant repo_map_1000 \
+  --variant repo_map_1600 \
+  --benchmark-path benchmarks/real_world_tasks_v4.json \
+  --repetitions 1 \
+  --require-clean-worktree
+```
+
+### Repo Map 预算盲测：V5 首次运行
+
+`benchmarks/real_world_tasks_v5.json` 使用全新的 `ops_center` fixture，五题覆盖区域库存分配、
+跨午夜维护窗口、折扣优先级、租户隔离的 rollout assignment 和事故依赖关闭。每题都经过新的
+API/service/helper 调用链，并包含未接入公共入口的 legacy/experiments 同名干扰实现。
+
+V5 的任务、隐藏 verifier、三轮运行方式和默认值修改门槛已在首次真实模型调用前提交为
+`363a8e8`。首次 `gpt-5.4`、clean-worktree 三轮结果中，600-token hard cap 与动态 `full`
+均通过 14/15，且模型失败、Action 拒绝和隔离失败均为 0。两档各在跨午夜维护窗口题失败一次，
+但出现在不同轮次。
+
+600 的输入 token 下降 3.8%，输出 token 增加 6.4%；按成功 attempt 计算的输入+输出 token
+从 42,845 降至 41,407，仅下降 3.36%，未达到预注册的 5% 成本门槛。平均工具步和模型调用基本
+持平，平均耗时增加 6.9%。因此严格按预注册协议保留动态默认，不把 600 设为项目默认值。见
+[决策协议](docs/metrics/v5-repo-map-budget-decision-protocol.md)、
+[首次运行报告](docs/metrics/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md)和
+[原始 JSON artifact](artifacts/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.json)。
+V5 从这次结果被检查后转为回归集，不再是 held-out。
 
 首次检查环境时，建议先运行一个低成本 smoke：
 

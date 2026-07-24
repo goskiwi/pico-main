@@ -108,6 +108,55 @@ Repeated attempts over the same task are not independent task samples. The repor
 deviation describes run-to-run stability on this fixed suite; it is not a confidence interval for
 unseen repositories.
 
+## Repo-map ablation
+
+The runner exposes `full` and `no_repo_map` variants. `no_repo_map` disables both
+automatic ContextManager injection and the `query_repo_map` tool while retaining the
+same model, task snapshot, tool-step limit, safety policy, memory settings, and final
+answer requirements.
+
+```bash
+uv run python scripts/run_real_world_benchmark.py \
+  --variant full \
+  --variant no_repo_map \
+  --benchmark-path benchmarks/real_world_tasks_v3.json \
+  --repetitions 3 \
+  --require-clean-worktree \
+  --artifact-path artifacts/real-world-benchmark-v3-repo-map-ablation-3x.json \
+  --report-path docs/metrics/real-world-benchmark-v3-repo-map-ablation-3x.md
+```
+
+The report records the pass-rate and average tool-step deltas for `full -
+no_repo_map`. Because variants call a remote model sequentially, the comparison is
+not paired deterministic inference. Interpret it together with per-task stability,
+token totals, and latency rather than as a causal claim from one run.
+
+The runner also exposes `repo_map_600`, `repo_map_1000`, and `repo_map_1600`.
+Each sets the automatic Repo Map section to an auditable hard token cap; dynamic
+budget adjustment cannot exceed that cap. A budget study should use one repetition
+to screen all three candidates, choose by pass rate first and cost second, and then
+run `full` against only the selected candidate for at least three repetitions.
+Because candidate selection consumes V4 outcomes, the confirmation remains tuning
+and regression evidence on V4 rather than a new held-out result.
+
+### Localization-heavy V4 suite
+
+`benchmarks/real_world_tasks_v4.json` isolates the use case Repo Map is intended to
+address. Its five tasks share one multi-package fixture, require changes reached
+through cross-module import/call paths, and include similarly named inactive
+implementations under `legacy/` and `experiments/`. A unit-level contract checks
+that:
+
+- the public fixture tests pass before an agent changes the repository;
+- every hidden verifier rejects the unmodified fixture;
+- the task-ranked map includes each active multi-file path and competing distractor
+  paths within its normal context budget.
+
+These checks validate benchmark construction, not model quality. The suite becomes
+evaluation evidence only after its prompt, fixture, verifier, and runtime snapshots
+are frozen before the first live run. `full` versus `no_repo_map` should then be run
+from a clean worktree for at least three repetitions.
+
 ## Interpretation boundary
 
 - A model label may point to a provider implementation that changes over time.

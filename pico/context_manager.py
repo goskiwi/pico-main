@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from . import memory as memorylib
 from . import skills as skillslib
 from .config import (
@@ -22,7 +24,15 @@ from .context_types import (
 )
 
 
-SECTION_ORDER = ("prefix", "memory", "skills", "relevant_memory", "history", "current_request")
+SECTION_ORDER = (
+    "prefix",
+    "memory",
+    "skills",
+    "repo_map",
+    "relevant_memory",
+    "history",
+    "current_request",
+)
 CURRENT_REQUEST_SECTION = "current_request"
 RECENT_RUN_GUIDANCE = "Use read_file on task_graph, then read_tool_output for node refs."
 
@@ -42,6 +52,13 @@ class ContextManager:
         self.section_budgets = dict(DEFAULT_SECTION_BUDGETS)
         if section_budgets:
             self.section_budgets.update({str(key): int(value) for key, value in section_budgets.items()})
+        self.repo_map_budget_cap_tokens = getattr(
+            agent, "repo_map_budget_tokens", None
+        )
+        if self.repo_map_budget_cap_tokens is not None:
+            self.section_budgets["repo_map"] = int(
+                self.repo_map_budget_cap_tokens
+            )
         self._section_floor_overrides = {str(key): int(value) for key, value in (section_floors or {}).items()}
         self.section_floors = self._compute_section_floors()
         self.reduction_order = tuple(reduction_order or DEFAULT_REDUCTION_ORDER)
@@ -71,6 +88,7 @@ class ContextManager:
         self.section_floors = self._compute_section_floors()
         memory_enabled = self.agent.feature_enabled("memory")
         relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
+        repo_map_enabled = self.agent.feature_enabled("repo_map")
         context_reduction_enabled = self.agent.feature_enabled("context_reduction")
         llm_history_compaction_enabled = self.agent.feature_enabled("llm_history_compaction")
         dynamic_budget_enabled = self.agent.feature_enabled("dynamic_budget")
@@ -80,6 +98,7 @@ class ContextManager:
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
         selected_recent_runs = self._recent_runs_for_request(user_message)
         selected_skills = self.agent.select_skills(user_message)
+        repo_map_query = self.agent.repo_map.query(user_message) if repo_map_enabled else None
         prefix_text = str(self.agent.prefix)
         checkpoint_text = str(self.agent.render_checkpoint_text() or "").strip()
         if checkpoint_text:
@@ -88,13 +107,19 @@ class ContextManager:
             "prefix": prefix_text,
             "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
             "skills": "",
+            "repo_map": "Repository map:\n- disabled",
             "history": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
         section_texts["skills"] = skillslib.render_skills(selected_skills)
 
         if not context_reduction_enabled:
-            rendered = self._render_sections_without_reduction(section_texts, selected_notes=selected_notes, recent_runs=selected_recent_runs)
+            rendered = self._render_sections_without_reduction(
+                section_texts,
+                selected_notes=selected_notes,
+                recent_runs=selected_recent_runs,
+                repo_map_query=repo_map_query,
+            )
             prompt = self._assemble_prompt(rendered)
             metadata = self._metadata(
                 prompt=prompt,
@@ -114,6 +139,19 @@ class ContextManager:
         dynamic_adjustment = {}
         if dynamic_budget_enabled:
             budgets, dynamic_adjustment = self._dynamic_budget_adjust(budgets, user_message)
+        if self.repo_map_budget_cap_tokens is not None:
+            repo_map_budget_before_cap = int(budgets.get("repo_map", 0))
+            budgets["repo_map"] = min(
+                repo_map_budget_before_cap,
+                int(self.repo_map_budget_cap_tokens),
+            )
+            dynamic_adjustment = {
+                **dynamic_adjustment,
+                "repo_map_budget_cap_tokens": int(
+                    self.repo_map_budget_cap_tokens
+                ),
+                "repo_map_budget_before_cap_tokens": repo_map_budget_before_cap,
+            }
         dedup_file_paths = set()
         if cross_section_dedup_enabled and memory_enabled:
             memory_state = self.agent.memory.to_dict()
@@ -125,13 +163,15 @@ class ContextManager:
             recent_runs=selected_recent_runs,
             llm_history_compaction_enabled=llm_history_compaction_enabled,
             dedup_file_paths=dedup_file_paths,
+            repo_map_query=repo_map_query,
         )
         prompt = self._assemble_prompt(rendered)
         reduction_log = []
 
         # 如果 prompt 超过 token 预算，就按固定顺序不断压缩。
         # 这里的顺序体现了平台偏好：
-        # 先牺牲 relevant_memory，再牺牲 history，然后才动 memory 和 prefix。
+        # 先牺牲 relevant_memory、skills 和旧 history，然后才动 repo map、
+        # memory 和 prefix。
         # 优先压缩旧上下文；仍然超预算时，保留当前请求的首尾并截断。
         prompt_tokens = _estimate_tokens(prompt)
         while prompt_tokens > self.total_budget:
@@ -161,6 +201,7 @@ class ContextManager:
                     recent_runs=selected_recent_runs,
                     llm_history_compaction_enabled=llm_history_compaction_enabled,
                     dedup_file_paths=dedup_file_paths,
+                    repo_map_query=repo_map_query,
                 )
                 prompt = self._assemble_prompt(rendered)
                 prompt_tokens = _estimate_tokens(prompt)
@@ -185,7 +226,13 @@ class ContextManager:
         )
         return prompt, metadata
 
-    def _render_sections_without_reduction(self, section_texts, selected_notes=None, recent_runs=None):
+    def _render_sections_without_reduction(
+        self,
+        section_texts,
+        selected_notes=None,
+        recent_runs=None,
+        repo_map_query=None,
+    ):
         selected_notes = selected_notes or []
         recent_runs = recent_runs or []
         relevant_lines = ["Relevant memory:"]
@@ -208,6 +255,11 @@ class ContextManager:
             "prefix": SectionRender(raw=section_texts["prefix"], budget=_estimate_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
             "memory": SectionRender(raw=section_texts["memory"], budget=_estimate_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
             "skills": SectionRender(raw=section_texts["skills"], budget=_estimate_tokens(section_texts["skills"]), rendered=section_texts["skills"], details={}),
+            "repo_map": self._render_repo_map(
+                repo_map_query,
+                int(self.section_budgets.get("repo_map", 0)),
+                section_texts["repo_map"],
+            ),
             "relevant_memory": SectionRender(
                 raw=relevant_raw,
                 budget=_estimate_tokens(relevant_raw),
@@ -237,7 +289,16 @@ class ContextManager:
         floors.update(self._section_floor_overrides)
         return floors
 
-    def _render_sections(self, section_texts, budgets, selected_notes=None, recent_runs=None, llm_history_compaction_enabled=False, dedup_file_paths=None):
+    def _render_sections(
+        self,
+        section_texts,
+        budgets,
+        selected_notes=None,
+        recent_runs=None,
+        llm_history_compaction_enabled=False,
+        dedup_file_paths=None,
+        repo_map_query=None,
+    ):
         rendered = {}
         for section in SECTION_ORDER:
             budget = budgets.get(section)
@@ -246,6 +307,12 @@ class ContextManager:
                 rendered[section] = SectionRender(raw=raw, budget=0, rendered=raw, details={})
             elif section == "relevant_memory":
                 rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0), recent_runs=recent_runs or [])
+            elif section == "repo_map":
+                rendered[section] = self._render_repo_map(
+                    repo_map_query,
+                    int(budget or 0),
+                    section_texts[section],
+                )
             elif section == "history":
                 rendered[section] = self._render_history_section(
                     int(budget or 0),
@@ -257,6 +324,36 @@ class ContextManager:
                 rendered_text = _token_clip(raw, int(budget)) if budget is not None else raw
                 rendered[section] = SectionRender(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
         return rendered
+
+    def _render_repo_map(self, repo_map_query, budget, fallback):
+        budget = max(0, int(budget))
+        if repo_map_query is None:
+            rendered = _token_clip(fallback, budget) if budget else ""
+            return SectionRender(
+                raw=fallback,
+                budget=budget,
+                rendered=rendered,
+                details={
+                    "enabled": False,
+                    "selected_count": 0,
+                    "selected_files": [],
+                    "selected_symbols": [],
+                },
+            )
+        raw_render = repo_map_query.render(
+            budget_tokens=max(4000, budget),
+            max_results=60,
+        )
+        selected_render = repo_map_query.render(
+            budget_tokens=budget,
+            max_results=24,
+        )
+        return SectionRender(
+            raw=raw_render.text,
+            budget=budget,
+            rendered=selected_render.text,
+            details={"enabled": True, **selected_render.details},
+        )
 
     def _render_relevant_memory(self, selected_notes, budget, recent_runs=None):
         header = "Relevant memory:"
@@ -376,6 +473,8 @@ class ContextManager:
 
         history_score = sum(1 for signal in history_signals if signal in msg_lower)
         file_score = sum(1 for signal in file_signals if signal in msg_lower)
+        if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b", str(user_message)):
+            file_score += 2
 
         if history_score >= 2 and history_score > file_score:
             boost = min(800, int(budgets.get("prefix", 0) * 0.2))
@@ -383,12 +482,12 @@ class ContextManager:
                 adjusted["prefix"] = adjusted.get("prefix", 0) - boost
                 adjusted["history"] = adjusted.get("history", 0) + boost
                 adjustment = {"strategy": "history_boost", "boost_tokens": boost}
-        elif file_score >= 2 and file_score > history_score:
-            boost = min(400, int(budgets.get("skills", 0) * 0.3))
+        elif file_score >= 1 and file_score > history_score:
+            boost = min(600, int(budgets.get("history", 0) * 0.15))
             if boost > 0:
-                adjusted["skills"] = adjusted.get("skills", 0) - boost
-                adjusted["memory"] = adjusted.get("memory", 0) + boost
-                adjustment = {"strategy": "memory_boost", "boost_tokens": boost}
+                adjusted["history"] = adjusted.get("history", 0) - boost
+                adjusted["repo_map"] = adjusted.get("repo_map", 0) + boost
+                adjustment = {"strategy": "repo_map_boost", "boost_tokens": boost}
 
         return adjusted, adjustment
 
@@ -528,6 +627,23 @@ class ContextManager:
             "budget_reductions": reduction_log,
             "reduction_order": list(self.reduction_order),
             "skills": skillslib.skill_metadata(selected_skills, rendered["skills"].rendered),
+            "repo_map": {
+                "enabled": bool(rendered["repo_map"].details.get("enabled", False)),
+                "query": str(rendered["repo_map"].details.get("query", "")),
+                "graph_nodes": int(rendered["repo_map"].details.get("graph_nodes", 0)),
+                "graph_edges": int(rendered["repo_map"].details.get("graph_edges", 0)),
+                "parsed_files": int(rendered["repo_map"].details.get("parsed_files", 0)),
+                "skipped_files": int(rendered["repo_map"].details.get("skipped_files", 0)),
+                "parse_error_files": int(rendered["repo_map"].details.get("parse_error_files", 0)),
+                "cache_hits": int(rendered["repo_map"].details.get("cache_hits", 0)),
+                "cache_misses": int(rendered["repo_map"].details.get("cache_misses", 0)),
+                "selected_count": int(rendered["repo_map"].details.get("selected_count", 0)),
+                "selected_files": list(rendered["repo_map"].details.get("selected_files", [])),
+                "selected_symbols": list(rendered["repo_map"].details.get("selected_symbols", [])),
+                "truncated": bool(rendered["repo_map"].details.get("truncated", False)),
+                "raw_estimated_tokens": rendered["repo_map"].raw_tokens,
+                "rendered_estimated_tokens": rendered["repo_map"].rendered_tokens,
+            },
             "relevant_memory": {
                 "limit": RELEVANT_MEMORY_LIMIT,
                 "selected_count": len(selected_notes),
