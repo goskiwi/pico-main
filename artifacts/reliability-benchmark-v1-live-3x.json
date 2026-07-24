@@ -1,0 +1,1150 @@
+{
+  "artifact_type": "pico-reliability-benchmark",
+  "benchmark": {
+    "description": "Three frozen live-model scenarios covering cross-module task completion, rejected multi-file recovery, and preservation of a pre-existing dirty file.",
+    "evaluation_snapshot_id": "sha256:67ea15e520955191a4dace0262c550febb732766f381a4db540360cb9532b5e3",
+    "fixture_snapshot_id": "sha256:d6f56102bb9e298b94b6341b05025524ce8a25cabed95493e3719979f71ca901",
+    "name": "pico-repo-map-undo-reliability-v1",
+    "source": "benchmarks/reliability_tasks_v1.json",
+    "task_count": 3,
+    "task_ids": [
+      "repo_map_cross_module",
+      "undo_rejected_multifile_change",
+      "undo_preserves_preexisting_dirty_file"
+    ]
+  },
+  "captured_at": "2026-07-24T06:09:52.375738Z",
+  "execution_mode": "live_llm",
+  "model": "gpt-5.4",
+  "provider": "openai",
+  "repetitions": 3,
+  "rows": [
+    {
+      "agent_duration_ms": 80924,
+      "cached_tokens": 14592,
+      "category": "repo_map_task_success",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "patch_file",
+        "write_file",
+        "run_shell",
+        "run_shell"
+      ],
+      "expected_agent_changes": [
+        "ops_center/inventory/policy.py"
+      ],
+      "final_answer": "Updated inventory selection to honor region-specific priorities before default fallback, kept public API unchanged, and added coverage for regional match, no-fallback insufficiency, ValueError, and KeyError cases. Verified with `PYTHONPATH=. pytest -q tests/test_inventory.py` (5 passed).",
+      "input_tokens": 35796,
+      "missing_expected_changes": [],
+      "mode": "task_success",
+      "model_action_rejections": 0,
+      "model_calls": 10,
+      "model_duration_ms": 79250,
+      "model_failures": 0,
+      "mutation_paths": [
+        "ops_center/inventory/policy.py",
+        "tests/test_inventory.py"
+      ],
+      "output_tokens": 1611,
+      "passed": true,
+      "path_hash_evidence": {
+        "ops_center/inventory/policy.py": {
+          "after_agent": "463a5cfadda446d87f1dfcde7f4badbef0dd25e82b6a40c1844b18082aaf5585",
+          "after_undo": null,
+          "pre_run": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2",
+          "pristine": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2"
+        },
+        "tests/test_inventory.py": {
+          "after_agent": "232eb0e1dc944212d604e293c15c9e004be414aba471cbe671b1a154a30f7aea",
+          "after_undo": null,
+          "pre_run": "6c3da4634e2e332b18680266bd0322483c6a77098addce439e4e130518f27a87",
+          "pristine": "6c3da4634e2e332b18680266bd0322483c6a77098addce439e4e130518f27a87"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 125,
+        "stderr": "not applicable",
+        "stdout": "",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 0,
+      "pre_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "......                                                                   [100%]\n6 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 511,
+      "recovery": {
+        "already_restored": false,
+        "attempted": false,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [],
+        "duration_ms": 0,
+        "error": "",
+        "exact_restoration": false,
+        "passed": false,
+        "restored_paths": []
+      },
+      "repetition": 1,
+      "repo_map_files": [
+        "tests/test_inventory.py",
+        "ops_center/inventory/service.py",
+        "ops_center/inventory/api.py",
+        "ops_center/legacy/inventory.py",
+        "ops_center/inventory/policy.py",
+        "ops_center/inventory/store.py",
+        "ops_center/experiments/allocation.py",
+        "tests/test_incidents.py",
+        "ops_center/incidents/service.py",
+        "ops_center/incidents/store.py",
+        "ops_center/incidents/api.py",
+        "ops_center/legacy/incidents.py",
+        "ops_center/incidents/dependencies.py",
+        "tests/test_rollouts.py",
+        "tests/test_scheduling.py",
+        "ops_center/rollouts/store.py",
+        "tests/test_pricing.py",
+        "ops_center/rollouts/service.py",
+        "ops_center/experiments/dependencies.py",
+        "ops_center/rollouts/api.py",
+        "ops_center/legacy/rollouts.py",
+        "ops_center/rollouts/cohorts.py",
+        "ops_center/experiments/cohorts.py",
+        "ops_center/pricing/service.py"
+      ],
+      "reported_changed_files": [
+        "ops_center/inventory/policy.py",
+        "tests/test_inventory.py"
+      ],
+      "run_id": "run_20260724-135422-6fb740",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "repo_map_cross_module",
+      "tool_steps": 9,
+      "total_duration_ms": 81435,
+      "trace_parse_errors": [],
+      "workspace": "rep-1/repo_map_cross_module/ops_center",
+      "workspace_digests": {
+        "after_agent": "sha256:415774041fc2a2a428ce5f6cd2a241f229975c74e53788c19172c13a731be3d7",
+        "after_undo": null,
+        "pre_run": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b",
+        "pristine": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-1/repo_map_cross_module/ops_center",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-135422-6fb740"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 56283,
+      "cached_tokens": 5632,
+      "category": "undo_recovery",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "patch_file",
+        "read_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "final_answer": "Applied both requested source changes without modifying or running tests: checkout/pricing.py now multiplies by 3, and checkout/service.py now uses the label \"experimental\".",
+      "input_tokens": 9352,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 56115,
+      "model_failures": 0,
+      "mutation_paths": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "output_tokens": 315,
+      "passed": true,
+      "path_hash_evidence": {
+        "checkout/pricing.py": {
+          "after_agent": "7caac1a8cb5344cae15d782cf81a026124b72bc3eb02b6df896b8f64f3337bc1",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        },
+        "checkout/service.py": {
+          "after_agent": "96b8bf2fc60aaa5fa135c233f0b184bf8355fc11fdb0ff5d4d5b0c97e392a222",
+          "after_undo": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pre_run": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pristine": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 495,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_baseline_contract_rejects_experimental_rollout ______________\n\n    def test_baseline_contract_rejects_experimental_rollout():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'ex..., 'total': 30} == {'label': 'st..., 'total': 20}\nE         \nE         Differing items:\nE         {'total': 30} != {'total': 20}\nE         {'label': 'experimental'} != {'label': 'standard'}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:5: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_rejects_experimental_rollout\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 503,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ]
+      },
+      "repetition": 1,
+      "repo_map_files": [
+        "checkout/service.py",
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "run_id": "run_20260724-135543-37ab8d",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_rejected_multifile_change",
+      "tool_steps": 4,
+      "total_duration_ms": 57287,
+      "trace_parse_errors": [],
+      "workspace": "rep-1/undo_rejected_multifile_change/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:298b80e5cc8ddc8e5e09a1556f6046c0bfda4747801286ce977fb74170385eb5",
+        "after_undo": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pre_run": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-1/undo_rejected_multifile_change/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-135543-37ab8d"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 60546,
+      "cached_tokens": 2816,
+      "category": "undo_dirty_workspace",
+      "dirty_paths": [
+        "README.md"
+      ],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "patch_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "final_answer": "Updated README.md heading to \"# Experimental Checkout\" while preserving the existing owner note, and changed checkout/pricing.py so calculate_total returns amount * 4. Did not modify or run tests.",
+      "input_tokens": 9409,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 60377,
+      "model_failures": 0,
+      "mutation_paths": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "output_tokens": 289,
+      "passed": true,
+      "path_hash_evidence": {
+        "README.md": {
+          "after_agent": "42bb4ebc9f3ddb3e4ed19642d1ed3efae21e4995589f2c0421e7634a02b817ce",
+          "after_undo": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pre_run": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pristine": "4a8d23041a08c7a450861dc3f28710045ad88ec78c3283c4afe11d115d8220ac"
+        },
+        "checkout/pricing.py": {
+          "after_agent": "bac9ff4f3582891010d2e7917d50dc7debf3bc5b3744c9fb941e8b2fa257393d",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 490,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________ test_baseline_contract_and_owner_note_survive _________________\n\n    def test_baseline_contract_and_owner_note_survive():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'st..., 'total': 40} == {'label': 'st..., 'total': 20}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'total': 40} != {'total': 20}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:7: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_and_owner_note_survive\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 531,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ]
+      },
+      "repetition": 1,
+      "repo_map_files": [
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "checkout/service.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "run_id": "run_20260724-135640-a04795",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_preserves_preexisting_dirty_file",
+      "tool_steps": 4,
+      "total_duration_ms": 61573,
+      "trace_parse_errors": [],
+      "workspace": "rep-1/undo_preserves_preexisting_dirty_file/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:4981bcf623b5d8dc8d237db32f54b086463022302e9bcb3ef231cbc914022c7c",
+        "after_undo": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pre_run": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-1/undo_preserves_preexisting_dirty_file/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-135640-a04795"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 177043,
+      "cached_tokens": 15104,
+      "category": "repo_map_task_success",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "run_shell",
+        "search",
+        "write_file",
+        "write_file",
+        "run_shell"
+      ],
+      "expected_agent_changes": [
+        "ops_center/inventory/policy.py"
+      ],
+      "final_answer": "Fixed ops_center/inventory/policy.py so reserve_stock uses a region-specific priority list when present, falls back to default only when the region is absent, selects the first warehouse with sufficient stock, and preserves existing ValueError/KeyError behavior without mutating inputs on failure. Added inventory tests covering regional selection, no fallback on insufficient regional stock, non-positive quantity, and unknown warehouse IDs. Verified with: PYTHONPATH=. pytest -q tests/test_inventory.py (5 passed).",
+      "input_tokens": 34925,
+      "missing_expected_changes": [],
+      "mode": "task_success",
+      "model_action_rejections": 0,
+      "model_calls": 10,
+      "model_duration_ms": 175406,
+      "model_failures": 0,
+      "mutation_paths": [
+        "ops_center/inventory/policy.py",
+        "tests/test_inventory.py"
+      ],
+      "output_tokens": 1481,
+      "passed": true,
+      "path_hash_evidence": {
+        "ops_center/inventory/policy.py": {
+          "after_agent": "24b769a2dd700321c934bc83469c2ade48ded0d0a729b5463de6a7346254962d",
+          "after_undo": null,
+          "pre_run": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2",
+          "pristine": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2"
+        },
+        "tests/test_inventory.py": {
+          "after_agent": "fef5a163f196436ae9670dae3be88200e7a9b868537aec401dbcc7a01f0e3993",
+          "after_undo": null,
+          "pre_run": "6c3da4634e2e332b18680266bd0322483c6a77098addce439e4e130518f27a87",
+          "pristine": "6c3da4634e2e332b18680266bd0322483c6a77098addce439e4e130518f27a87"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 125,
+        "stderr": "not applicable",
+        "stdout": "",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 0,
+      "pre_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "......                                                                   [100%]\n6 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 529,
+      "recovery": {
+        "already_restored": false,
+        "attempted": false,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [],
+        "duration_ms": 0,
+        "error": "",
+        "exact_restoration": false,
+        "passed": false,
+        "restored_paths": []
+      },
+      "repetition": 2,
+      "repo_map_files": [
+        "tests/test_inventory.py",
+        "ops_center/inventory/service.py",
+        "ops_center/inventory/api.py",
+        "ops_center/legacy/inventory.py",
+        "ops_center/inventory/policy.py",
+        "ops_center/inventory/store.py",
+        "ops_center/experiments/allocation.py",
+        "tests/test_incidents.py",
+        "ops_center/incidents/service.py",
+        "ops_center/incidents/store.py",
+        "ops_center/incidents/api.py",
+        "ops_center/legacy/incidents.py",
+        "ops_center/incidents/dependencies.py",
+        "tests/test_rollouts.py",
+        "tests/test_scheduling.py",
+        "ops_center/rollouts/store.py",
+        "tests/test_pricing.py",
+        "ops_center/rollouts/service.py",
+        "ops_center/experiments/dependencies.py",
+        "ops_center/rollouts/api.py",
+        "ops_center/legacy/rollouts.py",
+        "ops_center/rollouts/cohorts.py",
+        "ops_center/experiments/cohorts.py",
+        "ops_center/pricing/service.py"
+      ],
+      "reported_changed_files": [
+        "ops_center/inventory/policy.py",
+        "tests/test_inventory.py"
+      ],
+      "run_id": "run_20260724-135742-227e88",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "repo_map_cross_module",
+      "tool_steps": 9,
+      "total_duration_ms": 177572,
+      "trace_parse_errors": [],
+      "workspace": "rep-2/repo_map_cross_module/ops_center",
+      "workspace_digests": {
+        "after_agent": "sha256:7d4ca6cb59dbf42ed4d6daddac2718197796e0f127948efe609ba43927f93152",
+        "after_undo": null,
+        "pre_run": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b",
+        "pristine": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-2/repo_map_cross_module/ops_center",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-135742-227e88"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 63154,
+      "cached_tokens": 4224,
+      "category": "undo_recovery",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "patch_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "final_answer": "Updated checkout/pricing.py to multiply amount by 3 and checkout/service.py to use label \"experimental\". Did not modify or run tests.",
+      "input_tokens": 9408,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 62980,
+      "model_failures": 0,
+      "mutation_paths": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "output_tokens": 310,
+      "passed": true,
+      "path_hash_evidence": {
+        "checkout/pricing.py": {
+          "after_agent": "7caac1a8cb5344cae15d782cf81a026124b72bc3eb02b6df896b8f64f3337bc1",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        },
+        "checkout/service.py": {
+          "after_agent": "96b8bf2fc60aaa5fa135c233f0b184bf8355fc11fdb0ff5d4d5b0c97e392a222",
+          "after_undo": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pre_run": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pristine": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 486,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_baseline_contract_rejects_experimental_rollout ______________\n\n    def test_baseline_contract_rejects_experimental_rollout():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'ex..., 'total': 30} == {'label': 'st..., 'total': 20}\nE         \nE         Differing items:\nE         {'label': 'experimental'} != {'label': 'standard'}\nE         {'total': 30} != {'total': 20}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:5: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_rejects_experimental_rollout\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 513,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ]
+      },
+      "repetition": 2,
+      "repo_map_files": [
+        "checkout/service.py",
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "run_id": "run_20260724-140040-c066f8",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_rejected_multifile_change",
+      "tool_steps": 4,
+      "total_duration_ms": 64159,
+      "trace_parse_errors": [],
+      "workspace": "rep-2/undo_rejected_multifile_change/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:298b80e5cc8ddc8e5e09a1556f6046c0bfda4747801286ce977fb74170385eb5",
+        "after_undo": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pre_run": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-2/undo_rejected_multifile_change/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-140040-c066f8"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 56297,
+      "cached_tokens": 2816,
+      "category": "undo_dirty_workspace",
+      "dirty_paths": [
+        "README.md"
+      ],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "patch_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "final_answer": "Updated README.md heading to # Experimental Checkout and changed checkout/pricing.py to return amount * 4. No tests run.",
+      "input_tokens": 9409,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 56143,
+      "model_failures": 0,
+      "mutation_paths": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "output_tokens": 275,
+      "passed": true,
+      "path_hash_evidence": {
+        "README.md": {
+          "after_agent": "42bb4ebc9f3ddb3e4ed19642d1ed3efae21e4995589f2c0421e7634a02b817ce",
+          "after_undo": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pre_run": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pristine": "4a8d23041a08c7a450861dc3f28710045ad88ec78c3283c4afe11d115d8220ac"
+        },
+        "checkout/pricing.py": {
+          "after_agent": "bac9ff4f3582891010d2e7917d50dc7debf3bc5b3744c9fb941e8b2fa257393d",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 484,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________ test_baseline_contract_and_owner_note_survive _________________\n\n    def test_baseline_contract_and_owner_note_survive():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'st..., 'total': 40} == {'label': 'st..., 'total': 20}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'total': 40} != {'total': 20}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:7: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_and_owner_note_survive\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 506,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ]
+      },
+      "repetition": 2,
+      "repo_map_files": [
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "checkout/service.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "run_id": "run_20260724-140144-f57a8b",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_preserves_preexisting_dirty_file",
+      "tool_steps": 4,
+      "total_duration_ms": 57293,
+      "trace_parse_errors": [],
+      "workspace": "rep-2/undo_preserves_preexisting_dirty_file/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:4981bcf623b5d8dc8d237db32f54b086463022302e9bcb3ef231cbc914022c7c",
+        "after_undo": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pre_run": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-2/undo_preserves_preexisting_dirty_file/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-140144-f57a8b"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 247666,
+      "cached_tokens": 13696,
+      "category": "repo_map_task_success",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "read_file",
+        "patch_file",
+        "write_file",
+        "write_file",
+        "run_shell"
+      ],
+      "expected_agent_changes": [
+        "ops_center/inventory/policy.py"
+      ],
+      "final_answer": "Updated inventory region selection to use the requested region\u2019s priority list when present, otherwise fall back to default; preserved API and return value. Also verified with pytest, which currently fails during collection because the repo is missing the import path for ops_center (ModuleNotFoundError across all test modules).",
+      "input_tokens": 33750,
+      "missing_expected_changes": [],
+      "mode": "task_success",
+      "model_action_rejections": 0,
+      "model_calls": 10,
+      "model_duration_ms": 246588,
+      "model_failures": 0,
+      "mutation_paths": [
+        "ops_center/inventory/policy.py"
+      ],
+      "output_tokens": 873,
+      "passed": true,
+      "path_hash_evidence": {
+        "ops_center/inventory/policy.py": {
+          "after_agent": "2a5562b72d1379f60ad383dae44d159e386fe7322daa432b72816e1eb6bac252",
+          "after_undo": null,
+          "pre_run": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2",
+          "pristine": "4d483d6164798af7cdbadc917614c33719fb7a4c080cd376511c6b514d129bd2"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 125,
+        "stderr": "not applicable",
+        "stdout": "",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 0,
+      "pre_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "......                                                                   [100%]\n6 passed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 544,
+      "recovery": {
+        "already_restored": false,
+        "attempted": false,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [],
+        "duration_ms": 0,
+        "error": "",
+        "exact_restoration": false,
+        "passed": false,
+        "restored_paths": []
+      },
+      "repetition": 3,
+      "repo_map_files": [
+        "tests/test_inventory.py",
+        "ops_center/inventory/service.py",
+        "ops_center/inventory/api.py",
+        "ops_center/legacy/inventory.py",
+        "ops_center/inventory/policy.py",
+        "ops_center/inventory/store.py",
+        "ops_center/experiments/allocation.py",
+        "tests/test_incidents.py",
+        "ops_center/incidents/service.py",
+        "ops_center/incidents/store.py",
+        "ops_center/incidents/api.py",
+        "ops_center/legacy/incidents.py",
+        "ops_center/incidents/dependencies.py",
+        "tests/test_rollouts.py",
+        "tests/test_scheduling.py",
+        "ops_center/rollouts/store.py",
+        "tests/test_pricing.py",
+        "ops_center/rollouts/service.py",
+        "ops_center/experiments/dependencies.py",
+        "ops_center/rollouts/api.py",
+        "ops_center/legacy/rollouts.py",
+        "ops_center/rollouts/cohorts.py",
+        "ops_center/experiments/cohorts.py",
+        "ops_center/pricing/service.py"
+      ],
+      "reported_changed_files": [
+        "ops_center/inventory/policy.py"
+      ],
+      "run_id": "run_20260724-140241-eed56c",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "repo_map_cross_module",
+      "tool_steps": 9,
+      "total_duration_ms": 248210,
+      "trace_parse_errors": [],
+      "workspace": "rep-3/repo_map_cross_module/ops_center",
+      "workspace_digests": {
+        "after_agent": "sha256:dce0ba2157892f933d9f68830caa5f45d73348b734202d73328afc93ca2bc3e0",
+        "after_undo": null,
+        "pre_run": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b",
+        "pristine": "sha256:7bcc48dbe3b749be5255bfe6b847aecbdab1721685840fa911fe1c5a81460c9b"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-3/repo_map_cross_module/ops_center",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-140241-eed56c"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 121380,
+      "cached_tokens": 5632,
+      "category": "undo_recovery",
+      "dirty_paths": [],
+      "executed_tools": [
+        "read_file",
+        "read_file",
+        "patch_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "final_answer": "Updated checkout/pricing.py to triple amounts and checkout/service.py to label quotes experimental.",
+      "input_tokens": 9399,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 121206,
+      "model_failures": 0,
+      "mutation_paths": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "output_tokens": 295,
+      "passed": true,
+      "path_hash_evidence": {
+        "checkout/pricing.py": {
+          "after_agent": "b00382429595469fa5ea1caad7d8c24af9ed98cc8e207f8f664a3008de5ff2f5",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        },
+        "checkout/service.py": {
+          "after_agent": "96b8bf2fc60aaa5fa135c233f0b184bf8355fc11fdb0ff5d4d5b0c97e392a222",
+          "after_undo": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pre_run": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0",
+          "pristine": "be12f9174bd883018c79ef39b536b0428d30f3ae510451bb8029e3cbebc951c0"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 487,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_baseline_contract_rejects_experimental_rollout ______________\n\n    def test_baseline_contract_rejects_experimental_rollout():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'ex..., 'total': 30} == {'label': 'st..., 'total': 20}\nE         \nE         Differing items:\nE         {'total': 30} != {'total': 20}\nE         {'label': 'experimental'} != {'label': 'standard'}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:5: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_rejects_experimental_rollout\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 538,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "checkout/pricing.py",
+          "checkout/service.py"
+        ]
+      },
+      "repetition": 3,
+      "repo_map_files": [
+        "checkout/service.py",
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "checkout/pricing.py",
+        "checkout/service.py"
+      ],
+      "run_id": "run_20260724-140649-407ac3",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_rejected_multifile_change",
+      "tool_steps": 4,
+      "total_duration_ms": 122411,
+      "trace_parse_errors": [],
+      "workspace": "rep-3/undo_rejected_multifile_change/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:b28d802f69efe38ff558a5a4c7944db3e5362aa905aa569bfe4371e02f87970a",
+        "after_undo": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pre_run": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-3/undo_rejected_multifile_change/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-140649-407ac3"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "agent_duration_ms": 59101,
+      "cached_tokens": 2816,
+      "category": "undo_dirty_workspace",
+      "dirty_paths": [
+        "README.md"
+      ],
+      "executed_tools": [
+        "read_file",
+        "patch_file",
+        "read_file",
+        "patch_file"
+      ],
+      "expected_agent_changes": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "final_answer": "Updated README.md heading to # Experimental Checkout and changed checkout/pricing.py to return amount * 4. No tests were run.",
+      "input_tokens": 9639,
+      "missing_expected_changes": [],
+      "mode": "undo_recovery",
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_duration_ms": 58932,
+      "model_failures": 0,
+      "mutation_paths": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "output_tokens": 317,
+      "passed": true,
+      "path_hash_evidence": {
+        "README.md": {
+          "after_agent": "42bb4ebc9f3ddb3e4ed19642d1ed3efae21e4995589f2c0421e7634a02b817ce",
+          "after_undo": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pre_run": "e4c084a7b3d8879e3f11d5686326f59bac60b6b7c39edd6655f5cf5eeb935115",
+          "pristine": "4a8d23041a08c7a450861dc3f28710045ad88ec78c3283c4afe11d115d8220ac"
+        },
+        "checkout/pricing.py": {
+          "after_agent": "bac9ff4f3582891010d2e7917d50dc7debf3bc5b3744c9fb941e8b2fa257393d",
+          "after_undo": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pre_run": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b",
+          "pristine": "abc70b9009172542e430a9d0e14a20a0cf7720eef5de49a5036793c94246795b"
+        }
+      },
+      "post_undo_verifier": {
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "post_verify_duration_ms": 479,
+      "pre_undo_verifier": {
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "F                                                                        [100%]\n=================================== FAILURES ===================================\n________________ test_baseline_contract_and_owner_note_survive _________________\n\n    def test_baseline_contract_and_owner_note_survive():\n>       assert quote(10) == {\"total\": 20, \"label\": \"standard\"}\nE       AssertionError: assert {'label': 'st..., 'total': 40} == {'label': 'st..., 'total': 20}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'total': 40} != {'total': 20}\nE         Use -v to get more diff\n\n.benchmark_hidden/test_hidden.py:7: AssertionError\n=========================== short test summary info ============================\nFAILED .benchmark_hidden/test_hidden.py::test_baseline_contract_and_owner_note_survive\n1 failed in 0.01s\n",
+        "timed_out": false
+      },
+      "pre_verify_duration_ms": 551,
+      "recovery": {
+        "already_restored": false,
+        "attempted": true,
+        "deleted_paths": [],
+        "dirty_preserved": true,
+        "dry_run_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ],
+        "duration_ms": 6,
+        "error": "",
+        "exact_restoration": true,
+        "passed": true,
+        "restored_paths": [
+          "README.md",
+          "checkout/pricing.py"
+        ]
+      },
+      "repetition": 3,
+      "repo_map_files": [
+        "checkout/pricing.py",
+        "legacy/pricing.py",
+        "checkout/service.py",
+        "tests/test_checkout.py"
+      ],
+      "reported_changed_files": [
+        "README.md",
+        "checkout/pricing.py"
+      ],
+      "run_id": "run_20260724-140852-70293c",
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "undo_preserves_preexisting_dirty_file",
+      "tool_steps": 4,
+      "total_duration_ms": 60137,
+      "trace_parse_errors": [],
+      "workspace": "rep-3/undo_preserves_preexisting_dirty_file/checkout_app",
+      "workspace_digests": {
+        "after_agent": "sha256:4981bcf623b5d8dc8d237db32f54b086463022302e9bcb3ef231cbc914022c7c",
+        "after_undo": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pre_run": "sha256:4c3853fa94176b7b217ec807329039469ea8a74b89cdb0f075e32b6520b4c7ae",
+        "pristine": "sha256:0d74097d3c391e080d2db6c651a6c92f7e3caea94368bd59416b4a1ac2a551d1"
+      },
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-reliability-v1-5d80ce5/rep-3/undo_preserves_preexisting_dirty_file/checkout_app",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-140852-70293c"
+        ],
+        "violations": []
+      }
+    }
+  ],
+  "run_config": {
+    "max_new_tokens": 1024,
+    "repo_map": "dynamic default",
+    "require_clean_worktree": true,
+    "temperature": 0.0,
+    "undo_conflict_policy": "fail closed",
+    "verifier_timeout_seconds": 90
+  },
+  "runtime": {
+    "branch": "codex/reliability-evaluation",
+    "commit_sha": "5d80ce56f63c3f9aa4649725fab71b3271d92666",
+    "platform": "macOS-15.3-arm64-arm-64bit",
+    "python_version": "3.11.15",
+    "working_tree_dirty": false
+  },
+  "sandbox": {
+    "cpus": 4.0,
+    "image": "pico-sandbox:latest",
+    "memory": "4g",
+    "pids_limit": 512
+  },
+  "schema_version": 1,
+  "summary": {
+    "attempt_count": 9,
+    "avg_duration_ms": 103341.88888888889,
+    "avg_model_calls": 6.666666666666667,
+    "avg_tool_steps": 5.666666666666667,
+    "dirty_preservation_rate": 1.0,
+    "exact_restoration_rate": 1.0,
+    "model_action_rejections": 0,
+    "model_failures": 0,
+    "pass_rate": 1.0,
+    "passed": 9,
+    "recovered": 6,
+    "recovery_attempt_count": 6,
+    "recovery_rate": 1.0,
+    "tasks": {
+      "repo_map_cross_module": {
+        "attempt_count": 3,
+        "avg_duration_ms": 169072.33333333334,
+        "avg_model_calls": 10.0,
+        "avg_tool_steps": 9.0,
+        "category": "repo_map_task_success",
+        "dirty_preservations": 0,
+        "exact_restorations": 0,
+        "mode": "task_success",
+        "pass_rate": 1.0,
+        "passed": 3,
+        "total_input_tokens": 104471,
+        "total_output_tokens": 3965
+      },
+      "undo_preserves_preexisting_dirty_file": {
+        "attempt_count": 3,
+        "avg_duration_ms": 59667.666666666664,
+        "avg_model_calls": 5.0,
+        "avg_tool_steps": 4.0,
+        "category": "undo_dirty_workspace",
+        "dirty_preservations": 3,
+        "exact_restorations": 3,
+        "mode": "undo_recovery",
+        "pass_rate": 1.0,
+        "passed": 3,
+        "total_input_tokens": 28457,
+        "total_output_tokens": 881
+      },
+      "undo_rejected_multifile_change": {
+        "attempt_count": 3,
+        "avg_duration_ms": 81285.66666666667,
+        "avg_model_calls": 5.0,
+        "avg_tool_steps": 4.0,
+        "category": "undo_recovery",
+        "dirty_preservations": 0,
+        "exact_restorations": 3,
+        "mode": "undo_recovery",
+        "pass_rate": 1.0,
+        "passed": 3,
+        "total_input_tokens": 28159,
+        "total_output_tokens": 920
+      }
+    },
+    "total_input_tokens": 161087,
+    "total_output_tokens": 5766,
+    "trace_parse_errors": 0,
+    "workspace_isolation_failures": 0
+  }
+}

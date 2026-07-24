@@ -6,7 +6,16 @@ an archived report is not a current benchmark claim.
 
 ## Current evidence
 
-1. [`real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md`](real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md) —
+1. [`reliability-benchmark-v1-live-3x.md`](reliability-benchmark-v1-live-3x.md) —
+   first execution of the frozen
+   [reliability protocol](reliability-benchmark-v1-protocol.md) from clean commit
+   `5d80ce5`. The cross-module Repo Map task passed 3/3, both Undo scenarios
+   recovered 6/6, complete post-Undo workspace digests matched their pre-run
+   digests 6/6, and the pre-existing dirty README was preserved 3/3. The nine
+   attempts recorded no model failures, Action rejections, trace parse errors, or
+   workspace-isolation failures. This is a small engineering regression, not a new
+   Repo Map ablation or a general coding-capability result.
+2. [`real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md`](real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md) —
    first live-model result over the new V5 `ops_center` suite, frozen with its
    [decision protocol](v5-repo-map-budget-decision-protocol.md) at clean commit
    `363a8e8`. Both dynamic `full` and the 600-token hard cap passed 14/15 attempts.
@@ -14,7 +23,7 @@ an archived report is not a current benchmark claim.
    below the pre-registered 5% default-change threshold, so the dynamic default was
    retained. Neither variant recorded model failures, action rejections, or
    isolation failures. V5 became a regression suite after this result was inspected.
-2. [`real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md`](real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md) —
+3. [`real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md`](real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md) —
    budget-tuning confirmation for clean commit `f69cb8e`: the 600-token cap passed
    15/15 attempts and dynamic `full` passed 14/15. The cap used 9.5% fewer input
    tokens, 11.1% fewer output tokens, and 15.6% fewer reported input-plus-output
@@ -24,27 +33,27 @@ an archived report is not a current benchmark claim.
    [`single-repetition screen`](real-world-benchmark-v4-repo-map-budget-screen-1x.md)
    selected 600 by the declared pass-rate-first rule, but both competing failures
    were remote `model_error` events rather than verifier failures.
-3. [`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md) —
+4. [`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md) —
    primary localization result for clean commit `016c618`: `full` passed 13/15
    attempts and `no_repo_map` passed 6/15, an observed +46.7 percentage-point
    difference on the frozen five-task suite. `full` used 33.8% more tokens per
    attempt and 22.1% more wall time, but 38.3% fewer tokens per passing attempt.
    This is a targeted Repo Map benchmark, not a universal coding-agent claim.
-4. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
+5. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
    primary published result for commit `0897195`: 13/15 attempts across three
    clean-worktree repetitions; four of five tasks passed 3/3. It is not validation
    of later runtime revisions.
-5. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
+6. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
    negative follow-up: a prompt change regressed the same frozen suite to 12/15 and
    was rolled back.
-6. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
+7. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
    repetition semantics, hidden-verifier isolation, delegation cost accounting, and
    interpretation limits.
 
 The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
 fixtures and hidden verifiers remain under `benchmarks/`.
 
-## Frozen protocols awaiting or accompanying results
+## Frozen protocols accompanying results
 
 1. [`reliability-benchmark-v1-protocol.md`](reliability-benchmark-v1-protocol.md) —
    pre-registers three live-model scenarios and nine attempts covering a

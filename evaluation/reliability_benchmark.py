@@ -358,6 +358,16 @@ def summarize_reliability_rows(rows):
         ),
         "total_input_tokens": sum(row["input_tokens"] for row in rows),
         "total_output_tokens": sum(row["output_tokens"] for row in rows),
+        "model_failures": sum(row["model_failures"] for row in rows),
+        "model_action_rejections": sum(
+            row["model_action_rejections"] for row in rows
+        ),
+        "trace_parse_errors": sum(
+            len(row["trace_parse_errors"]) for row in rows
+        ),
+        "workspace_isolation_failures": sum(
+            not row["workspace_isolation"]["ok"] for row in rows
+        ),
         "avg_tool_steps": safe_mean(row["tool_steps"] for row in rows),
         "avg_model_calls": safe_mean(row["model_calls"] for row in rows),
         "avg_duration_ms": safe_mean(
@@ -393,6 +403,14 @@ def render_reliability_markdown(artifact):
             "- Pre-existing dirty-file preservation: "
             f"**{summary['dirty_preservation_rate']:.1%}**."
         ),
+        (
+            "- Recorded model failures / Action rejections / trace parse "
+            "errors / workspace-isolation failures: "
+            f"**{summary['model_failures']} / "
+            f"{summary['model_action_rejections']} / "
+            f"{summary['trace_parse_errors']} / "
+            f"{summary['workspace_isolation_failures']}**."
+        ),
         "",
         "## Per-scenario metrics",
         "",
@@ -427,13 +445,27 @@ def render_reliability_markdown(artifact):
     )
     for row in artifact["rows"]:
         recovery = row["recovery"]
+        restored_label = (
+            "n/a"
+            if row["mode"] == "task_success"
+            else "yes"
+            if recovery["exact_restoration"]
+            else "no"
+        )
+        dirty_label = (
+            "n/a"
+            if not row["dirty_paths"]
+            else "yes"
+            if recovery["dirty_preserved"]
+            else "no"
+        )
         lines.append(
             f"| `{row['task_id']}` | {row['repetition']} | "
             f"{'yes' if row['passed'] else 'no'} | "
             f"{len(row['mutation_paths'])} | "
             f"{row['pre_undo_verifier']['exit_code']} | "
-            f"{'yes' if recovery['exact_restoration'] else 'n/a' if row['mode'] == 'task_success' else 'no'} | "
-            f"{'yes' if recovery['dirty_preserved'] else 'n/a' if not row['dirty_paths'] else 'no'} | "
+            f"{restored_label} | "
+            f"{dirty_label} | "
             f"{len(row['repo_map_files'])} |"
         )
 
@@ -487,6 +519,12 @@ def render_reliability_markdown(artifact):
                 "small scenarios, not a general coding-capability benchmark. "
                 "It demonstrates observed task completion and restoration "
                 "behavior for this frozen snapshot and model configuration."
+            ),
+            (
+                "Provider transport retries that eventually succeed inside "
+                "the model SDK are not emitted as model failures in Pico's "
+                "trace, so the artifact does not quantify transient HTTP "
+                "retry frequency."
             ),
             "",
         ]

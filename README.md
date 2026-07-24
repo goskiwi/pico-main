@@ -2,7 +2,7 @@
 
 **一个可审计、沙箱化的本地 Coding Agent Runtime。**
 
-[`v0.1.0`](https://github.com/goskiwi/pico-main/tree/v0.1.0) ·
+[`v0.2.0`](https://github.com/goskiwi/pico-main/tree/v0.2.0) ·
 [架构](docs/architecture/agent-harness-v1-overview.md) ·
 [安全模型](docs/security-model.md) ·
 [评测证据](docs/metrics/README.md) ·
@@ -32,7 +32,7 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前分支工程回归 | 318 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 当前分支工程回归 | 324 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 盲测 | commit `363a8e8` 的首次 V5：600 与动态预算均 14/15；每次成功 token 仅降 3.4%，未过预注册 5% 门槛，默认不改 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
@@ -472,6 +472,24 @@ attempt 计算的 token 低 38.3%。这说明它在该定位专项上用更多�
 完成率，不构成对任意仓库或模型的通用因果结论。见
 [完整报告](docs/metrics/real-world-benchmark-v4-repo-map-ablation-3x.md)和
 [原始 JSON artifact](artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json)。
+
+### Repo Map + Undo 可靠性回归 V1（commit `5d80ce5`）
+
+三场景协议在首次真实调用前冻结并推送：一个含 legacy/experimental 干扰文件的跨模块 Repo Map
+任务，一个会被隐藏 baseline verifier 拒绝的双文件改动，以及一个在 Agent 启动前已经修改
+README、随后又要求 Agent 修改同一文件的脏工作区场景。`gpt-5.4`、temperature 0、clean
+worktree 下各跑三轮：
+
+- 跨模块任务通过 3/3；
+- Undo 恢复通过 6/6，恢复后完整工作区摘要哈希与 pre-run 相同 6/6；
+- 原有脏 README 恢复到 pre-run SHA-256、而非 pristine fixture SHA-256，3/3；
+- 9 次尝试共记录 0 次模型失败、0 次 Action 拒绝、0 次 trace 解析错误和 0 次隔离失败。
+
+总计记录 161,087 input tokens、5,766 output tokens，平均每次尝试 103.34 秒。这个结果证明冻结
+小场景中的工程恢复链路，不是新的 Repo Map A/B，也不代表通用 coding 成功率。见
+[冻结协议](docs/metrics/reliability-benchmark-v1-protocol.md)、
+[完整报告](docs/metrics/reliability-benchmark-v1-live-3x.md)和
+[原始 JSON artifact](artifacts/reliability-benchmark-v1-live-3x.json)。
 
 ### V4 预算调优复测（commit `f69cb8e`）
 

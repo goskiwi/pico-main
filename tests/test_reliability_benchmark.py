@@ -41,12 +41,16 @@ def _row(**updates):
         "passed": True,
         "tool_steps": 2,
         "model_calls": 3,
+        "model_failures": 0,
+        "model_action_rejections": 0,
         "input_tokens": 100,
         "output_tokens": 20,
         "total_duration_ms": 500,
         "mutation_paths": ["checkout/pricing.py"],
         "dirty_paths": [],
         "repo_map_files": ["checkout/pricing.py"],
+        "trace_parse_errors": [],
+        "workspace_isolation": {"ok": True},
         "pre_undo_verifier": {"exit_code": 1},
         "recovery": {
             "passed": True,
@@ -144,7 +148,10 @@ def test_summary_and_markdown_report_recovery_and_dirty_preservation():
     assert summary["recovered"] == 2
     assert summary["recovery_rate"] == 1.0
     assert summary["dirty_preservation_rate"] == 1.0
+    assert summary["model_failures"] == 0
+    assert summary["workspace_isolation_failures"] == 0
     assert "Undo recovery: **2/2 (100.0%)**" in report
+    assert "0 / 0 / 0 / 0" in report
     assert "`dirty-task`" in report
 
 
