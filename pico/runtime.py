@@ -154,6 +154,7 @@ class Pico:
         self.tool_audit_log = []
         self.model_action_rejections = []
         self._last_tool_result_metadata = {}
+        self._last_tool_full_result = None
         self._delegate_outcome_metadata = {}
         self._last_sandbox_metadata = {}
         self._last_prefix_refresh = {
@@ -421,7 +422,26 @@ class Pico:
         if name == "run_shell":
             command = str(args.get("command", "")).strip()
             lines = [line for line in result.splitlines() if line.strip()]
-            key = lines[:4] if lines else ["(empty)"]
+            if "pytest" in command.split():
+                pytest_summary = [
+                    line
+                    for line in lines
+                    if any(
+                        token in line.lower()
+                        for token in (
+                            "failed",
+                            "passed",
+                            "error",
+                            "skipped",
+                            "xfailed",
+                            "xpassed",
+                        )
+                    )
+                ]
+                key = list(dict.fromkeys([*lines[:2], *pytest_summary[-2:]]))
+            else:
+                key = lines[:4]
+            key = key[:4] if key else ["(empty)"]
             return f"run_shell {command}\n" + "\n".join(key)
         if name in ("write_file", "patch_file"):
             path = str(args.get("path", ""))

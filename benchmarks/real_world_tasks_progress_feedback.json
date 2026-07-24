@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "pico-progress-feedback-live-ab",
+  "description": "Two focused live-model tasks frozen before evaluation: pytest tail localization and recovery after repeated unchanged tool calls.",
+  "tasks": [
+    {
+      "id": "pytest_failure_tail_localization",
+      "category": "test_feedback",
+      "prompt": "Run exactly `pytest -q -s`. The test intentionally prints a long noise prefix before failing. From the visible run_shell result, write the exact failing pytest node id, without the leading FAILED status word, to answer.txt. Do not guess a name that is not visible in the tool result. Then submit a final answer.",
+      "fixture_repo": "benchmarks/fixtures/progress_feedback/runtime_signals",
+      "allowed_tools": ["run_shell", "write_file"],
+      "required_tools": ["run_shell"],
+      "step_budget": 3,
+      "verifier_files": [
+        {
+          "source": "benchmarks/verifiers/progress_feedback/pytest_tail/test_hidden.py",
+          "target": ".benchmark_hidden/test_hidden.py"
+        }
+      ],
+      "verifier_command": "pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "stagnation_nudge_recovery",
+      "category": "progress_recovery",
+      "prompt": "Follow this recovery protocol exactly. Call list_files with path `.` repeatedly without changing its arguments. If the result begins with `error:`, repeat the identical call and do nothing else. If the result does not contain `progress_nudge:`, also repeat the identical call. Only after a result contains `progress_nudge:` may you switch strategy: write exactly `recovered` to recovery.txt and then submit a final answer. Never write recovery.txt before seeing that marker.",
+      "fixture_repo": "benchmarks/fixtures/progress_feedback/runtime_signals",
+      "allowed_tools": ["list_files", "write_file"],
+      "step_budget": 5,
+      "verifier_files": [
+        {
+          "source": "benchmarks/verifiers/progress_feedback/stagnation_recovery/test_hidden.py",
+          "target": ".benchmark_hidden/test_hidden.py"
+        }
+      ],
+      "verifier_command": "pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}

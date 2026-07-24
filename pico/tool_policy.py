@@ -59,11 +59,3 @@ def shell_command_policy(name, args):
     if name != "run_shell":
         return None
     return toolkit.shell_command_policy((args or {}).get("command", ""))
-
-
-def repeated_tool_call(agent, name, args):
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
-    if len(tool_events) < 2:
-        return False
-    recent = tool_events[-2:]
-    return all(item["name"] == name and item["args"] == args for item in recent)

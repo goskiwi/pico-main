@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "artifact_type": "progress-feedback-live-ab-comparison",
+  "baseline_artifact": "artifacts/progress-feedback-live-ab-baseline-3x.json",
+  "candidate_artifact": "artifacts/progress-feedback-live-ab-candidate-3x.json",
+  "matches": {
+    "evaluation_snapshot": true,
+    "fixture_snapshot": true,
+    "model": true,
+    "python_version": true,
+    "clean_worktrees": true
+  },
+  "overall": {
+    "baseline": {
+      "passed": 2,
+      "attempts": 6,
+      "input_tokens": 54354,
+      "output_tokens": 1028,
+      "model_calls": 31,
+      "tool_steps": 19,
+      "total_duration_ms": 90801,
+      "model_failures": 0,
+      "model_action_rejections": 7
+    },
+    "candidate": {
+      "passed": 6,
+      "attempts": 6,
+      "input_tokens": 43726,
+      "output_tokens": 717,
+      "model_calls": 24,
+      "tool_steps": 18,
+      "total_duration_ms": 69360,
+      "model_failures": 0,
+      "model_action_rejections": 0
+    }
+  },
+  "tasks": {
+    "pytest_failure_tail_localization": {
+      "baseline_passed": 0,
+      "candidate_passed": 3,
+      "attempts_per_group": 3,
+      "candidate_raw_output_chars": [7913, 7913, 7913],
+      "candidate_summary_output_chars": [4000, 4000, 4000]
+    },
+    "stagnation_nudge_recovery": {
+      "baseline_passed": 2,
+      "candidate_passed": 3,
+      "attempts_per_group": 3,
+      "baseline_repeated_call_rejections": [3, 1, 1],
+      "candidate_progress_nudge_events": [1, 1, 1]
+    }
+  },
+  "excluded_runs": [
+    {
+      "group": "candidate",
+      "reason": "evaluation snapshot mismatch caused by ignored fixture cache directories created during a manual smoke test",
+      "used_in_report": false
+    }
+  ]
+}

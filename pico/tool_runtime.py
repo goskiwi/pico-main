@@ -6,8 +6,42 @@ from . import approval
 from . import security
 from . import tool_policy
 from . import workspace_diff
+from .config import MAX_TOOL_OUTPUT
 from .sandbox import SandboxError
 from .workspace import clip
+
+
+def _is_pytest_shell_command(shell_policy):
+    matched_prefix = str((shell_policy or {}).get("matched_prefix", ""))
+    return "pytest" in matched_prefix.split()
+
+
+def _compact_pytest_result(result, limit=MAX_TOOL_OUTPUT):
+    result = str(result)
+    if len(result) <= limit:
+        return result
+
+    header_lines = re.findall(r"^(?:sandbox|exit_code):[^\n]*$", result, flags=re.MULTILINE)
+    header = "\n".join(header_lines[:2])
+    if header:
+        header += "\n"
+    summary_pattern = re.compile(
+        r"(?i)(^(?:FAILED|ERROR)\s+|\b\d+\s+(?:failed|passed|errors?|skipped)\b)"
+    )
+    summary_lines = []
+    for line in result.splitlines():
+        stripped = line.strip()
+        if stripped and summary_pattern.search(stripped) and stripped not in summary_lines:
+            summary_lines.append(stripped[:500])
+    summary = "\n".join(summary_lines[-3:])
+    if summary:
+        summary += "\n"
+    marker = "...[pytest output compacted; full output is available in the tool artifact]...\n"
+    summary_budget = max(0, min(1500, limit - len(header) - len(marker)))
+    summary = summary[:summary_budget]
+    tail_size = max(0, limit - len(header) - len(summary) - len(marker))
+    tail = result[-tail_size:] if tail_size else ""
+    return f"{header}{summary}{marker}{tail}"
 
 
 def _merge_unique(left, right):
@@ -69,6 +103,8 @@ def _result_metadata(
     delegate_outcome=None,
     undo_status="not_applicable",
     undo_recorded_paths=None,
+    raw_output_chars=None,
+    summary_output_chars=None,
 ):
     """Build the stable metadata shape shared by every tool outcome."""
     capability = tool_policy.tool_capability(tool)
@@ -95,6 +131,10 @@ def _result_metadata(
         metadata.update(dict(sandbox_metadata))
     if delegate_outcome is not None:
         metadata["delegate_outcome"] = dict(delegate_outcome)
+    if raw_output_chars is not None:
+        metadata["raw_output_chars"] = int(raw_output_chars)
+    if summary_output_chars is not None:
+        metadata["summary_output_chars"] = int(summary_output_chars)
     return metadata
 
 
@@ -111,6 +151,7 @@ def _store_outcome(agent, name, tool, *, record_note=False, **updates):
 
 
 def run_tool(agent, name, args):
+    agent._last_tool_full_result = None
     agent._delegate_outcome_metadata = _unexecuted_delegate_outcome(name, args)
     tool = agent.tools.get(name)
     if tool is None:
@@ -157,11 +198,6 @@ def run_tool(agent, name, args):
             approval_decision="denied",
         )
         return permission_error["message"]
-    if tool_policy.repeated_tool_call(agent, name, args):
-        _store_outcome(
-            agent, name, tool, status="rejected", error_code="repeated_identical_call"
-        )
-        return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
     shell_policy = tool_policy.shell_command_policy(name, args)
     if shell_policy and not shell_policy["allowed"] and agent.approval_policy == "never":
         _store_outcome(
@@ -228,7 +264,12 @@ def run_tool(agent, name, args):
     if name == "run_shell":
         agent._last_sandbox_metadata = agent.sandbox.audit_metadata()
     try:
-        result = security.redact_text(agent, clip(tool["run"](args)))
+        full_result = security.redact_text(agent, tool["run"](args))
+        agent._last_tool_full_result = full_result
+        if name == "run_shell" and _is_pytest_shell_command(shell_policy):
+            result = _compact_pytest_result(full_result)
+        else:
+            result = clip(full_result)
         after_snapshot = workspace_diff.after_workspace_snapshot(agent, name, args, tool, snapshot_mode, before_snapshot)
         affected_paths, diff_summary = workspace_diff.diff_workspace_snapshots(before_snapshot, after_snapshot)
         try:
@@ -308,6 +349,8 @@ def run_tool(agent, name, args):
             sandbox_metadata=sandbox_metadata,
             undo_status="recorded" if undo_token else "not_applicable",
             undo_recorded_paths=undo_recorded_paths,
+            raw_output_chars=len(full_result) if name == "run_shell" else None,
+            summary_output_chars=len(result) if name == "run_shell" else None,
             record_note=True,
         )
         return result
