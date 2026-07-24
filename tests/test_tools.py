@@ -116,14 +116,14 @@ def test_search_reports_rg_errors_explicitly(tmp_path):
     assert result == "error: search failed: regex parse error"
 
 
-def test_repeated_identical_tool_call_is_rejected(tmp_path):
+def test_direct_repeated_identical_tool_call_is_not_hard_rejected(tmp_path):
     agent = build_agent(tmp_path, [])
     agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "1"})
     agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "2"})
 
     result = agent.run_tool("list_files", {})
 
-    assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
+    assert not result.startswith("error: repeated identical tool call")
 
 
 def test_read_tool_output_reads_current_run_node_ref(tmp_path):

@@ -1,5 +1,6 @@
 """Execution lifecycle for one complete agent turn."""
 
+import json
 import time
 from typing import Any, TypedDict
 
@@ -18,6 +19,12 @@ from .checkpoints import (
 from .parser import retry_notice
 from .task_state import TaskState
 from .workspace import clip, now
+
+
+_PROGRESS_NUDGE = (
+    "progress_nudge: this exact tool call has now run three times without changing the "
+    "workspace. Inspect the result, change the approach or arguments, or submit a final answer."
+)
 
 
 class AgentTurnState(TypedDict, total=False):
@@ -97,7 +104,30 @@ def _record_action_result(agent, action, result):
         recorder(action, result)
 
 
-def _execute_tool_action(agent, task_state, user_message, action):
+def _stagnation_nudge(progress_tracker, name, args, metadata):
+    signature = json.dumps(
+        [str(name or ""), args or {}],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if metadata.get("workspace_changed"):
+        progress_tracker["recent"] = []
+        return ""
+
+    recent = [*progress_tracker["recent"], signature][-3:]
+    progress_tracker["recent"] = recent
+    if (
+        len(recent) == 3
+        and len(set(recent)) == 1
+        and signature not in progress_tracker["nudged"]
+    ):
+        progress_tracker["nudged"].add(signature)
+        return _PROGRESS_NUDGE
+    return ""
+
+
+def _execute_tool_action(agent, task_state, user_message, action, progress_tracker):
     name = action.name
     args = action.args
     agent.mark_tool_planned(name)
@@ -110,11 +140,33 @@ def _execute_tool_action(agent, task_state, user_message, action):
     metadata = dict(agent._last_tool_result_metadata or {})
 
     report.record_tool_audit(agent, name, safe_args, result, duration_ms)
+    progress_nudge = _stagnation_nudge(
+        progress_tracker,
+        name,
+        args,
+        metadata,
+    )
+    if progress_nudge:
+        result = f"{result}\n\n{progress_nudge}"
+        agent.emit_trace(
+            task_state,
+            "progress_nudge",
+            {"tool_name": name, "repeat_count": 3},
+        )
     agent.mark_tool_finished(name, metadata, result)
     tool_status = str(metadata.get("tool_status", "")).strip() or "ok"
     safe_name = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name or "tool"))
     node_id = f"t{task_state.tool_steps:03d}_{safe_name}"
-    content_ref = agent.run_store.save_tool_output(task_state, task_state.tool_steps, name, result)
+    full_result = getattr(agent, "_last_tool_full_result", None)
+    if full_result is None:
+        full_result = result
+    full_result = security.redact_text(agent, full_result)
+    content_ref = agent.run_store.save_tool_output(
+        task_state,
+        task_state.tool_steps,
+        name,
+        full_result,
+    )
     agent.run_store.append_task_graph_tool(task_state, node_id, name, safe_args, tool_status, content_ref)
     agent.record(
         {
@@ -127,6 +179,14 @@ def _execute_tool_action(agent, task_state, user_message, action):
             "created_at": now(),
         }
     )
+    if progress_nudge:
+        agent.record(
+            {
+                "role": "assistant",
+                "content": progress_nudge,
+                "created_at": now(),
+            }
+        )
     agent.run_store.write_task_state(task_state)
     agent.emit_trace(
         task_state,
@@ -196,6 +256,7 @@ def _run_agent_turn(agent, user_message):
     )
 
     max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
+    progress_tracker = {"recent": [], "nudged": set()}
     native_actions = bool(getattr(agent.model_client, "supports_native_actions", False))
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
@@ -371,7 +432,13 @@ def _run_agent_turn(agent, user_message):
         return Command(update={"result": result}, goto=END)
 
     def execute_tool(state: AgentTurnState):
-        _execute_tool_action(agent, task_state, user_message, state["action"])
+        _execute_tool_action(
+            agent,
+            task_state,
+            user_message,
+            state["action"],
+            progress_tracker,
+        )
         return Command(goto="call_model")
 
     workflow = StateGraph(AgentTurnState)

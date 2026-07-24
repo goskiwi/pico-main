@@ -76,6 +76,8 @@ def record_tool_audit(agent, name, args, result, duration_ms):
     }
     if name == "run_shell":
         entry["command"] = clip(str((args or {}).get("command", "")), 200)
+        entry["raw_output_chars"] = int(metadata.get("raw_output_chars") or 0)
+        entry["summary_output_chars"] = int(metadata.get("summary_output_chars") or 0)
         entry["sandbox"] = {
             "backend": metadata.get("sandbox_backend", ""),
             "image": metadata.get("sandbox_image", ""),

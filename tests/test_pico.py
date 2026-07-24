@@ -1,9 +1,11 @@
+import json
 from unittest.mock import patch
 
 from pico.actions import ModelAction
 from pico.models import FakeModelClient
 from pico.runtime import Pico
-from tests.helpers import build_agent
+from pico.sandbox import SandboxResult
+from tests.helpers import UnitTestSandbox, build_agent
 
 
 def write_skill(root, name, text):
@@ -108,6 +110,189 @@ def test_native_action_loop_reuses_the_structured_conversation_prompt(tmp_path):
     assert client.prompts[0] == client.prompts[1]
     assert client.results[0][0] == "call_1"
     assert agent.last_prompt_metadata["prompt_reused"] is True
+
+
+def test_pytest_output_keeps_failure_tail_in_context_and_full_artifact(tmp_path):
+    class LongPytestSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout, env
+            noise = "".join(f"noise line {index:04d}\n" for index in range(800))
+            return SandboxResult(
+                returncode=1,
+                stdout=(
+                    f"{noise}"
+                    "FAILED tests/test_checkout.py::test_cross_module_total - AssertionError\n"
+                    "=========================== short test summary info ===========================\n"
+                    "FAILED tests/test_checkout.py::test_cross_module_total\n"
+                    "1 failed, 7 passed in 0.42s\n"
+                ),
+            )
+
+    class NativeModelClient:
+        supports_native_actions = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.results = []
+            self.last_completion_metadata = {}
+            self.actions = [
+                ModelAction.tool(
+                    "run_shell",
+                    {"command": "pytest -q", "timeout": 20},
+                    protocol="responses_function",
+                    call_id="call_1",
+                ),
+                ModelAction.final("Finished.", protocol="responses_function", call_id="call_2"),
+            ]
+
+        def reset_action_session(self):
+            self.results = []
+
+        def complete_action(self, prompt, max_new_tokens, **kwargs):
+            del prompt, max_new_tokens, kwargs
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            self.results.append((action.call_id, result))
+
+    agent = build_agent(tmp_path, [], sandbox=LongPytestSandbox(tmp_path))
+    client = NativeModelClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    assert agent.ask("Run pytest and inspect the failure.") == "Finished."
+
+    compact_result = client.results[0][1]
+    assert len(compact_result) <= 4000
+    assert "FAILED tests/test_checkout.py::test_cross_module_total" in compact_result
+    assert "1 failed, 7 passed in 0.42s" in compact_result
+    assert "pytest output compacted" in compact_result
+
+    audit = agent.tool_audit_log[0]
+    assert audit["raw_output_chars"] > audit["summary_output_chars"]
+    assert audit["summary_output_chars"] == len(compact_result)
+
+    tool_item = next(item for item in agent.session["history"] if item["role"] == "tool")
+    assert "FAILED tests/test_checkout.py::test_cross_module_total" in tool_item["summary"]
+    artifact = (agent.current_run_dir / tool_item["content_ref"]).read_text(encoding="utf-8")
+    assert "noise line 0000" in artifact
+    assert "FAILED tests/test_checkout.py::test_cross_module_total" in artifact
+    assert len(artifact) == audit["raw_output_chars"]
+
+
+def test_short_pytest_failure_is_prioritized_in_history_summary(tmp_path):
+    agent = build_agent(tmp_path, [])
+    result = (
+        "sandbox: test\n"
+        "exit_code: 1\n"
+        "stdout:\n"
+        "collected 8 items\n"
+        ".......F\n"
+        "FAILED tests/test_checkout.py::test_total - AssertionError\n"
+        "1 failed, 7 passed in 0.42s\n"
+        "stderr:\n"
+        "(empty)"
+    )
+
+    summary = agent.summarize_tool_result(
+        "run_shell",
+        {"command": "pytest -q"},
+        result,
+    )
+
+    assert "FAILED tests/test_checkout.py::test_total" in summary
+    assert "1 failed, 7 passed in 0.42s" in summary
+
+
+def test_stagnation_nudge_is_injected_once_after_three_unchanged_calls(tmp_path):
+    class NativeModelClient:
+        supports_native_actions = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.results = []
+            self.last_completion_metadata = {}
+            self.actions = [
+                *[
+                    ModelAction.tool(
+                        "list_files",
+                        {"path": "."},
+                        protocol="responses_function",
+                        call_id=f"call_{index}",
+                    )
+                    for index in range(1, 5)
+                ],
+                ModelAction.final("Changed approach.", protocol="responses_function", call_id="call_5"),
+            ]
+
+        def reset_action_session(self):
+            self.results = []
+
+        def complete_action(self, prompt, max_new_tokens, **kwargs):
+            del prompt, max_new_tokens, kwargs
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            self.results.append((action.call_id, result))
+
+    agent = build_agent(tmp_path, [], max_steps=5)
+    client = NativeModelClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    assert agent.ask("Inspect the workspace.") == "Changed approach."
+
+    nudged_results = [result for _, result in client.results if "progress_nudge:" in result]
+    assert len(nudged_results) == 1
+    assert [entry["status"] for entry in agent.tool_audit_log] == ["ok"] * 4
+
+    trace_records = [
+        json.loads(line)
+        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    nudge_events = [record for record in trace_records if record["event"] == "progress_nudge"]
+    assert len(nudge_events) == 1
+    assert nudge_events[0]["tool_name"] == "list_files"
+    assert nudge_events[0]["repeat_count"] == 3
+
+
+def test_text_protocol_receives_stagnation_nudge_in_next_prompt(tmp_path):
+    repeated_call = '<tool>{"name":"list_files","args":{"path":"."}}</tool>'
+    agent = build_agent(
+        tmp_path,
+        [repeated_call, repeated_call, repeated_call, "<final>Changed approach.</final>"],
+        max_steps=4,
+    )
+
+    assert agent.ask("Inspect the workspace.") == "Changed approach."
+
+    assert "progress_nudge:" in agent.model_client.prompts[3]
+    nudge_history = [
+        item
+        for item in agent.session["history"]
+        if item["role"] == "assistant" and "progress_nudge:" in item["content"]
+    ]
+    assert len(nudge_history) == 1
+
+
+def test_workspace_change_breaks_identical_call_stagnation_streak(tmp_path):
+    repeated_write = (
+        '<tool>{"name":"write_file","args":{"path":"same.txt","content":"same"}}</tool>'
+    )
+    agent = build_agent(
+        tmp_path,
+        [repeated_write, repeated_write, repeated_write, "<final>Finished.</final>"],
+        max_steps=4,
+    )
+
+    assert agent.ask("Write the file.") == "Finished."
+
+    assert [entry["workspace_changed"] for entry in agent.tool_audit_log] == [
+        True,
+        False,
+        False,
+    ]
+    assert all("progress_nudge:" not in prompt for prompt in agent.model_client.prompts)
 
 
 def test_native_action_gets_one_final_only_turn_after_tool_limit(tmp_path):
