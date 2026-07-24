@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "pico-repo-map-localization-v5-heldout",
+  "description": "Five previously unseen localization-heavy tasks over a new multi-package operations repository. The suite and its decision gate are frozen before the first live-model run.",
+  "tasks": [
+    {
+      "id": "regional_inventory_allocation",
+      "category": "bugfix",
+      "prompt": "Fix the public inventory reserve_stock flow. Use the requested region's warehouse priority list when that region exists; only an absent region may fall back to the default list. Choose the first listed warehouse with enough units of the SKU. A present but insufficient regional list must not fall back. Invalid non-positive quantities raise ValueError, unknown warehouse IDs raise KeyError, and every failure leaves inventory and priorities unchanged. Preserve the public APIs and return the selected warehouse ID, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v5/ops_center",
+      "allowed_tools": ["query_repo_map", "list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v5/regional_inventory_allocation/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "cross_midnight_maintenance_window",
+      "category": "bugfix",
+      "prompt": "Fix the public scheduling is_maintenance_active flow. Windows use local weekday numbers 0 through 6, inclusive start minutes, and exclusive end minutes. A window whose start is later than its end crosses midnight: its after-midnight segment belongs to the previous configured start day. Apply offset_minutes before evaluating the local day and minute, including week wraparound. Reject invalid weekday or minute inputs with ValueError, raise KeyError for an unknown service, leave windows unchanged, preserve the public APIs, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v5/ops_center",
+      "allowed_tools": ["query_repo_map", "list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v5/cross_midnight_maintenance_window/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "discount_rule_precedence",
+      "category": "feature",
+      "prompt": "Complete discount selection behind the public pricing quote_invoice flow. Eligible rules match the exact SKU or \"*\", meet min_qty (default 1), and either omit segment or match the customer segment. Choose the eligible rule with the smallest numeric priority; ties keep original rule order, regardless of discount size. Apply percent_bps in integer cents, reject a selected percentage outside 0..10000 with ValueError, reject non-positive quantity with ValueError, raise KeyError for an unknown SKU, leave all inputs unchanged, preserve the public APIs, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v5/ops_center",
+      "allowed_tools": ["query_repo_map", "list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v5/discount_rule_precedence/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "tenant_sticky_rollout_assignment",
+      "category": "bugfix",
+      "prompt": "Fix the public rollouts evaluate_flag flow. Stored assignments are sticky and must be scoped by tenant_id, user_id, and flag_name, so the same user ID in different tenants cannot collide. For a new assignment, validate required identifiers and a percentage in 0..100 before computing the stable cohort and persisting the boolean result. Missing identifiers or flags raise KeyError and invalid percentages raise ValueError before changing assignments. Preserve flags and public APIs, and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v5/ops_center",
+      "allowed_tools": ["query_repo_map", "list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v5/tenant_sticky_rollout_assignment/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    },
+    {
+      "id": "transitive_incident_blockers",
+      "category": "feature",
+      "prompt": "Complete dependency validation behind the public incidents resolve_incident flow. Before resolving a target, traverse all transitive blocker IDs. Any unknown target or blocker raises KeyError, any dependency cycle raises ValueError(\"incident dependency cycle\"), and any unresolved blocker raises ValueError(\"open blocker\"). Every failure leaves incidents and audit_log unchanged. A successful resolution changes only the target status and appends exactly one audit entry; an already resolved target is a complete no-op. Preserve the public APIs and run the tests.",
+      "fixture_repo": "benchmarks/fixtures/real_v5/ops_center",
+      "allowed_tools": ["query_repo_map", "list_files", "read_file", "search", "run_shell", "write_file", "patch_file"],
+      "step_budget": 9,
+      "verifier_files": [{"source": "benchmarks/verifiers/real_v5/transitive_incident_blockers/test_hidden.py", "target": ".benchmark_hidden/test_hidden.py"}],
+      "verifier_command": "PYTHONPATH=. pytest -q -p no:cacheprovider .benchmark_hidden/test_hidden.py"
+    }
+  ]
+}

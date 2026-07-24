@@ -32,7 +32,7 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前分支工程回归 | 289 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 当前分支工程回归 | 301 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 回归 | commit `f69cb8e` 的 V4 预算复测：600-token cap 15/15，动态预算 14/15；这是调参集证据，不是新盲测 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
@@ -509,6 +509,17 @@ uv run python scripts/run_real_world_benchmark.py \
   --repetitions 1 \
   --require-clean-worktree
 ```
+
+### Repo Map 预算盲测：冻结 V5
+
+`benchmarks/real_world_tasks_v5.json` 使用全新的 `ops_center` fixture，五题覆盖区域库存分配、
+跨午夜维护窗口、折扣优先级、租户隔离的 rollout assignment 和事故依赖关闭。每题都经过新的
+API/service/helper 调用链，并包含未接入公共入口的 legacy/experiments 同名干扰实现。
+
+V5 的任务、隐藏 verifier、三轮运行方式和默认值修改门槛会在首次真实模型调用前一起提交冻结。
+只有 600-token hard cap 至少通过 13/15、通过数不低于 `full`、每次成功 token 至少降低 5%，
+且没有模型/隔离错误时，才修改默认预算。完整预注册条件见
+[V5 budget decision protocol](docs/metrics/v5-repo-map-budget-decision-protocol.md)。
 
 首次检查环境时，建议先运行一个低成本 smoke：
 

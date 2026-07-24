@@ -36,6 +36,13 @@ an archived report is not a current benchmark claim.
 The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
 fixtures and hidden verifiers remain under `benchmarks/`.
 
+## Pending first-run evidence
+
+[`v5-repo-map-budget-decision-protocol.md`](v5-repo-map-budget-decision-protocol.md)
+freezes the decision gate for the new `ops_center` localization suite before its
+first live-model run. V5 must not be described as held-out after its outcomes have
+been inspected or used to change the runtime.
+
 ## Development-only evidence
 
 1. [`real-world-benchmark-v3-repo-map-ablation-live-1x.md`](real-world-benchmark-v3-repo-map-ablation-live-1x.md) —
