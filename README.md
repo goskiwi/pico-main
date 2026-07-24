@@ -342,6 +342,18 @@ uv run pico undo --cwd /path/to/target-repo \
 提交。受保护的 `.git/`、`.pico/`、虚拟环境和常见缓存目录不属于 workspace undo 范围。数据模型
 与冲突规则见 [Run undo architecture](docs/architecture/run-undo.md)。
 
+Repo Map 与 Undo 的统一真实模型回归使用三个冻结场景：跨模块定位、错误多文件改动恢复、原有
+脏文件被 Agent 再修改后的恢复。每次尝试记录 token、时延、工具步数、隐藏 verifier 结果、
+Undo 路径和四阶段 SHA-256；完整验收规则见
+[Reliability benchmark V1 protocol](docs/metrics/reliability-benchmark-v1-protocol.md)。
+
+```bash
+uv run python scripts/run_reliability_benchmark.py \
+  --repetitions 3 \
+  --require-clean-worktree \
+  --workspace-root /tmp/pico-reliability-v1-workspaces
+```
+
 shell 执行安全链路可以按这条线理解：
 
 ```text
@@ -414,6 +426,7 @@ tool_outputs/*.txt
 - `evaluation/real_benchmark.py`：真实模型任务清单、模型客户端和 benchmark runner。
 - `evaluation/real_benchmark_evidence.py`：trace、delegate 证据和工作区隔离审计。
 - `evaluation/real_benchmark_reporting.py`：指标汇总、报告渲染与 artifact 对比。
+- `evaluation/reliability_benchmark.py`：Repo Map 任务成功与 Undo 恢复的统一真实模型回归。
 
 `evaluation/` 是源码仓库的验证资产，不属于本地构建的 runtime wheel/sdist。
 

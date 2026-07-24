@@ -44,6 +44,15 @@ an archived report is not a current benchmark claim.
 The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
 fixtures and hidden verifiers remain under `benchmarks/`.
 
+## Frozen protocols awaiting or accompanying results
+
+1. [`reliability-benchmark-v1-protocol.md`](reliability-benchmark-v1-protocol.md) —
+   pre-registers three live-model scenarios and nine attempts covering a
+   cross-module Repo Map task, exact Undo restoration after a rejected two-file
+   change, and preservation of a pre-existing dirty README modified again by the
+   agent. The protocol requires publishing failures without editing the frozen
+   tasks or acceptance gates.
+
 ## Development-only evidence
 
 1. [`real-world-benchmark-v3-repo-map-ablation-live-1x.md`](real-world-benchmark-v3-repo-map-ablation-live-1x.md) —
