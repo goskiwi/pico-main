@@ -12,6 +12,7 @@ user request
   -> a transient LangGraph routes model, tool, retry, and final transitions
   -> LangChain replays native function_call / function_call_output messages
   -> tool validation, approval, and execution run
+  -> changed paths are attached to the run undo journal
   -> session, trace, task state, and report are persisted
 ```
 
@@ -25,6 +26,15 @@ available through the read-only `query_repo_map` tool, which refreshes changed f
 before answering. Ranking evidence is stored in prompt metadata and `report.json`.
 
 The tool layer is intentionally explicit. Pydantic argument models are the single schema source used to derive both the legacy registry view and strict Responses functions. The model can only request registered tools, every tool has argument validation, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
+
+Risky workspace actions also pass through `run_undo.py`. Path-specific tools stage
+their target and its parent directories; shell actions stage the workspace scope
+because their output paths are not knowable in advance. Only paths that actually
+change retain blobs. The first preimage remains stable across later edits in the
+same run, while the expected post-state advances after every tool. `pico undo`
+preflights every current path against that post-state before restoring anything,
+so post-run user edits cause an all-or-nothing refusal. This restores an already
+dirty worktree without changing Git refs or the index.
 
 Delegation has a separate boundary: `tools.py` validates requests and renders outcomes, while `DelegateScheduler` reserves the batch step budget and executes workspace-read-only `run_delegate_child` calls through a bounded thread pool. Single and multi-delegate requests therefore share the same concurrency, timeout, and outcome accounting. Child sessions are marked as delegate audit artifacts and excluded from the default `--resume latest` path; concurrent run-index updates use a shared lock plus atomic replacement so sibling completions cannot overwrite one another.
 

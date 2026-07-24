@@ -21,6 +21,19 @@ def build_report(agent, task_state):
         "summary": build_run_summary(agent, task_state),
         "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
         "repo_map": dict((agent.last_prompt_metadata or {}).get("repo_map", {})),
+        "undo": (
+            agent.current_undo_journal.summary()
+            if getattr(agent, "current_undo_journal", None) is not None
+            else {
+                "schema_version": "run-undo-v1",
+                "status": "unavailable",
+                "available": False,
+                "changed_path_count": 0,
+                "changed_paths": [],
+                "restored_paths": [],
+                "manifest_path": "",
+            }
+        ),
         "tool_audit": list(agent.tool_audit_log),
         "model_action_rejections": list(getattr(agent, "model_action_rejections", [])),
         "task_state": task_state.to_dict(),
@@ -55,6 +68,10 @@ def record_tool_audit(agent, name, args, result, duration_ms):
         "affected_paths": list(metadata.get("affected_paths") or []),
         "workspace_changed": bool(metadata.get("workspace_changed")),
         "diff_summary": list(metadata.get("diff_summary") or []),
+        "undo_status": metadata.get("undo_status", "not_applicable"),
+        "undo_recorded_paths": list(
+            metadata.get("undo_recorded_paths") or []
+        ),
         "result_preview": clip(result, 200),
     }
     if name == "run_shell":

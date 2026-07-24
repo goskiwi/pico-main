@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from langsmith import tracing_context
 
-from . import memory_runtime, report, security
+from . import memory_runtime, report, run_undo, security
 from . import tools as toolkit
 from .actions import ACTION_FINAL, ACTION_RETRY, ACTION_TOOL, ModelAction
 from .checkpoints import (
@@ -174,6 +174,12 @@ def _run_agent_turn(agent, user_message):
     task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
     agent.current_task_state = task_state
     agent.current_run_dir = agent.run_store.start_run(task_state)
+    agent.current_undo_journal = run_undo.RunUndoJournal(
+        agent.root,
+        agent.current_run_dir,
+        task_state.run_id,
+    )
+    agent.current_undo_journal.start()
     agent.tool_audit_log = []
     agent.model_action_rejections = []
     reset_action_session = getattr(agent.model_client, "reset_action_session", None)

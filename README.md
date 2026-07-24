@@ -23,8 +23,8 @@
   符号图；Personalized PageRank 按当前请求排序，并在独立 token 预算内注入函数签名。
 - **强制执行边界**：文件工具限制敏感路径；`run_shell` 只能进入无网络、只读 RootFS、移除
   capabilities 且限制 CPU、内存和 PIDs 的 Docker 容器，没有宿主机回退。
-- **可恢复、可审计**：session、checkpoint、任务图、完整工具输出和逐事件 trace 分层存储，既能
-  续接长任务，也能解释一次任务为什么成功或失败。
+- **可恢复、可审计**：session、checkpoint、任务图、完整工具输出和逐事件 trace 分层存储；每次
+  写操作还记录可冲突检测的前像，既能续接长任务，也能安全撤销一次运行。
 - **真实模型验证闭环**：冻结 fixture 与隐藏 verifier，记录完整评测快照、Git 状态、token、时延、
   delegate 证据和失败分类；失败实验同样保留并说明回滚原因。
 
@@ -32,7 +32,7 @@
 
 | 证据 | 结果与边界 |
 |---|---|
-| 当前分支工程回归 | 306 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
+| 当前分支工程回归 | 318 passed，4 个 opt-in 测试默认跳过；Docker integration 由 CI 独立验证 |
 | 最新已发布 LLM 盲测 | commit `363a8e8` 的首次 V5：600 与动态预算均 14/15；每次成功 token 仅降 3.4%，未过预注册 5% 门槛，默认不改 |
 | Shell containment | Docker-only、无网络、只读 RootFS、capability drop、CPU/内存/PID 限制 |
 | 运行证据 | `task_state.json`、`trace.jsonl`、`report.json`、任务图和完整工具输出 |
@@ -116,6 +116,9 @@ uv run pico --cwd /path/to/target-repo \
 ├── trace.jsonl
 ├── task_graph.mmd
 ├── report.json
+├── undo/
+│   ├── manifest.json
+│   └── blobs/
 └── tool_outputs/
 ```
 
@@ -282,6 +285,7 @@ workspace diff。更完整的资产、信任边界和非目标见
 - `trace.jsonl`
 - `report.json`
 - `task_graph.mmd`
+- `undo/manifest.json` 与 `undo/blobs/*`
 - `tool_outputs/*.txt`
 
 此外 `.pico/runs/index.json` 会维护跨 run 的轻量索引，记录每次任务的目标、状态、更新时间、`task_graph.mmd` 路径和 `report.json` 路径。
@@ -291,6 +295,7 @@ workspace diff。更完整的资产、信任边界和非目标见
 - `summary`：任务、停止原因、模型轮次、工具步数、改动文件、失败工具、安全事件。
 - `tool_audit`：每次工具调用的名称、状态、错误码、capability、审批结果、dry-run 状态、shell 白名单结果、耗时、影响文件、结果预览；shell 调用会记录命令预览。
 - `task_graph_path`：本次任务 Mermaid 任务图路径。
+- `undo`：是否存在可撤销改动、涉及路径、journal schema 与恢复状态。
 
 工具完整输出不会长期塞进 prompt。`pico` 会把完整工具结果写进 `tool_outputs/`，history 只保留摘要、`node_id` 和 `content_ref`。如果后续需要回看某个任务图节点对应的原始输出，模型会发起结构化的只读工具调用。下面是参数示意，不是用户在 REPL 中输入的命令：
 
@@ -306,6 +311,37 @@ workspace diff。更完整的资产、信任边界和非目标见
 
 不传 `run_id` 时，`read_tool_output` 默认读取当前 run。工具会校验 `ref` 必须位于对应 run 的 `tool_outputs/` 目录下，避免任务图引用逃逸到其他路径。
 
+### 安全撤销一次运行
+
+写文件、patch 或 shell 执行前，runtime 会在当前 run 的 `undo/` 下暂存候选前像；工具结束后只
+保留实际变化路径的第一份前像，并持续更新该路径在本次运行结束时应有的状态。这里保存的是任务
+开始时真实工作区内容，因此文件原本已经有未提交修改时，撤销会恢复到那份修改，而不是退回
+`HEAD`。
+
+先预检而不修改：
+
+```bash
+uv run pico undo --cwd /path/to/target-repo \
+  --run run_20260724-120000-abcdef \
+  --dry-run
+```
+
+确认后执行：
+
+```bash
+uv run pico undo --cwd /path/to/target-repo \
+  --run run_20260724-120000-abcdef
+```
+
+撤销是全量预检的：只要任一受影响路径在 agent 结束后又被修改，整次操作都会拒绝，不会先恢复
+一半再报告冲突。成功时会逐字节恢复原文件和权限位、重新创建被删除路径，并删除本次运行新建的
+文件与空目录；`report.json` 和 `trace.jsonl` 会记录恢复事件。journal 不完整、blob 损坏、路径
+逃逸或新建目录中出现运行后新增内容时同样拒绝。
+
+实现不创建自动 commit，也不调用 `git reset --hard`，因此不会重写 Git index、分支或用户已有
+提交。受保护的 `.git/`、`.pico/`、虚拟环境和常见缓存目录不属于 workspace undo 范围。数据模型
+与冲突规则见 [Run undo architecture](docs/architecture/run-undo.md)。
+
 shell 执行安全链路可以按这条线理解：
 
 ```text
@@ -317,6 +353,7 @@ schema 校验
   -> 过滤环境变量
   -> Docker 隔离 + 网络/资源/权限约束
   -> workspace diff
+  -> run undo journal
   -> trace/report 审计
 ```
 
@@ -372,6 +409,7 @@ tool_outputs/*.txt
 - `pico/context_types.py`：token 估算、语义截断和 section 数据结构。
 - `pico/memory.py`：短期工作记忆和可持久化记忆。
 - `pico/run_store.py`：单次运行工件落盘。
+- `pico/run_undo.py`：运行级文件前像、冲突预检与逐路径恢复。
 - `pico/task_state.py`：一次 `ask()` 的状态机快照。
 - `evaluation/real_benchmark.py`：真实模型任务清单、模型客户端和 benchmark runner。
 - `evaluation/real_benchmark_evidence.py`：trace、delegate 证据和工作区隔离审计。
