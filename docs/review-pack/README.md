@@ -32,6 +32,7 @@ The project demonstrates an end-to-end agent harness rather than a single API wr
 - `pico/context_history.py`: transcript summarization, task-graph compaction, and history rendering.
 - `pico/memory.py`: working memory and durable memory records.
 - `pico/run_store.py`: per-run `task_state.json`, `trace.jsonl`, and `report.json` persistence.
+- `pico/run_undo.py`: first-touch preimages, all-or-nothing conflict detection, and run restoration.
 - `evaluation/real_benchmark.py`: benchmark manifest, model client, hidden verifier, and runner.
 - `evaluation/real_benchmark_evidence.py`: trace accounting, delegate evidence, and workspace isolation audit.
 - `evaluation/real_benchmark_reporting.py`: aggregation, artifact comparison, and Markdown reporting.
@@ -58,5 +59,6 @@ Each run writes artifacts under `.pico/runs/<run_id>/`:
 - `task_state.json`: compact state machine snapshot for the current `ask()` call.
 - `trace.jsonl`: ordered event stream with prompt, model, tool, checkpoint, and finish events.
 - `report.json`: final report with status, stop reason, prompt metadata, run summary, tool audit entries, and rejected model Actions.
+- `undo/manifest.json` plus content-addressed blobs: restorable workspace preimages and expected post-run states.
 
 For a Chinese interview walkthrough, use [`interview-notes.md`](interview-notes.md).

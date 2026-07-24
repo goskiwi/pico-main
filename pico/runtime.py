@@ -141,6 +141,7 @@ class Pico:
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
         self.current_run_dir = None
+        self.current_undo_journal = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
         self.last_durable_promotions = []

@@ -16,6 +16,7 @@ import textwrap
 
 from .config import DEFAULT_APPROVAL_POLICY
 from .models import OpenAICompatibleModelClient
+from .run_undo import RunUndoConflictError, RunUndoError, restore_run
 from .runtime import Pico
 from .sandbox import (
     DEFAULT_SANDBOX_CPUS,
@@ -345,6 +346,10 @@ def build_arg_parser():
             "Auditable, sandboxed local coding-agent runtime for "
             "OpenAI-compatible Responses models."
         ),
+        epilog=(
+            "Restore one run with: "
+            "pico undo --cwd /path/to/workspace --run <run_id>"
+        ),
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
@@ -407,12 +412,79 @@ def build_arg_parser():
     return parser
 
 
+def build_undo_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="pico undo",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Restore the workspace preimages recorded for one Pico run. "
+            "The command refuses the entire undo if any affected path "
+            "changed after that run."
+        ),
+    )
+    parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Workspace directory or a path inside its Git repository.",
+    )
+    parser.add_argument(
+        "--run",
+        required=True,
+        dest="run_id",
+        help="Run id whose recorded workspace changes should be restored.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate conflicts and list paths without changing files.",
+    )
+    return parser
+
+
+def run_undo_command(argv):
+    args = build_undo_arg_parser().parse_args(argv)
+    workspace = WorkspaceContext.build(args.cwd)
+    try:
+        result = restore_run(
+            workspace.repo_root,
+            args.run_id,
+            dry_run=args.dry_run,
+        )
+    except RunUndoConflictError as exc:
+        print(
+            "undo refused: workspace paths changed after the run",
+            file=sys.stderr,
+        )
+        for path in exc.paths:
+            print(f"- {path}", file=sys.stderr)
+        return 1
+    except RunUndoError as exc:
+        print(f"undo failed: {exc}", file=sys.stderr)
+        return 1
+
+    if result.already_restored:
+        print(f"run already restored: {result.run_id}")
+        return 0
+    action = "would restore" if result.dry_run else "restored"
+    print(
+        f"{action} {len(result.restored_paths)} path(s) "
+        f"for run {result.run_id}"
+    )
+    for path in result.restored_paths:
+        marker = "delete" if path in result.deleted_paths else "restore"
+        print(f"- {marker}: {path}")
+    return 0
+
+
 def main(argv=None):
     """命令行主入口函数。
 
     解析参数 -> 构建 agent -> 显示欢迎信息 -> 进入 one-shot 或交互模式。
     """
-    args = build_arg_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "undo":
+        return run_undo_command(raw_argv[1:])
+    args = build_arg_parser().parse_args(raw_argv)
     # Parse first so ``pico --help`` remains a clean, side-effect-free CLI
     # surface instead of printing startup logs before argparse exits.
     logger.info("pico 启动中...")
