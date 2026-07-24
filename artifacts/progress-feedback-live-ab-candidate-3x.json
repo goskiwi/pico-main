@@ -1,0 +1,792 @@
+{
+  "artifact_type": "real-world-benchmark",
+  "benchmark": {
+    "description": "Two focused live-model tasks frozen before evaluation: pytest tail localization and recovery after repeated unchanged tool calls.",
+    "evaluation_snapshot_id": "sha256:8ebcc825694b14fd311d32b34ce47467c0d98376aa940c8e95ebe871e920fcca",
+    "fixture_snapshot_id": "sha256:0e898db240d54c441a40fd608db5c7ff48a3123803590ae6932e8f2edab7ebe7",
+    "name": "pico-progress-feedback-live-ab",
+    "source": "benchmarks/real_world_tasks_progress_feedback.json",
+    "task_count": 2,
+    "task_ids": [
+      "pytest_failure_tail_localization",
+      "stagnation_nudge_recovery"
+    ]
+  },
+  "captured_at": "2026-07-24T06:52:49.494349Z",
+  "execution_mode": "live_llm",
+  "model": "gpt-5.4",
+  "provider": "openai",
+  "repetitions": 3,
+  "rows": [
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 10329,
+      "cached_tokens": 3968,
+      "category": "test_feedback",
+      "changed_files": [
+        "answer.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "run_shell",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Ran `pytest -q -s`, captured the visible failing node id, and wrote it to `answer.txt` as `tests/test_noisy_failure.py::test_tail_only_failure`. Verified from the pytest output.",
+      "input_tokens": 7437,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 3,
+      "model_failures": 0,
+      "output_tokens": 120,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 3968,
+      "parent_input_tokens": 7437,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 3,
+      "parent_model_duration_ms": 9676,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 120,
+      "passed": true,
+      "repetition": 1,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [
+        "run_shell"
+      ],
+      "run_id": "run_20260724-145140-48fc0b",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "pytest_failure_tail_localization",
+      "tool_steps": 2,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 3968,
+      "total_duration_ms": 10854,
+      "total_input_tokens": 7437,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 3,
+      "total_model_duration_ms": 9676,
+      "total_model_failures": 0,
+      "total_output_tokens": 120,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 525,
+      "workspace": "rep-1/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-1/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145140-48fc0b"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 11138,
+      "cached_tokens": 4864,
+      "category": "progress_recovery",
+      "changed_files": [
+        "recovery.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "list_files",
+        "list_files",
+        "list_files",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Recovery protocol completed: waited for progress_nudge, wrote recovery.txt with exact content `recovered`, and finished.",
+      "input_tokens": 7031,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_failures": 0,
+      "output_tokens": 119,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 4864,
+      "parent_input_tokens": 7031,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 5,
+      "parent_model_duration_ms": 10994,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 119,
+      "passed": true,
+      "repetition": 1,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [],
+      "run_id": "run_20260724-145150-253e4f",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stagnation_nudge_recovery",
+      "tool_steps": 4,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 4864,
+      "total_duration_ms": 11669,
+      "total_input_tokens": 7031,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 5,
+      "total_model_duration_ms": 10994,
+      "total_model_failures": 0,
+      "total_output_tokens": 119,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 531,
+      "workspace": "rep-1/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-1/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145150-253e4f"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 9063,
+      "cached_tokens": 5632,
+      "category": "test_feedback",
+      "changed_files": [
+        "answer.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "run_shell",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Ran `pytest -q -s`, captured the visible failing node id, and wrote it to `answer.txt` as `tests/test_noisy_failure.py::test_tail_only_failure`. Verified from the pytest output.",
+      "input_tokens": 7409,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 3,
+      "model_failures": 0,
+      "output_tokens": 120,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 5632,
+      "parent_input_tokens": 7409,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 3,
+      "parent_model_duration_ms": 8385,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 120,
+      "passed": true,
+      "repetition": 2,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [
+        "run_shell"
+      ],
+      "run_id": "run_20260724-145202-d60763",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "pytest_failure_tail_localization",
+      "tool_steps": 2,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 5632,
+      "total_duration_ms": 9595,
+      "total_input_tokens": 7409,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 3,
+      "total_model_duration_ms": 8385,
+      "total_model_failures": 0,
+      "total_output_tokens": 120,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 532,
+      "workspace": "rep-2/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-2/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145202-d60763"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 12261,
+      "cached_tokens": 4992,
+      "category": "progress_recovery",
+      "changed_files": [
+        "recovery.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "list_files",
+        "list_files",
+        "list_files",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Created recovery.txt with exact content `recovered` after the progress_nudge marker appeared, then completed the protocol.",
+      "input_tokens": 7013,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_failures": 0,
+      "output_tokens": 119,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 4992,
+      "parent_input_tokens": 7013,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 5,
+      "parent_model_duration_ms": 12121,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 119,
+      "passed": true,
+      "repetition": 2,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [],
+      "run_id": "run_20260724-145212-095351",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stagnation_nudge_recovery",
+      "tool_steps": 4,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 4992,
+      "total_duration_ms": 12795,
+      "total_input_tokens": 7013,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 5,
+      "total_model_duration_ms": 12121,
+      "total_model_failures": 0,
+      "total_output_tokens": 119,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 534,
+      "workspace": "rep-2/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-2/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145212-095351"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 11569,
+      "cached_tokens": 6784,
+      "category": "test_feedback",
+      "changed_files": [
+        "answer.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "run_shell",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Ran `pytest -q -s`, captured the visible failing node id, and wrote it to `answer.txt` as `tests/test_noisy_failure.py::test_tail_only_failure`. Verified file write completed.",
+      "input_tokens": 7783,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 3,
+      "model_failures": 0,
+      "output_tokens": 119,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 6784,
+      "parent_input_tokens": 7783,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 3,
+      "parent_model_duration_ms": 10906,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 119,
+      "passed": true,
+      "repetition": 3,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [
+        "run_shell"
+      ],
+      "run_id": "run_20260724-145225-c0cd5b",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "pytest_failure_tail_localization",
+      "tool_steps": 2,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 6784,
+      "total_duration_ms": 12065,
+      "total_input_tokens": 7783,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 3,
+      "total_model_duration_ms": 10906,
+      "total_model_failures": 0,
+      "total_output_tokens": 119,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 496,
+      "workspace": "rep-3/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-3/no_repo_map/pytest_failure_tail_localization/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145225-c0cd5b"
+        ],
+        "violations": []
+      }
+    },
+    {
+      "action_protocols": [
+        "responses_function"
+      ],
+      "agent_duration_ms": 11863,
+      "cached_tokens": 4608,
+      "category": "progress_recovery",
+      "changed_files": [
+        "recovery.txt"
+      ],
+      "delegate_action_protocols": [],
+      "delegate_agent_ids": [],
+      "delegate_cached_tokens": 0,
+      "delegate_evidence": {
+        "attempt_count": 0,
+        "completed_count": 0,
+        "expected_delegate_attempts": null,
+        "expected_delegate_runs": null,
+        "failed_count": 0,
+        "issues": [],
+        "ok": true,
+        "related_agent_ids": [],
+        "reported_agent_ids": [],
+        "requested_count": 0,
+        "required": false,
+        "successful_attempt_count": 0
+      },
+      "delegate_input_tokens": 0,
+      "delegate_model_action_rejections": 0,
+      "delegate_model_calls": 0,
+      "delegate_model_duration_ms": 0,
+      "delegate_model_failures": 0,
+      "delegate_output_tokens": 0,
+      "delegate_run_count": 0,
+      "delegate_run_ids": [],
+      "executed_tools": [
+        "list_files",
+        "list_files",
+        "list_files",
+        "write_file"
+      ],
+      "expected_delegate_attempts": null,
+      "expected_delegate_runs": null,
+      "failed_delegate_outcomes": [],
+      "failure_category": "",
+      "final_answer": "Wrote recovery.txt with exact content `recovered` after seeing `progress_nudge:` and completed the recovery protocol.",
+      "input_tokens": 7053,
+      "missing_required_tools": [],
+      "model_action_rejections": 0,
+      "model_calls": 5,
+      "model_failures": 0,
+      "output_tokens": 120,
+      "parent_action_protocols": [
+        "responses_function"
+      ],
+      "parent_cached_tokens": 4608,
+      "parent_input_tokens": 7053,
+      "parent_model_action_rejections": 0,
+      "parent_model_calls": 5,
+      "parent_model_duration_ms": 11720,
+      "parent_model_failures": 0,
+      "parent_output_tokens": 120,
+      "passed": true,
+      "repetition": 3,
+      "repo_map_budget_cap_tokens": 0,
+      "require_successful_delegates": false,
+      "required_tools": [],
+      "run_id": "run_20260724-145237-ff217c",
+      "security_events": [],
+      "status": "completed",
+      "stop_reason": "final_answer_returned",
+      "task_id": "stagnation_nudge_recovery",
+      "tool_steps": 4,
+      "total_action_protocols": [
+        "responses_function"
+      ],
+      "total_cached_tokens": 4608,
+      "total_duration_ms": 12382,
+      "total_input_tokens": 7053,
+      "total_model_action_rejections": 0,
+      "total_model_calls": 5,
+      "total_model_duration_ms": 11720,
+      "total_model_failures": 0,
+      "total_output_tokens": 120,
+      "trace_parse_errors": [],
+      "variant": "no_repo_map",
+      "verifier": {
+        "exit_code": 0,
+        "skipped": false,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "timed_out": false
+      },
+      "verifier_duration_ms": 519,
+      "workspace": "rep-3/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+      "workspace_isolation": {
+        "expected_workspace_root": "/private/tmp/pico-progress-ab.FHHVRY/candidate-final-workspaces/rep-3/no_repo_map/stagnation_nudge_recovery/runtime_signals",
+        "ok": true,
+        "run_count": 1,
+        "run_ids": [
+          "run_20260724-145237-ff217c"
+        ],
+        "violations": []
+      }
+    }
+  ],
+  "run_config": {
+    "agent_duration_semantics": "parent_attempt_wall_clock_including_delegate_wait",
+    "max_new_tokens": 512,
+    "model_cost_scope": "attempt_parent_and_related_delegates",
+    "model_duration_semantics": "sum_of_model_call_durations",
+    "repo_map_budget_cap_tokens_by_variant": {
+      "no_repo_map": null
+    },
+    "require_clean_worktree": true,
+    "temperature": 0.0,
+    "verifier_timeout_seconds": 90
+  },
+  "runtime": {
+    "branch": "",
+    "commit_sha": "71b30f768ca0a6e4333bd509d991aa8258dde554",
+    "platform": "macOS-15.3-arm64-arm-64bit",
+    "python_version": "3.12.13",
+    "working_tree_dirty": false
+  },
+  "sandbox": {
+    "cpus": 4.0,
+    "image": "pico-sandbox:latest",
+    "memory": "4g",
+    "pids_limit": 512
+  },
+  "schema_version": 3,
+  "summary": {
+    "category_counts": {
+      "progress_recovery": 1,
+      "test_feedback": 1
+    },
+    "comparison": {},
+    "failure_category_counts": {},
+    "row_count": 6,
+    "variants": {
+      "no_repo_map": {
+        "action_protocols": [
+          "responses_function"
+        ],
+        "attempt_count": 6,
+        "avg_agent_duration_ms": 11037.166666666666,
+        "avg_delegate_model_action_rejections": 0.0,
+        "avg_delegate_model_calls": 0.0,
+        "avg_delegate_model_duration_ms": 0.0,
+        "avg_delegate_model_failures": 0.0,
+        "avg_delegate_run_count": 0.0,
+        "avg_model_action_rejections": 0.0,
+        "avg_model_calls": 4.0,
+        "avg_model_failures": 0.0,
+        "avg_parent_model_action_rejections": 0.0,
+        "avg_parent_model_calls": 4.0,
+        "avg_parent_model_duration_ms": 10633.666666666666,
+        "avg_parent_model_failures": 0.0,
+        "avg_tool_steps": 3.0,
+        "avg_total_duration_ms": 11560.0,
+        "avg_total_model_action_rejections": 0.0,
+        "avg_total_model_calls": 4.0,
+        "avg_total_model_duration_ms": 10633.666666666666,
+        "avg_total_model_failures": 0.0,
+        "complete_repetitions": 3,
+        "delegate_action_protocols": [],
+        "delegate_run_count": 0,
+        "parent_action_protocols": [
+          "responses_function"
+        ],
+        "pass_rate": 1.0,
+        "passed": 6,
+        "repetition_count": 3,
+        "repetition_pass_rate_max": 1.0,
+        "repetition_pass_rate_mean": 1.0,
+        "repetition_pass_rate_min": 1.0,
+        "repetition_pass_rate_stddev": 0.0,
+        "repetition_summaries": [
+          {
+            "attempt_count": 2,
+            "avg_model_calls": 4.0,
+            "avg_tool_steps": 3.0,
+            "avg_total_duration_ms": 11261.5,
+            "pass_rate": 1.0,
+            "passed": 2,
+            "repetition": 1
+          },
+          {
+            "attempt_count": 2,
+            "avg_model_calls": 4.0,
+            "avg_tool_steps": 3.0,
+            "avg_total_duration_ms": 11195.0,
+            "pass_rate": 1.0,
+            "passed": 2,
+            "repetition": 2
+          },
+          {
+            "attempt_count": 2,
+            "avg_model_calls": 4.0,
+            "avg_tool_steps": 3.0,
+            "avg_total_duration_ms": 12223.5,
+            "pass_rate": 1.0,
+            "passed": 2,
+            "repetition": 3
+          }
+        ],
+        "repo_map_budget_cap_tokens": 0,
+        "task_count": 2,
+        "task_stability": [
+          {
+            "attempt_count": 3,
+            "category": "test_feedback",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "pytest_failure_tail_localization"
+          },
+          {
+            "attempt_count": 3,
+            "category": "progress_recovery",
+            "outcome": "always_passed",
+            "pass_rate": 1.0,
+            "passed": 3,
+            "task_id": "stagnation_nudge_recovery"
+          }
+        ],
+        "total_action_protocols": [
+          "responses_function"
+        ],
+        "total_cached_tokens": 30848,
+        "total_delegate_cached_tokens": 0,
+        "total_delegate_input_tokens": 0,
+        "total_delegate_output_tokens": 0,
+        "total_delegate_run_count": 0,
+        "total_input_tokens": 43726,
+        "total_output_tokens": 717,
+        "total_parent_cached_tokens": 30848,
+        "total_parent_input_tokens": 43726,
+        "total_parent_output_tokens": 717
+      }
+    }
+  },
+  "variants": [
+    "no_repo_map"
+  ]
+}
