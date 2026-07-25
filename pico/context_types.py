@@ -44,17 +44,6 @@ def count_tokens(text, *, model: str = ""):
     return len(encoding.encode(value, disallowed_special=()))
 
 
-def _tail_clip(text, limit):
-    text = str(text)
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    if limit <= 3:
-        return text[:limit]
-    return text[: limit - 3] + "..."
-
-
 def _semantic_cut(text, limit):
     """在语义边界截断文本，优先保留完整的信息单元。
 
@@ -112,22 +101,6 @@ def _token_clip(text, token_budget, *, token_counter: Callable[[str], int] = cou
         else:
             hi = mid - 1
     return best
-
-
-def _estimate_tokens(text):
-    """Deprecated private alias retained for internal callers during migration.
-
-    Despite its historical name, this now performs a real ``o200k_base``
-    tokenization.  Prompt assembly passes a model-specific counter instead.
-    """
-    return count_tokens(text)
-
-
-def _indent_block(text, prefix="  "):
-    lines = str(text or "").splitlines()
-    if not lines:
-        return [prefix + "- none"]
-    return [prefix + line for line in lines]
 
 
 @dataclass

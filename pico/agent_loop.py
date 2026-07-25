@@ -21,7 +21,7 @@ from .config import (
     TASK_CANVAS_RETAIN_NODES,
 )
 from .task_state import TaskState
-from .workspace import clip, now
+from .workspace import clip
 
 
 _COMPLETION_NOTICE = (
@@ -239,17 +239,6 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
         retain_nodes=TASK_CANVAS_RETAIN_NODES,
         max_tokens=TASK_CANVAS_MAX_TOKENS,
     )
-    agent.record(
-        {
-            "role": "tool",
-            "name": name,
-            "node_id": node_id,
-            "args": safe_args,
-            "summary": summary,
-            "result_ref": result_ref,
-            "created_at": now(),
-        }
-    )
     agent.run_store.write_task_state(task_state)
     agent.run_store.update_index(task_state, latest_node_id=node_id)
     if fold["folded"]:
@@ -293,7 +282,6 @@ def _write_finished_run(agent, task_state, final, run_started_at):
 def _run_agent_turn(agent, user_message):
     run_started_at = time.monotonic()
     agent.mark_work_started(user_message)
-    agent.record({"role": "user", "content": user_message, "created_at": now()})
 
     task_state = TaskState.create(
         run_id=agent.new_run_id(),
@@ -328,13 +316,8 @@ def _run_agent_turn(agent, user_message):
         },
     )
 
-    def attempt_limit():
-        active_tool_limit = (
-            hard_tool_limit if task_state.step_extension_granted else task_state.nominal_tool_budget
-        )
-        return max(active_tool_limit * 3, active_tool_limit + 4)
-
-    max_hard_attempts = max(hard_tool_limit * 3, hard_tool_limit + 4)
+    max_retry_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
+    max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
     progress_tracker = {
         "last_workspace_change_step": 0,
         "last_recoverable_step": 0,
@@ -347,19 +330,18 @@ def _run_agent_turn(agent, user_message):
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
 
     def finish_stopped():
-        if task_state.attempts >= attempt_limit() and task_state.tool_steps < hard_tool_limit:
+        if task_state.attempts >= max_retry_attempts and task_state.tool_steps < hard_tool_limit:
             final = "Stopped after too many rejected model actions without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
         agent.mark_work_finished(final, stopped=True)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
         _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
         return _write_finished_run(agent, task_state, final, run_started_at)
 
     def call_model(state: AgentTurnState):
-        if task_state.attempts >= attempt_limit():
+        if task_state.attempts >= max_retry_attempts:
             return Command(update={"result": finish_stopped()}, goto=END)
 
         completion_ready = bool(progress_tracker["completion_ready"])
@@ -392,7 +374,6 @@ def _run_agent_turn(agent, user_message):
             prompt_metadata["tool_budget"] = {
                 "nominal": task_state.nominal_tool_budget,
                 "hard_limit": task_state.hard_tool_limit,
-                "extension_granted": task_state.step_extension_granted,
                 "completion_ready": completion_ready,
             }
             prompt_snapshot = (prompt, dict(prompt_metadata))
@@ -405,7 +386,6 @@ def _run_agent_turn(agent, user_message):
                 "tool_steps": task_state.tool_steps,
                 "finalization_only": finalization_only,
                 "completion_ready": completion_ready,
-                "step_extension_granted": task_state.step_extension_granted,
                 "hard_tool_limit": task_state.hard_tool_limit,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
             },
@@ -450,7 +430,6 @@ def _run_agent_turn(agent, user_message):
             error = str(exc)
             final = f"Stopped after model error: {error_type}: {error}"
             agent.mark_work_finished(final, stopped=True)
-            agent.record({"role": "assistant", "content": final, "created_at": now()})
             task_state.stop_model_error(final)
             agent.last_prompt_metadata = prompt_metadata
             agent.last_completion_metadata = {}
@@ -572,13 +551,11 @@ def _run_agent_turn(agent, user_message):
         if kind == ACTION_RETRY:
             _record_action_result(agent, action, payload)
             agent.mark_retry_needed(payload)
-            agent.record({"role": "assistant", "content": payload, "created_at": now()})
             agent.run_store.write_task_state(task_state)
             return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
         agent.mark_work_finished(final)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
         task_state.finish_success(final)
         memory_runtime.promote_durable_memory(agent, user_message, final)
         memory_runtime.llm_promote_durable_memory(agent, user_message, final)
@@ -613,6 +590,6 @@ def _run_agent_turn(agent, user_message):
     with tracing_context(enabled=False):
         result = graph.invoke(
             {"finalization_attempted": False},
-            config={"recursion_limit": max(32, max_hard_attempts * 4 + 16)},
+            config={"recursion_limit": max(32, max_graph_iterations * 4 + 16)},
         )
     return result["result"]

@@ -159,13 +159,15 @@ class Pico:
                 "session_kind": "delegate" if self.parent_agent_id else "main",
                 "agent_mode": self.agent_mode,
                 "parent_agent_id": self.parent_agent_id,
-                "history": [],
                 "memory": memorylib.default_memory_state(),
                 "checkpoints": {"current_id": "", "items": {}},
                 "runtime_identity": {},
                 "resume_state": {},
             }
         )
+        # Run artifacts are the sole event audit record.  Discard the former
+        # session-level copy when an existing session is opened.
+        self.session.pop("history", None)
         self._ensure_session_shape()
         self.memory = memorylib.LayeredMemory(
             self.session["memory"],
@@ -238,7 +240,6 @@ class Pico:
             "id": str,
             "agent_mode": str,
             "parent_agent_id": str,
-            "history": list,
             "memory": dict,
             "checkpoints": dict,
             "runtime_identity": dict,
@@ -565,15 +566,11 @@ class Pico:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record(self, item):
-        self.session["history"].append(item)
-        self.session_path = self.session_store.save(self.session)
-
     def summarize_tool_result(self, name, args, result):
-        """为 history 生成工具输出的简要摘要。
+        """为 task canvas 与 offload 生成工具输出的简要摘要。
 
-        完整输出已通过 RunStore.save_tool_output 落盘，
-        history 里只保留这个摘要和文件引用，保持 prompt 精简。
+        完整输出保留在 ``refs/*.txt``；这个摘要只服务于可折叠的
+        canvas 和可寻址的 offload 事件，不参与 provider 会话。
         """
         result = str(result or "")
         if name == "read_file":
@@ -677,8 +674,8 @@ class Pico:
         """把少量高价值工具结果沉淀到 working memory。
 
         为什么存在：
-        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进了
-        `history`，这里只挑少量“下一轮大概率还会用到”的事实做提纯，
+        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进入
+        run artifact；这里只挑少量“下一轮大概率还会用到”的事实做提纯，
         例如最近读写过哪些文件、某个文件读出来的短摘要。
 
         输入 / 输出：
@@ -687,7 +684,7 @@ class Pico:
 
         在 agent 链路里的位置：
         它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
-        也就是说：工具结果先进入完整历史，再由这个函数择优沉淀成轻量记忆。
+        也就是说：工具结果落盘后，再由这个函数择优沉淀成轻量记忆。
         """
         if not self.feature_enabled("memory"):
             return
@@ -820,7 +817,6 @@ class Pico:
                 raise ValueError("delegate depth exceeded")
 
     def reset(self):
-        self.session["history"] = []
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
         self.memory = memorylib.LayeredMemory(

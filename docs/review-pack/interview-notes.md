@@ -3,26 +3,31 @@
 ## 30 秒项目介绍
 
 `pico` 是一个本地 coding agent runtime，重点不是接通 LLM，而是解决三个工程问题：
-模型如何在大于上下文窗口的仓库里找到正确代码，模型动作如何被限制在可审计边界内，以及一次
-Agent 修改如何在不破坏用户 Git 状态的前提下恢复。
+如何在有限 token 内选对上下文，如何让工具调用持续、受控且可恢复，以及如何在不破坏用户 Git
+状态的前提下撤销一次 Agent 修改。
 
-我的主线是 Repo Map、Docker-only 执行边界和 Run Undo；真实模型 fixture 与隐藏 verifier 用来
-验证这些设计，而不是只展示 demo。
+我的主线是“上下文选择 → 受控执行 → 可审计恢复”；真实模型 fixture 与隐藏 verifier 用来验证
+这些设计，而不是只展示 demo。
 
-## 最值得讲的亮点：Task-aware Repo Map
+## 最值得讲的亮点：任务相关上下文，而不是历史拼接
 
-直接把仓库全文塞进 prompt 会浪费 token，也会让干扰实现稀释注意力。`pico` 用 tree-sitter 提取
-类、函数、方法和签名，再把 import、调用、继承、包含和测试关系组成加权图。用户请求中的符号和
-文件线索作为 Personalized PageRank 的 personalization vector，最后只渲染预算内的相关签名。
+直接把仓库全文或整段聊天历史塞进 prompt 会浪费 token，也会让干扰实现稀释注意力。`pico` 用
+真实 `tiktoken` 计数分配预算：Repo Map 用 tree-sitter 构建符号图与 Personalized PageRank，
+工作记忆保存当前任务事实，Markdown durable memory 通过 Qdrant 做混合召回。
 
-它既能自动注入每轮上下文，也暴露只读 `query_repo_map`，让模型对新的子问题重新排序。实现只
-支持 Python，没有正则降级；这是为了让边界和失败方式清楚。
+它既能自动注入每轮上下文，也暴露只读 `query_repo_map`，让模型对新的子问题重新排序。向量库
+只是 Markdown 事实的可丢弃检索镜像，不索引源码或工具输出；源码真相仍通过工具读取。
 
-真实 V4 A/B 专门构造了多 package、跨模块调用和 `legacy/experiments` 同名干扰文件。clean
-commit 上三轮结果是 `full` 13/15、`no_repo_map` 6/15。这个结果说明 Repo Map 在目标使用场景
-有价值，同时报告也保留了额外 token 和时延成本。
+另一个关键取舍是：Mermaid task canvas 只做 UI、审计和上下文溢出后的恢复导航；它不会替代
+provider 会话中的原始 tool result。这样 patch 与测试修复仍基于精确证据，而画布可以阶段折叠。
 
-## 第二亮点：可恢复但不改写 Git
+## 第二亮点：连续工具会话与有界恢复
+
+Responses 的 function-call output 会原样回放到同一 provider 会话，不会每个工具调用后重新拼
+一份“历史 prompt”。只有 provider 明确报告 context overflow 时，runtime 才重建一次受 tokenizer
+约束的恢复包；第二次溢出透明停止，避免反复摘要导致细节悄悄丢失。
+
+## 第三亮点：可恢复但不改写 Git
 
 自动 commit + `git reset` 会污染用户分支、index 和已有脏文件。`pico` 改为 run-level Undo：
 
@@ -42,13 +47,14 @@ commit 上三轮结果是 `full` 13/15、`no_repo_map` 6/15。这个结果说明
 
 ## 2 分钟架构讲解
 
-1. `RepoMap` 刷新符号图，`ContextManager` 按预算组 prompt。
-2. Responses strict function calling 返回统一 `ModelAction(tool | final | retry)`。
-3. `agent_loop` 执行有界状态转换。
+1. `RepoMap`、工作记忆与语义记忆由 `ContextManager` 按真实 token 预算组装。
+2. Responses strict function calling 返回统一 `ModelAction(tool | final | retry)`，工具输出保留在
+   provider 会话。
+3. `agent_loop` 执行有界状态转换，并只在明确溢出时进行一次恢复。
 4. `tools.py` 用同一份 Pydantic model 做 schema、提示展示和本地校验。
-5. 高风险动作经过 capability、approval 和危险命令检查。
-6. `run_shell` 只能进无网络、只读 RootFS、资源受限的 Docker。
-7. task state、trace、report、完整工具输出和 Undo journal 分层落盘。
+5. 高风险动作经过 capability、approval 和危险命令检查；`run_shell` 只能进无网络、只读 RootFS、
+   资源受限的 Docker。
+6. task state、trace、完整工具输出、阶段折叠的 canvas 和 Undo journal 分层落盘。
 
 ## 面试官可能追问
 
@@ -56,6 +62,17 @@ commit 上三轮结果是 `full` 13/15、`no_repo_map` 6/15。这个结果说明
 
 Provider 只负责输出形状，不能替代本地权限边界。调用可能来自兼容端点、重放 artifact 或未来的
 其他入口；路径保护、read-only、approval 和危险命令规则都必须由 runtime 自己执行。
+
+### 为什么画布不直接替代即时上下文？
+
+画布是低 token 的任务导航和审计视图，适合折叠旧步骤；但 patch、测试失败和冲突恢复需要完整
+源码与原始工具输出。即时上下文由 provider 会话保存精确证据，画布只在该会话确实溢出时提供
+可控的恢复入口。
+
+### 为什么需要 Qdrant，又不把代码放进去？
+
+它解决的是用户偏好、项目约束、反馈等稳定 Markdown 记忆的语义改写召回。代码会变，且需要
+行级精确性，因此仍由 Repo Map 定位、工具读取；Qdrant 只存可重建的检索镜像。
 
 ### 为什么还要 LangGraph，普通 while 循环不够吗？
 
@@ -88,9 +105,9 @@ manager、持久队列、幂等任务、监控告警和供应链策略。
 
 ## 3 分钟演示顺序
 
-1. 展示 `pico/repo_map.py` 的 symbol graph 和排序入口。
-2. 展示 V4 fixture 的 active path 与干扰 path，再展示 13/15 vs 6/15。
+1. 展示 `pico/context_manager.py` 的预算和 `pico/repo_map.py` 的 symbol graph 排序入口。
+2. 展示一次 run 的连续 tool output、`task.mmd`、`phases/`、`offload.jsonl` 和 `refs/`。
 3. 展示 `pico/tools.py` 的单一 Pydantic schema 和 `pico/sandbox.py`。
-4. 展示一次 run 的 `trace.jsonl`、`task.mmd`、`offload.jsonl` 和 `undo/manifest.json`。
-5. 用 reliability 报告说明脏文件恢复和 digest 验证。
+4. 展示 `undo/manifest.json`，再用 reliability 报告说明脏文件恢复和 digest 验证。
+5. 用 V5 预算门槛说明为什么保持动态默认，而不是追求更小数字。
 6. 最后主动说明本地单用户与微基准的外部有效性边界。

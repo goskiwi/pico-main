@@ -34,7 +34,6 @@ DEFAULT_FEATURE_FLAGS: dict = {
     "prompt_cache": True,
     "llm_memory_extract": True,
     "dynamic_budget": True,
-    "cross_section_dedup": True,
 }
 
 DEFAULT_SHELL_ENV_ALLOWLIST: Tuple[str, ...] = (
@@ -120,7 +119,6 @@ STALE_DURABLE_MEMORY_DAYS: int = 2
 # ---------------------------------------------------------------------------
 
 MAX_TOOL_OUTPUT: int = 4000
-MAX_HISTORY: int = 12000
 DOC_NAMES: Tuple[str, ...] = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 IGNORED_PATH_NAMES: frozenset = frozenset(
     {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}

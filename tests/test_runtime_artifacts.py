@@ -26,6 +26,7 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     run_dir = next(path for path in (tmp_path / ".pico" / "runs").iterdir() if path.is_dir())
     task_state = json.loads((run_dir / "task_state.json").read_text(encoding="utf-8"))
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    session = json.loads(agent.session_path.read_text(encoding="utf-8"))
     trace = [
         json.loads(line)
         for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
@@ -42,6 +43,7 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     } <= {path.name for path in run_dir.iterdir()}
     assert task_state["stop_reason"] == "final_answer_returned"
     assert report["summary"]["tools"] == ["read_file"]
+    assert "history" not in session
     assert report["tool_audit"][0]["status"] == "ok"
     assert trace[0]["event"] == "run_started"
     assert trace[-1]["event"] == "run_finished"
@@ -54,6 +56,36 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     assert index[0]["latest_node_id"] == "N001_read_file"
     assert index[0]["task_canvas_path"] == str(run_dir / "task.mmd")
     assert index[0]["offload_path"] == str(run_dir / "offload.jsonl")
+
+
+def test_resuming_a_session_keeps_memory_and_checkpoints_without_history(tmp_path):
+    agent = build_agent(tmp_path, [final_action("Finished.")])
+
+    assert agent.ask("Remember this task") == "Finished."
+    checkpoint_id = agent.session["checkpoints"]["current_id"]
+    legacy_session = json.loads(agent.session_path.read_text(encoding="utf-8"))
+    legacy_session["history"] = [{"role": "user", "content": "obsolete copy"}]
+    agent.session_path.write_text(
+        json.dumps(legacy_session),
+        encoding="utf-8",
+    )
+
+    resumed = Pico.from_session(
+        model_client=FakeModelClient([]),
+        workspace=agent.workspace,
+        session_store=agent.session_store,
+        session_id=agent.session["id"],
+        approval_policy="auto",
+        feature_flags=agent.feature_flags,
+        sandbox=agent.sandbox,
+    )
+    persisted = json.loads(resumed.session_path.read_text(encoding="utf-8"))
+
+    assert "history" not in resumed.session
+    assert "history" not in persisted
+    assert resumed.memory.to_dict()["working"]["goal"] == "Remember this task"
+    assert resumed.session["checkpoints"]["current_id"] == checkpoint_id
+    assert "Remember this task" in resumed.render_checkpoint_text()
 
 
 def test_trace_report_session_and_tool_output_redact_secrets(tmp_path):

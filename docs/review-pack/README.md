@@ -3,33 +3,35 @@
 ## 10–15 minute review route
 
 1. Read the project pitch and architecture map below.
-2. Inspect `pico/repo_map.py`, then read the
-   [Repo Map A/B report](../metrics/real-world-benchmark-v4-repo-map-ablation-3x.md).
-3. Follow `pico/agent_loop.py` → `pico/tools.py` → `pico/sandbox.py`.
-4. Inspect `pico/run_undo.py` and the
+2. Inspect `pico/context_manager.py` → `pico/repo_map.py` → `pico/semantic_memory.py`.
+3. Follow `pico/models.py` → `pico/agent_loop.py` → `pico/tools.py` → `pico/sandbox.py`.
+4. Inspect `pico/run_store.py` and `pico/run_undo.py`, then the
    [Repo Map + Undo result](../metrics/reliability-benchmark-v1-live-3x.md).
-5. Finish with the [security model](../security-model.md) and
+5. Read the [V5 budget decision](../metrics/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md),
+   then finish with the [security model](../security-model.md) and
    [metrics evidence map](../metrics/README.md).
 
 ## Project pitch
 
-`pico` is a local coding-agent runtime focused on task-aware repository retrieval,
-bounded execution, recoverable workspace changes, and auditable evidence. It is not
-a wrapper around one LLM call: the repository contains the model/tool state machine,
-Pydantic tool contracts, Docker-only shell boundary, context budgeting, run artifacts,
-Undo journal, and hidden-verifier benchmark runner.
+`pico` is a local coding-agent runtime focused on task-aware context selection,
+continuous tool conversations, bounded execution, recoverable workspace changes, and
+auditable evidence. It is not a wrapper around one LLM call: the repository contains
+tokenizer-aware context budgeting, a Repo Map, hybrid durable-memory retrieval, the
+model/tool state machine, Pydantic tool contracts, Docker-only shell boundary, run
+artifacts, an Undo journal, and a hidden-verifier benchmark runner.
 
 ## Architecture map
 
 - `pico/repo_map.py`: tree-sitter symbols, weighted relations, Personalized PageRank,
   incremental refresh, and budgeted rendering.
-- `pico/context_manager.py`: prompt sections and token budgets.
-- `pico/models.py`: strict Responses function calls normalized to `ModelAction`.
-- `pico/agent_loop.py`: bounded model/tool/final transitions.
+- `pico/context_manager.py`: real-token budgets for Repo Map, memory, skills, and recovery evidence.
+- `pico/semantic_memory.py`: Qdrant mirror over canonical Markdown durable memories.
+- `pico/models.py`: strict Responses functions and native tool-result replay.
+- `pico/agent_loop.py`: bounded model/tool/final transitions plus one-shot context recovery.
 - `pico/tools.py`: one Pydantic schema source, capability checks, and tool execution.
 - `pico/sandbox.py`: mandatory network-disabled Docker execution.
 - `pico/run_undo.py`: first-touch preimages, conflict preflight, and restoration.
-- `pico/run_store.py`: task state, trace, task graph, reports, and full tool outputs.
+- `pico/run_store.py`: task state, trace, foldable task canvas, reports, and full tool outputs.
 - `evaluation/real_benchmark.py`: frozen fixtures, hidden verifiers, isolation audit,
   and evidence collection.
 
@@ -38,11 +40,11 @@ The detailed flow is in the
 
 ## Benchmark evidence
 
-The strongest focused Repo Map evidence is V4: five cross-module tasks with inactive
-look-alike implementations, run three times per variant from a clean commit.
-`full` passed 13/15 and `no_repo_map` passed 6/15. V5 then tested the concrete budget
-decision: dynamic and 600-token maps both passed 14/15, but the measured cost reduction
-missed the pre-registered threshold, so the default was not changed.
+V5 is the active frozen regression suite: dynamic and 600-token maps both passed
+14/15, but the measured cost reduction missed the pre-registered threshold, so the
+dynamic default was not changed. The earlier V4 A/B result (`full` 13/15 versus
+`no_repo_map` 6/15) remains historical evidence for the Repo Map design; it is not
+duplicated as a second fixture-contract test suite.
 
 The reliability suite joins retrieval with recovery: Repo Map localization passed 3/3,
 both Undo scenarios recovered 6/6, and complete post-Undo workspace digests matched
@@ -50,6 +52,15 @@ their pre-run digests 6/6.
 
 These are small, scenario-specific engineering regressions. They are not universal
 model-capability claims.
+
+## Test focus
+
+For an interview, read the invariant tests rather than every fixture self-check:
+
+- `tests/test_agent_loop.py`: live tool-result continuity, context recovery, bounded completion;
+- `tests/test_safety_invariants.py` and `tests/test_run_undo.py`: local policy and all-or-nothing recovery;
+- `tests/test_context_tokens.py`, `tests/test_repo_map.py`, and `tests/test_semantic_memory.py`: bounded context selection;
+- `tests/test_reliability_benchmark.py` and `tests/test_real_benchmark_v5.py`: frozen end-to-end evidence.
 
 Useful checks:
 

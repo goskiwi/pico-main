@@ -6,8 +6,8 @@ Each run persists evidence in four progressively lighter forms:
 
 The first is the source evidence, the JSONL file makes each tool result
 addressable, the Mermaid canvas is the active task view, and the index is the
-cross-run entry point.  Session history remains an audit trail; it is not a
-prompt-context fallback.
+cross-run entry point.  These run artifacts are the audit trail; they are not
+prompt-context fallbacks.
 """
 
 import json

@@ -33,19 +33,12 @@ def test_agent_runs_tool_then_final_and_records_the_task_canvas(tmp_path):
 
     assert agent.ask("Inspect hello.txt") == "Read the file successfully."
 
-    tool_item = next(
-        item
-        for item in agent.session["history"]
-        if item["role"] == "tool" and item["name"] == "read_file"
-    )
-    assert tool_item["node_id"] == "N001_read_file"
-    assert tool_item["result_ref"].endswith("refs/0001_read_file.txt")
     canvas = (agent.current_run_dir / "task.mmd").read_text(encoding="utf-8")
     assert 'N001_read_file["task_step | done | read_file hello.txt:' in canvas
     assert "refs/0001_read_file.txt" in canvas
     event = json.loads((agent.current_run_dir / "offload.jsonl").read_text(encoding="utf-8"))
     assert event["node_id"] == "N001_read_file"
-    assert event["result_ref"] == tool_item["result_ref"]
+    assert event["result_ref"].endswith("refs/0001_read_file.txt")
 
 
 def test_agent_automatically_folds_long_task_canvas_into_phase_artifacts(tmp_path):
@@ -266,12 +259,11 @@ def test_pytest_failure_tail_stays_in_context_and_full_output_stays_on_disk(tmp_
 
     assert agent.ask("Run pytest and inspect the failure.") == "Finished."
 
-    tool_item = next(item for item in agent.session["history"] if item["role"] == "tool")
     event = json.loads((agent.current_run_dir / "offload.jsonl").read_text(encoding="utf-8"))
-    assert event["node_id"] == tool_item["node_id"]
+    assert event["node_id"] == "N001_run_shell"
     assert "FAILED tests/test_checkout.py::test_cross_module_total" in event["summary"]
     assert "1 failed, 7 passed in 0.42s" in event["summary"]
-    artifact = (agent.current_run_dir / tool_item["result_ref"]).read_text(
+    artifact = (agent.current_run_dir / event["result_ref"]).read_text(
         encoding="utf-8"
     )
     assert "noise line 0000" in artifact
@@ -470,8 +462,8 @@ def test_patch_conflict_returns_current_file_as_repair_evidence(tmp_path):
     assert audit["status"] == "rejected"
     assert audit["error_code"] == "patch_conflict"
     assert "current file" in audit["result_preview"]
-    tool_item = next(item for item in agent.session["history"] if item["role"] == "tool")
-    evidence = (agent.current_run_dir / tool_item["result_ref"]).read_text(encoding="utf-8")
+    event = json.loads((agent.current_run_dir / "offload.jsonl").read_text(encoding="utf-8"))
+    evidence = (agent.current_run_dir / event["result_ref"]).read_text(encoding="utf-8")
     assert "demo" in evidence
 
 
@@ -711,7 +703,6 @@ def test_nominal_budget_is_soft_while_hard_limit_still_bounds_the_task(tmp_path)
     assert agent.ask("Make a small change and verify it.").startswith("Changed the file")
     assert "list_files" in client.tool_sets[1]
     assert client.tool_sets[2] == ["submit_final"]
-    assert agent.current_task_state.step_extension_granted is False
     assert agent.current_task_state.nominal_tool_budget == 1
     assert agent.current_task_state.hard_tool_limit == 2
     assert agent.current_task_state.tool_steps == 2
@@ -760,7 +751,6 @@ def test_soft_budget_does_not_force_finalization_after_an_old_workspace_change(t
 
     assert agent.ask("Avoid looping after an old edit.").startswith("No more useful progress")
     assert "list_files" in client.tool_sets[-1]
-    assert agent.current_task_state.step_extension_granted is False
 
 
 def test_patch_conflict_can_use_the_hard_budget_for_repair(tmp_path):
@@ -807,7 +797,6 @@ def test_patch_conflict_can_use_the_hard_budget_for_repair(tmp_path):
 
     assert agent.ask("Repair a failed patch.").startswith("Recovered after")
     assert "read_file" in client.tool_sets[1]
-    assert agent.current_task_state.step_extension_reason == ""
 
 
 def test_successful_pytest_after_a_change_forces_completion_only_turn(tmp_path):

@@ -254,7 +254,6 @@ def _variant_feature_flags(variant):
             "context_reduction": False,
             "llm_memory_extract": False,
             "dynamic_budget": False,
-            "cross_section_dedup": False,
             "require_workspace_change": True,
         }
     if variant == contract.VARIANT_NO_REPO_MAP:

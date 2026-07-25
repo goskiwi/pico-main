@@ -71,7 +71,7 @@ HELP_DETAILS = textwrap.dedent(
     /help    Show this help message.
     /memory  Show the agent's working state panel.
     /session Show the path to the saved session file.
-    /reset   Clear the current session history and memory.
+    /reset   Clear the current session memory.
     /reload-skills Reload .pico/skills from disk.
     /exit    Exit the agent.
     """
@@ -557,7 +557,7 @@ def main(argv=None):
     logger.info("进入交互模式")
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 session history 和 working memory 会跨轮延续。
+        # 因此 working memory 和 checkpoint 会跨轮延续。
         try:
             user_input = input("\npico> ").strip()
         except (EOFError, KeyboardInterrupt):

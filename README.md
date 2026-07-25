@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/goskiwi/pico-main/actions/workflows/ci.yml/badge.svg)](https://github.com/goskiwi/pico-main/actions/workflows/ci.yml)
 
-**一个突出检索、执行边界和可恢复性的本地 Coding Agent Runtime。**
+**一个突出上下文选择、执行边界和可恢复性的本地 Coding Agent Runtime。**
 
 [架构](docs/architecture/agent-harness-v1-overview.md) ·
 [安全模型](docs/security-model.md) ·
@@ -15,12 +15,14 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 
 项目刻意只突出四件事：
 
-1. **Task-aware Repo Map**：tree-sitter 建符号图，Personalized PageRank 按当前任务排序，
-   只把相关签名放进上下文。
-2. **强制执行边界**：shell 只能进入无网络、只读 RootFS、资源受限的 Docker 容器，
-   不回退到宿主机。
-3. **Run Undo 与审计**：记录文件首触前像和运行后状态，冲突时整次拒绝恢复，不改写 Git。
-4. **可验证的 Agent 循环**：隐藏 verifier、冻结快照和真实模型 A/B 用来决定改动是否保留。
+1. **任务相关上下文**：真实 tokenizer 预算下，Repo Map、工作记忆和 Qdrant 语义检索只注入
+   当前任务需要的内容；Markdown 是记忆的唯一事实来源。
+2. **连续而可恢复的 Agent 循环**：Responses 原生 tool result 留在 provider 会话内；明确的
+   上下文溢出才会触发一次有界恢复，不用摘要覆盖原始证据。
+3. **强制执行边界与 Run Undo**：shell 只能进入无网络、只读 RootFS、资源受限的 Docker 容器；
+   修改记录首触前像，冲突时整次拒绝恢复，不改写 Git。
+4. **可审计的任务过程**：task canvas 是导航与恢复控制面，完整工具输出、trace、报告和隐藏
+   verifier 共同保留可复核证据。
 
 > 边界：这是本地单用户实验型 runtime，不是多租户生产平台；仓库微基准用于工程回归，
 > 不代表通用 coding 能力。
@@ -253,11 +255,14 @@ Qdrant 数据卷。
 |---|---|
 | `pico/agent_loop.py` | 有界模型—工具循环与停止状态 |
 | `pico/runtime.py` | Agent 组合、prompt prefix 与运行生命周期 |
+| `pico/context_manager.py` | tokenizer 预算、Repo Map、记忆和恢复上下文的组装 |
+| `pico/models.py` | 原生 Responses 会话与 function-call output 回放 |
 | `pico/repo_map.py` | tree-sitter、符号图、PageRank 与预算渲染 |
+| `pico/semantic_memory.py` | Qdrant 向量镜像与混合召回 |
 | `pico/tools.py` | 工具 schema、校验和执行 |
 | `pico/sandbox.py` | 强制 Docker shell 边界 |
 | `pico/run_undo.py` | 前像、冲突预检和恢复 |
-| `pico/run_store.py` | trace、报告、任务图和完整工具输出 |
+| `pico/run_store.py` | trace、报告、任务画布分阶段归档和完整工具输出 |
 | `evaluation/real_benchmark.py` | 真实模型 fixture、隐藏 verifier 与证据采集 |
 
 10–15 分钟代码审阅顺序见 [review pack](docs/review-pack/README.md)。

@@ -16,8 +16,6 @@ def build_report(agent, task_state):
         "tool_budget": {
             "nominal": task_state.nominal_tool_budget,
             "hard_limit": task_state.hard_tool_limit,
-            "extension_granted": task_state.step_extension_granted,
-            "extension_reason": task_state.step_extension_reason,
         },
         "checkpoint_id": task_state.checkpoint_id,
         "resume_status": task_state.resume_status,
@@ -139,8 +137,6 @@ def build_run_summary(agent, task_state):
         "tool_budget": {
             "nominal": task_state.nominal_tool_budget,
             "hard_limit": task_state.hard_tool_limit,
-            "extension_granted": task_state.step_extension_granted,
-            "extension_reason": task_state.step_extension_reason,
         },
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
