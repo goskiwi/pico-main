@@ -253,7 +253,6 @@ def _variant_feature_flags(variant):
             "relevant_memory": False,
             "context_reduction": False,
             "llm_memory_extract": False,
-            "llm_history_compaction": False,
             "dynamic_budget": False,
             "cross_section_dedup": False,
             "require_workspace_change": True,

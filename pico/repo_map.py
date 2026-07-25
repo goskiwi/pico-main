@@ -17,7 +17,7 @@ from .config import (
     REPO_MAP_MAX_FILES,
     REPO_MAP_PAGE_RANK_ITERATIONS,
 )
-from .context_types import _estimate_tokens, _token_clip
+from .context_types import count_tokens, _token_clip
 
 
 PYTHON_LANGUAGE = Language(tree_sitter_python.language())
@@ -215,10 +215,11 @@ class RepoMapQuery:
     ranked: tuple[RankedSymbol, ...]
     snapshot: RepoSnapshot
 
-    def render(self, budget_tokens=1600, max_results=24):
+    def render(self, budget_tokens=1600, max_results=24, *, token_counter=None):
         """Render a diverse, deterministic symbol selection within a token budget."""
         budget_tokens = max(0, int(budget_tokens))
         max_results = max(1, int(max_results))
+        token_counter = token_counter or count_tokens
         if budget_tokens == 0:
             return RepoMapRender(
                 text="",
@@ -230,7 +231,11 @@ class RepoMapQuery:
             "use query_repo_map or read_file for details):"
         )
         if not self.ranked:
-            text = _token_clip(header + "\n- no Python symbols found", budget_tokens)
+            text = _token_clip(
+                header + "\n- no Python symbols found",
+                budget_tokens,
+                token_counter=token_counter,
+            )
             return RepoMapRender(
                 text=text,
                 details=self._details((), truncated=False),
@@ -249,14 +254,18 @@ class RepoMapQuery:
                 f"  L{symbol.line} {symbol.kind} {symbol.qualified_name} — {symbol.signature}"
             )
             candidate = "\n".join([*lines, *additions])
-            if _estimate_tokens(candidate) > budget_tokens:
+            if token_counter(candidate) > budget_tokens:
                 continue
             lines.extend(additions)
             accepted.append(item)
             current_path = symbol.path
 
         if not accepted:
-            text = _token_clip(header + "\n- omitted: repo-map budget is too small", budget_tokens)
+            text = _token_clip(
+                header + "\n- omitted: repo-map budget is too small",
+                budget_tokens,
+                token_counter=token_counter,
+            )
         else:
             text = "\n".join(lines)
         truncated = len(accepted) < len(self.ranked)
@@ -366,10 +375,11 @@ class RepoMap:
         )
         return RepoMapQuery(query=str(query), ranked=tuple(ranked), snapshot=snapshot)
 
-    def render(self, query, *, budget_tokens=1600, max_results=24):
+    def render(self, query, *, budget_tokens=1600, max_results=24, token_counter=None):
         return self.query(query).render(
             budget_tokens=budget_tokens,
             max_results=max_results,
+            token_counter=token_counter,
         )
 
     def refresh(self):

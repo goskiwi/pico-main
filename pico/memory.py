@@ -8,6 +8,7 @@ session history 负责保存完整事件流；这个模块只保存更小的一�
 import hashlib
 from datetime import datetime, timezone
 import re
+import uuid
 from pathlib import Path
 
 from .config import (
@@ -19,6 +20,7 @@ from .config import (
     STALE_DURABLE_MEMORY_DAYS,
 )
 from .workspace import clip, now
+from .semantic_memory import DisabledSemanticMemoryIndex, reciprocal_rank_fusion
 
 DURABLE_MEMORY_TYPES = {
     "user": {
@@ -171,6 +173,22 @@ class DurableMemoryStore:
                 )
         if current:
             notes.append(current)
+        return notes
+
+    def all_notes(self):
+        """Return every canonical durable note with its persisted source path."""
+        notes = []
+        for entry in self.load_index():
+            memory_type = str(entry.get("type", "")).strip()
+            for note in self.load_type_notes(memory_type):
+                notes.append(
+                    {
+                        **note,
+                        "type": memory_type,
+                        "kind": "durable",
+                        "source_path": f"entries/{memory_type}.md",
+                    }
+                )
         return notes
 
     @staticmethod
@@ -648,35 +666,76 @@ def summarize_read_result(result, limit=180):
     return clip(summary, limit)
 
 
-def retrieval_candidates(state, query, limit=3, workspace_root=None):
+def durable_memory_id(workspace_root, note):
+    root = Path(workspace_root).resolve()
+    memory_type = str(note.get("type") or note.get("source") or "").strip()
+    name = str(note.get("name") or _slugify(note.get("text", ""))).strip()
+    namespace = uuid.uuid5(uuid.NAMESPACE_URL, f"pico-memory:{root}")
+    return str(uuid.uuid5(namespace, f"{memory_type}:{name}"))
+
+
+def _lexical_note_rank(note, query_tokens):
+    note_tags = {tag.lower() for tag in note.get("tags", [])}
+    note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
+    exact_tag_match = int(bool(query_tokens & note_tags))
+    keyword_overlap = len(query_tokens & note_tokens)
+    if exact_tag_match == 0 and keyword_overlap == 0:
+        return None
+    recency = _parse_timestamp(note.get("updated_at") or note.get("created_at"))
+    return exact_tag_match, keyword_overlap, recency
+
+
+def retrieval_candidates(
+    state,
+    query,
+    limit=3,
+    workspace_root=None,
+    semantic_index=None,
+    metadata=None,
+):
     state = normalize_memory_state(state, workspace_root)
     query_tokens = _tokenize(query)
     ranked = []
     for note in state["episodic_notes"]:
-        # 召回逻辑故意保持简单透明：先看 tag 精确命中，
-        # 再看关键词重叠，最后看新旧程度。这里不引入 embedding。
-        note_tags = {tag.lower() for tag in note.get("tags", [])}
-        note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
-        exact_tag_match = int(bool(query_tokens & note_tags))
-        keyword_overlap = len(query_tokens & note_tokens)
-        if exact_tag_match == 0 and keyword_overlap == 0:
+        score = _lexical_note_rank(note, query_tokens)
+        if score is None:
             continue
-        recency = _parse_timestamp(note.get("created_at"))
         note_index = int(note.get("note_index", 0))
-        ranked.append(((exact_tag_match, keyword_overlap, recency, note_index), note))
+        ranked.append(((*score, note_index), f"episodic:{note_index}", note))
 
+    durable_by_id = {}
     if workspace_root is not None:
         durable_store = DurableMemoryStore(Path(workspace_root) / ".pico" / "memory")
-        for note in durable_store.retrieval_candidates(query, limit=limit):
-            note_tags = {tag.lower() for tag in note.get("tags", [])}
-            note_tokens = _tokenize(note.get("text", "")) | _tokenize(note.get("source", "")) | note_tags
-            exact_tag_match = int(bool(query_tokens & note_tags))
-            keyword_overlap = len(query_tokens & note_tokens)
-            recency = _parse_timestamp(note.get("created_at"))
-            ranked.append(((exact_tag_match, keyword_overlap, recency, -1), note))
+        for note in durable_store.all_notes():
+            memory_id = durable_memory_id(workspace_root, note)
+            durable_by_id[memory_id] = note
+            score = _lexical_note_rank(note, query_tokens)
+            if score is not None:
+                ranked.append(((*score, -1), memory_id, note))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [note for _, note in ranked[:limit]]
+    lexical_ids = [item[1] for item in ranked]
+    semantic_index = semantic_index or DisabledSemanticMemoryIndex()
+    semantic_ids = (
+        semantic_index.search(query, limit=max(12, int(limit) * 4))
+        if semantic_index.enabled and durable_by_id
+        else []
+    )
+    semantic_ids = [memory_id for memory_id in semantic_ids if memory_id in durable_by_id]
+    note_by_id = {item[1]: item[2] for item in ranked}
+    note_by_id.update(durable_by_id)
+    fused_ids = reciprocal_rank_fusion([lexical_ids, semantic_ids])
+    if metadata is not None:
+        metadata.update(
+            {
+                "strategy": "rrf_lexical_plus_qdrant_semantic",
+                "lexical_candidates": len(lexical_ids),
+                "semantic_candidates": len(semantic_ids),
+                "semantic_enabled": bool(semantic_index.enabled),
+                "semantic_error": str(getattr(semantic_index, "last_error", "")),
+            }
+        )
+    return [note_by_id[memory_id] for memory_id in fused_ids[: max(0, int(limit))]]
 
 
 def retrieval_view(state, query, limit=3, workspace_root=None):
@@ -733,10 +792,13 @@ def render_memory_text(state, workspace_root=None):
 
 
 class LayeredMemory:
-    def __init__(self, state=None, workspace_root=None):
+    def __init__(self, state=None, workspace_root=None, semantic_index=None):
         self.workspace_root = workspace_root
         self.state = normalize_memory_state(state, workspace_root)
         self.durable_store = DurableMemoryStore(Path(workspace_root) / ".pico" / "memory") if workspace_root is not None else None
+        self.semantic_index = semantic_index or DisabledSemanticMemoryIndex()
+        self.last_retrieval_metadata = {}
+        self.last_semantic_sync = dict(self.semantic_index.last_sync)
 
     def to_dict(self):
         self.state = normalize_memory_state(self.state, self.workspace_root)
@@ -782,7 +844,15 @@ class LayeredMemory:
         return invalidated
 
     def retrieval_candidates(self, query, limit=3):
-        return retrieval_candidates(self.state, query, limit=limit, workspace_root=self.workspace_root)
+        self.last_retrieval_metadata = {}
+        return retrieval_candidates(
+            self.state,
+            query,
+            limit=limit,
+            workspace_root=self.workspace_root,
+            semantic_index=self.semantic_index,
+            metadata=self.last_retrieval_metadata,
+        )
 
     def retrieval_view(self, query, limit=3):
         return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
@@ -796,4 +866,22 @@ class LayeredMemory:
         self.state = normalize_memory_state(self.state, self.workspace_root)
         promoted, superseded = self.durable_store.promote(promotions)
         self.state = normalize_memory_state(self.state, self.workspace_root)
+        if promoted or superseded:
+            self.sync_semantic_memory()
         return promoted, superseded
+
+    def sync_semantic_memory(self):
+        if self.durable_store is None:
+            return dict(self.semantic_index.last_sync)
+        notes = [
+            {
+                **note,
+                "memory_id": durable_memory_id(self.workspace_root, note),
+            }
+            for note in self.durable_store.all_notes()
+        ]
+        self.last_semantic_sync = self.semantic_index.sync(
+            notes,
+            manifest_path=self.durable_store.root / "semantic-index.json",
+        )
+        return dict(self.last_semantic_sync)

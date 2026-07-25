@@ -6,6 +6,8 @@
 """
 
 import argparse
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import textwrap
 
 from .config import DEFAULT_APPROVAL_POLICY
 from .models import OpenAICompatibleModelClient
+from .memory import LayeredMemory, default_memory_state
 from .run_undo import RunUndoConflictError, RunUndoError, restore_run
 from .runtime import Pico
 from .sandbox import (
@@ -26,6 +29,7 @@ from .sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
 )
+from .semantic_memory import SemanticMemoryConfig, SemanticMemoryIndex
 from .session_store import SessionStore
 from .workspace import WorkspaceContext, middle
 
@@ -43,6 +47,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
+    "PICO_QDRANT_API_KEY",
+    "PICO_EMBEDDINGS_API_KEY",
     "GITHUB_PAT",
     "GH_PAT",
 )
@@ -273,6 +279,7 @@ def build_agent(args):
 
     # 构建模型客户端
     model = _build_model_client(args, env=workspace_env)
+    semantic_memory_config = SemanticMemoryConfig.from_env(workspace_env)
     sandbox_config = DockerSandboxConfig(
         image=args.sandbox_image
         or os.environ.get("PICO_SANDBOX_IMAGE")
@@ -308,6 +315,7 @@ def build_agent(args):
             dry_run=dry_run,
             secret_env_names=configured_secret_names,
             sandbox=sandbox,
+            semantic_memory_config=semantic_memory_config,
         )
 
     logger.info("创建新的 Pico 实例")
@@ -322,6 +330,7 @@ def build_agent(args):
         dry_run=dry_run,
         secret_env_names=configured_secret_names,
         sandbox=sandbox,
+        semantic_memory_config=semantic_memory_config,
     )
 
 
@@ -438,6 +447,39 @@ def build_undo_arg_parser():
     return parser
 
 
+def build_memory_sync_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="pico memory-sync",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Synchronize canonical durable Markdown memories to Qdrant.",
+    )
+    parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    return parser
+
+
+def run_memory_sync_command(argv):
+    args = build_memory_sync_arg_parser().parse_args(argv)
+    workspace = WorkspaceContext.build(args.cwd)
+    workspace_env = _load_workspace_env(args.cwd)
+    config = SemanticMemoryConfig.from_env(workspace_env)
+    if config is None:
+        print("semantic memory is not configured; set PICO_QDRANT_* and PICO_EMBEDDINGS_* in .env.local", file=sys.stderr)
+        return 1
+    workspace_id = hashlib.sha256(workspace.repo_root.encode("utf-8")).hexdigest()
+    index = SemanticMemoryIndex(config, workspace_id=workspace_id)
+    try:
+        memory = LayeredMemory(
+            default_memory_state(),
+            workspace_root=workspace.repo_root,
+            semantic_index=index,
+        )
+        result = memory.sync_semantic_memory()
+    finally:
+        index.close()
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("status") == "ok" else 1
+
+
 def run_undo_command(argv):
     args = build_undo_arg_parser().parse_args(argv)
     workspace = WorkspaceContext.build(args.cwd)
@@ -481,6 +523,8 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "undo":
         return run_undo_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "memory-sync":
+        return run_memory_sync_command(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     # Parse first so ``pico --help`` remains a clean, side-effect-free CLI
     # surface instead of printing startup logs before argparse exits.

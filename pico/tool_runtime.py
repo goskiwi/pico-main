@@ -44,6 +44,31 @@ def _compact_pytest_result(result, limit=MAX_TOOL_OUTPUT):
     return f"{header}{summary}{marker}{tail}"
 
 
+def _pytest_verification(command, result, exit_code):
+    """Return structured pytest truth that shell pipelines cannot mask."""
+    if "pytest" not in str(command or "").lower():
+        return None
+    text = str(result or "")
+    failed = sum(
+        int(count)
+        for count in re.findall(r"\b(\d+)\s+failed\b", text, flags=re.IGNORECASE)
+    )
+    errors = sum(
+        int(count)
+        for count in re.findall(r"\b(\d+)\s+errors?\b", text, flags=re.IGNORECASE)
+    )
+    failure_marker = bool(re.search(r"(?m)^(?:FAILED|ERROR)\s+", text))
+    passed = int(exit_code) == 0 and not failed and not errors and not failure_marker
+    return {
+        "framework": "pytest",
+        "passed": passed,
+        "exit_code": int(exit_code),
+        "failed": failed,
+        "errors": errors,
+        "pipeline_masked_failure": bool(int(exit_code) == 0 and not passed),
+    }
+
+
 def _merge_unique(left, right):
     return list(dict.fromkeys([*(left or []), *(right or [])]))
 
@@ -105,6 +130,7 @@ def _result_metadata(
     undo_recorded_paths=None,
     raw_output_chars=None,
     summary_output_chars=None,
+    verification=None,
 ):
     """Build the stable metadata shape shared by every tool outcome."""
     capability = tool_policy.tool_capability(tool)
@@ -135,6 +161,8 @@ def _result_metadata(
         metadata["raw_output_chars"] = int(raw_output_chars)
     if summary_output_chars is not None:
         metadata["summary_output_chars"] = int(summary_output_chars)
+    if verification is not None:
+        metadata["verification"] = dict(verification)
     return metadata
 
 
@@ -150,6 +178,20 @@ def _store_outcome(agent, name, tool, *, record_note=False, **updates):
     return metadata
 
 
+def _patch_conflict_evidence(agent, args):
+    """Return the current file as repair evidence after an exact patch miss."""
+    try:
+        path = agent.path(args["path"])
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"error: patch conflict; current file could not be recovered: {exc}"
+    return (
+        "error: patch conflict; old_text no longer matches exactly. "
+        "Use the current file content below as the repair source.\n\n"
+        f"=== current file: {path.relative_to(agent.root)} ===\n{content}"
+    )
+
+
 def run_tool(agent, name, args):
     agent._last_tool_full_result = None
     agent._delegate_outcome_metadata = _unexecuted_delegate_outcome(name, args)
@@ -159,9 +201,45 @@ def run_tool(agent, name, args):
             agent, name, None, status="rejected", error_code="unknown_tool", risk_level="high"
         )
         return f"error: unknown tool '{name}'"
+    if agent.is_duplicate_read_only_tool(name, args):
+        cached = agent.cached_read_only_evidence(name, args)
+        evidence = str(cached.get("result", "")).strip()
+        node_id = str(cached.get("node_id", "")).strip()
+        result_ref = str(cached.get("result_ref", "")).strip()
+        _store_outcome(
+            agent,
+            name,
+            tool,
+            status="rejected",
+            error_code="duplicate_read_only_call",
+            workspace_fingerprint=agent.workspace.fingerprint(),
+            record_note=True,
+        )
+        origin = ""
+        if node_id or result_ref:
+            origin = f" Original evidence: {node_id or 'saved result'} ({result_ref or 'in conversation'})."
+        cached_result = clip(evidence, MAX_TOOL_OUTPUT) if evidence else "(cached output unavailable)"
+        return (
+            "error: duplicate read-only call blocked because the workspace has not changed. "
+            "The original evidence is repeated below; use it instead of issuing the same call."
+            f"{origin}\n\n{cached_result}"
+        )
     try:
         agent.validate_tool(name, args)
     except Exception as exc:
+        if name == "patch_file" and "old_text must occur exactly once" in str(exc):
+            full_result = _patch_conflict_evidence(agent, args)
+            agent._last_tool_full_result = full_result
+            _store_outcome(
+                agent,
+                name,
+                tool,
+                status="rejected",
+                error_code="patch_conflict",
+                risk_level="high" if tool["risky"] else "low",
+                record_note=True,
+            )
+            return clip(full_result)
         message = f"error: invalid arguments for {name}: {exc}"
         security_event_type = ""
         if "path escapes workspace" in str(exc):
@@ -305,16 +383,21 @@ def run_tool(agent, name, args):
         tool_status = "ok"
         tool_error_code = ""
         security_event_type = ""
+        verification = None
         sandbox_metadata = dict(agent._last_sandbox_metadata or {}) if name == "run_shell" else {}
         if name == "run_shell":
             match = re.search(r"exit_code:\s*(-?\d+)", result)
             exit_code = int(match.group(1)) if match else 0
+            verification = _pytest_verification(args.get("command", ""), full_result, exit_code)
             if exit_code != 0 and workspace_changed:
                 tool_status = "partial_success"
                 tool_error_code = "tool_partial_success"
             elif exit_code != 0:
                 tool_status = "error"
                 tool_error_code = "tool_failed"
+            if verification and not verification["passed"]:
+                tool_status = "error"
+                tool_error_code = "pytest_failed"
             if sandbox_metadata.get("sandbox_timed_out"):
                 tool_error_code = "sandbox_timeout"
                 security_event_type = "sandbox_timeout"
@@ -348,6 +431,7 @@ def run_tool(agent, name, args):
             undo_recorded_paths=undo_recorded_paths,
             raw_output_chars=len(full_result) if name == "run_shell" else None,
             summary_output_chars=len(result) if name == "run_shell" else None,
+            verification=verification,
             record_note=True,
         )
         return result

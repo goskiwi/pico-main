@@ -167,7 +167,7 @@ def test_context_manager_enforces_explicit_repo_map_budget_cap(tmp_path):
 
     assert metadata["section_budgets_tokens"]["repo_map"] == 600
     assert metadata["sections"]["repo_map"]["budget_tokens"] == 600
-    assert metadata["repo_map"]["rendered_estimated_tokens"] <= 600
+    assert metadata["repo_map"]["rendered_tokens"] <= 600
     assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
     assert metadata["dynamic_adjustment"]["repo_map_budget_cap_tokens"] == 600
     assert (

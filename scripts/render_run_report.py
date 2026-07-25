@@ -52,7 +52,8 @@ def trace_duration(events):
 def usage_metrics(prompt_metadata):
     fields = [
         ("Prompt chars", prompt_metadata.get("prompt_chars")),
-        ("Estimated tokens", prompt_metadata.get("prompt_estimated_tokens")),
+        ("Prompt tokens", prompt_metadata.get("prompt_tokens")),
+        ("Tokenizer", (prompt_metadata.get("tokenizer") or {}).get("encoding")),
         ("Input tokens", prompt_metadata.get("input_tokens")),
         ("Output tokens", prompt_metadata.get("output_tokens")),
         ("Cached tokens", prompt_metadata.get("cached_tokens")),
@@ -143,8 +144,8 @@ def render_trace(events):
     return "\n".join(items)
 
 
-def load_task_graph(run_dir, report):
-    path = report.get("task_graph_path") or str(Path(run_dir) / "task_graph.mmd")
+def load_task_canvas(run_dir, report):
+    path = report.get("task_canvas_path") or str(Path(run_dir) / "task.mmd")
     graph_path = Path(path)
     if not graph_path.is_absolute():
         graph_path = Path(run_dir) / graph_path
@@ -153,12 +154,65 @@ def load_task_graph(run_dir, report):
     return graph_path.read_text(encoding="utf-8", errors="replace"), str(graph_path)
 
 
-def render_task_graph(graph_text, graph_path):
+def load_task_phases(run_dir, report):
+    phase_index_path = report.get("phase_index_path") or str(Path(run_dir) / "phases" / "index.json")
+    path = Path(phase_index_path)
+    if not path.is_absolute():
+        path = Path(run_dir) / path
+    phase_index = load_json(path, default=[])
+    if not isinstance(phase_index, list):
+        return []
+    root = Path(run_dir).resolve()
+    phases = []
+    for item in phase_index:
+        if not isinstance(item, dict):
+            continue
+        candidate = root / str(item.get("path", ""))
+        try:
+            candidate = candidate.resolve()
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not candidate.is_file() or candidate.suffix != ".mmd":
+            continue
+        phases.append(
+            {
+                "phase_id": str(item.get("phase_id", candidate.stem)),
+                "status": str(item.get("status", "")),
+                "node_count": int(item.get("node_count", 0)),
+                "path": str(candidate),
+                "text": candidate.read_text(encoding="utf-8", errors="replace"),
+            }
+        )
+    return phases
+
+
+def _mermaid(graph_text):
+    return f'<div class="mermaid">{esc(graph_text)}</div>'
+
+
+def render_task_canvas(graph_text, graph_path, phases):
     if not str(graph_text).strip():
-        return '<p class="empty">No task graph recorded.</p>'
+        return '<p class="empty">No task canvas recorded.</p>'
+    phase_html = "".join(
+        f"""
+        <details class="task-phase">
+          <summary>{esc(phase["phase_id"])} · {esc(phase["status"] or "archived")} · {esc(phase["node_count"])} task steps</summary>
+          <p class="subtle">{esc(phase["path"])}</p>
+          {_mermaid(phase["text"])}
+        </details>
+        """
+        for phase in phases
+    )
+    archive = (
+        f'<h3>Archived phases ({len(phases)})</h3>{phase_html}'
+        if phases
+        else ""
+    )
     return f"""
     <p class="subtle">{esc(graph_path)}</p>
-    <pre>{esc(graph_text)}</pre>
+    <div class="task-canvas">{_mermaid(graph_text)}</div>
+    {archive}
     """
 
 
@@ -175,7 +229,8 @@ def render_html(run_dir):
     final_answer = report.get("final_answer") or task_state.get("final_answer") or ""
     changed_files = summary.get("changed_files") or []
     failed_tools = summary.get("failed_tools") or []
-    task_graph, task_graph_path = load_task_graph(run_dir, report)
+    task_canvas, task_canvas_path = load_task_canvas(run_dir, report)
+    task_phases = load_task_phases(run_dir, report)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -232,6 +287,11 @@ def render_html(run_dir):
       border-radius: 6px;
       font-size: 12px;
     }}
+    .task-canvas, .task-phase {{ margin-top: 12px; }}
+    .mermaid {{ overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }}
+    .mermaid svg {{ max-width: 100%; height: auto; }}
+    h3 {{ margin: 20px 0 8px; font-size: 15px; }}
+    .task-phase {{ border-top: 1px solid var(--line); padding-top: 12px; }}
     .pill {{
       display: inline-block;
       border: 1px solid var(--line);
@@ -274,7 +334,7 @@ def render_html(run_dir):
     {metric("Duration", trace_duration(trace))}
     {metric("Dry run", report.get("dry_run", False))}
     {metric("Prompt chars", prompt_metadata.get("prompt_chars", "-"))}
-    {metric("Estimated tokens", prompt_metadata.get("prompt_estimated_tokens", "-"))}
+    {metric("Prompt tokens", prompt_metadata.get("prompt_tokens", "-"))}
   </div>
 
   <section>
@@ -293,8 +353,8 @@ def render_html(run_dir):
   </section>
 
   <section>
-    <h2>Task Graph</h2>
-    {render_task_graph(task_graph, task_graph_path)}
+    <h2>Task Canvas</h2>
+    {render_task_canvas(task_canvas, task_canvas_path, task_phases)}
   </section>
 
   <section>
@@ -312,6 +372,11 @@ def render_html(run_dir):
     {render_trace(trace)}
   </section>
 </main>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({{ startOnLoad: false, securityLevel: "strict", htmlLabels: false }});
+  mermaid.run({{ querySelector: ".mermaid" }});
+</script>
 </body>
 </html>
 """

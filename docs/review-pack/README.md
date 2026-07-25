@@ -65,9 +65,11 @@ Each run writes under `.pico/runs/<run_id>/`:
 
 - `task_state.json`: state machine snapshot for one `ask()`;
 - `trace.jsonl`: ordered prompt, model, tool, checkpoint, Undo, and finish events;
-- `task_graph.mmd`: compact execution graph with tool-output references;
+- `task.mmd`: active Mermaid task canvas with node-level evidence references;
+- `phases/phase_XXX.mmd`: archived task stages that can be opened from the active canvas;
+- `offload.jsonl`: tool-level summaries, node IDs, and reference paths;
 - `report.json`: final status, prompt metadata, summary, audit, and rejected Actions;
 - `undo/manifest.json` plus blobs: restorable preimages and expected post-run states;
-- `tool_outputs/*.txt`: complete outputs kept out of normal prompt history.
+- `refs/*.txt`: complete evidence kept out of normal prompt context.
 
 For a Chinese interview walkthrough, use [`interview-notes.md`](interview-notes.md).

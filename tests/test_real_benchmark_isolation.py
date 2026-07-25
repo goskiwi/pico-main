@@ -40,7 +40,7 @@ def test_workspace_isolation_audit_accepts_finished_runs_inside_workspace(tmp_pa
             },
         ),
     )
-    output_dir = run_dir / "tool_outputs"
+    output_dir = run_dir / "refs"
     output_dir.mkdir()
     (output_dir / "0001_search.txt").write_text(
         f"{workspace_root / 'settings.py'}:1:def normalize_label(label):\n",
@@ -76,7 +76,7 @@ def test_workspace_isolation_audit_rejects_root_search_and_verifier_leaks(tmp_pa
             },
         ),
     )
-    output_dir = run_dir / "tool_outputs"
+    output_dir = run_dir / "refs"
     output_dir.mkdir()
     (output_dir / "0001_search.txt").write_text(
         "\n".join(

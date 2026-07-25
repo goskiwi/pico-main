@@ -11,6 +11,7 @@ from langsmith import tracing_context
 
 from .actions import ModelAction
 from .config import DEFAULT_MODEL_MAX_RETRIES
+from .context_types import count_tokens, tokenizer_details
 
 
 def _normalize_versioned_base_url(base_url):
@@ -136,6 +137,13 @@ class OpenAICompatibleModelClient:
         self._action_primary_call_id = ""
         self._action_defer_extra_calls = False
         self._action_pending_output = None
+
+    def count_tokens(self, text):
+        """Count prompt tokens with the encoding mapped to this model."""
+        return count_tokens(text, model=self.model)
+
+    def tokenizer_metadata(self):
+        return tokenizer_details(self.model)
 
     def fork_for_delegate(self):
         """Create an independent Responses conversation for a child agent."""

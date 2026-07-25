@@ -3,6 +3,7 @@
 import json
 
 from pico.actions import ModelAction
+from pico.context_types import count_tokens, tokenizer_details
 
 
 SCRIPTED_PROTOCOL = "scripted_action"
@@ -59,6 +60,12 @@ class FakeModelClient:
 
     def reset_action_session(self):
         return None
+
+    def count_tokens(self, text):
+        return count_tokens(text, model=self.model)
+
+    def tokenizer_metadata(self):
+        return tokenizer_details(self.model)
 
     def record_action_result(self, action, result):
         del action, result

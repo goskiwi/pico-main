@@ -1,7 +1,8 @@
 """Prompt 组装与上下文预算控制。
 
-这个模块负责决定：每一轮到底把多少 prefix、memory、相关笔记、历史
-以及当前用户请求送进模型。
+这个模块负责决定：新任务或上下文恢复时，把多少 prefix、memory、相关笔记、
+任务控制状态和当前用户请求送进模型。正常工具回合由 provider 的连续
+tool-result 会话承载，不会用画布摘要替代原始证据。
 """
 
 from __future__ import annotations
@@ -16,10 +17,8 @@ from .config import (
     DEFAULT_REDUCTION_ORDER,
     RELEVANT_MEMORY_LIMIT,
 )
-from .context_history import HistoryRenderer
 from .context_types import (
     SectionRender,
-    _estimate_tokens,
     _token_clip,
 )
 
@@ -30,11 +29,14 @@ SECTION_ORDER = (
     "skills",
     "repo_map",
     "relevant_memory",
-    "history",
+    "task_context",
     "current_request",
 )
 CURRENT_REQUEST_SECTION = "current_request"
-RECENT_RUN_GUIDANCE = "Use read_file on task_graph, then read_tool_output for node refs."
+RECENT_RUN_GUIDANCE = (
+    "Use read_task_canvas for the task map or an archived phase, read_task_event for a node summary, "
+    "then read_tool_output only when the evidence is needed."
+)
 
 
 class ContextManager:
@@ -47,7 +49,6 @@ class ContextManager:
         reduction_order=None,
     ):
         self.agent = agent
-        self.history_renderer = HistoryRenderer(agent)
         self.total_budget = int(total_budget)
         self.section_budgets = dict(DEFAULT_SECTION_BUDGETS)
         if section_budgets:
@@ -60,6 +61,16 @@ class ContextManager:
         self._section_floor_overrides = {str(key): int(value) for key, value in (section_floors or {}).items()}
         self.section_floors = self._compute_section_floors()
         self.reduction_order = tuple(reduction_order or DEFAULT_REDUCTION_ORDER)
+        self._count_tokens = agent.count_tokens
+
+    def _section(self, *, raw, budget, rendered, details=None):
+        return SectionRender(
+            raw=raw,
+            budget=budget,
+            rendered=rendered,
+            details=details,
+            token_counter=self._count_tokens,
+        )
 
     def build(self, user_message):
         """按预算组装一轮完整 prompt。
@@ -67,7 +78,9 @@ class ContextManager:
         为什么存在：
         仅靠用户这一轮输入，模型并不知道当前仓库状态、会话里已经读过什么、
         哪些旧信息还值得继续参考。这个函数负责把“稳定基线 + 工作记忆 +
-        相关笔记 + 历史 + 当前请求”拼成真正发给模型的 prompt。
+        相关笔记 + 任务控制状态 + 当前请求”拼成首次（或超限恢复时）发给模型的
+        prompt。任务内的后续回合继续使用 provider 保存的精确 tool-result 对话；
+        画布只是可审计、可下钻的控制平面。
 
         输入 / 输出：
         - 输入：`user_message`，也就是用户当前这一轮的新请求。
@@ -88,9 +101,7 @@ class ContextManager:
         relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
         repo_map_enabled = self.agent.feature_enabled("repo_map")
         context_reduction_enabled = self.agent.feature_enabled("context_reduction")
-        llm_history_compaction_enabled = self.agent.feature_enabled("llm_history_compaction")
         dynamic_budget_enabled = self.agent.feature_enabled("dynamic_budget")
-        cross_section_dedup_enabled = self.agent.feature_enabled("cross_section_dedup")
         selected_notes = []
         if memory_enabled and relevant_memory_enabled:
             selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
@@ -106,7 +117,7 @@ class ContextManager:
             "memory": "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text()),
             "skills": "",
             "repo_map": "Repository map:\n- disabled",
-            "history": "",
+            "task_context": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
         section_texts["skills"] = skillslib.render_skills(selected_skills)
@@ -150,17 +161,11 @@ class ContextManager:
                 ),
                 "repo_map_budget_before_cap_tokens": repo_map_budget_before_cap,
             }
-        dedup_file_paths = set()
-        if cross_section_dedup_enabled and memory_enabled:
-            memory_state = self.agent.memory.to_dict()
-            dedup_file_paths = set(memory_state.get("file_summaries", {}).keys())
         rendered = self._render_sections(
             section_texts,
             budgets,
             selected_notes=selected_notes,
             recent_runs=selected_recent_runs,
-            llm_history_compaction_enabled=llm_history_compaction_enabled,
-            dedup_file_paths=dedup_file_paths,
             repo_map_query=repo_map_query,
         )
         prompt = self._assemble_prompt(rendered)
@@ -168,10 +173,10 @@ class ContextManager:
 
         # 如果 prompt 超过 token 预算，就按固定顺序不断压缩。
         # 这里的顺序体现了平台偏好：
-        # 先牺牲 relevant_memory、skills 和旧 history，然后才动 repo map、
+        # 先牺牲 relevant_memory、skills 和任务画布，然后才动 repo map、
         # memory 和 prefix。
         # 优先压缩旧上下文；仍然超预算时，保留当前请求的首尾并截断。
-        prompt_tokens = _estimate_tokens(prompt)
+        prompt_tokens = self._count_tokens(prompt)
         while prompt_tokens > self.total_budget:
             overflow = prompt_tokens - self.total_budget
             reduced = False
@@ -197,12 +202,10 @@ class ContextManager:
                     budgets,
                     selected_notes=selected_notes,
                     recent_runs=selected_recent_runs,
-                    llm_history_compaction_enabled=llm_history_compaction_enabled,
-                    dedup_file_paths=dedup_file_paths,
                     repo_map_query=repo_map_query,
                 )
                 prompt = self._assemble_prompt(rendered)
-                prompt_tokens = _estimate_tokens(prompt)
+                prompt_tokens = self._count_tokens(prompt)
                 reduced = True
                 break
             if not reduced:
@@ -247,20 +250,19 @@ class ContextManager:
         if len(relevant_lines) == 1:
             relevant_lines.append("- none")
         relevant_raw = "\n".join(relevant_lines)
-        history = list(self.agent.session.get("history", []))
-        history_raw = self._raw_history_text(history)
+        task_context_raw = self.agent.task_context_text()
         return {
-            "prefix": SectionRender(raw=section_texts["prefix"], budget=_estimate_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
-            "memory": SectionRender(raw=section_texts["memory"], budget=_estimate_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
-            "skills": SectionRender(raw=section_texts["skills"], budget=_estimate_tokens(section_texts["skills"]), rendered=section_texts["skills"], details={}),
+            "prefix": self._section(raw=section_texts["prefix"], budget=self._count_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
+            "memory": self._section(raw=section_texts["memory"], budget=self._count_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
+            "skills": self._section(raw=section_texts["skills"], budget=self._count_tokens(section_texts["skills"]), rendered=section_texts["skills"], details={}),
             "repo_map": self._render_repo_map(
                 repo_map_query,
                 int(self.section_budgets.get("repo_map", 0)),
                 section_texts["repo_map"],
             ),
-            "relevant_memory": SectionRender(
+            "relevant_memory": self._section(
                 raw=relevant_raw,
-                budget=_estimate_tokens(relevant_raw),
+                budget=self._count_tokens(relevant_raw),
                 rendered=relevant_raw,
                 details={
                     "selected_notes": [memorylib.render_relevant_memory_note(note) for note in selected_notes],
@@ -270,8 +272,13 @@ class ContextManager:
                     "note_budget": 0,
                 },
             ),
-            "history": SectionRender(raw=history_raw, budget=_estimate_tokens(history_raw), rendered=history_raw, details={"rendered_entries": []}),
-            CURRENT_REQUEST_SECTION: SectionRender(
+            "task_context": self._section(
+                raw=task_context_raw,
+                budget=self._count_tokens(task_context_raw),
+                rendered=task_context_raw,
+                details={"active_run_id": self._active_run_id()},
+            ),
+            CURRENT_REQUEST_SECTION: self._section(
                 raw=section_texts[CURRENT_REQUEST_SECTION],
                 budget=0,
                 rendered=section_texts[CURRENT_REQUEST_SECTION],
@@ -293,8 +300,6 @@ class ContextManager:
         budgets,
         selected_notes=None,
         recent_runs=None,
-        llm_history_compaction_enabled=False,
-        dedup_file_paths=None,
         repo_map_query=None,
     ):
         rendered = {}
@@ -302,7 +307,7 @@ class ContextManager:
             budget = budgets.get(section)
             if section == CURRENT_REQUEST_SECTION:
                 raw = section_texts[section]
-                rendered[section] = SectionRender(raw=raw, budget=0, rendered=raw, details={})
+                rendered[section] = self._section(raw=raw, budget=0, rendered=raw, details={})
             elif section == "relevant_memory":
                 rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0), recent_runs=recent_runs or [])
             elif section == "repo_map":
@@ -311,23 +316,19 @@ class ContextManager:
                     int(budget or 0),
                     section_texts[section],
                 )
-            elif section == "history":
-                rendered[section] = self._render_history_section(
-                    int(budget or 0),
-                    llm_history_compaction_enabled=llm_history_compaction_enabled,
-                    dedup_file_paths=dedup_file_paths,
-                )
+            elif section == "task_context":
+                rendered[section] = self._render_task_context(int(budget or 0))
             else:
                 raw = section_texts[section]
-                rendered_text = _token_clip(raw, int(budget)) if budget is not None else raw
-                rendered[section] = SectionRender(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
+                rendered_text = _token_clip(raw, int(budget), token_counter=self._count_tokens) if budget is not None else raw
+                rendered[section] = self._section(raw=raw, budget=int(budget) if budget is not None else 0, rendered=rendered_text, details={})
         return rendered
 
     def _render_repo_map(self, repo_map_query, budget, fallback):
         budget = max(0, int(budget))
         if repo_map_query is None:
-            rendered = _token_clip(fallback, budget) if budget else ""
-            return SectionRender(
+            rendered = _token_clip(fallback, budget, token_counter=self._count_tokens) if budget else ""
+            return self._section(
                 raw=fallback,
                 budget=budget,
                 rendered=rendered,
@@ -341,12 +342,14 @@ class ContextManager:
         raw_render = repo_map_query.render(
             budget_tokens=max(4000, budget),
             max_results=60,
+            token_counter=self._count_tokens,
         )
         selected_render = repo_map_query.render(
             budget_tokens=budget,
             max_results=24,
+            token_counter=self._count_tokens,
         )
-        return SectionRender(
+        return self._section(
             raw=raw_render.text,
             budget=budget,
             rendered=selected_render.text,
@@ -371,7 +374,7 @@ class ContextManager:
         raw = "\n".join(raw_lines) if (note_texts or run_texts) else "\n".join([header, "- none"])
         if not note_texts and not run_texts:
             rendered = raw
-            return SectionRender(
+            return self._section(
                 raw=raw,
                 budget=budget,
                 rendered=rendered,
@@ -390,12 +393,12 @@ class ContextManager:
                     header,
                     "Recent runs:",
                     RECENT_RUN_GUIDANCE,
-                    *[f"- {_token_clip(text, per_run_budget)}" for text in run_texts],
+                    *[f"- {_token_clip(text, per_run_budget, token_counter=self._count_tokens)}" for text in run_texts],
                 ]
             )
-            if _estimate_tokens(rendered) > budget and budget > 0:
-                rendered = _token_clip(raw, budget)
-            return SectionRender(
+            if self._count_tokens(rendered) > budget and budget > 0:
+                rendered = _token_clip(raw, budget, token_counter=self._count_tokens)
+            return self._section(
                 raw=raw,
                 budget=budget,
                 rendered=rendered,
@@ -412,22 +415,22 @@ class ContextManager:
         rendered_notes = []
         while True:
             # 让每条 note 平分这一段的预算，避免一条超长笔记把其他笔记都挤掉。
-            rendered_notes = [_token_clip(text, per_note_budget) for text in note_texts]
+            rendered_notes = [_token_clip(text, per_note_budget, token_counter=self._count_tokens) for text in note_texts]
             lines = [header] + [f"- {text}" for text in rendered_notes]
             if run_texts:
                 lines.append("Recent runs:")
                 lines.append(RECENT_RUN_GUIDANCE)
-                lines.extend(f"- {_token_clip(text, max(30, per_note_budget))}" for text in run_texts)
+                lines.extend(f"- {_token_clip(text, max(30, per_note_budget), token_counter=self._count_tokens)}" for text in run_texts)
             rendered = "\n".join(lines)
-            if _estimate_tokens(rendered) <= budget or per_note_budget <= 1:
+            if self._count_tokens(rendered) <= budget or per_note_budget <= 1:
                 break
             per_note_budget -= 1
 
-        if _estimate_tokens(rendered) > budget and budget > 0:
-            rendered = _token_clip(raw, budget)
+        if self._count_tokens(rendered) > budget and budget > 0:
+            rendered = _token_clip(raw, budget, token_counter=self._count_tokens)
             rendered_notes = [rendered]
 
-        return SectionRender(
+        return self._section(
             raw=raw,
             budget=budget,
             rendered=rendered,
@@ -443,22 +446,28 @@ class ContextManager:
     def _per_note_budget(self, budget, note_count, header):
         if note_count <= 0:
             return 0
-        overhead = _estimate_tokens(header) + note_count
+        overhead = self._count_tokens(header) + note_count
         usable = max(0, budget - overhead)
         return max(1, usable // note_count)
 
-    def _render_history_section(self, budget, llm_history_compaction_enabled=False, dedup_file_paths=None):
-        return self.history_renderer._render_history_section(
-            budget,
-            llm_history_compaction_enabled=llm_history_compaction_enabled,
-            dedup_file_paths=dedup_file_paths,
+    def _render_task_context(self, budget):
+        raw = self.agent.task_context_text()
+        return self._section(
+            raw=raw,
+            budget=budget,
+            rendered=_token_clip(raw, budget, token_counter=self._count_tokens) if budget else "",
+            details={"active_run_id": self._active_run_id()},
         )
+
+    def _active_run_id(self):
+        state = self.agent.current_task_state
+        return str(state.run_id) if state is not None else ""
 
 
     def _dynamic_budget_adjust(self, budgets, user_message):
         """根据用户请求特征动态调整 section budget 分配。
 
-        核心思路：如果用户问的是"之前做了什么"，history 应该多分配；
+        核心思路：如果用户问的是"之前做了什么"，任务控制状态应该多分配；
         如果用户提到了具体文件名，memory 应该多分配。
         调整方式是从其他 section 等量借出，总预算不变。
         """
@@ -466,32 +475,28 @@ class ContextManager:
         adjusted = dict(budgets)
         adjustment = {}
 
-        history_signals = ("之前", "刚才", "上一次", "上一步", "已经", "before", "previous", "last time", "earlier", "already did")
+        task_context_signals = ("之前", "刚才", "上一次", "上一步", "已经", "before", "previous", "last time", "earlier", "already did")
         file_signals = (".py", ".js", ".ts", ".md", ".json", ".yaml", ".yml", ".txt", ".toml", "文件", "file")
 
-        history_score = sum(1 for signal in history_signals if signal in msg_lower)
+        task_context_score = sum(1 for signal in task_context_signals if signal in msg_lower)
         file_score = sum(1 for signal in file_signals if signal in msg_lower)
         if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b", str(user_message)):
             file_score += 2
 
-        if history_score >= 2 and history_score > file_score:
+        if task_context_score >= 2 and task_context_score > file_score:
             boost = min(800, int(budgets.get("prefix", 0) * 0.2))
             if boost > 0:
                 adjusted["prefix"] = adjusted.get("prefix", 0) - boost
-                adjusted["history"] = adjusted.get("history", 0) + boost
-                adjustment = {"strategy": "history_boost", "boost_tokens": boost}
-        elif file_score >= 1 and file_score > history_score:
-            boost = min(600, int(budgets.get("history", 0) * 0.15))
+                adjusted["task_context"] = adjusted.get("task_context", 0) + boost
+                adjustment = {"strategy": "task_context_boost", "boost_tokens": boost}
+        elif file_score >= 1 and file_score > task_context_score:
+            boost = min(600, int(budgets.get("task_context", 0) * 0.15))
             if boost > 0:
-                adjusted["history"] = adjusted.get("history", 0) - boost
+                adjusted["task_context"] = adjusted.get("task_context", 0) - boost
                 adjusted["repo_map"] = adjusted.get("repo_map", 0) + boost
                 adjustment = {"strategy": "repo_map_boost", "boost_tokens": boost}
 
         return adjusted, adjustment
-
-    def _raw_history_text(self, history):
-        return self.history_renderer._raw_history_text(history)
-
 
     def _assemble_prompt(self, rendered):
         # 顺序是刻意设计的：稳定规则放前面，最新请求放最后。
@@ -506,7 +511,7 @@ class ContextManager:
     def _fit_current_request(self, rendered, user_message):
         """Clip only an oversized request, keeping both its beginning and end."""
         prompt = self._assemble_prompt(rendered)
-        if _estimate_tokens(prompt) <= self.total_budget:
+        if self._count_tokens(prompt) <= self.total_budget:
             return rendered, prompt
 
         header = "Current user request:\n"
@@ -514,7 +519,7 @@ class ContextManager:
 
         def section_for(char_limit):
             body = self._head_tail_clip(user_message, char_limit)
-            return SectionRender(
+            return self._section(
                 raw=raw_section,
                 budget=0,
                 rendered=header + body,
@@ -524,15 +529,15 @@ class ContextManager:
         rendered = dict(rendered)
         rendered[CURRENT_REQUEST_SECTION] = section_for(0)
         for section in self.reduction_order:
-            overflow = _estimate_tokens(self._assemble_prompt(rendered)) - self.total_budget
+            overflow = self._count_tokens(self._assemble_prompt(rendered)) - self.total_budget
             if overflow <= 0:
                 break
             current = rendered[section]
             target_budget = max(0, current.rendered_tokens - overflow)
-            rendered[section] = SectionRender(
+            rendered[section] = self._section(
                 raw=current.raw,
                 budget=target_budget,
-                rendered=_token_clip(current.rendered, target_budget),
+                rendered=_token_clip(current.rendered, target_budget, token_counter=self._count_tokens),
                 details=current.details,
             )
 
@@ -542,7 +547,7 @@ class ContextManager:
             mid = (lo + hi) // 2
             candidate = dict(rendered)
             candidate[CURRENT_REQUEST_SECTION] = section_for(mid)
-            if _estimate_tokens(self._assemble_prompt(candidate)) <= self.total_budget:
+            if self._count_tokens(self._assemble_prompt(candidate)) <= self.total_budget:
                 best = candidate[CURRENT_REQUEST_SECTION]
                 lo = mid + 1
             else:
@@ -550,11 +555,11 @@ class ContextManager:
 
         rendered[CURRENT_REQUEST_SECTION] = best
         prompt = self._assemble_prompt(rendered)
-        if _estimate_tokens(prompt) > self.total_budget:
-            rendered[CURRENT_REQUEST_SECTION] = SectionRender(
+        if self._count_tokens(prompt) > self.total_budget:
+            rendered[CURRENT_REQUEST_SECTION] = self._section(
                 raw=raw_section,
                 budget=self.total_budget,
-                rendered=_token_clip(raw_section, self.total_budget),
+                rendered=_token_clip(raw_section, self.total_budget, token_counter=self._count_tokens),
                 details={"truncated": True},
             )
             prompt = self._assemble_prompt(rendered)
@@ -592,18 +597,18 @@ class ContextManager:
             section_metadata[section] = {
                 "raw_chars": rendered[section].raw_chars,
                 "rendered_chars": rendered[section].rendered_chars,
-                "raw_estimated_tokens": rendered[section].raw_tokens,
+                "raw_tokens": rendered[section].raw_tokens,
                 "budget_tokens": rendered[section].budget_tokens,
-                "rendered_estimated_tokens": rendered[section].rendered_tokens,
+                "rendered_tokens": rendered[section].rendered_tokens,
             }
         section_metadata[CURRENT_REQUEST_SECTION] = {
             "raw_chars": len(section_texts[CURRENT_REQUEST_SECTION]),
             "rendered_chars": len(rendered[CURRENT_REQUEST_SECTION].rendered),
-            "raw_estimated_tokens": rendered[CURRENT_REQUEST_SECTION].raw_tokens,
+            "raw_tokens": rendered[CURRENT_REQUEST_SECTION].raw_tokens,
             "budget_tokens": None,
-            "rendered_estimated_tokens": rendered[CURRENT_REQUEST_SECTION].rendered_tokens,
+            "rendered_tokens": rendered[CURRENT_REQUEST_SECTION].rendered_tokens,
         }
-        prompt_tokens = _estimate_tokens(prompt)
+        prompt_tokens = self._count_tokens(prompt)
         rendered_request = rendered[CURRENT_REQUEST_SECTION].rendered
         request_header = "Current user request:\n"
         rendered_request_body = (
@@ -613,9 +618,10 @@ class ContextManager:
         )
         return {
             "prompt_chars": len(prompt),
-            "prompt_estimated_tokens": prompt_tokens,
+            "prompt_tokens": prompt_tokens,
             "prompt_budget_tokens": self.total_budget,
             "prompt_over_budget": prompt_tokens > self.total_budget,
+            "tokenizer": self.agent.tokenizer_metadata(),
             "section_order": list(SECTION_ORDER),
             "section_budgets_tokens": {
                 section: (None if section == CURRENT_REQUEST_SECTION else int(budgets.get(section, 0)))
@@ -639,8 +645,8 @@ class ContextManager:
                 "selected_files": list(rendered["repo_map"].details.get("selected_files", [])),
                 "selected_symbols": list(rendered["repo_map"].details.get("selected_symbols", [])),
                 "truncated": bool(rendered["repo_map"].details.get("truncated", False)),
-                "raw_estimated_tokens": rendered["repo_map"].raw_tokens,
-                "rendered_estimated_tokens": rendered["repo_map"].rendered_tokens,
+                "raw_tokens": rendered["repo_map"].raw_tokens,
+                "rendered_tokens": rendered["repo_map"].rendered_tokens,
             },
             "relevant_memory": {
                 "limit": RELEVANT_MEMORY_LIMIT,
@@ -653,34 +659,30 @@ class ContextManager:
                 ),
                 "raw_chars": rendered["relevant_memory"].raw_chars,
                 "rendered_chars": rendered["relevant_memory"].rendered_chars,
-                "raw_estimated_tokens": rendered["relevant_memory"].raw_tokens,
-                "rendered_estimated_tokens": rendered["relevant_memory"].rendered_tokens,
+                "raw_tokens": rendered["relevant_memory"].raw_tokens,
+                "rendered_tokens": rendered["relevant_memory"].rendered_tokens,
                 "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),
                 "rendered_count": int(rendered["relevant_memory"].details.get("rendered_count", 0)),
+                "retrieval": dict(self.agent.memory.last_retrieval_metadata),
             },
             "recent_runs": {
                 "included": bool(selected_recent_runs),
                 "selected_count": len(selected_recent_runs),
                 "run_ids": [str(item.get("run_id", "")) for item in selected_recent_runs],
             },
-            "history": {
-                "raw_chars": rendered["history"].raw_chars,
-                "rendered_chars": rendered["history"].rendered_chars,
-                "older_entries_count": int(rendered["history"].details.get("older_entries_count", 0)),
-                "collapsed_duplicate_reads": int(rendered["history"].details.get("collapsed_duplicate_reads", 0)),
-                "reused_file_summary_count": int(rendered["history"].details.get("reused_file_summary_count", 0)),
-                "summarized_tool_count": int(rendered["history"].details.get("summarized_tool_count", 0)),
-                "dedup_skipped": int(rendered["history"].details.get("dedup_skipped", 0)),
-                "llm_compact_used": bool(rendered["history"].details.get("llm_compact_used", False)),
-                "llm_compact_error": str(rendered["history"].details.get("llm_compact_error", "")),
-                "llm_compact_summary_chars": int(rendered["history"].details.get("llm_compact_summary_chars", 0)),
+            "task_context": {
+                "raw_chars": rendered["task_context"].raw_chars,
+                "rendered_chars": rendered["task_context"].rendered_chars,
+                "raw_tokens": rendered["task_context"].raw_tokens,
+                "rendered_tokens": rendered["task_context"].rendered_tokens,
+                "active_run_id": str(rendered["task_context"].details.get("active_run_id", "")),
             },
             "dynamic_adjustment": dict(dynamic_adjustment or {}),
             "current_request": {
                 "text": user_message,
                 "raw_chars": len(user_message),
                 "rendered_chars": len(rendered_request_body),
-                "estimated_tokens": _estimate_tokens(user_message),
+                "tokens": self._count_tokens(user_message),
                 "section_chars": len(rendered[CURRENT_REQUEST_SECTION].rendered),
                 "truncated": rendered_request_body != user_message,
             },
@@ -716,6 +718,8 @@ class ContextManager:
             f"status={item.get('status', '')}; "
             f"stop_reason={item.get('stop_reason', '')}; "
             f"updated_at={item.get('updated_at', '')}; "
-            f"task_graph={item.get('task_graph_path', '')}; "
+            f"latest_node={item.get('latest_node_id', '')}; "
+            f"task_canvas={item.get('task_canvas_path', '')}; "
+            f"offload={item.get('offload_path', '')}; "
             f"report={item.get('report_path', '')}"
         )

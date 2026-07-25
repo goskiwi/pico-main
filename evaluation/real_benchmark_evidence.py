@@ -512,7 +512,7 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                 )
 
         artifact_paths = [trace_path, run_dir / "report.json"]
-        artifact_paths.extend(sorted((run_dir / "tool_outputs").glob("*.txt")))
+        artifact_paths.extend(sorted((run_dir / "refs").glob("*.txt")))
         for artifact_path in artifact_paths:
             if not artifact_path.is_file():
                 continue
@@ -534,7 +534,7 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                     artifact=str(artifact_path.relative_to(run_dir)),
                 )
 
-        for output_path in sorted((run_dir / "tool_outputs").glob("*_search.txt")):
+        for output_path in sorted((run_dir / "refs").glob("*_search.txt")):
             for line in output_path.read_text(
                 encoding="utf-8", errors="replace"
             ).splitlines():

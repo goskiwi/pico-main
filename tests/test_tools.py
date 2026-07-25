@@ -42,26 +42,40 @@ def test_local_validation_rejects_provider_bypassed_extra_arguments(tmp_path):
     assert result.startswith("error: invalid arguments for list_files: unexpected argument")
 
 
-def test_read_tool_output_resolves_the_task_graph_reference(tmp_path):
+def test_task_artifact_tools_expand_canvas_to_event_to_reference(tmp_path):
     agent = build_agent(tmp_path, [])
     state = agent.current_task_state = TaskState.create(
         run_id="run_current",
         task_id="task_current",
         user_request="Inspect output.",
     )
-    run_dir = agent.run_store.start_run(state)
-    output_path = run_dir / "tool_outputs" / "0001_read_file.txt"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("full tool output\nline 2\n", encoding="utf-8")
-    (run_dir / "task_graph.mmd").write_text(
-        "flowchart TD\n"
-        '  t001_read_file["tool | ok | read_file hello.txt"]\n'
-        "  %% t001_read_file ref: tool_outputs/0001_read_file.txt\n",
-        encoding="utf-8",
+    agent.run_store.start_run(state)
+    result_ref = agent.run_store.save_reference(
+        state, 1, "read_file", "full tool output\nline 2\n"
+    )
+    agent.run_store.append_offload_event(
+        state,
+        node_id="N001_read_file",
+        tool_name="read_file",
+        args={"path": "hello.txt"},
+        summary="Read hello.txt",
+        status="done",
+        result_ref=result_ref,
+    )
+    agent.run_store.append_task_node(
+        state,
+        node_id="N001_read_file",
+        summary="Read hello.txt",
+        status="done",
+        result_ref=result_ref,
     )
 
-    result = agent.run_tool("read_tool_output", {"node_id": "t001_read_file"})
+    canvas = agent.run_tool("read_task_canvas", {})
+    event = agent.run_tool("read_task_event", {"node_id": "N001_read_file"})
+    result = agent.run_tool("read_tool_output", {"node_id": "N001_read_file"})
 
+    assert "N001_read_file" in canvas
+    assert '"result_ref": "refs/0001_read_file.txt"' in event
     assert result == "full tool output\nline 2\n"
 
 
@@ -69,16 +83,14 @@ def test_read_tool_output_rejects_refs_outside_the_artifact_directory(tmp_path):
     agent = build_agent(tmp_path, [])
     run_dir = agent.run_store.run_dir("run_previous")
     run_dir.mkdir(parents=True)
-    (run_dir / "task_graph.mmd").write_text(
-        "flowchart TD\n"
-        '  t001_read_file["tool | ok | bad ref"]\n'
-        "  %% t001_read_file ref: tool_outputs/../../README.md\n",
+    (run_dir / "offload.jsonl").write_text(
+        '{"node_id":"N001_read_file","result_ref":"refs/../../README.md"}\n',
         encoding="utf-8",
     )
 
     result = agent.run_tool(
         "read_tool_output",
-        {"run_id": "run_previous", "node_id": "t001_read_file"},
+        {"run_id": "run_previous", "node_id": "N001_read_file"},
     )
 
     assert "invalid ref" in result

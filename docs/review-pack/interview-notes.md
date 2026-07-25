@@ -91,6 +91,6 @@ manager、持久队列、幂等任务、监控告警和供应链策略。
 1. 展示 `pico/repo_map.py` 的 symbol graph 和排序入口。
 2. 展示 V4 fixture 的 active path 与干扰 path，再展示 13/15 vs 6/15。
 3. 展示 `pico/tools.py` 的单一 Pydantic schema 和 `pico/sandbox.py`。
-4. 展示一次 run 的 `trace.jsonl`、`task_graph.mmd` 和 `undo/manifest.json`。
+4. 展示一次 run 的 `trace.jsonl`、`task.mmd`、`offload.jsonl` 和 `undo/manifest.json`。
 5. 用 reliability 报告说明脏文件恢复和 digest 验证。
 6. 最后主动说明本地单用户与微基准的外部有效性边界。

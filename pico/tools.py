@@ -4,6 +4,7 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import json
 import re
 import shlex
 import shutil
@@ -97,9 +98,21 @@ TOOL_DEFINITIONS = {
         start=_arg(int, 1, ge=1),
         end=_arg(int, 200, ge=1),
     ),
+    "read_task_canvas": _tool(
+        "ReadTaskCanvasArgs",
+        "Read the active Mermaid task canvas or one archived phase; defaults to the active run.",
+        run_id=_arg(str, ""),
+        phase_id=_arg(str, "", description="Archived phase id such as phase_001; empty reads the active canvas."),
+    ),
+    "read_task_event": _tool(
+        "ReadTaskEventArgs",
+        "Read one offloaded tool-summary event by task-canvas node id.",
+        node_id=_arg(str, min_length=1),
+        run_id=_arg(str, ""),
+    ),
     "read_tool_output": _tool(
         "ReadToolOutputArgs",
-        "Read full saved tool output by task graph node id.",
+        "Read full saved evidence after inspecting its offloaded task event.",
         node_id=_arg(str, min_length=1),
         run_id=_arg(str, ""),
     ),
@@ -204,6 +217,8 @@ def _tool_spec(definition):
 BASE_TOOL_NAMES = (
     "list_files",
     "read_file",
+    "read_task_canvas",
+    "read_task_event",
     "read_tool_output",
     "search",
     "query_repo_map",
@@ -441,15 +456,19 @@ def validate_tool(agent, name, args):
             raise ValueError("invalid line range")
         return
 
-    if name == "read_tool_output":
-        node_id = str(args.get("node_id", "")).strip()
-        if not node_id:
-            raise ValueError("node_id must not be empty")
+    if name in {"read_task_canvas", "read_task_event", "read_tool_output"}:
         run_id = str(args.get("run_id", "")).strip()
-        if ".." in node_id or "/" in node_id or "\\" in node_id:
-            raise ValueError("invalid node_id")
         if run_id and (".." in run_id or "/" in run_id or "\\" in run_id):
             raise ValueError("invalid run_id")
+        phase_id = str(args.get("phase_id", "")).strip()
+        if phase_id and not re.fullmatch(r"phase_\d{3,}", phase_id):
+            raise ValueError("invalid phase_id")
+        if name != "read_task_canvas":
+            node_id = str(args.get("node_id", "")).strip()
+            if not node_id:
+                raise ValueError("node_id must not be empty")
+            if ".." in node_id or "/" in node_id or "\\" in node_id:
+                raise ValueError("invalid node_id")
         return
 
     if name == "search":
@@ -562,43 +581,51 @@ def tool_read_file(agent, args):
     )
 
 
-def tool_read_tool_output(agent, args):
-    node_id = str(args.get("node_id", "")).strip()
+def _artifact_run_id(agent, args):
     run_id = str(args.get("run_id", "")).strip()
     if not run_id:
         task_state = agent.current_task_state
         run_id = str(task_state.run_id if task_state is not None else "")
     if not run_id:
         raise ValueError("run_id is required when no current run is active")
+    return run_id
+
+
+def tool_read_task_canvas(agent, args):
+    run_id = _artifact_run_id(agent, args)
+    return agent.run_store.task_canvas_text(
+        run_id,
+        phase_id=str(args.get("phase_id", "")).strip(),
+    )
+
+
+def tool_read_task_event(agent, args):
+    run_id = _artifact_run_id(agent, args)
+    node_id = str(args["node_id"]).strip()
+    event = agent.run_store.read_offload_event(run_id, node_id)
+    return json.dumps(event, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def tool_read_tool_output(agent, args):
+    node_id = str(args["node_id"]).strip()
+    run_id = _artifact_run_id(agent, args)
 
     run_dir = agent.run_store.run_dir(run_id).resolve()
-    graph_path = agent.run_store.task_graph_path(run_id).resolve()
-    if not graph_path.is_file():
-        raise ValueError(f"task graph not found for run_id: {run_id}")
-    graph_text = graph_path.read_text(encoding="utf-8", errors="replace")
-    ref = _tool_output_ref_for_node(graph_text, node_id)
+    event = agent.run_store.read_offload_event(run_id, node_id)
+    ref = str(event.get("result_ref", "")).strip()
     if not ref:
-        raise ValueError(f"node not found or ref missing: {node_id}")
+        raise ValueError(f"result_ref missing for node: {node_id}")
     if Path(ref).is_absolute() or ".." in ref:
         raise ValueError(f"invalid ref: {ref}")
     ref_path = (run_dir / ref).resolve()
-    tool_outputs_dir = (run_dir / "tool_outputs").resolve()
+    refs_dir = agent.run_store.refs_dir(run_id).resolve()
     try:
-        ref_path.relative_to(tool_outputs_dir)
+        ref_path.relative_to(refs_dir)
     except ValueError as exc:
-        raise ValueError("ref escapes tool_outputs") from exc
+        raise ValueError("ref escapes refs") from exc
     if not ref_path.is_file():
-        raise ValueError(f"tool output not found: {ref}")
+        raise ValueError(f"reference not found: {ref}")
     return ref_path.read_text(encoding="utf-8", errors="replace")
-
-
-def _tool_output_ref_for_node(graph_text, node_id):
-    # ref 存在独立注释行 `%% <node_id> ref: <path>`，不受节点 label 截断影响。
-    comment_pattern = re.compile(
-        rf"^\s*%%\s*{re.escape(node_id)}\s+ref:\s*(.+?)\s*$", re.MULTILINE
-    )
-    match = comment_pattern.search(str(graph_text or ""))
-    return match.group(1).strip() if match else ""
 
 
 def tool_search(agent, args):
@@ -642,6 +669,7 @@ def tool_query_repo_map(agent, args):
         str(args["query"]).strip(),
         budget_tokens=int(args.get("budget_tokens", 1200)),
         max_results=int(args.get("max_results", 24)),
+        token_counter=agent.count_tokens,
     )
     details = rendered.details
     evidence = (
@@ -739,13 +767,14 @@ def run_delegate_child(agent, args):
         agent_mode=role,
         parent_agent_id=agent.agent_id,
         allowed_tools=role_config["allowed_tools"],
+        semantic_memory_config=agent.semantic_memory_config,
     )
     child._assert_workspace_root()
     # 委派的目标是“调查”，不是“放权执行”。
     # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
     child.memory.set_goal(child_task)
     child.memory.append_note(
-        clip(agent.history_text(), 300),
+        clip(agent.task_context_text(), 300),
         tags=("delegated_context",),
         source=agent.agent_id,
         kind="process",
@@ -837,6 +866,8 @@ def tool_delegate_many(agent, args):
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
+    "read_task_canvas": tool_read_task_canvas,
+    "read_task_event": tool_read_task_event,
     "read_tool_output": tool_read_tool_output,
     "search": tool_search,
     "query_repo_map": tool_query_repo_map,

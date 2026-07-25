@@ -27,6 +27,10 @@ class TaskState:
     status: str = STATUS_RUNNING
     tool_steps: int = 0
     attempts: int = 0
+    nominal_tool_budget: int = 0
+    hard_tool_limit: int = 0
+    step_extension_granted: bool = False
+    step_extension_reason: str = ""
     last_tool: str = ""
     stop_reason: str = ""
     final_answer: str = ""
@@ -65,6 +69,16 @@ class TaskState:
         self.last_tool = str(name or "")
         return self
 
+    def configure_tool_budget(self, nominal_tool_budget, hard_tool_limit):
+        self.nominal_tool_budget = int(nominal_tool_budget)
+        self.hard_tool_limit = int(hard_tool_limit)
+        return self
+
+    def grant_step_extension(self, reason):
+        self.step_extension_granted = True
+        self.step_extension_reason = str(reason)
+        return self
+
     def stop(self, stop_reason, status=STATUS_STOPPED, final_answer=""):
         # stop_reason 和 status 分开存，是为了区分“怎么停的”和“停下时是什么状态”。
         self.status = status
@@ -96,6 +110,10 @@ class TaskState:
             "status": self.status,
             "tool_steps": self.tool_steps,
             "attempts": self.attempts,
+            "nominal_tool_budget": self.nominal_tool_budget,
+            "hard_tool_limit": self.hard_tool_limit,
+            "step_extension_granted": self.step_extension_granted,
+            "step_extension_reason": self.step_extension_reason,
             "last_tool": self.last_tool,
             "stop_reason": self.stop_reason,
             "final_answer": self.final_answer,

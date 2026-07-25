@@ -21,6 +21,9 @@ from . import skills as skillslib
 from . import tool_runtime
 from .checkpoints import CHECKPOINT_NONE_STATUS
 from .config import (
+    CONTEXT_RECOVERY_EVIDENCE_TOKENS,
+    CONTEXT_RECOVERY_MAX_FILES,
+    CONTEXT_RECOVERY_MAX_TOOL_OUTPUTS,
     DEFAULT_APPROVAL_POLICY,
     DEFAULT_MAX_DEPTH,
     DEFAULT_FEATURE_FLAGS,
@@ -29,11 +32,18 @@ from .config import (
     DEFAULT_SHELL_ENV_ALLOWLIST,
 )
 from .context_manager import ContextManager
+from .context_types import _token_clip, count_tokens, tokenizer_details
 from .repo_map import RepoMap
 from .run_store import RunStore
 from .sandbox import DockerSandbox
+from .semantic_memory import DisabledSemanticMemoryIndex, SemanticMemoryIndex
 from . import tools as toolkit
 from .workspace import WorkspaceContext, clip, now
+
+
+_DEDUPLICATED_READ_ONLY_TOOLS = frozenset(
+    {"read_file", "list_files", "search", "query_repo_map"}
+)
 
 
 @dataclass
@@ -60,6 +70,7 @@ class Pico:
         run_store=None,
         approval_policy=DEFAULT_APPROVAL_POLICY,
         max_steps=DEFAULT_MAX_STEPS,
+        max_step_extension=None,
         max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         depth=0,
         max_depth=DEFAULT_MAX_DEPTH,
@@ -74,6 +85,7 @@ class Pico:
         parent_agent_id=None,
         allowed_tools=None,
         sandbox=None,
+        semantic_memory_config=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -82,7 +94,20 @@ class Pico:
         self.sandbox = sandbox or DockerSandbox(self.root)
         self.session_store = session_store
         self.approval_policy = approval_policy
-        self.max_steps = max_steps
+        self.max_steps = int(max_steps)
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be a positive integer")
+        if max_step_extension is None:
+            max_step_extension = self.max_steps
+        if isinstance(max_step_extension, bool):
+            raise ValueError("max_step_extension must be a non-negative integer")
+        try:
+            self.max_step_extension = int(max_step_extension)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_step_extension must be a non-negative integer") from exc
+        if self.max_step_extension < 0:
+            raise ValueError("max_step_extension must be a non-negative integer")
+        self.hard_max_steps = self.max_steps + self.max_step_extension
         self.max_new_tokens = max_new_tokens
         self.depth = depth
         self.max_depth = max_depth
@@ -111,6 +136,17 @@ class Pico:
             if self.repo_map_budget_tokens <= 0:
                 raise ValueError("repo_map_budget_tokens must be a positive integer")
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
+        self.semantic_memory_config = semantic_memory_config
+        self.semantic_memory = (
+            SemanticMemoryIndex(
+                semantic_memory_config,
+                workspace_id=hashlib.sha256(
+                    str(self.root).encode("utf-8")
+                ).hexdigest(),
+            )
+            if semantic_memory_config is not None
+            else DisabledSemanticMemoryIndex()
+        )
         self.session = (
             session
             if session is not None
@@ -134,6 +170,7 @@ class Pico:
         self.memory = memorylib.LayeredMemory(
             self.session["memory"],
             workspace_root=self.root,
+            semantic_index=self.semantic_memory,
         )
         self.session["memory"] = self.memory.to_dict()
         self.repo_map = RepoMap(self.root)
@@ -160,6 +197,7 @@ class Pico:
         self.last_llm_durable_rejections = []
         self.last_llm_durable_superseded = []
         self.last_llm_memory_extractor_error = ""
+        self.last_semantic_memory_sync = dict(self.memory.last_semantic_sync)
         self.tool_audit_log = []
         self.model_action_rejections = []
         self._last_tool_result_metadata = {}
@@ -171,6 +209,9 @@ class Pico:
             "prefix_changed": False,
         }
         self._workspace_snapshot_hash_cache = {}
+        self._read_only_tool_signatures = set()
+        self._read_only_tool_evidence = {}
+        self._context_recovery_text = ""
 
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
@@ -256,6 +297,10 @@ class Pico:
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "repo_map_budget_tokens": self.repo_map_budget_tokens,
             "read_only": bool(self.read_only),
+            "semantic_memory_enabled": bool(self.semantic_memory.enabled),
+            "semantic_memory_status": str(
+                self.semantic_memory.last_sync.get("status", "not_run")
+            ),
             "workspace_root": str(self.root.resolve()),
             "sandbox": self.sandbox.identity(),
         }
@@ -324,9 +369,9 @@ class Pico:
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - New files should be complete and runnable, including obvious imports.
-            - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
+            - Never repeat read_file, list_files, search, or query_repo_map with identical arguments while the workspace is unchanged. Reuse the saved evidence, choose a different range or query, run a test, or make the needed edit.
             - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.
-            - When a task graph node has a ref, use read_tool_output instead of manually reading tool_outputs paths.
+            - Use read_task_canvas to inspect the active task map (or an archived phase by phase_id), read_task_event for a node summary, and read_tool_output only when the saved evidence is needed.
             - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, delegate, or delegate_many with args={{}}.
 
             Tools:
@@ -383,8 +428,135 @@ class Pico:
     def memory_text(self):
         return self.memory.render_memory_text()
 
-    def history_text(self):
-        return self.context_manager.history_renderer.history_text()
+    def count_tokens(self, text):
+        """Use the provider model's tokenizer, with a declared tiktoken fallback."""
+        counter = getattr(self.model_client, "count_tokens", None)
+        if callable(counter):
+            return int(counter(text))
+        return count_tokens(text, model=str(getattr(self.model_client, "model", "")))
+
+    def tokenizer_metadata(self):
+        details = getattr(self.model_client, "tokenizer_metadata", None)
+        if callable(details):
+            return dict(details())
+        return tokenizer_details(str(getattr(self.model_client, "model", "")))
+
+    def task_context_text(self):
+        task_state = self.current_task_state
+        if task_state is None:
+            return "Task state:\n- no active task"
+        lines = [
+            "Task state (the full Mermaid canvas is for UI, audit, and recovery):",
+            f"- goal: {clip(task_state.user_request, 500)}",
+            f"- tool steps: {task_state.tool_steps}",
+            f"- last tool: {task_state.last_tool or 'none'}",
+            f"- canvas: {self.run_store.task_canvas_path(task_state.run_id)}",
+            "- In this live task, the conversation's tool results are the authoritative evidence.",
+        ]
+        if self._context_recovery_text:
+            lines.append(self._context_recovery_text)
+        return "\n".join(lines)
+
+    def prepare_context_recovery(self):
+        """Build a bounded fresh-session bundle after a provider context error.
+
+        This is deliberately reactive: the exact tool-result conversation stays
+        intact until the provider says it no longer fits.  The recovery bundle
+        then preserves the newest raw observations and fresh versions of the
+        files they touched, while the Mermaid canvas remains an audit index.
+        """
+        task_state = self.current_task_state
+        if task_state is None or self.current_run_dir is None:
+            self._context_recovery_text = ""
+            return {"tool_outputs": 0, "files": 0, "tokens": 0}
+
+        events = []
+        offload_path = self.run_store.offload_path(task_state.run_id)
+        if offload_path.exists():
+            for line in offload_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+        recent_events = events[-CONTEXT_RECOVERY_MAX_TOOL_OUTPUTS:]
+
+        def append_with_budget(parts, text, remaining):
+            if remaining <= 0:
+                return remaining
+            rendered = _token_clip(text, remaining, token_counter=self.count_tokens)
+            if rendered:
+                parts.append(rendered)
+                return max(0, remaining - self.count_tokens(rendered))
+            return remaining
+
+        parts = [
+            "Context recovery after a provider context-limit error:",
+            "- This is a fresh model session. The evidence below is authoritative; do not re-read an unchanged file just to reconstruct it.",
+            "- Continue the same task, repair or verify from this evidence, and use the task canvas only to navigate archived details.",
+        ]
+        remaining = max(0, int(CONTEXT_RECOVERY_EVIDENCE_TOKENS) - self.count_tokens("\n".join(parts)))
+        # Reserve one third for current file snapshots.  Raw tool output can
+        # otherwise fill the whole bundle and recreate the stale-source
+        # problem that caused the recovery in the first place.
+        evidence_budget = (remaining * 2) // 3
+        evidence_remaining = evidence_budget
+        output_count = 0
+        touched_paths = []
+        for event in reversed(recent_events):
+            args = dict(event.get("args") or {})
+            path = str(args.get("path", "")).strip()
+            if path and path not in touched_paths:
+                touched_paths.append(path)
+            ref = str(event.get("result_ref", "")).strip()
+            if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
+                continue
+            ref_path = (self.current_run_dir / ref).resolve()
+            refs_dir = self.run_store.refs_dir(task_state.run_id).resolve()
+            try:
+                ref_path.relative_to(refs_dir)
+            except ValueError:
+                continue
+            if not ref_path.is_file():
+                continue
+            raw_output = ref_path.read_text(encoding="utf-8", errors="replace")
+            heading = (
+                f"\nLatest tool evidence {event.get('node_id', '')} | "
+                f"{event.get('tool_name', '')} | args={json.dumps(args, ensure_ascii=False, sort_keys=True)}:\n"
+            )
+            before = len(parts)
+            evidence_remaining = append_with_budget(parts, heading + raw_output, evidence_remaining)
+            output_count += int(len(parts) > before)
+            if evidence_remaining <= 0:
+                break
+
+        file_count = 0
+        file_remaining = remaining - evidence_budget
+        for relative_path in reversed(touched_paths):
+            if file_count >= CONTEXT_RECOVERY_MAX_FILES or file_remaining <= 0:
+                break
+            try:
+                path = self.path(relative_path)
+            except (ValueError, OSError):
+                continue
+            if not path.is_file():
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace")
+            heading = f"\nFresh workspace snapshot | {relative_path}:\n"
+            before = len(parts)
+            file_remaining = append_with_budget(parts, heading + content, file_remaining)
+            file_count += int(len(parts) > before)
+
+        self._context_recovery_text = "\n".join(parts)
+        return {
+            "tool_outputs": output_count,
+            "files": file_count,
+            "tokens": self.count_tokens(self._context_recovery_text),
+        }
+
+    def clear_context_recovery(self):
+        self._context_recovery_text = ""
 
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
@@ -465,7 +637,7 @@ class Pico:
                 "prefix_chars": len(self.prefix),
                 "workspace_chars": len(self.workspace.text()),
                 "memory_chars": len(self.memory_text()),
-                "history_chars": len(self.history_text()),
+                "task_context_chars": len(self.task_context_text()),
                 "request_chars": len(user_message),
                 "tool_count": len(self.tools),
                 "active_tool_names": sorted(self.active_tool_names) if self.active_tool_names is not None else None,
@@ -543,6 +715,11 @@ class Pico:
         self.session_path = self.session_store.save(self.session)
 
     def mark_work_started(self, user_message):
+        # A task may legitimately inspect the same file as a prior task.  The
+        # strict read de-duplication window is intentionally scoped to one ask.
+        self._read_only_tool_signatures.clear()
+        self._read_only_tool_evidence.clear()
+        self.clear_context_recovery()
         self.update_working_state(
             goal=user_message,
             current_subtask="building prompt and asking model",
@@ -556,7 +733,47 @@ class Pico:
             next_action="inspect the tool result",
         )
 
-    def mark_tool_finished(self, name, metadata, result):
+    @staticmethod
+    def _read_only_tool_signature(name, args):
+        return json.dumps(
+            [str(name or ""), args or {}],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def is_duplicate_read_only_tool(self, name, args):
+        if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
+            return False
+        return self._read_only_tool_signature(name, args) in self._read_only_tool_signatures
+
+    def cached_read_only_evidence(self, name, args):
+        signature = self._read_only_tool_signature(name, args)
+        return dict(self._read_only_tool_evidence.get(signature, {}))
+
+    def cache_read_only_evidence(self, name, args, result, *, result_ref="", node_id=""):
+        if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
+            return
+        signature = self._read_only_tool_signature(name, args)
+        self._read_only_tool_signatures.add(signature)
+        # Preserve the first observation for this workspace version.  A later
+        # duplicate must never replace the original source evidence with its
+        # own rejection message.
+        self._read_only_tool_evidence.setdefault(
+            signature,
+            {
+                "result": str(result or ""),
+                "result_ref": str(result_ref or ""),
+                "node_id": str(node_id or ""),
+            },
+        )
+
+    def mark_tool_finished(self, name, args, metadata, result):
+        # A successful workspace change invalidates all prior read evidence.
+        # The next read may therefore reuse the same tool arguments.
+        if metadata.get("workspace_changed"):
+            self._read_only_tool_signatures.clear()
+            self._read_only_tool_evidence.clear()
         status = str(metadata.get("tool_status", "")).strip() or "ok"
         error_code = str(metadata.get("tool_error_code", "")).strip()
         if status in {"error", "rejected", "partial_success"}:
@@ -606,7 +823,11 @@ class Pico:
         self.session["history"] = []
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
-        self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)
+        self.memory = memorylib.LayeredMemory(
+            self.session["memory"],
+            workspace_root=self.root,
+            semantic_index=self.semantic_memory,
+        )
         self.session_store.save(self.session)
 
     def path(self, raw_path):

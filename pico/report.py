@@ -13,10 +13,19 @@ def build_report(agent, task_state):
         "final_answer": task_state.final_answer,
         "tool_steps": task_state.tool_steps,
         "attempts": task_state.attempts,
+        "tool_budget": {
+            "nominal": task_state.nominal_tool_budget,
+            "hard_limit": task_state.hard_tool_limit,
+            "extension_granted": task_state.step_extension_granted,
+            "extension_reason": task_state.step_extension_reason,
+        },
         "checkpoint_id": task_state.checkpoint_id,
         "resume_status": task_state.resume_status,
         "dry_run": bool(agent.dry_run),
-        "task_graph_path": str(agent.run_store.task_graph_path(task_state.run_id)),
+        "task_canvas_path": str(agent.run_store.task_canvas_path(task_state.run_id)),
+        "offload_path": str(agent.run_store.offload_path(task_state.run_id)),
+        "phase_index_path": str(agent.run_store.phase_index_path(task_state.run_id)),
+        "task_phase_summary": agent.run_store.phase_summary(task_state.run_id),
         "agent": agent.identity_metadata(),
         "summary": build_run_summary(agent, task_state),
         "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
@@ -45,6 +54,7 @@ def build_report(agent, task_state):
         "llm_durable_rejections": list(agent.last_llm_durable_rejections),
         "llm_durable_superseded": list(agent.last_llm_durable_superseded),
         "llm_memory_extractor_error": str(agent.last_llm_memory_extractor_error),
+        "semantic_memory_sync": dict(agent.last_semantic_memory_sync),
         "redacted_env": security.detected_secret_env_summary(agent),
     }
 
@@ -73,6 +83,7 @@ def record_tool_audit(agent, name, args, result, duration_ms):
             metadata.get("undo_recorded_paths") or []
         ),
         "result_preview": clip(result, 200),
+        "verification": dict(metadata.get("verification") or {}),
     }
     if name == "run_shell":
         entry["command"] = clip(str((args or {}).get("command", "")), 200)
@@ -125,6 +136,12 @@ def build_run_summary(agent, task_state):
         "stop_reason": task_state.stop_reason,
         "attempts": task_state.attempts,
         "tool_steps": task_state.tool_steps,
+        "tool_budget": {
+            "nominal": task_state.nominal_tool_budget,
+            "hard_limit": task_state.hard_tool_limit,
+            "extension_granted": task_state.step_extension_granted,
+            "extension_reason": task_state.step_extension_reason,
+        },
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
         "skills": list((agent.last_prompt_metadata or {}).get("skills", {}).get("selected_names", [])),

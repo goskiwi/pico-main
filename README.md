@@ -170,22 +170,82 @@ uv run pico undo --cwd /path/to/target-repo \
 .pico/runs/<run_id>/
 ├── task_state.json
 ├── trace.jsonl
-├── task_graph.mmd
+├── task.mmd
+├── offload.jsonl
+├── phases/
+│   ├── index.json
+│   └── phase_001.mmd
 ├── report.json
 ├── undo/
 │   ├── manifest.json
 │   └── blobs/
-└── tool_outputs/
+└── refs/
 ```
 
-完整工具输出保存在 `tool_outputs/`，history 只保留摘要和引用；模型需要回看时通过
-`read_tool_output` 按任务图节点读取，避免把大段 pytest 输出反复塞回上下文。
+上下文按四层持久化：`refs/*.txt` 保存完整证据，`offload.jsonl` 保存工具级摘要和
+引用，`task.mmd` 保存活动任务画布，`index.json` 保存跨任务入口。预算使用模型对应的
+`tiktoken` 编码（未知的兼容模型会明确记录 `o200k_base` 回退），不再使用字符估算。
+主画布达到 12 个活动节点或 2800 token 后，较早步骤会折叠到 `phases/phase_XXX.mmd`；
+通过 `read_task_canvas(phase_id="phase_001")` 可下钻查看。画布是前端展示、审计、恢复与
+证据导航的控制平面；它不会替代任务内的即时上下文。模型在任务首轮收到轻量任务状态，
+随后持续接收与函数调用匹配的原始 `tool_result`。只有 provider 明确报上下文超限时，运行时
+才会新开一次会话，并在真实 tokenizer 预算内注入最近工具证据和当前文件快照；再次超限会
+透明地停止，而不是反复压缩丢失细节。
 
 可以把最新运行渲染为静态审计页面：
 
 ```bash
 uv run python scripts/render_run_report.py .pico/runs --latest
 ```
+
+生成的 `report.html` 会在浏览器中用 Mermaid 渲染当前画布，并把折叠阶段显示为可展开的
+子画布；首次渲染需要能访问 Mermaid CDN，离线时仍会保留 Mermaid 源码。
+
+## 语义长期记忆（可选 Qdrant）
+
+稳定的 `user`、`feedback`、`project`、`reference` 记忆以 `.pico/memory/` 中的 Markdown
+为事实源。配置 Qdrant 与 embedding 服务后，Pico 会把这些记忆增量镜像为外部向量，并把
+Qdrant 语义排名与本地标签/关键词排名用 RRF 融合；代码、文件摘要、工具输出和任务工件
+不会进入向量库。
+
+项目根目录的 `docker-compose.yml` 已包含本地 Qdrant。它只监听 `127.0.0.1:6333`，数据放在
+Docker 命名卷 `qdrant_storage` 中；启动后也可在 <http://localhost:6333/dashboard> 查看集合：
+
+```bash
+docker compose up -d qdrant
+docker compose ps
+```
+
+复制示例配置到工作区 `.env.local`，再填入 embedding 服务的 Key：
+
+```bash
+cp .env.example .env.local
+```
+
+本地容器不需要 Qdrant API Key，保留 `PICO_QDRANT_API_KEY` 为空即可：
+
+```dotenv
+PICO_QDRANT_URL=http://localhost:6333
+PICO_QDRANT_API_KEY=
+PICO_QDRANT_COLLECTION=pico_memory
+PICO_EMBEDDINGS_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+PICO_EMBEDDINGS_API_KEY=<DASHSCOPE_API_KEY>
+PICO_EMBEDDINGS_MODEL=text-embedding-v4
+PICO_EMBEDDINGS_DIMENSION=1024
+```
+
+已有 Markdown 记忆可显式建立首次索引；日后的 durable-memory 写入会自动增量同步：
+
+```bash
+uv run pico memory-sync --cwd /path/to/target-repo
+```
+
+示例与 Glodex 当前环境对齐：它复用 `DASHSCOPE_API_KEY`，使用 DashScope OpenAI-compatible
+API 的 `text-embedding-v4`（1024 维）。`PICO_EMBEDDINGS_DIMENSION` 会原样传给 embedding
+接口；Qdrant 则在首次同步时以实际返回向量维度建 collection。若改用受保护的自托管实例或
+Qdrant Cloud，只需将 `PICO_QDRANT_URL` 和 `PICO_QDRANT_API_KEY` 换成对应值。
+`docker compose down` 会停止服务但保留记忆；只有 `docker compose down -v` 才会删除本地
+Qdrant 数据卷。
 
 ## 代码入口
 

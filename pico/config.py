@@ -33,7 +33,6 @@ DEFAULT_FEATURE_FLAGS: dict = {
     "context_reduction": True,
     "prompt_cache": True,
     "llm_memory_extract": True,
-    "llm_history_compaction": True,
     "dynamic_budget": True,
     "cross_section_dedup": True,
 }
@@ -58,7 +57,7 @@ SENSITIVE_ENV_NAME_MARKERS: Tuple[str, ...] = ("API_KEY", "TOKEN", "SECRET", "PA
 REDACTED_VALUE: str = "<redacted>"
 
 # ---------------------------------------------------------------------------
-# 上下文预算（token 估算值）
+# 上下文预算（真实 tokenizer token 数）
 # ---------------------------------------------------------------------------
 
 DEFAULT_TOTAL_BUDGET: int = 12000
@@ -68,20 +67,33 @@ DEFAULT_SECTION_BUDGETS: dict = {
     "skills": 900,
     "repo_map": 1800,
     "relevant_memory": 900,
-    "history": 4200,
+    "task_context": 4200,
 }
 DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = (
     "relevant_memory",
     "skills",
-    "history",
+    "task_context",
     "repo_map",
     "memory",
     "prefix",
 )
-HISTORY_RECENT_WINDOW: int = 6
 RELEVANT_MEMORY_LIMIT: int = 3
-LLM_COMPACT_MAX_INPUT_CHARS: int = 12000
-LLM_COMPACT_MAX_OUTPUT_TOKENS: int = 700
+
+# The Mermaid canvas is an audit/recovery control plane, not the live tool
+# conversation.  Fold older completed steps into a drill-down phase artifact
+# before the UI view becomes hard to navigate.
+TASK_CANVAS_MAX_ACTIVE_NODES: int = 12
+TASK_CANVAS_RETAIN_NODES: int = 8
+TASK_CANVAS_MAX_TOKENS: int = 2800
+
+# A provider-side action conversation normally keeps exact tool results.  If
+# the provider explicitly rejects that conversation for context overflow, one
+# fresh session is recovered from this bounded, tokenizer-measured evidence
+# bundle.  A second overflow stops transparently instead of repeatedly
+# summarizing and silently losing details.
+CONTEXT_RECOVERY_MAX_TOOL_OUTPUTS: int = 5
+CONTEXT_RECOVERY_MAX_FILES: int = 4
+CONTEXT_RECOVERY_EVIDENCE_TOKENS: int = 3600
 
 # ---------------------------------------------------------------------------
 # Task-aware Python repository map
