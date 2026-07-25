@@ -30,6 +30,7 @@ htmlcov/
 tmp/
 .worktrees/
 .pico/
+output/
 .env
 .env.local
 # Live benchmark outputs are ignored by default because provider-backed runs
