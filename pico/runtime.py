@@ -6,6 +6,7 @@ Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型�
 
 import json
 import os
+import re
 import textwrap
 import uuid
 import hashlib
@@ -165,9 +166,6 @@ class Pico:
                 "resume_state": {},
             }
         )
-        # Run artifacts are the sole event audit record.  Discard the former
-        # session-level copy when an existing session is opened.
-        self.session.pop("history", None)
         self._ensure_session_shape()
         self.memory = memorylib.LayeredMemory(
             self.session["memory"],
@@ -369,6 +367,7 @@ class Pico:
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
+            - When Workspace provides a verification_command, use it for test verification unless current test output proves it is unsuitable.
             - New files should be complete and runnable, including obvious imports.
             - Never repeat read_file, list_files, search, or query_repo_map with identical arguments while the workspace is unchanged. Reuse the saved evidence, choose a different range or query, run a test, or make the needed edit.
             - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.
@@ -507,9 +506,18 @@ class Pico:
         touched_paths = []
         for event in reversed(recent_events):
             args = dict(event.get("args") or {})
-            path = str(args.get("path", "")).strip()
-            if path and path not in touched_paths:
-                touched_paths.append(path)
+            event_paths = (
+                [
+                    str(file_args.get("path", "")).strip()
+                    for file_args in args.get("files", [])
+                    if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+                ]
+                if event.get("tool_name") == "read_file"
+                else [str(args.get("path", "")).strip()]
+            )
+            for path in event_paths:
+                if path and path not in touched_paths:
+                    touched_paths.append(path)
             ref = str(event.get("result_ref", "")).strip()
             if not ref or Path(ref).is_absolute() or ".." in Path(ref).parts:
                 continue
@@ -562,10 +570,6 @@ class Pico:
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
 
-    def prompt(self, user_message):
-        prompt, _ = self._build_prompt_and_metadata(user_message)
-        return prompt
-
     def summarize_tool_result(self, name, args, result):
         """为 task canvas 与 offload 生成工具输出的简要摘要。
 
@@ -574,14 +578,18 @@ class Pico:
         """
         result = str(result or "")
         if name == "read_file":
-            path = str(args.get("path", ""))
             lines = result.splitlines()
             if len(lines) <= 16:
                 preview = "\n".join(lines)
             else:
                 omitted = len(lines) - 15
                 preview = "\n".join([*lines[:10], f"... ({omitted} lines omitted)", *lines[-5:]])
-            return f"read_file {path}: {len(lines)} lines\n{preview}"
+            paths = [
+                str(file_args.get("path", "")).strip()
+                for file_args in args.get("files", [])
+                if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+            ]
+            return f"read_file {', '.join(paths)}: {len(lines)} lines\n{preview}"
         if name == "run_shell":
             command = str(args.get("command", "")).strip()
             lines = [line for line in result.splitlines() if line.strip()]
@@ -618,10 +626,6 @@ class Pico:
         if name in ("delegate", "delegate_many"):
             return result[:400] if result else "(empty)"
         return result[:200] if result else "(empty)"
-
-    def prompt_metadata(self, user_message):
-        _, metadata = self._build_prompt_and_metadata(user_message)
-        return metadata
 
     def _build_prompt_and_metadata(self, user_message):
         refresh = self.refresh_prefix()
@@ -688,21 +692,41 @@ class Pico:
         """
         if not self.feature_enabled("memory"):
             return
-        path = args.get("path")
-        if not path:
-            return
-
-        canonical_path = self.memory.canonical_path(path)
-        # 不是所有工具结果都进入工作记忆。
-        # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
-        if name in {"read_file", "write_file", "patch_file"}:
-            self.memory.remember_file(canonical_path)
         if name == "read_file":
-            summary = memorylib.summarize_read_result(result)
-            self.memory.set_file_summary(canonical_path, summary)
-            self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
+            file_args = [
+                item for item in args.get("files", [])
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            ]
+            sections = self._read_file_result_sections(result)
+            for index, item in enumerate(file_args):
+                path = str(item["path"])
+                canonical_path = self.memory.canonical_path(path)
+                self.memory.remember_file(canonical_path)
+                summary = memorylib.summarize_read_result(
+                    sections[index] if index < len(sections) else result
+                )
+                self.memory.set_file_summary(canonical_path, summary)
+                self.memory.append_note(summary, tags=(canonical_path,), source=canonical_path)
         elif name in {"write_file", "patch_file"}:
+            path = args.get("path")
+            if not path:
+                return
+            canonical_path = self.memory.canonical_path(path)
+            self.memory.remember_file(canonical_path)
             self.memory.invalidate_file_summary(canonical_path)
+
+    def _read_file_result_sections(self, result):
+        """Extract one batch-read result so each file gets its own memory summary."""
+        text = str(result)
+        header = re.compile(
+            r"^=== read_file metadata: .+; header and line numbers are not file content ===$",
+            flags=re.MULTILINE,
+        )
+        matches = list(header.finditer(text))
+        return [
+            text[match.end(): matches[index + 1].start() if index + 1 < len(matches) else len(text)].strip()
+            for index, match in enumerate(matches)
+        ]
 
     def update_working_state(self, **updates):
         if not self.feature_enabled("memory"):

@@ -22,12 +22,12 @@ def _normalize_versioned_base_url(base_url):
 
 
 def _message_text(message):
-    """Return text from either classic or Responses-v1 ``AIMessage`` content."""
+    """Return text from a Responses-v1 ``AIMessage`` content block list."""
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
+    if not isinstance(content, list):
+        return ""
     parts = []
-    for block in content if isinstance(content, list) else []:
+    for block in content:
         if not isinstance(block, dict):
             continue
         if block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
@@ -81,6 +81,7 @@ class OpenAICompatibleModelClient:
         temperature,
         timeout,
         *,
+        reasoning_effort=None,
         http_client=None,
     ):
         self.model = str(model)
@@ -88,6 +89,7 @@ class OpenAICompatibleModelClient:
         self.api_key = str(api_key or "")
         self.temperature = temperature
         self.timeout = timeout
+        self.reasoning_effort = str(reasoning_effort).strip() if reasoning_effort else None
         self.supports_prompt_cache = any(
             host in self.base_url for host in ("openai.com", "right.codes")
         )
@@ -127,6 +129,8 @@ class OpenAICompatibleModelClient:
             # either supplies one explicitly or lets the OpenAI SDK own it.
             "http_socket_options": (),
         }
+        if self.reasoning_effort:
+            client_args["reasoning"] = {"effort": self.reasoning_effort}
         client_args["http_client"] = http_client
         self._model = ChatOpenAI(**client_args)
         self.reset_action_session()
@@ -153,6 +157,7 @@ class OpenAICompatibleModelClient:
             api_key=self.api_key,
             temperature=self.temperature,
             timeout=self.timeout,
+            reasoning_effort=self.reasoning_effort,
             http_client=self._http_client,
         )
 

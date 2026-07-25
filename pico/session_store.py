@@ -33,7 +33,7 @@ class SessionStore:
     def load(self, session_id):
         return json.loads(self.path(session_id).read_text(encoding="utf-8"))
 
-    def latest(self, *, include_children=False):
+    def latest(self):
         """Return the newest resumable session.
 
         Delegate sessions are audit artifacts, not interactive conversations,
@@ -45,8 +45,6 @@ class SessionStore:
             reverse=True,
         )
         for path in files:
-            if include_children:
-                return path.stem
             try:
                 session = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):

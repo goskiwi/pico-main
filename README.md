@@ -250,6 +250,13 @@ Qdrant Cloud，只需将 `PICO_QDRANT_URL` 和 `PICO_QDRANT_API_KEY` 换成对�
 `docker compose down` 会停止服务但保留记忆；只有 `docker compose down -v` 才会删除本地
 Qdrant 数据卷。
 
+## 本地 Skills
+
+项目的可选工作流保存在 `.pico/skills/<name>/SKILL.md`，并与源码一起提交。当前包含
+调试、测试先行、代码审查、运行时不变量变更、运行工件审计和安全/Undo 审查。审查类 skills
+通过 `allowed_tools_strict` 只暴露读取与审计工具；它们只能收缩能力，不能绕过 Pico 的本地
+校验、审批和 Docker sandbox。
+
 ## 代码入口
 
 | 模块 | 职责 |

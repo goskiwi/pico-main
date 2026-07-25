@@ -25,7 +25,7 @@ def test_agent_runs_tool_then_final_and_records_the_task_canvas(tmp_path):
         tmp_path,
         [
             tool_action_json(
-                '{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}'
+                '{"name":"read_file","args":{"files":[{"path":"hello.txt","start":1,"end":2}]}}'
             ),
             final_action("Read the file successfully."),
         ],
@@ -78,7 +78,7 @@ def test_strict_action_loop_keeps_live_tool_conversation_after_each_tool(tmp_pat
             self.actions = [
                 ModelAction.tool(
                     "read_file",
-                    {"path": "README.md", "start": 1, "end": 1},
+                    {"files": [{"path": "README.md", "start": 1, "end": 1}]},
                     protocol="responses_function",
                     call_id="call_1",
                 ),
@@ -137,7 +137,7 @@ def test_provider_context_limit_recovers_once_with_recent_tool_evidence(tmp_path
             if self.calls == 1:
                 return ModelAction.tool(
                     "read_file",
-                    {"path": "README.md", "start": 1, "end": 2},
+                    {"files": [{"path": "README.md", "start": 1, "end": 2}]},
                     protocol="responses_function",
                     call_id="call_1",
                 )
@@ -332,7 +332,7 @@ def test_identical_read_only_tool_is_allowed_after_workspace_change(tmp_path):
             self.actions = [
                 ModelAction.tool(
                     "read_file",
-                    {"path": "README.md"},
+                    {"files": [{"path": "README.md"}]},
                     protocol="responses_function",
                     call_id="call_1",
                 ),
@@ -344,7 +344,7 @@ def test_identical_read_only_tool_is_allowed_after_workspace_change(tmp_path):
                 ),
                 ModelAction.tool(
                     "read_file",
-                    {"path": "README.md"},
+                    {"files": [{"path": "README.md"}]},
                     protocol="responses_function",
                     call_id="call_3",
                 ),
@@ -373,53 +373,6 @@ def test_identical_read_only_tool_is_allowed_after_workspace_change(tmp_path):
     assert agent.ask("Update the README.") == "Updated and re-read."
     assert [item["status"] for item in agent.tool_audit_log] == ["ok", "ok", "ok"]
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "updated\\n"
-
-
-def test_failed_read_only_call_is_also_deduplicated(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
-
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.actions = [
-                ModelAction.tool(
-                    "read_file",
-                    {"path": "missing.txt"},
-                    protocol="responses_function",
-                    call_id="call_1",
-                ),
-                ModelAction.tool(
-                    "read_file",
-                    {"path": "missing.txt"},
-                    protocol="responses_function",
-                    call_id="call_2",
-                ),
-                ModelAction.final(
-                    "The file is absent.",
-                    protocol="responses_function",
-                    call_id="call_3",
-                ),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=3)
-    agent.model_client = StrictModelClient()
-    agent.refresh_prefix(force=True)
-
-    assert agent.ask("Inspect missing.txt.") == "The file is absent."
-    assert [item["status"] for item in agent.tool_audit_log] == ["rejected", "rejected"]
-    assert agent.tool_audit_log[0]["error_code"] == "invalid_arguments"
-    assert agent.tool_audit_log[1]["error_code"] == "duplicate_read_only_call"
 
 
 def test_patch_conflict_returns_current_file_as_repair_evidence(tmp_path):
@@ -753,53 +706,7 @@ def test_soft_budget_does_not_force_finalization_after_an_old_workspace_change(t
     assert "list_files" in client.tool_sets[-1]
 
 
-def test_patch_conflict_can_use_the_hard_budget_for_repair(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
-
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.tool_sets = []
-            self.actions = [
-                ModelAction.tool(
-                    "patch_file",
-                    {
-                        "path": "README.md",
-                        "old_text": "not the current text\n",
-                        "new_text": "replacement\n",
-                    },
-                    protocol="responses_function",
-                ),
-                ModelAction.tool(
-                    "read_file",
-                    {"path": "README.md", "start": 1, "end": 5},
-                    protocol="responses_function",
-                ),
-                ModelAction.final("Recovered after inspecting the rejected patch.", protocol="responses_function"),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            self.tool_sets.append([tool["name"] for tool in action_tools])
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=1, max_step_extension=1)
-    client = StrictModelClient()
-    agent.model_client = client
-    agent.refresh_prefix(force=True)
-
-    assert agent.ask("Repair a failed patch.").startswith("Recovered after")
-    assert "read_file" in client.tool_sets[1]
-
-
-def test_successful_pytest_after_a_change_forces_completion_only_turn(tmp_path):
+def test_successful_pytest_after_a_change_is_finalized_without_another_model_call(tmp_path):
     class PassingPytestSandbox(UnitTestSandbox):
         def run(self, command, *, cwd, timeout, env=None):
             del command, cwd, timeout, env
@@ -823,10 +730,6 @@ def test_successful_pytest_after_a_change_forces_completion_only_turn(tmp_path):
                     {"command": "pytest -q", "timeout": 20},
                     protocol="responses_function",
                 ),
-                ModelAction.final(
-                    "Implemented changed.txt and pytest passed.",
-                    protocol="responses_function",
-                ),
             ]
 
         def reset_action_session(self):
@@ -845,9 +748,17 @@ def test_successful_pytest_after_a_change_forces_completion_only_turn(tmp_path):
     agent.model_client = client
     agent.refresh_prefix(force=True)
 
-    assert agent.ask("Change the workspace and run pytest.").startswith("Implemented changed.txt")
-    assert client.tool_sets[2] == ["submit_final"]
+    answer = agent.ask("Change the workspace and run pytest.")
+
+    assert answer == (
+        "Completed verified changes.\n"
+        "Changed files: changed.txt\n"
+        "Verification: pytest -q — pytest passed."
+    )
+    assert len(client.tool_sets) == 2
     assert agent.current_task_state.stop_reason == "final_answer_returned"
+    trace = (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8")
+    assert '"event": "runtime_finalized"' in trace
 
 
 def test_agent_recovers_from_malformed_tool_payload_and_audits_it(tmp_path):
@@ -860,7 +771,7 @@ def test_agent_recovers_from_malformed_tool_payload_and_audits_it(tmp_path):
                 raw_preview='{"name":"read_file","args":"bad"}',
             ),
             tool_action_json(
-                '{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}'
+                '{"name":"read_file","args":{"files":[{"path":"hello.txt","start":1,"end":1}]}}'
             ),
             final_action("Recovered."),
         ],

@@ -17,11 +17,11 @@ def test_workspace_escape_and_symlink_traversal_are_rejected(tmp_path):
 
     assert "path escapes workspace" in agent.run_tool(
         "read_file",
-        {"path": "../outside.txt"},
+        {"files": [{"path": "../outside.txt"}]},
     )
     assert "path escapes workspace" in agent.run_tool(
         "read_file",
-        {"path": "linked.txt"},
+        {"files": [{"path": "linked.txt"}]},
     )
 
 
@@ -83,7 +83,7 @@ def test_protected_runtime_and_env_paths_cannot_be_written_or_read(tmp_path):
         "write_file",
         {"path": ".pico/runs/tamper.json", "content": "bad"},
     )
-    read_result = agent.run_tool("read_file", {"path": "service/.env.test"})
+    read_result = agent.run_tool("read_file", {"files": [{"path": "service/.env.test"}]})
     search_result = agent.run_tool(
         "search",
         {"pattern": "TOKEN", "path": "service/.env.test"},

@@ -37,7 +37,17 @@ def middle(text, limit):
 
 
 class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
+    def __init__(
+        self,
+        cwd,
+        repo_root,
+        branch,
+        default_branch,
+        status,
+        recent_commits,
+        project_docs,
+        verification_command,
+    ):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
@@ -45,6 +55,7 @@ class WorkspaceContext:
         self.status = status
         self.recent_commits = recent_commits
         self.project_docs = project_docs
+        self.verification_command = verification_command
 
     @classmethod
     def build(cls, cwd, repo_root_override=None):
@@ -103,6 +114,7 @@ class WorkspaceContext:
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
+            verification_command=discover_verification_command(repo_root),
         )
 
     def text(self):
@@ -122,6 +134,7 @@ class WorkspaceContext:
             {commits}
             - project_docs:
             {docs}
+            - verification_command: {self.verification_command or "- none"}
             """
         ).strip()
 
@@ -136,5 +149,29 @@ class WorkspaceContext:
             "status": self.status,
             "recent_commits": list(self.recent_commits),
             "project_docs": dict(self.project_docs),
+            "verification_command": self.verification_command,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def discover_verification_command(repo_root):
+    """Return one safe default test command when project structure makes it clear."""
+    root = Path(repo_root)
+    has_pytest = (root / "pytest.ini").is_file() or (root / "tests").is_dir()
+    if not has_pytest:
+        return ""
+
+    source_root = root / "src"
+    if source_root.is_dir() and any(
+        child.is_dir() and (child / "__init__.py").is_file()
+        for child in source_root.iterdir()
+    ):
+        return "PYTHONPATH=src pytest -q"
+    if any(
+        child.is_dir()
+        and not child.name.startswith(".")
+        and (child / "__init__.py").is_file()
+        for child in root.iterdir()
+    ):
+        return "PYTHONPATH=. pytest -q"
+    return "pytest -q"

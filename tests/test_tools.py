@@ -19,6 +19,40 @@ def test_patch_file_replaces_exact_match(tmp_path):
     assert file_path.read_text(encoding="utf-8") == "hello agent\n"
 
 
+def test_read_file_reads_multiple_files_in_one_tool_action(tmp_path):
+    (tmp_path / "first.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    (tmp_path / "second.txt").write_text("gamma\ndelta\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool(
+        "read_file",
+        {
+            "files": [
+                {"path": "first.txt", "start": 2, "end": 2},
+                {"path": "second.txt", "start": 1, "end": 1},
+            ]
+        },
+    )
+
+    assert result == (
+        "=== read_file metadata: first.txt; header and line numbers are not file content ===\n"
+        "   2: beta\n\n"
+        "=== read_file metadata: second.txt; header and line numbers are not file content ===\n"
+        "   1: gamma"
+    )
+    assert set(agent.memory.state["file_summaries"]) == {"first.txt", "second.txt"}
+    assert "beta" in agent.memory.state["file_summaries"]["first.txt"]["summary"]
+    assert "gamma" in agent.memory.state["file_summaries"]["second.txt"]["summary"]
+
+
+def test_read_file_rejects_legacy_single_path_arguments(tmp_path):
+    agent = build_agent(tmp_path, [])
+
+    result = agent.run_tool("read_file", {"path": "README.md"})
+
+    assert result.startswith("error: invalid arguments for read_file: missing required argument: files")
+
+
 def test_invalid_risky_tool_is_rejected_before_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="ask")
 
@@ -57,7 +91,7 @@ def test_task_artifact_tools_expand_canvas_to_event_to_reference(tmp_path):
         state,
         node_id="N001_read_file",
         tool_name="read_file",
-        args={"path": "hello.txt"},
+        args={"files": [{"path": "hello.txt"}]},
         summary="Read hello.txt",
         status="done",
         result_ref=result_ref,
@@ -105,3 +139,13 @@ def test_responses_tool_schemas_are_strict_and_share_pydantic_requirements(tmp_p
         parameters = item["parameters"]
         assert parameters["additionalProperties"] is False
         assert set(parameters["required"]) == set(parameters["properties"])
+
+    read_file = next(item for item in definitions if item["name"] == "read_file")
+    read_parameters = read_file["parameters"]
+    assert set(read_parameters["properties"]) == {"files"}
+    assert read_parameters["properties"]["files"]["maxItems"] == 5
+    assert set(read_parameters["properties"]["files"]["items"]["properties"]) == {
+        "path",
+        "start",
+        "end",
+    }

@@ -86,6 +86,14 @@ DelegateTaskArgs = create_model(
     max_steps=_arg(int, 3, ge=1, le=12),
 )
 
+ReadFileSpec = create_model(
+    "ReadFileSpec",
+    __base__=ToolArgs,
+    path=_arg(str, min_length=1, description="Workspace-relative file path."),
+    start=_arg(int, 1, ge=1),
+    end=_arg(int, 200, ge=1),
+)
+
 
 TOOL_DEFINITIONS = {
     "list_files": _tool(
@@ -93,10 +101,8 @@ TOOL_DEFINITIONS = {
     ),
     "read_file": _tool(
         "ReadFileArgs",
-        "Read a UTF-8 file by line range.",
-        path=_arg(str, min_length=1, description="Workspace-relative file path."),
-        start=_arg(int, 1, ge=1),
-        end=_arg(int, 200, ge=1),
+        "Read one to five UTF-8 files by line range; batch related files in one call.",
+        files=_arg(list[ReadFileSpec], min_length=1, max_length=5),
     ),
     "read_task_canvas": _tool(
         "ReadTaskCanvasArgs",
@@ -444,16 +450,8 @@ def validate_tool(agent, name, args):
         return
 
     if name == "read_file":
-        path = agent.path(args["path"])
-        protected_reason = protected_read_reason(agent, args["path"])
-        if protected_reason:
-            raise ValueError(f"protected read path blocked: {protected_reason}")
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        start = int(args.get("start", 1))
-        end = int(args.get("end", 200))
-        if start < 1 or end < start:
-            raise ValueError("invalid line range")
+        for index, file_args in enumerate(args["files"], start=1):
+            validate_read_file_spec(agent, file_args, label=f"files[{index}]")
         return
 
     if name in {"read_task_canvas", "read_task_event", "read_tool_output"}:
@@ -568,17 +566,37 @@ def tool_list_files(agent, args):
     return "\n".join(lines) or "(empty)"
 
 
-def tool_read_file(agent, args):
-    path = agent.path(args["path"])
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
+def validate_read_file_spec(agent, file_args, *, label):
+    raw_path = file_args["path"]
+    path = agent.path(raw_path)
+    protected_reason = protected_read_reason(agent, raw_path)
+    if protected_reason:
+        raise ValueError(f"protected read path blocked: {protected_reason}")
+    if not path.is_file():
+        raise ValueError(f"{label}.path is not a file")
+    start = int(file_args.get("start", 1))
+    end = int(file_args.get("end", 200))
+    if start < 1 or end < start:
+        raise ValueError(f"{label} has an invalid line range")
+    return path, start, end
+
+
+def _read_file_segment(path, start, end, root):
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
     return (
-        f"=== read_file metadata: {path.relative_to(agent.root)}; "
+        f"=== read_file metadata: {path.relative_to(root)}; "
         "header and line numbers are not file content ===\n"
         f"{body}"
     )
+
+
+def tool_read_file(agent, args):
+    segments = []
+    for index, file_args in enumerate(args["files"], start=1):
+        path, start, end = validate_read_file_spec(agent, file_args, label=f"files[{index}]")
+        segments.append(_read_file_segment(path, start, end, agent.root))
+    return "\n\n".join(segments)
 
 
 def _artifact_run_id(agent, args):

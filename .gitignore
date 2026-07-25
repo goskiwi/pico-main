@@ -29,7 +29,10 @@ htmlcov/
 # Local scratch space
 tmp/
 .worktrees/
-.pico/
+.pico/*
+!.pico/skills/
+!.pico/skills/**/
+!.pico/skills/**/SKILL.md
 output/
 .env
 .env.local

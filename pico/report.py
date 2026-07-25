@@ -97,7 +97,13 @@ def record_tool_audit(agent, name, args, result, duration_ms):
             "pids_limit": metadata.get("sandbox_pids_limit"),
             "timed_out": bool(metadata.get("sandbox_timed_out")),
         }
-    elif name in {"read_file", "write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
+    elif name == "read_file":
+        entry["paths"] = [
+            clip(str(file_args.get("path", "")), 200)
+            for file_args in (args or {}).get("files", [])
+            if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+        ]
+    elif name in {"write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
         entry["path"] = clip(str((args or {}).get("path", ".")), 200)
         if name in {"delegate", "delegate_many"}:
             entry["delegate_outcome"] = dict(metadata.get("delegate_outcome") or {})

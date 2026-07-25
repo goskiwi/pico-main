@@ -69,7 +69,12 @@ def render_tool_audit(tool_audit):
     for index, item in enumerate(tool_audit, start=1):
         status = str(item.get("status", ""))
         status_class = "ok" if status == "ok" else "warn" if status in {"dry_run", "partial_success"} else "bad" if status else ""
-        command_or_path = item.get("command") or item.get("path") or ""
+        command_or_path = (
+            item.get("command")
+            or ", ".join(item.get("paths") or [])
+            or item.get("path")
+            or ""
+        )
         rows.append(
             "<tr>"
             f"<td>{index}</td>"

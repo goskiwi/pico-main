@@ -333,7 +333,7 @@ class RunStore:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def load_recent_index(self, limit=5, *, include_children=False):
+    def load_recent_index(self, limit=5):
         path = self.index_path()
         if not path.exists():
             return []
@@ -343,14 +343,13 @@ class RunStore:
             return []
         if not isinstance(loaded, list):
             return []
-        entries = [item for item in loaded if isinstance(item, dict)]
-        if not include_children:
-            entries = [
-                item
-                for item in entries
-                if item.get("parent_agent_id") == ""
-                and item.get("agent_mode") == "main"
-            ]
+        entries = [
+            item
+            for item in loaded
+            if isinstance(item, dict)
+            and item.get("parent_agent_id") == ""
+            and item.get("agent_mode") == "main"
+        ]
         entries.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
         return entries[: max(0, int(limit))]
 
@@ -370,9 +369,6 @@ class RunStore:
             "phase_count": len(phases),
             "archived_node_count": sum(int(item.get("node_count", 0)) for item in phases),
         }
-
-    def load_task_phases(self, run_id):
-        return self._load_phase_index(run_id)
 
     def read_offload_event(self, run_id, node_id):
         path = self.offload_path(run_id)

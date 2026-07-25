@@ -15,7 +15,7 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
         tmp_path,
         [
             tool_action_json(
-                '{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}'
+                '{"name":"read_file","args":{"files":[{"path":"hello.txt","start":1,"end":2}]}}'
             ),
             final_action("Finished."),
         ],
@@ -56,36 +56,6 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     assert index[0]["latest_node_id"] == "N001_read_file"
     assert index[0]["task_canvas_path"] == str(run_dir / "task.mmd")
     assert index[0]["offload_path"] == str(run_dir / "offload.jsonl")
-
-
-def test_resuming_a_session_keeps_memory_and_checkpoints_without_history(tmp_path):
-    agent = build_agent(tmp_path, [final_action("Finished.")])
-
-    assert agent.ask("Remember this task") == "Finished."
-    checkpoint_id = agent.session["checkpoints"]["current_id"]
-    legacy_session = json.loads(agent.session_path.read_text(encoding="utf-8"))
-    legacy_session["history"] = [{"role": "user", "content": "obsolete copy"}]
-    agent.session_path.write_text(
-        json.dumps(legacy_session),
-        encoding="utf-8",
-    )
-
-    resumed = Pico.from_session(
-        model_client=FakeModelClient([]),
-        workspace=agent.workspace,
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
-        approval_policy="auto",
-        feature_flags=agent.feature_flags,
-        sandbox=agent.sandbox,
-    )
-    persisted = json.loads(resumed.session_path.read_text(encoding="utf-8"))
-
-    assert "history" not in resumed.session
-    assert "history" not in persisted
-    assert resumed.memory.to_dict()["working"]["goal"] == "Remember this task"
-    assert resumed.session["checkpoints"]["current_id"] == checkpoint_id
-    assert "Remember this task" in resumed.render_checkpoint_text()
 
 
 def test_trace_report_session_and_tool_output_redact_secrets(tmp_path):
@@ -164,7 +134,7 @@ def test_task_canvas_folds_old_steps_into_drill_down_phases(tmp_path):
             state,
             node_id=node_id,
             tool_name="read_file",
-            args={"path": f"file-{index}.txt"},
+            args={"files": [{"path": f"file-{index}.txt"}]},
             summary=f"Read file-{index}.txt",
             status="done",
             result_ref=result_ref,

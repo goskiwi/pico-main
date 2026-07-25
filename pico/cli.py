@@ -179,13 +179,18 @@ def _build_model_client(args, env=None):
     model = _effective_model(args, env=env)
     base_url = args.base_url or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
     api_key = env.get("OPENAI_API_KEY", "")
-    logger.info(f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}")
+    reasoning_effort = env.get("OPENAI_REASONING_EFFORT", "").strip() or None
+    logger.info(
+        f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}, "
+        f"reasoning_effort: {reasoning_effort or 'provider default'}"
+    )
     return OpenAICompatibleModelClient(
         model=model,
         base_url=base_url,
         api_key=api_key,
         temperature=args.temperature,
         timeout=args.openai_timeout,
+        reasoning_effort=reasoning_effort,
     )
 
 

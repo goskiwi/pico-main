@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
-from pico.memory import LayeredMemory
+from pico.memory import LayeredMemory, default_memory_state
 from pico.semantic_memory import SemanticMemoryConfig, SemanticMemoryIndex
 
 
@@ -96,7 +97,11 @@ def test_layered_memory_fuses_local_keywords_with_semantic_ids_and_reads_markdow
             return list(self.memory_ids)
 
     semantic = SemanticStub()
-    memory = LayeredMemory({}, workspace_root=tmp_path, semantic_index=semantic)
+    memory = LayeredMemory(
+        default_memory_state(),
+        workspace_root=tmp_path,
+        semantic_index=semantic,
+    )
 
     promoted, superseded = memory.promote_durable(
         [("feedback", "回答时先给结论，再解释实现细节。")]
@@ -110,6 +115,20 @@ def test_layered_memory_fuses_local_keywords_with_semantic_ids_and_reads_markdow
     assert memory.last_retrieval_metadata["lexical_candidates"] == 0
     assert memory.last_retrieval_metadata["semantic_candidates"] == 1
     assert not any(Path(note.get("source_path", "")).suffix == ".py" for note in selected)
+
+
+def test_memory_state_rejects_legacy_note_and_summary_shapes(tmp_path):
+    legacy_note_state = default_memory_state()
+    legacy_note_state["episodic_notes"] = ["old free-form note"]
+
+    with pytest.raises(ValueError, match="episodic_notes\\[0\\] must be an object"):
+        LayeredMemory(legacy_note_state, workspace_root=tmp_path)
+
+    legacy_summary_state = default_memory_state()
+    legacy_summary_state["file_summaries"] = {"README.md": "old summary"}
+
+    with pytest.raises(ValueError, match="file_summaries\\['README.md'\\] must be an object"):
+        LayeredMemory(legacy_summary_state, workspace_root=tmp_path)
 
 
 def test_semantic_memory_configuration_requires_all_external_credentials():

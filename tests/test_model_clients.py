@@ -12,8 +12,18 @@ READ_FILE_TOOL = {
     "description": "Read a file.",
     "parameters": {
         "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"],
+        "properties": {
+            "files": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["files"],
         "additionalProperties": False,
     },
     "strict": True,
@@ -103,9 +113,31 @@ def test_openai_compatible_client_posts_expected_responses_payload():
     }
 
 
+def test_openai_compatible_client_sends_reasoning_effort_when_configured():
+    queue = [_text_response("ok")]
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=queue.pop(0))
+
+    client = OpenAICompatibleModelClient(
+        "right.codes/codex-mini",
+        "https://right.codes/v1",
+        "sk-test",
+        0.2,
+        30,
+        reasoning_effort="low",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.complete("hello", 42) == "ok"
+    assert requests[0]["reasoning"] == {"effort": "low"}
+
+
 def test_openai_client_requires_one_strict_function_call():
     client, requests = _mocked_client(
-        _response(_call("read_file", {"path": "README.md"}, "call_1"))
+        _response(_call("read_file", {"files": [{"path": "README.md"}]}, "call_1"))
     )
 
     action = client.complete_action("inspect", 100, action_tools=[READ_FILE_TOOL])
@@ -113,7 +145,7 @@ def test_openai_client_requires_one_strict_function_call():
     assert (action.kind, action.name, action.args) == (
         "tool",
         "read_file",
-        {"path": "README.md"},
+        {"files": [{"path": "README.md"}]},
     )
     assert requests[0]["tool_choice"] == "required"
     assert requests[0]["parallel_tool_calls"] is False
@@ -128,7 +160,7 @@ def test_openai_client_replays_reasoning_and_function_output():
         "summary": [],
     }
     client, requests = _mocked_client(
-        _response(reasoning, _call("read_file", {"path": "README.md"}, "call_1")),
+        _response(reasoning, _call("read_file", {"files": [{"path": "README.md"}]}, "call_1")),
         _response(
             _call("submit_final", {"answer": "Done."}, "call_2"),
             response_id="resp_2",
@@ -153,11 +185,11 @@ def test_openai_client_replays_reasoning_and_function_output():
 def test_openai_client_executes_first_call_and_defers_extras():
     client, requests = _mocked_client(
         _response(
-            _call("read_file", {"path": "README.md"}, "call_1"),
-            _call("read_file", {"path": "pyproject.toml"}, "call_2"),
+            _call("read_file", {"files": [{"path": "README.md"}]}, "call_1"),
+            _call("read_file", {"files": [{"path": "pyproject.toml"}]}, "call_2"),
         ),
         _response(
-            _call("read_file", {"path": "README.md"}, "call_3"),
+            _call("read_file", {"files": [{"path": "README.md"}]}, "call_3"),
             response_id="resp_2",
         ),
     )
@@ -174,7 +206,7 @@ def test_openai_client_rejects_multiple_calls_when_one_is_final():
     message = AIMessage(
         content=[],
         tool_calls=[
-            {"name": "read_file", "args": {"path": "README.md"}, "id": "call_1"},
+            {"name": "read_file", "args": {"files": [{"path": "README.md"}]}, "id": "call_1"},
             {"name": "submit_final", "args": {"answer": "Done."}, "id": "call_2"},
         ],
     )

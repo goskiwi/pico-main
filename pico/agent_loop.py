@@ -24,12 +24,6 @@ from .task_state import TaskState
 from .workspace import clip
 
 
-_COMPLETION_NOTICE = (
-    "Runtime notice: a workspace change was followed by a successful pytest verification. "
-    "The acceptance evidence is complete; submit_final now with the files changed and test result."
-)
-
-
 def _is_context_limit_error(exc):
     """Return whether a provider explicitly rejected the active conversation size."""
     message = str(exc).lower()
@@ -69,6 +63,10 @@ def _record_completion_progress(progress_tracker, task_state, name, args, metada
             "passed" if verification.get("passed") else "failed"
         )
         progress_tracker["last_verification_step"] = task_state.tool_steps
+        progress_tracker["last_verification"] = {
+            "command": str(args.get("command", "")).strip(),
+            "exit_code": verification.get("exit_code"),
+        }
     if (
         name in {"write_file", "patch_file", "run_shell"}
         and str(metadata.get("tool_status", "")) in {"error", "rejected", "partial_success"}
@@ -84,9 +82,7 @@ def _record_completion_progress(progress_tracker, task_state, name, args, metada
         progress_tracker["completion_reason"] = "workspace_change_followed_by_pytest_pass"
 
 
-def _budget_notice(task_state, *, completion_ready):
-    if completion_ready:
-        return _COMPLETION_NOTICE
+def _budget_notice(task_state):
     if task_state.tool_steps >= task_state.hard_tool_limit:
         return "Runtime notice: the hard tool limit is reached; submit_final is the only action allowed."
     if task_state.tool_steps >= task_state.nominal_tool_budget:
@@ -97,6 +93,24 @@ def _budget_notice(task_state, *, completion_ready):
             "repair, verify, or finish the current task."
         )
     return ""
+
+
+def _verified_change_final(agent, progress_tracker):
+    """Build the final response from audited change and pytest evidence only."""
+    changed_paths = sorted(
+        {
+            str(path)
+            for entry in agent.tool_audit_log
+            for path in entry.get("affected_paths", [])
+            if str(path).strip()
+        }
+    )
+    verification = dict(progress_tracker.get("last_verification") or {})
+    command = str(verification.get("command", "pytest")).strip() or "pytest"
+    exit_code = verification.get("exit_code")
+    status = "pytest passed" if exit_code in (None, 0) else f"pytest passed (exit code {exit_code})"
+    changed = ", ".join(changed_paths) if changed_paths else "workspace changes"
+    return f"Completed verified changes.\nChanged files: {changed}\nVerification: {command} — {status}."
 
 
 class AgentTurnState(TypedDict, total=False):
@@ -325,6 +339,7 @@ def _run_agent_turn(agent, user_message):
         "completion_reason": "",
         "last_verification_status": "not_run",
         "last_verification_step": 0,
+        "last_verification": {},
     }
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
@@ -340,15 +355,19 @@ def _run_agent_turn(agent, user_message):
         _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
         return _write_finished_run(agent, task_state, final, run_started_at)
 
+    def finish_success(final, *, trigger):
+        agent.mark_work_finished(final)
+        task_state.finish_success(final)
+        memory_runtime.promote_durable_memory(agent, user_message, final)
+        memory_runtime.llm_promote_durable_memory(agent, user_message, final)
+        _create_checkpoint(agent, task_state, user_message, trigger)
+        return _write_finished_run(agent, task_state, final, run_started_at)
+
     def call_model(state: AgentTurnState):
         if task_state.attempts >= max_retry_attempts:
             return Command(update={"result": finish_stopped()}, goto=END)
 
-        completion_ready = bool(progress_tracker["completion_ready"])
-        finalization_only = (
-            completion_ready
-            or task_state.tool_steps >= task_state.hard_tool_limit
-        )
+        finalization_only = task_state.tool_steps >= task_state.hard_tool_limit
         finalization_attempted = bool(state.get("finalization_attempted", False))
         if finalization_only:
             if finalization_attempted:
@@ -367,14 +386,12 @@ def _run_agent_turn(agent, user_message):
         if prompt_snapshot is None:
             budget_notice = _budget_notice(
                 task_state,
-                completion_ready=completion_ready,
             )
             if budget_notice:
                 prompt = f"{prompt}\n\n{budget_notice}"
             prompt_metadata["tool_budget"] = {
                 "nominal": task_state.nominal_tool_budget,
                 "hard_limit": task_state.hard_tool_limit,
-                "completion_ready": completion_ready,
             }
             prompt_snapshot = (prompt, dict(prompt_metadata))
 
@@ -385,7 +402,6 @@ def _run_agent_turn(agent, user_message):
                 "attempts": task_state.attempts,
                 "tool_steps": task_state.tool_steps,
                 "finalization_only": finalization_only,
-                "completion_ready": completion_ready,
                 "hard_tool_limit": task_state.hard_tool_limit,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
             },
@@ -460,13 +476,7 @@ def _run_agent_turn(agent, user_message):
 
         if finalization_only and kind == ACTION_TOOL:
             rejected_tool_name = action.name
-            finalization_reason = (
-                "completion evidence is ready"
-                if completion_ready
-                else (
-                    "the hard tool limit is reached"
-                )
-            )
+            finalization_reason = "the hard tool limit is reached"
             payload = _retry_notice(
                 f"{finalization_reason}; only submit_final is allowed"
             )
@@ -481,9 +491,7 @@ def _run_agent_turn(agent, user_message):
                 task_state,
                 "finalization_rejected",
                 {
-                    "reason": (
-                        "completion_ready" if completion_ready else "hard_tool_limit_reached"
-                    ),
+                    "reason": "hard_tool_limit_reached",
                     "tool_name": rejected_tool_name,
                 },
             )
@@ -555,12 +563,7 @@ def _run_agent_turn(agent, user_message):
             return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
-        agent.mark_work_finished(final)
-        task_state.finish_success(final)
-        memory_runtime.promote_durable_memory(agent, user_message, final)
-        memory_runtime.llm_promote_durable_memory(agent, user_message, final)
-        _create_checkpoint(agent, task_state, user_message, "run_finished")
-        result = _write_finished_run(agent, task_state, final, run_started_at)
+        result = finish_success(final, trigger="run_finished")
         return Command(update={"result": result}, goto=END)
 
     def execute_tool(state: AgentTurnState):
@@ -571,6 +574,20 @@ def _run_agent_turn(agent, user_message):
             state["action"],
             progress_tracker,
         )
+        if progress_tracker["completion_ready"]:
+            final = _verified_change_final(agent, progress_tracker)
+            agent.emit_trace(
+                task_state,
+                "runtime_finalized",
+                {
+                    "reason": progress_tracker["completion_reason"],
+                    "verification": dict(progress_tracker["last_verification"]),
+                },
+            )
+            return Command(
+                update={"result": finish_success(final, trigger="verified_change_auto_finalized")},
+                goto=END,
+            )
         # The task canvas is a durable control-plane projection.  It must not
         # replace the live provider conversation: patching depends on the
         # exact source and test output returned by the preceding tool call.

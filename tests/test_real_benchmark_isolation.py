@@ -72,7 +72,7 @@ def test_workspace_isolation_audit_rejects_root_search_and_verifier_leaks(tmp_pa
             {
                 "event": "tool_executed",
                 "name": "read_file",
-                "args": {"path": str(outer_repo / "settings.py")},
+                "args": {"files": [{"path": str(outer_repo / "settings.py")}]},
             },
         ),
     )

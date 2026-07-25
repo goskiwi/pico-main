@@ -499,17 +499,27 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                 "patch_file",
             }:
                 continue
-            raw_path = str((event.get("args") or {}).get("path", ".")).strip() or "."
-            candidate = Path(raw_path)
-            if not candidate.is_absolute():
-                candidate = expected_root / candidate
-            if not _path_is_within(candidate, expected_root):
-                add_violation(
-                    "tool_path_outside_workspace",
-                    run_id,
-                    tool=name,
-                    path=raw_path,
-                )
+            args = event.get("args") or {}
+            raw_paths = (
+                [
+                    str(file_args.get("path", "")).strip()
+                    for file_args in args.get("files", [])
+                    if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+                ]
+                if name == "read_file"
+                else [str(args.get("path", ".")).strip() or "."]
+            )
+            for raw_path in raw_paths:
+                candidate = Path(raw_path)
+                if not candidate.is_absolute():
+                    candidate = expected_root / candidate
+                if not _path_is_within(candidate, expected_root):
+                    add_violation(
+                        "tool_path_outside_workspace",
+                        run_id,
+                        tool=name,
+                        path=raw_path,
+                    )
 
         artifact_paths = [trace_path, run_dir / "report.json"]
         artifact_paths.extend(sorted((run_dir / "refs").glob("*.txt")))

@@ -235,6 +235,7 @@ def build_real_model_client(model, base_url=None, timeout=300, *, env):
         api_key=api_key,
         temperature=0.0,
         timeout=int(timeout),
+        reasoning_effort=env.get("OPENAI_REASONING_EFFORT", "").strip() or None,
     )
 
 
@@ -286,6 +287,7 @@ class RealWorldBenchmarkRunner:
     verifier_timeout: int = 90
     require_clean_worktree: bool = False
     sandbox_config: DockerSandboxConfig | None = None
+    reasoning_effort: str = ""
 
     def __post_init__(self):
         self.provider = str(self.provider).strip().lower()
@@ -310,6 +312,9 @@ class RealWorldBenchmarkRunner:
             raise ValueError("repetitions must be positive")
         self.model = str(
             self.model or workspace_env.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+        ).strip()
+        self.reasoning_effort = str(
+            workspace_env.get("OPENAI_REASONING_EFFORT", "")
         ).strip()
 
     def run(self, task_ids=None):
@@ -369,6 +374,7 @@ class RealWorldBenchmarkRunner:
             "repetitions": int(self.repetitions),
             "run_config": {
                 "temperature": 0.0,
+                "reasoning_effort": self.reasoning_effort or "provider_default",
                 "max_new_tokens": int(self.max_new_tokens),
                 "verifier_timeout_seconds": int(self.verifier_timeout),
                 "require_clean_worktree": bool(self.require_clean_worktree),

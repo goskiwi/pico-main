@@ -450,34 +450,35 @@ def render_relevant_memory_note(note):
 
 
 def _normalize_note(note, index):
-    if isinstance(note, str):
-        text = clip(note.strip(), 500)
-        return {
-            "text": text,
-            "tags": [],
-            "source": "",
-            "created_at": now(),
-            "note_index": index,
-            "kind": "episodic",
-        }
-
     if not isinstance(note, dict):
-        text = clip(str(note).strip(), 500)
-        return {
-            "text": text,
-            "tags": [],
-            "source": "",
-            "created_at": now(),
-            "note_index": index,
-            "kind": "episodic",
-        }
+        raise ValueError(f"memory episodic_notes[{index}] must be an object")
+    required_fields = ("text", "tags", "source", "created_at", "note_index", "kind")
+    missing = [field for field in required_fields if field not in note]
+    if missing:
+        raise ValueError(
+            f"memory episodic_notes[{index}] missing required fields: {', '.join(missing)}"
+        )
+    if not isinstance(note["text"], str):
+        raise ValueError(f"memory episodic_notes[{index}].text must be a string")
+    if not isinstance(note["tags"], list) or not all(
+        isinstance(tag, str) for tag in note["tags"]
+    ):
+        raise ValueError(f"memory episodic_notes[{index}].tags must be a list of strings")
+    if not isinstance(note["source"], str):
+        raise ValueError(f"memory episodic_notes[{index}].source must be a string")
+    if not isinstance(note["created_at"], str) or not note["created_at"].strip():
+        raise ValueError(f"memory episodic_notes[{index}].created_at must be a non-empty string")
+    if not isinstance(note["note_index"], int) or isinstance(note["note_index"], bool):
+        raise ValueError(f"memory episodic_notes[{index}].note_index must be an integer")
+    if not isinstance(note["kind"], str) or not note["kind"].strip():
+        raise ValueError(f"memory episodic_notes[{index}].kind must be a non-empty string")
 
-    text = clip(str(note.get("text", "")).strip(), 500)
-    tags = [str(tag).strip() for tag in _ensure_list(note.get("tags", [])) if str(tag).strip()]
-    source = str(note.get("source", "")).strip()
-    created_at = str(note.get("created_at", "")).strip() or now()
-    note_index = int(note.get("note_index", index))
-    kind = str(note.get("kind", "episodic")).strip() or "episodic"
+    text = clip(note["text"].strip(), 500)
+    tags = [tag.strip() for tag in note["tags"] if tag.strip()]
+    source = note["source"].strip()
+    created_at = note["created_at"].strip()
+    note_index = note["note_index"]
+    kind = note["kind"].strip()
     return {
         "text": text,
         "tags": _dedupe_preserve_order(tags),
@@ -494,56 +495,84 @@ def normalize_memory_state(state, workspace_root=None):
     elif not isinstance(state, dict):
         raise TypeError("memory state must be a mapping")
 
-    # 规范化层只接受当前版本的记忆结构；旧 flat 字段不再回填。
-    working = state.get("working")
+    required_fields = (
+        "working",
+        "episodic_notes",
+        "file_summaries",
+        "next_note_index",
+        "durable_types",
+    )
+    missing = [field for field in required_fields if field not in state]
+    if missing:
+        raise ValueError(f"memory state missing required fields: {', '.join(missing)}")
+
+    working = state["working"]
     if not isinstance(working, dict):
-        working = {}
+        raise ValueError("memory working must be an object")
     for field, limit in (
         ("goal", 300),
         ("current_subtask", 240),
         ("next_action", 240),
         ("last_error", 240),
     ):
-        working[field] = clip(str(working.get(field, "")).strip(), limit)
+        if not isinstance(working.get(field), str):
+            raise ValueError(f"memory working.{field} must be a string")
+        working[field] = clip(working[field].strip(), limit)
+    if not isinstance(working.get("recent_files"), list) or not all(
+        isinstance(path, str) for path in working["recent_files"]
+    ):
+        raise ValueError("memory working.recent_files must be a list of strings")
     working["recent_files"] = _dedupe_preserve_order(
         [
             canonicalize_path(path, workspace_root)
-            for path in _ensure_list(working.get("recent_files", []))
-            if str(path).strip()
+            for path in working["recent_files"]
+            if path.strip()
         ]
     )[-WORKING_FILE_LIMIT:]
     state["working"] = working
 
-    episodic_notes = state.get("episodic_notes")
+    episodic_notes = state["episodic_notes"]
     if not isinstance(episodic_notes, list):
-        episodic_notes = []
+        raise ValueError("memory episodic_notes must be a list")
 
-    normalized_notes = []
-    for index, note in enumerate(episodic_notes):
-        if isinstance(note, str) and not str(note).strip():
-            continue
-        normalized_notes.append(_normalize_note(note, index))
-    episodic_notes = normalized_notes
-    episodic_notes = episodic_notes[-EPISODIC_NOTE_LIMIT:]
+    episodic_notes = [
+        _normalize_note(note, index) for index, note in enumerate(episodic_notes)
+    ][-EPISODIC_NOTE_LIMIT:]
     state["episodic_notes"] = episodic_notes
 
-    file_summaries = state.get("file_summaries")
+    file_summaries = state["file_summaries"]
     if not isinstance(file_summaries, dict):
-        file_summaries = {}
+        raise ValueError("memory file_summaries must be an object")
     normalized_file_summaries = {}
     for path, summary in file_summaries.items():
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("memory file_summaries keys must be non-empty strings")
+        if not isinstance(summary, dict):
+            raise ValueError(f"memory file_summaries[{path!r}] must be an object")
+        required_summary_fields = ("summary", "created_at", "freshness")
+        missing_summary_fields = [
+            field for field in required_summary_fields if field not in summary
+        ]
+        if missing_summary_fields:
+            raise ValueError(
+                f"memory file_summaries[{path!r}] missing required fields: "
+                f"{', '.join(missing_summary_fields)}"
+            )
+        if not isinstance(summary["summary"], str):
+            raise ValueError(f"memory file_summaries[{path!r}].summary must be a string")
+        if not isinstance(summary["created_at"], str) or not summary["created_at"].strip():
+            raise ValueError(
+                f"memory file_summaries[{path!r}].created_at must be a non-empty string"
+            )
+        if summary["freshness"] is not None and not isinstance(summary["freshness"], str):
+            raise ValueError(f"memory file_summaries[{path!r}].freshness must be a string or null")
         path = canonicalize_path(path, workspace_root)
-        if isinstance(summary, dict):
-            text = clip(str(summary.get("summary", "")).strip(), 500)
-            created_at = str(summary.get("created_at", "")).strip() or now()
-            freshness = summary.get("freshness")
-            freshness = None if freshness in (None, "") else str(freshness).strip() or None
-        else:
-            text = clip(str(summary).strip(), 500)
-            created_at = now()
-            freshness = None
+        text = clip(summary["summary"].strip(), 500)
+        created_at = summary["created_at"].strip()
+        freshness = summary["freshness"]
+        freshness = None if freshness in (None, "") else freshness.strip() or None
         if not path or not text:
-            continue
+            raise ValueError("memory file_summaries entries require a canonical path and summary")
         normalized_file_summaries[path] = {
             "summary": text,
             "created_at": created_at,
@@ -551,11 +580,20 @@ def normalize_memory_state(state, workspace_root=None):
         }
     state["file_summaries"] = normalized_file_summaries
 
-    next_note_index = state.get("next_note_index")
-    if not isinstance(next_note_index, int) or next_note_index < 0:
-        next_note_index = 0
+    next_note_index = state["next_note_index"]
+    if (
+        not isinstance(next_note_index, int)
+        or isinstance(next_note_index, bool)
+        or next_note_index < 0
+    ):
+        raise ValueError("memory next_note_index must be a non-negative integer")
     max_index = max([note["note_index"] for note in episodic_notes], default=-1)
     state["next_note_index"] = max(next_note_index, max_index + 1)
+
+    if not isinstance(state["durable_types"], list) or not all(
+        isinstance(memory_type, str) for memory_type in state["durable_types"]
+    ):
+        raise ValueError("memory durable_types must be a list of strings")
 
     durable_root = Path(workspace_root) / ".pico" / "memory" if workspace_root is not None else None
     durable_store = DurableMemoryStore(durable_root) if durable_root is not None else None
@@ -738,19 +776,6 @@ def retrieval_candidates(
     return [note_by_id[memory_id] for memory_id in fused_ids[: max(0, int(limit))]]
 
 
-def retrieval_view(state, query, limit=3, workspace_root=None):
-    candidates = retrieval_candidates(state, query, limit=limit, workspace_root=workspace_root)
-    lines = ["Relevant memory:"]
-    if not candidates:
-        lines.append("- none")
-        return "\n".join(lines)
-    for note in candidates:
-        rendered_note = render_relevant_memory_note(note)
-        if rendered_note:
-            lines.append(f"- {rendered_note}")
-    return "\n".join(lines)
-
-
 def render_memory_text(state, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     working = state["working"]
@@ -853,9 +878,6 @@ class LayeredMemory:
             semantic_index=self.semantic_index,
             metadata=self.last_retrieval_metadata,
         )
-
-    def retrieval_view(self, query, limit=3):
-        return retrieval_view(self.state, query, limit=limit, workspace_root=self.workspace_root)
 
     def render_memory_text(self):
         return render_memory_text(self.state, self.workspace_root)
