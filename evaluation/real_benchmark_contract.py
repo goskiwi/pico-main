@@ -4,10 +4,10 @@ from pathlib import Path
 
 
 REAL_BENCHMARK_SCHEMA_VERSION = 1
-REAL_BENCHMARK_ARTIFACT_SCHEMA_VERSION = 3
-DEFAULT_REAL_BENCHMARK_PATH = Path("benchmarks/real_world_tasks.json")
-DEFAULT_REAL_ARTIFACT_PATH = Path("artifacts/real-world-benchmark-v1-structured.json")
-DEFAULT_REAL_REPORT_PATH = Path("docs/metrics/real-world-benchmark-v1-structured.md")
+REAL_BENCHMARK_ARTIFACT_SCHEMA_VERSION = 4
+DEFAULT_REAL_BENCHMARK_PATH = Path("benchmarks/real_world_tasks_v5.json")
+DEFAULT_REAL_ARTIFACT_PATH = Path("artifacts/real-world-benchmark.json")
+DEFAULT_REAL_REPORT_PATH = Path("artifacts/real-world-benchmark.md")
 DEFAULT_REAL_WORKSPACE_ROOT = Path("artifacts/real-world-workspaces")
 REQUIRED_TASK_KEYS = (
     "id",

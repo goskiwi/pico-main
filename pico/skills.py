@@ -35,8 +35,6 @@ class SkillInfo:
     conflicts_with: tuple[str, ...] = ()
     when_to_use: str = ""
     version: str = ""
-    disclosure_level: str = "lazy"
-    owner: str = ""
     enabled: bool = True
 
 
@@ -76,8 +74,6 @@ def load_skills(root):
                 conflicts_with=tuple(parsed["conflicts_with"]),
                 when_to_use=parsed["when_to_use"],
                 version=parsed["version"],
-                disclosure_level=parsed["disclosure_level"],
-                owner=parsed["owner"],
                 enabled=parsed["enabled"],
             )
         )
@@ -105,8 +101,6 @@ def parse_skill(raw):
         "conflicts_with": tuple(metadata.get("conflicts_with", ())),
         "when_to_use": str(metadata.get("when_to_use", "")).strip(),
         "version": str(metadata.get("version", "")).strip(),
-        "disclosure_level": str(metadata.get("disclosure_level", "lazy")).strip() or "lazy",
-        "owner": str(metadata.get("owner", "")).strip(),
         "enabled": bool(metadata.get("enabled", True)),
     }
 
@@ -165,7 +159,7 @@ def select_skills_with_model(model_client, skills, user_message, limit=DEFAULT_S
     candidates = keyword_prefilter(skills, user_message)
     if not candidates:
         candidates = skills
-    if _can_skip_model_for_keyword_candidates(candidates, skills) and len(candidates) <= int(limit or DEFAULT_SKILL_LIMIT):
+    if _can_skip_model_for_keyword_candidates(candidates) and len(candidates) <= int(limit or DEFAULT_SKILL_LIMIT):
         return resolve_conflicts(candidates, limit=limit)
 
     prompt = _selection_prompt(candidates, user_message, limit)
@@ -200,7 +194,7 @@ def keyword_prefilter(skills, user_message):
     return candidates
 
 
-def _can_skip_model_for_keyword_candidates(candidates, all_skills):
+def _can_skip_model_for_keyword_candidates(candidates):
     if not candidates:
         return False
     return all(skill.trigger_keywords for skill in candidates)

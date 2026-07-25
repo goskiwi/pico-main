@@ -1,6 +1,5 @@
 """Execution lifecycle for one complete agent turn."""
 
-import json
 import time
 from typing import Any, TypedDict
 
@@ -16,22 +15,110 @@ from .checkpoints import (
     CHECKPOINT_PARTIAL_STALE_STATUS,
     CHECKPOINT_WORKSPACE_MISMATCH_STATUS,
 )
-from .parser import retry_notice
-from .task_state import TaskState
-from .workspace import clip, now
-
-
-_PROGRESS_NUDGE = (
-    "progress_nudge: this exact tool call has now run three times without changing the "
-    "workspace. Inspect the result, change the approach or arguments, or submit a final answer."
+from .config import (
+    TASK_CANVAS_MAX_ACTIVE_NODES,
+    TASK_CANVAS_MAX_TOKENS,
+    TASK_CANVAS_RETAIN_NODES,
 )
+from .task_state import TaskState
+from .workspace import clip
+
+
+def _is_context_limit_error(exc):
+    """Return whether a provider explicitly rejected the active conversation size."""
+    message = str(exc).lower()
+    indicators = (
+        "context length",
+        "context window",
+        "maximum context",
+        "max context",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+    )
+    return any(indicator in message for indicator in indicators)
+
+
+def _is_successful_pytest(name, args, metadata):
+    verification = dict(metadata.get("verification") or {})
+    return (
+        name == "run_shell"
+        and verification.get("framework") == "pytest"
+        and verification.get("passed") is True
+    )
+
+
+def _record_completion_progress(progress_tracker, task_state, name, args, metadata):
+    """Track deterministic completion evidence without trusting model narration."""
+    if metadata.get("workspace_changed"):
+        progress_tracker["last_workspace_change_step"] = task_state.tool_steps
+        progress_tracker["last_recoverable_step"] = 0
+        progress_tracker["completion_ready"] = False
+        progress_tracker["completion_reason"] = ""
+        progress_tracker["last_verification_status"] = "not_run"
+        return
+    verification = dict(metadata.get("verification") or {})
+    if verification.get("framework") == "pytest":
+        progress_tracker["last_verification_status"] = (
+            "passed" if verification.get("passed") else "failed"
+        )
+        progress_tracker["last_verification_step"] = task_state.tool_steps
+        progress_tracker["last_verification"] = {
+            "command": str(args.get("command", "")).strip(),
+            "exit_code": verification.get("exit_code"),
+        }
+    if (
+        name in {"write_file", "patch_file", "run_shell"}
+        and str(metadata.get("tool_status", "")) in {"error", "rejected", "partial_success"}
+    ):
+        # A failed patch or public test is actionable evidence, not idle
+        # exploration.  The model needs one bounded repair cycle to respond.
+        progress_tracker["last_recoverable_step"] = task_state.tool_steps
+    if (
+        progress_tracker["last_workspace_change_step"]
+        and _is_successful_pytest(name, args, metadata)
+    ):
+        progress_tracker["completion_ready"] = True
+        progress_tracker["completion_reason"] = "workspace_change_followed_by_pytest_pass"
+
+
+def _budget_notice(task_state):
+    if task_state.tool_steps >= task_state.hard_tool_limit:
+        return "Runtime notice: the hard tool limit is reached; submit_final is the only action allowed."
+    if task_state.tool_steps >= task_state.nominal_tool_budget:
+        remaining = max(0, task_state.hard_tool_limit - task_state.tool_steps)
+        return (
+            "Runtime notice: the soft planning budget has been crossed. "
+            f"You have at most {remaining} safety-limit tool calls remaining; use them only to "
+            "repair, verify, or finish the current task."
+        )
+    return ""
+
+
+def _verified_change_final(agent, progress_tracker):
+    """Build the final response from audited change and pytest evidence only."""
+    changed_paths = sorted(
+        {
+            str(path)
+            for entry in agent.tool_audit_log
+            for path in entry.get("affected_paths", [])
+            if str(path).strip()
+        }
+    )
+    verification = dict(progress_tracker.get("last_verification") or {})
+    command = str(verification.get("command", "pytest")).strip() or "pytest"
+    exit_code = verification.get("exit_code")
+    status = "pytest passed" if exit_code in (None, 0) else f"pytest passed (exit code {exit_code})"
+    changed = ", ".join(changed_paths) if changed_paths else "workspace changes"
+    return f"Completed verified changes.\nChanged files: {changed}\nVerification: {command} — {status}."
 
 
 class AgentTurnState(TypedDict, total=False):
     """Transient routing state; durable audit/resume state stays in ``TaskState``."""
 
-    native_prompt: tuple[str, dict[str, Any]] | None
+    prompt_snapshot: tuple[str, dict[str, Any]] | None
     finalization_attempted: bool
+    context_recovery_attempted: bool
     action: ModelAction
     result: str
 
@@ -67,12 +154,12 @@ def _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
         _create_checkpoint(agent, task_state, user_message, "context_reduction")
 
 
-def _prompt_for_attempt(agent, task_state, user_message, native_prompt):
-    """Build text prompts each attempt; reuse the first prompt for native Actions."""
+def _prompt_for_attempt(agent, task_state, user_message, prompt_snapshot):
+    """Build the first prompt once and reuse it for the Responses conversation."""
     started_at = time.monotonic()
-    reused = native_prompt is not None
+    reused = prompt_snapshot is not None
     if reused:
-        prompt, original_metadata = native_prompt
+        prompt, original_metadata = prompt_snapshot
         prompt_metadata = dict(original_metadata)
     else:
         prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
@@ -99,32 +186,11 @@ def _action_payload(action):
 
 
 def _record_action_result(agent, action, result):
-    recorder = getattr(agent.model_client, "record_action_result", None)
-    if recorder is not None:
-        recorder(action, result)
+    agent.model_client.record_action_result(action, result)
 
 
-def _stagnation_nudge(progress_tracker, name, args, metadata):
-    signature = json.dumps(
-        [str(name or ""), args or {}],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    if metadata.get("workspace_changed"):
-        progress_tracker["recent"] = []
-        return ""
-
-    recent = [*progress_tracker["recent"], signature][-3:]
-    progress_tracker["recent"] = recent
-    if (
-        len(recent) == 3
-        and len(set(recent)) == 1
-        and signature not in progress_tracker["nudged"]
-    ):
-        progress_tracker["nudged"].add(signature)
-        return _PROGRESS_NUDGE
-    return ""
+def _retry_notice(problem):
+    return f"Runtime notice: {problem}. Return exactly one valid function call."
 
 
 def _execute_tool_action(agent, task_state, user_message, action, progress_tracker):
@@ -140,65 +206,73 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     metadata = dict(agent._last_tool_result_metadata or {})
 
     report.record_tool_audit(agent, name, safe_args, result, duration_ms)
-    progress_nudge = _stagnation_nudge(
-        progress_tracker,
-        name,
-        args,
-        metadata,
-    )
-    if progress_nudge:
-        result = f"{result}\n\n{progress_nudge}"
-        agent.emit_trace(
-            task_state,
-            "progress_nudge",
-            {"tool_name": name, "repeat_count": 3},
-        )
-    agent.mark_tool_finished(name, metadata, result)
+    _record_completion_progress(progress_tracker, task_state, name, args, metadata)
     tool_status = str(metadata.get("tool_status", "")).strip() or "ok"
     safe_name = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name or "tool"))
-    node_id = f"t{task_state.tool_steps:03d}_{safe_name}"
-    full_result = getattr(agent, "_last_tool_full_result", None)
+    node_id = f"N{task_state.tool_steps:03d}_{safe_name}"
+    full_result = agent._last_tool_full_result
     if full_result is None:
         full_result = result
     full_result = security.redact_text(agent, full_result)
-    content_ref = agent.run_store.save_tool_output(
+    result_ref = agent.run_store.save_reference(
         task_state,
         task_state.tool_steps,
         name,
         full_result,
     )
-    agent.run_store.append_task_graph_tool(task_state, node_id, name, safe_args, tool_status, content_ref)
-    agent.record(
-        {
-            "role": "tool",
-            "name": name,
-            "node_id": node_id,
-            "args": safe_args,
-            "summary": agent.summarize_tool_result(name, safe_args, result),
-            "content_ref": content_ref,
-            "created_at": now(),
-        }
+    agent.cache_read_only_evidence(
+        name,
+        args,
+        full_result,
+        result_ref=result_ref,
+        node_id=node_id,
     )
-    if progress_nudge:
-        agent.record(
-            {
-                "role": "assistant",
-                "content": progress_nudge,
-                "created_at": now(),
-            }
-        )
+    agent.mark_tool_finished(name, args, metadata, result)
+    summary = agent.summarize_tool_result(name, safe_args, result)
+    canvas_status = "done" if tool_status in {"ok", "dry_run"} else "blocked"
+    agent.run_store.append_offload_event(
+        task_state,
+        node_id=node_id,
+        tool_name=name,
+        args=safe_args,
+        summary=summary,
+        status=canvas_status,
+        result_ref=result_ref,
+    )
+    agent.run_store.append_task_node(
+        task_state,
+        node_id=node_id,
+        summary=summary,
+        status=canvas_status,
+        result_ref=result_ref,
+    )
+    fold = agent.run_store.fold_task_canvas(
+        task_state,
+        token_counter=agent.count_tokens,
+        max_active_nodes=TASK_CANVAS_MAX_ACTIVE_NODES,
+        retain_nodes=TASK_CANVAS_RETAIN_NODES,
+        max_tokens=TASK_CANVAS_MAX_TOKENS,
+    )
     agent.run_store.write_task_state(task_state)
+    agent.run_store.update_index(task_state, latest_node_id=node_id)
+    if fold["folded"]:
+        agent.emit_trace(task_state, "task_canvas_folded", fold)
     agent.emit_trace(
         task_state,
         "tool_executed",
         {
             "name": name,
             "args": safe_args,
+            "node_id": node_id,
+            "result_ref": result_ref,
             "result": clip(result, 500),
             "duration_ms": duration_ms,
             **metadata,
         },
     )
+    # Keep the provider-side tool conversation intact.  The next model turn
+    # receives this exact result as the matching tool_result instead of a
+    # lossy task-canvas summary.
     _record_action_result(agent, action, result)
     _create_checkpoint(agent, task_state, user_message, "tool_executed")
 
@@ -222,7 +296,6 @@ def _write_finished_run(agent, task_state, final, run_started_at):
 def _run_agent_turn(agent, user_message):
     run_started_at = time.monotonic()
     agent.mark_work_started(user_message)
-    agent.record({"role": "user", "content": user_message, "created_at": now()})
 
     task_state = TaskState.create(
         run_id=agent.new_run_id(),
@@ -231,6 +304,10 @@ def _run_agent_turn(agent, user_message):
         agent_mode=agent.agent_mode,
         parent_agent_id=agent.parent_agent_id,
     )
+    hard_tool_limit = (
+        agent.hard_max_steps if agent.feature_enabled("dynamic_budget") else agent.max_steps
+    )
+    task_state.configure_tool_budget(agent.max_steps, hard_tool_limit)
     task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
     agent.current_task_state = task_state
     agent.current_run_dir = agent.run_store.start_run(task_state)
@@ -242,9 +319,7 @@ def _run_agent_turn(agent, user_message):
     agent.current_undo_journal.start()
     agent.tool_audit_log = []
     agent.model_action_rejections = []
-    reset_action_session = getattr(agent.model_client, "reset_action_session", None)
-    if reset_action_session is not None:
-        reset_action_session()
+    agent.model_client.reset_action_session()
     agent.emit_trace(
         task_state,
         "run_started",
@@ -255,46 +330,70 @@ def _run_agent_turn(agent, user_message):
         },
     )
 
-    max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
-    progress_tracker = {"recent": [], "nudged": set()}
-    native_actions = bool(getattr(agent.model_client, "supports_native_actions", False))
+    max_retry_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
+    max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
+    progress_tracker = {
+        "last_workspace_change_step": 0,
+        "last_recoverable_step": 0,
+        "completion_ready": False,
+        "completion_reason": "",
+        "last_verification_status": "not_run",
+        "last_verification_step": 0,
+        "last_verification": {},
+    }
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
 
     def finish_stopped():
-        if task_state.attempts >= max_attempts and task_state.tool_steps < agent.max_steps:
-            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+        if task_state.attempts >= max_retry_attempts and task_state.tool_steps < hard_tool_limit:
+            final = "Stopped after too many rejected model actions without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
         else:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
         agent.mark_work_finished(final, stopped=True)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
         _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
         return _write_finished_run(agent, task_state, final, run_started_at)
 
+    def finish_success(final, *, trigger):
+        agent.mark_work_finished(final)
+        task_state.finish_success(final)
+        memory_runtime.promote_durable_memory(agent, user_message, final)
+        memory_runtime.llm_promote_durable_memory(agent, user_message, final)
+        _create_checkpoint(agent, task_state, user_message, trigger)
+        return _write_finished_run(agent, task_state, final, run_started_at)
+
     def call_model(state: AgentTurnState):
-        if task_state.attempts >= max_attempts:
+        if task_state.attempts >= max_retry_attempts:
             return Command(update={"result": finish_stopped()}, goto=END)
 
-        finalization_only = task_state.tool_steps >= agent.max_steps
+        finalization_only = task_state.tool_steps >= task_state.hard_tool_limit
         finalization_attempted = bool(state.get("finalization_attempted", False))
         if finalization_only:
-            if not native_actions or finalization_attempted:
+            if finalization_attempted:
                 return Command(update={"result": finish_stopped()}, goto=END)
             finalization_attempted = True
 
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
-        native_prompt = state.get("native_prompt")
+        prompt_snapshot = state.get("prompt_snapshot")
         prompt, prompt_metadata = _prompt_for_attempt(
             agent,
             task_state,
             user_message,
-            native_prompt if native_actions else None,
+            prompt_snapshot,
         )
-        if native_actions and native_prompt is None:
-            native_prompt = (prompt, dict(prompt_metadata))
+        if prompt_snapshot is None:
+            budget_notice = _budget_notice(
+                task_state,
+            )
+            if budget_notice:
+                prompt = f"{prompt}\n\n{budget_notice}"
+            prompt_metadata["tool_budget"] = {
+                "nominal": task_state.nominal_tool_budget,
+                "hard_limit": task_state.hard_tool_limit,
+            }
+            prompt_snapshot = (prompt, dict(prompt_metadata))
 
         agent.emit_trace(
             task_state,
@@ -303,14 +402,13 @@ def _run_agent_turn(agent, user_message):
                 "attempts": task_state.attempts,
                 "tool_steps": task_state.tool_steps,
                 "finalization_only": finalization_only,
+                "hard_tool_limit": task_state.hard_tool_limit,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
             },
         )
         prompt_cache_key = None
         prompt_cache_retention = None
-        if agent.feature_enabled("prompt_cache") and getattr(
-            agent.model_client, "supports_prompt_cache", False
-        ):
+        if agent.feature_enabled("prompt_cache") and agent.model_client.supports_prompt_cache:
             prompt_cache_key = prompt_metadata.get("prompt_cache_key")
             prompt_cache_retention = "in_memory"
 
@@ -322,14 +420,32 @@ def _run_agent_turn(agent, user_message):
                 action_tools=final_action_tools if finalization_only else action_tools,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
-                require_explicit_final=agent.feature_enabled("require_explicit_final"),
             )
         except Exception as exc:
+            if _is_context_limit_error(exc) and not state.get("context_recovery_attempted", False):
+                recovery = agent.prepare_context_recovery()
+                agent.model_client.reset_action_session()
+                agent.emit_trace(
+                    task_state,
+                    "context_recovery_started",
+                    {
+                        "reason": "provider_context_limit",
+                        "duration_ms": int((time.monotonic() - model_started_at) * 1000),
+                        **recovery,
+                    },
+                )
+                return Command(
+                    update={
+                        "prompt_snapshot": None,
+                        "finalization_attempted": finalization_attempted,
+                        "context_recovery_attempted": True,
+                    },
+                    goto="call_model",
+                )
             error_type = type(exc).__name__
             error = str(exc)
             final = f"Stopped after model error: {error_type}: {error}"
             agent.mark_work_finished(final, stopped=True)
-            agent.record({"role": "assistant", "content": final, "created_at": now()})
             task_state.stop_model_error(final)
             agent.last_prompt_metadata = prompt_metadata
             agent.last_completion_metadata = {}
@@ -346,7 +462,11 @@ def _run_agent_turn(agent, user_message):
             result = _write_finished_run(agent, task_state, final, run_started_at)
             return Command(update={"result": result}, goto=END)
 
-        completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
+        if state.get("context_recovery_attempted", False):
+            agent.clear_context_recovery()
+            agent.emit_trace(task_state, "context_recovery_completed", {})
+
+        completion_metadata = dict(agent.model_client.last_completion_metadata or {})
         if completion_metadata:
             prompt_metadata.update(completion_metadata)
         agent.last_completion_metadata = completion_metadata
@@ -356,8 +476,9 @@ def _run_agent_turn(agent, user_message):
 
         if finalization_only and kind == ACTION_TOOL:
             rejected_tool_name = action.name
-            payload = retry_notice(
-                "the tool step budget is exhausted; only submit_final is allowed"
+            finalization_reason = "the hard tool limit is reached"
+            payload = _retry_notice(
+                f"{finalization_reason}; only submit_final is allowed"
             )
             action = ModelAction.retry(
                 payload,
@@ -369,7 +490,10 @@ def _run_agent_turn(agent, user_message):
             agent.emit_trace(
                 task_state,
                 "finalization_rejected",
-                {"reason": "tool_step_budget_exhausted", "tool_name": rejected_tool_name},
+                {
+                    "reason": "hard_tool_limit_reached",
+                    "tool_name": rejected_tool_name,
+                },
             )
 
         if (
@@ -377,7 +501,7 @@ def _run_agent_turn(agent, user_message):
             and agent.feature_enabled("require_workspace_change")
             and not any(entry.get("workspace_changed") for entry in agent.tool_audit_log)
         ):
-            payload = retry_notice(
+            payload = _retry_notice(
                 "the task requires a workspace change, but no effective file change was recorded"
             )
             action = ModelAction.retry(
@@ -387,6 +511,24 @@ def _run_agent_turn(agent, user_message):
             )
             kind = ACTION_RETRY
             agent.emit_trace(task_state, "final_rejected", {"reason": "workspace_change_required"})
+
+        if (
+            kind == ACTION_FINAL
+            and progress_tracker["last_workspace_change_step"]
+            and progress_tracker["last_verification_status"] == "failed"
+        ):
+            payload = _retry_notice(
+                "the latest pytest verification failed after the workspace change; repair the failure "
+                "or report that the task remains unverified"
+            )
+            action = ModelAction.retry(
+                payload,
+                protocol="runtime_guard",
+                raw_preview=action.raw_preview,
+                call_id=action.call_id,
+            )
+            kind = ACTION_RETRY
+            agent.emit_trace(task_state, "final_rejected", {"reason": "verification_failed"})
 
         if kind == ACTION_RETRY:
             rejection = {
@@ -409,7 +551,7 @@ def _run_agent_turn(agent, user_message):
         )
 
         next_state = {
-            "native_prompt": native_prompt,
+            "prompt_snapshot": prompt_snapshot,
             "finalization_attempted": finalization_attempted,
         }
         if kind == ACTION_TOOL:
@@ -417,18 +559,11 @@ def _run_agent_turn(agent, user_message):
         if kind == ACTION_RETRY:
             _record_action_result(agent, action, payload)
             agent.mark_retry_needed(payload)
-            agent.record({"role": "assistant", "content": payload, "created_at": now()})
             agent.run_store.write_task_state(task_state)
             return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
-        agent.mark_work_finished(final)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
-        task_state.finish_success(final)
-        memory_runtime.promote_durable_memory(agent, user_message, final)
-        memory_runtime.llm_promote_durable_memory(agent, user_message, final)
-        _create_checkpoint(agent, task_state, user_message, "run_finished")
-        result = _write_finished_run(agent, task_state, final, run_started_at)
+        result = finish_success(final, trigger="run_finished")
         return Command(update={"result": result}, goto=END)
 
     def execute_tool(state: AgentTurnState):
@@ -439,7 +574,27 @@ def _run_agent_turn(agent, user_message):
             state["action"],
             progress_tracker,
         )
-        return Command(goto="call_model")
+        if progress_tracker["completion_ready"]:
+            final = _verified_change_final(agent, progress_tracker)
+            agent.emit_trace(
+                task_state,
+                "runtime_finalized",
+                {
+                    "reason": progress_tracker["completion_reason"],
+                    "verification": dict(progress_tracker["last_verification"]),
+                },
+            )
+            return Command(
+                update={"result": finish_success(final, trigger="verified_change_auto_finalized")},
+                goto=END,
+            )
+        # The task canvas is a durable control-plane projection.  It must not
+        # replace the live provider conversation: patching depends on the
+        # exact source and test output returned by the preceding tool call.
+        return Command(
+            update={"prompt_snapshot": state.get("prompt_snapshot")},
+            goto="call_model",
+        )
 
     workflow = StateGraph(AgentTurnState)
     workflow.add_node(
@@ -452,6 +607,6 @@ def _run_agent_turn(agent, user_message):
     with tracing_context(enabled=False):
         result = graph.invoke(
             {"finalization_attempted": False},
-            config={"recursion_limit": max(32, max_attempts * 4 + 16)},
+            config={"recursion_limit": max(32, max_graph_iterations * 4 + 16)},
         )
     return result["result"]

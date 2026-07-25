@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
-import time
 from typing import Any, Callable, Mapping, Sequence
 
 from .config import (
@@ -29,10 +28,8 @@ class DelegateOutcome:
     index: int
     spec: dict[str, Any]
     status: str
-    reserved_steps: int
     result: dict[str, Any] | None = None
     error: str = ""
-    duration_ms: int = 0
 
 
 class DelegateScheduler:
@@ -41,7 +38,6 @@ class DelegateScheduler:
     def __init__(self, agent, *, child_runner: DelegateChildRunner | None = None):
         self.agent = agent
         self._child_runner = child_runner
-        self.last_reserved_steps = 0
 
     def run(self, specs: Sequence[Mapping[str, Any]]) -> list[DelegateOutcome]:
         """Return ordered outcomes for every supplied child-task specification.
@@ -54,7 +50,6 @@ class DelegateScheduler:
         normalized_specs = [dict(spec) for spec in specs]
         outcomes: list[DelegateOutcome | None] = [None] * len(normalized_specs)
         futures = {}
-        self.last_reserved_steps = 0
         remaining_steps = DELEGATE_TOTAL_STEP_BUDGET
         runner = self._resolve_child_runner()
 
@@ -71,7 +66,6 @@ class DelegateScheduler:
                         index=index,
                         spec=spec,
                         status="budget_exhausted",
-                        reserved_steps=0,
                         error=(
                             "delegate step budget exhausted: "
                             f"requested {reserved_steps}, remaining {remaining_steps}"
@@ -80,10 +74,8 @@ class DelegateScheduler:
                     continue
 
                 remaining_steps -= reserved_steps
-                self.last_reserved_steps += reserved_steps
-                started_at = time.monotonic()
                 future = executor.submit(runner, self.agent, spec)
-                futures[future] = (index, spec, reserved_steps, started_at)
+                futures[future] = (index, spec)
 
             if futures:
                 completed, pending = wait(
@@ -92,27 +84,23 @@ class DelegateScheduler:
                 )
                 timed_out = bool(pending)
                 for future in completed:
-                    index, spec, reserved_steps, started_at = futures[future]
+                    index, spec = futures[future]
                     outcomes[index - 1] = self._outcome_from_future(
                         future,
                         index=index,
                         spec=spec,
-                        reserved_steps=reserved_steps,
-                        started_at=started_at,
                     )
                 for future in pending:
-                    index, spec, reserved_steps, started_at = futures[future]
+                    index, spec = futures[future]
                     future.cancel()
                     outcomes[index - 1] = DelegateOutcome(
                         index=index,
                         spec=spec,
                         status="timeout",
-                        reserved_steps=reserved_steps,
                         error=(
                             "delegate batch exceeded "
                             f"{DELEGATE_BATCH_TIMEOUT_SECONDS:g}s timeout"
                         ),
-                        duration_ms=self._duration_ms(started_at),
                     )
         finally:
             # ThreadPoolExecutor cannot forcibly stop an in-flight Python
@@ -131,7 +119,7 @@ class DelegateScheduler:
 
         return run_delegate_child
 
-    def _outcome_from_future(self, future, *, index, spec, reserved_steps, started_at):
+    def _outcome_from_future(self, future, *, index, spec):
         try:
             result = dict(future.result())
         except Exception as exc:
@@ -139,9 +127,7 @@ class DelegateScheduler:
                 index=index,
                 spec=spec,
                 status="error",
-                reserved_steps=reserved_steps,
                 error=f"{type(exc).__name__}: {exc}",
-                duration_ms=self._duration_ms(started_at),
             )
         child_status = str(result.get("status", "completed")).strip()
         if child_status and child_status != "completed":
@@ -150,22 +136,14 @@ class DelegateScheduler:
                 index=index,
                 spec=spec,
                 status="error",
-                reserved_steps=reserved_steps,
                 error=(
                     f"child stopped with status={child_status}"
                     + (f" ({stop_reason})" if stop_reason else "")
                 ),
-                duration_ms=self._duration_ms(started_at),
             )
         return DelegateOutcome(
             index=index,
             spec=spec,
             status="ok",
-            reserved_steps=reserved_steps,
             result=result,
-            duration_ms=self._duration_ms(started_at),
         )
-
-    @staticmethod
-    def _duration_ms(started_at):
-        return int((time.monotonic() - started_at) * 1000)

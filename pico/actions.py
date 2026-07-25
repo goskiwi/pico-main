@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .parser import parse_model_output
-
 
 ACTION_TOOL = "tool"
 ACTION_FINAL = "final"
@@ -18,11 +16,11 @@ class ModelAction:
     """One validated decision returned by a model backend."""
 
     kind: str
+    protocol: str
     name: str = ""
     args: dict = field(default_factory=dict)
     answer: str = ""
     error: str = ""
-    protocol: str = "text"
     raw_preview: str = ""
     call_id: str = ""
 
@@ -69,25 +67,6 @@ class ModelAction:
             raw_preview=_preview(raw_preview),
             call_id=str(call_id or ""),
         )
-
-
-def action_from_text(raw, *, require_explicit_final=False, protocol="text"):
-    """Normalize a text-protocol model response into ``ModelAction``."""
-    kind, payload = parse_model_output(
-        raw,
-        require_explicit_final=bool(require_explicit_final),
-    )
-    if kind == ACTION_TOOL:
-        return ModelAction.tool(
-            payload.get("name", ""),
-            payload.get("args", {}),
-            protocol=protocol,
-            raw_preview=raw,
-        )
-    if kind == ACTION_FINAL:
-        return ModelAction.final(payload, protocol=protocol, raw_preview=raw)
-    return ModelAction.retry(payload, protocol=protocol, raw_preview=raw)
-
 
 def _preview(value, limit=800):
     text = str(value or "").strip()

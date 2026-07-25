@@ -20,11 +20,12 @@ def promote_durable_memory(agent, user_message, final_answer):
     agent.last_durable_promotions = result.promoted
     agent.last_durable_rejections = result.rejections
     agent.last_durable_superseded = result.superseded
+    agent.last_semantic_memory_sync = dict(agent.memory.last_semantic_sync)
     return result.promoted, result.rejections, result.superseded
 
 
 def llm_memory_index_text(agent):
-    if not getattr(agent.memory, "durable_store", None):
+    if agent.memory.durable_store is None:
         return "- none"
     entries = agent.memory.durable_store.load_index()
     if not entries:
@@ -123,4 +124,5 @@ def llm_promote_durable_memory(agent, user_message, final_answer):
     agent.last_llm_durable_promotions = result.promoted
     agent.last_llm_durable_rejections = result.rejections
     agent.last_llm_durable_superseded = result.superseded
+    agent.last_semantic_memory_sync = dict(agent.memory.last_semantic_sync)
     return result.promoted, result.rejections, result.superseded

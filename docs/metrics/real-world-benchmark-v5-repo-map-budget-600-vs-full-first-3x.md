@@ -128,7 +128,7 @@ V5 becomes a regression suite after this first result is inspected.
 
 - These are real model runs over fresh repository copies; hidden verifier tests are injected only after the agent stops.
 - Parent and child run roots, file-tool paths, search results, and verifier-source exposure are audited before hidden verifier injection; failures skip verification.
-- In schema v3, compatibility fields for model calls, tokens, failures, rejections, and protocols cover the parent plus related delegates; explicit P/D/T fields retain the breakdown.
+- Model calls, tokens, failures, rejections, and protocols are reported explicitly for parent, delegates, and their total.
 - Required/executed tools and structured delegate outcomes remain parent-trace checks; related child identities and completion are cross-checked from child traces, whose model events also contribute to aggregate behavior and cost metrics.
 - Cumulative model-call duration is a workload indicator, not wall latency; concurrent child durations can overlap. Agent duration is the parent attempt's end-to-end wall time.
 - Verifiers run inside the mandatory Docker sandbox with networking disabled.

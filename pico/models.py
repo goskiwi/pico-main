@@ -1,4 +1,4 @@
-"""LangChain-backed OpenAI-compatible model clients and test doubles."""
+"""LangChain-backed OpenAI-compatible model client."""
 
 from __future__ import annotations
 
@@ -9,35 +9,9 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langsmith import tracing_context
 
-from .actions import ModelAction, action_from_text
+from .actions import ModelAction
 from .config import DEFAULT_MODEL_MAX_RETRIES
-
-
-class FakeModelClient:
-    """Deterministic text-protocol model used by the offline test suite."""
-
-    def __init__(self, outputs):
-        self.outputs = list(outputs)
-        self.prompts = []
-        self.supports_prompt_cache = False
-        self.supports_native_actions = False
-        self.last_completion_metadata = {}
-
-    def complete(self, prompt, max_new_tokens, **kwargs):
-        self.prompts.append(prompt)
-        if not getattr(self, "last_completion_metadata", None):
-            self.last_completion_metadata = {}
-        if not self.outputs:
-            raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
-
-    def complete_action(self, prompt, max_new_tokens, *, require_explicit_final=False, **kwargs):
-        kwargs.pop("action_tools", None)
-        return action_from_text(
-            self.complete(prompt, max_new_tokens, **kwargs),
-            require_explicit_final=require_explicit_final,
-            protocol="scripted_text",
-        )
+from .context_types import count_tokens, tokenizer_details
 
 
 def _normalize_versioned_base_url(base_url):
@@ -48,12 +22,12 @@ def _normalize_versioned_base_url(base_url):
 
 
 def _message_text(message):
-    """Return text from either classic or Responses-v1 ``AIMessage`` content."""
+    """Return text from a Responses-v1 ``AIMessage`` content block list."""
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
+    if not isinstance(content, list):
+        return ""
     parts = []
-    for block in content if isinstance(content, list) else []:
+    for block in content:
         if not isinstance(block, dict):
             continue
         if block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
@@ -91,71 +65,6 @@ def _remove_placeholder_authorization(request):
     request.headers.pop("authorization", None)
 
 
-def _response_from_sse(body_text):
-    """Recover one non-streaming Responses payload from a mislabelled SSE body."""
-    completed_response = None
-    deltas = []
-    completed_text = ""
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line.removeprefix("data:").strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        event_response = event.get("response")
-        if isinstance(event_response, dict) and (
-            event.get("type") == "response.completed"
-            or event_response.get("status") == "completed"
-        ):
-            completed_response = event_response
-        if event.get("type") == "response.output_text.delta":
-            deltas.append(str(event.get("delta", "")))
-        elif event.get("type") == "response.output_text.done":
-            completed_text = str(event.get("text", ""))
-
-    if completed_response:
-        return completed_response
-    text = completed_text or "".join(deltas)
-    if not text:
-        return None
-    return {
-        "id": "pico_sse_response",
-        "object": "response",
-        "created_at": 0,
-        "status": "completed",
-        "model": "openai-compatible",
-        "output": [
-            {
-                "id": "pico_sse_message",
-                "type": "message",
-                "status": "completed",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
-    }
-
-
-def _normalize_sse_response(response):
-    """Keep compatibility with endpoints returning SSE for ``stream=false``."""
-    if "text/event-stream" not in response.headers.get("content-type", "").lower():
-        return
-    payload = _response_from_sse(response.read().decode("utf-8", errors="replace"))
-    if payload is None:
-        return
-    content = json.dumps(payload).encode("utf-8")
-    # httpx response hooks cannot replace a response. Once read, updating its
-    # buffered bytes is safe and keeps the SDK-facing response non-streaming.
-    response._content = content
-    response.headers["content-type"] = "application/json"
-    response.headers["content-length"] = str(len(content))
-
-
 class OpenAICompatibleModelClient:
     """Thin Pico adapter around LangChain's Responses API implementation.
 
@@ -163,8 +72,6 @@ class OpenAICompatibleModelClient:
     tests do not depend on LangChain message types.  LangChain owns transport,
     retry, SSE parsing, Responses item conversion, and encrypted reasoning replay.
     """
-
-    supports_native_actions = True
 
     def __init__(
         self,
@@ -174,6 +81,7 @@ class OpenAICompatibleModelClient:
         temperature,
         timeout,
         *,
+        reasoning_effort=None,
         http_client=None,
     ):
         self.model = str(model)
@@ -181,6 +89,7 @@ class OpenAICompatibleModelClient:
         self.api_key = str(api_key or "")
         self.temperature = temperature
         self.timeout = timeout
+        self.reasoning_effort = str(reasoning_effort).strip() if reasoning_effort else None
         self.supports_prompt_cache = any(
             host in self.base_url for host in ("openai.com", "right.codes")
         )
@@ -191,14 +100,12 @@ class OpenAICompatibleModelClient:
         # stripping the internal placeholder before a request is sent.
         self._owned_http_client = None
         if http_client is None:
-            hooks = {"response": [_normalize_sse_response]}
+            hooks = {}
             if not self.api_key:
                 hooks["request"] = [_remove_placeholder_authorization]
             self._owned_http_client = httpx.Client(event_hooks=hooks)
             http_client = self._owned_http_client
         else:
-            if _normalize_sse_response not in http_client.event_hooks["response"]:
-                http_client.event_hooks["response"].append(_normalize_sse_response)
             if not self.api_key and _remove_placeholder_authorization not in http_client.event_hooks[
                 "request"
             ]:
@@ -213,9 +120,7 @@ class OpenAICompatibleModelClient:
             "timeout": self.timeout,
             "max_retries": DEFAULT_MODEL_MAX_RETRIES,
             "use_responses_api": True,
-            # Keep Pico's existing wire contract. Responses-compatible servers
-            # may support streaming, but one Pico model turn is consumed as one
-            # auditable result.
+            # One Pico model turn is consumed as one auditable result.
             "streaming": False,
             "output_version": "responses/v1",
             "include": ["reasoning.encrypted_content"],
@@ -224,6 +129,8 @@ class OpenAICompatibleModelClient:
             # either supplies one explicitly or lets the OpenAI SDK own it.
             "http_socket_options": (),
         }
+        if self.reasoning_effort:
+            client_args["reasoning"] = {"effort": self.reasoning_effort}
         client_args["http_client"] = http_client
         self._model = ChatOpenAI(**client_args)
         self.reset_action_session()
@@ -235,6 +142,13 @@ class OpenAICompatibleModelClient:
         self._action_defer_extra_calls = False
         self._action_pending_output = None
 
+    def count_tokens(self, text):
+        """Count prompt tokens with the encoding mapped to this model."""
+        return count_tokens(text, model=self.model)
+
+    def tokenizer_metadata(self):
+        return tokenizer_details(self.model)
+
     def fork_for_delegate(self):
         """Create an independent Responses conversation for a child agent."""
         return OpenAICompatibleModelClient(
@@ -243,6 +157,7 @@ class OpenAICompatibleModelClient:
             api_key=self.api_key,
             temperature=self.temperature,
             timeout=self.timeout,
+            reasoning_effort=self.reasoning_effort,
             http_client=self._http_client,
         )
 
@@ -323,10 +238,8 @@ class OpenAICompatibleModelClient:
         action_tools,
         prompt_cache_key=None,
         prompt_cache_retention=None,
-        require_explicit_final=False,
     ):
         """Request one strict function call and normalize it to ``ModelAction``."""
-        del require_explicit_final
         if not self._action_messages:
             self._action_messages = [HumanMessage(content=str(prompt))]
         self._append_pending_outputs()

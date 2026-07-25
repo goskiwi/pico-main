@@ -1,86 +1,57 @@
 # Metrics evidence map
 
-This directory separates the current evaluation claim from historical engineering
-evidence. Reports are kept with their original measurements and scope boundaries;
-an archived report is not a current benchmark claim.
+这里只保留能直接支撑当前设计的四组证据。每组都链接到报告；对应的 reviewed JSON 位于
+`artifacts/`，fixture 与隐藏 verifier 位于 `benchmarks/`。
 
-## Current evidence
+## 1. Repo Map 的目标场景
 
-1. [`reliability-benchmark-v1-live-3x.md`](reliability-benchmark-v1-live-3x.md) —
-   first execution of the frozen
-   [reliability protocol](reliability-benchmark-v1-protocol.md) from clean commit
-   `5d80ce5`. The cross-module Repo Map task passed 3/3, both Undo scenarios
-   recovered 6/6, complete post-Undo workspace digests matched their pre-run
-   digests 6/6, and the pre-existing dirty README was preserved 3/3. The nine
-   attempts recorded no model failures, Action rejections, trace parse errors, or
-   workspace-isolation failures. This is a small engineering regression, not a new
-   Repo Map ablation or a general coding-capability result.
-2. [`progress-feedback-live-ab-3x.md`](progress-feedback-live-ab-3x.md) —
-   focused live `gpt-5.4` A/B over clean, snapshot-matched runtimes. The candidate
-   passed 6/6 attempts versus 2/6 for the baseline. Pytest tail localization moved
-   from 0/3 to 3/3; the artificial stagnation-recovery mechanism moved from 2/3 to
-   3/3 and used fewer model calls. This is targeted engineering evidence, not a
-   general coding benchmark.
-3. [`real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md`](real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md) —
-   first live-model result over the new V5 `ops_center` suite, frozen with its
-   [decision protocol](v5-repo-map-budget-decision-protocol.md) at clean commit
-   `363a8e8`. Both dynamic `full` and the 600-token hard cap passed 14/15 attempts.
-   The cap reduced reported input-plus-output tokens per passing attempt by 3.36%,
-   below the pre-registered 5% default-change threshold, so the dynamic default was
-   retained. Neither variant recorded model failures, action rejections, or
-   isolation failures. V5 became a regression suite after this result was inspected.
-4. [`real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md`](real-world-benchmark-v4-repo-map-budget-600-vs-full-3x.md) —
-   budget-tuning confirmation for clean commit `f69cb8e`: the 600-token cap passed
-   15/15 attempts and dynamic `full` passed 14/15. The cap used 9.5% fewer input
-   tokens, 11.1% fewer output tokens, and 15.6% fewer reported input-plus-output
-   tokens per passing attempt. This is confirmation on the V4 tuning/regression
-   suite, not a new held-out result, so it does not by itself justify changing the
-   runtime default. The preceding
-   [`single-repetition screen`](real-world-benchmark-v4-repo-map-budget-screen-1x.md)
-   selected 600 by the declared pass-rate-first rule, but both competing failures
-   were remote `model_error` events rather than verifier failures.
-5. [`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md) —
-   primary localization result for clean commit `016c618`: `full` passed 13/15
-   attempts and `no_repo_map` passed 6/15, an observed +46.7 percentage-point
-   difference on the frozen five-task suite. `full` used 33.8% more tokens per
-   attempt and 22.1% more wall time, but 38.3% fewer tokens per passing attempt.
-   This is a targeted Repo Map benchmark, not a universal coding-agent claim.
-6. [`real-world-benchmark-v3-first-3x.md`](real-world-benchmark-v3-first-3x.md) —
-   primary published result for commit `0897195`: 13/15 attempts across three
-   clean-worktree repetitions; four of five tasks passed 3/3. It is not validation
-   of later runtime revisions.
-7. [`real-world-benchmark-v3-constraint-regression-3x.md`](real-world-benchmark-v3-constraint-regression-3x.md) —
-   negative follow-up: a prompt change regressed the same frozen suite to 12/15 and
-   was rolled back.
-8. [`evaluation-methodology.md`](evaluation-methodology.md) — snapshot identity,
-   repetition semantics, hidden-verifier isolation, delegation cost accounting, and
-   interpretation limits.
+[`real-world-benchmark-v4-repo-map-ablation-3x.md`](real-world-benchmark-v4-repo-map-ablation-3x.md)
 
-The corresponding reviewed JSON artifacts remain under `artifacts/`. The benchmark
-fixtures and hidden verifiers remain under `benchmarks/`.
+- 五个任务共享一个多 package fixture；
+- 修改需要沿跨模块 import/call path 定位；
+- `legacy/` 和 `experiments/` 中存在同名干扰实现；
+- clean commit 上各跑三轮：`full` 13/15，`no_repo_map` 6/15；
+- 观察到 +46.7 个百分点，但代价是每次尝试 token 与 wall time 增加。
 
-## Frozen protocols accompanying results
+这是针对 Repo Map 使用场景的工程证据，不是通用 coding 能力结论。
 
-1. [`reliability-benchmark-v1-protocol.md`](reliability-benchmark-v1-protocol.md) —
-   pre-registers three live-model scenarios and nine attempts covering a
-   cross-module Repo Map task, exact Undo restoration after a rejected two-file
-   change, and preservation of a pre-existing dirty README modified again by the
-   agent. The protocol requires publishing failures without editing the frozen
-   tasks or acceptance gates.
+## 2. Repo Map 预算决策
 
-## Development-only evidence
+[`real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md`](real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md) ·
+[`decision protocol`](v5-repo-map-budget-decision-protocol.md)
 
-1. [`real-world-benchmark-v3-repo-map-ablation-live-1x.md`](real-world-benchmark-v3-repo-map-ablation-live-1x.md) —
-   a single-repetition live A/B on the frozen V3 suite comparing `full` with
-   `no_repo_map`. Both variants passed 4/5 tasks; `full` used 1.8 fewer tool steps
-   per task on average. This run was captured from a dirty working tree, so it is
-   directional regression evidence rather than a publishable benchmark claim.
+V5 首次冻结运行中，动态预算与 600-token cap 均通过 14/15。600 cap 每个成功尝试的
+input-plus-output token 下降 3.36%，未达到预注册的 5% 默认切换阈值，因此保留动态默认。
 
-## Historical / archive evidence
+## 3. Repo Map + Undo
 
-V1, V2, and the legacy structured-action comparison predate the current provenance
-schema or have already entered the development feedback loop. They remain useful for
-showing project evolution, but they are not the headline result and must not be read
-as a strict causal ablation or a fresh held-out claim.
+[`reliability-benchmark-v1-live-3x.md`](reliability-benchmark-v1-live-3x.md) ·
+[`frozen protocol`](reliability-benchmark-v1-protocol.md)
 
-Use the [`archive` index](archive/README.md) for those reports and their limitations.
+- 跨模块定位 3/3；
+- 两个 Undo 场景恢复 6/6；
+- 完整 workspace digest 回到运行前状态 6/6；
+- 原有脏 README 保留 3/3；
+- 九次尝试没有 model failure、Action rejection、trace parse error 或 isolation failure。
+
+## 4. 失败输出与停滞反馈
+
+[`progress-feedback-live-ab-3x.md`](progress-feedback-live-ab-3x.md)
+
+在 snapshot-matched 的 `gpt-5.4` A/B 中，candidate 通过 6/6，baseline 通过 2/6。
+pytest tail 定位从 0/3 变为 3/3；停滞恢复从 2/3 变为 3/3，并减少模型调用。
+
+## 5. 精简后的 clean-worktree 回归
+
+[`live-llm-v5-post-simplification-3x.md`](../../artifacts/live-llm-v5-post-simplification-3x.md) ·
+[`reviewed JSON`](../../artifacts/live-llm-v5-post-simplification-3x.json)
+
+删除 session-level history、无引用上下文辅助代码与重复 V4 fixture 自检后，以
+`--require-clean-worktree` 对 V5 `full` 跑三轮：`gpt-5.4` 共通过 15/15，三轮均为 5/5，
+没有 model failure 或 Action rejection。该结果只证明这次运行时精简没有使固定 V5 回归集退化。
+
+## 方法边界
+
+统一方法、快照身份、delegate 成本口径和解释限制见
+[`evaluation-methodology.md`](evaluation-methodology.md)。这些 suite 一旦被用于改进 runtime，
+就成为回归集；新的 held-out 主张需要新的未观察任务。

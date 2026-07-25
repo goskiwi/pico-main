@@ -42,7 +42,7 @@ References are resolved conservatively:
 
 The final rank combines normalized lexical and PageRank scores. Rendering applies a
 per-file diversity penalty, groups signatures by path, and rejects any addition that
-would cross the section's estimated-token budget.
+would cross the section's real tokenizer token budget.
 
 ## Context and tool paths
 

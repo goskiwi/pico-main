@@ -1,18 +1,47 @@
-"""Shared text-budget primitives for prompt context rendering."""
+"""Shared tokenizer-aware text-budget primitives for prompt rendering."""
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from typing import Callable
+
+import tiktoken
 
 
-def _tail_clip(text, limit):
-    text = str(text)
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    if limit <= 3:
-        return text[:limit]
-    return text[: limit - 3] + "..."
+DEFAULT_TOKENIZER_ENCODING = "o200k_base"
+
+
+@lru_cache(maxsize=32)
+def _encoding_for_model(model: str):
+    """Resolve the real tiktoken encoding for an OpenAI model name.
+
+    OpenAI-compatible gateways sometimes expose an alias that tiktoken does
+    not know.  Those aliases still use a real tokenizer, not a character
+    heuristic: Pico falls back to the explicit ``o200k_base`` encoding and
+    records that fallback in prompt metadata.
+    """
+    try:
+        return tiktoken.encoding_for_model(str(model or "")), True
+    except KeyError:
+        return tiktoken.get_encoding(DEFAULT_TOKENIZER_ENCODING), False
+
+
+def tokenizer_details(model: str = "") -> dict:
+    encoding, model_mapping_known = _encoding_for_model(str(model or ""))
+    return {
+        "model": str(model or ""),
+        "encoding": encoding.name,
+        "model_mapping_known": model_mapping_known,
+    }
+
+
+def count_tokens(text, *, model: str = ""):
+    """Count tokens with tiktoken instead of approximating from characters."""
+    value = str(text or "")
+    if not value:
+        return 0
+    encoding, _ = _encoding_for_model(str(model or ""))
+    return len(encoding.encode(value, disallowed_special=()))
 
 
 def _semantic_cut(text, limit):
@@ -54,41 +83,24 @@ def _semantic_cut(text, limit):
     return text[:effective] + marker
 
 
-def _token_clip(text, token_budget):
+def _token_clip(text, token_budget, *, token_counter: Callable[[str], int] = count_tokens):
     text = str(text)
     token_budget = int(token_budget or 0)
     if token_budget <= 0:
         return ""
-    if _estimate_tokens(text) <= token_budget:
+    if token_counter(text) <= token_budget:
         return text
     lo, hi = 0, len(text)
     best = ""
     while lo <= hi:
         mid = (lo + hi) // 2
         candidate = _semantic_cut(text, mid)
-        if _estimate_tokens(candidate) <= token_budget:
+        if token_counter(candidate) <= token_budget:
             best = candidate
             lo = mid + 1
         else:
             hi = mid - 1
     return best
-
-
-def _estimate_tokens(text):
-    text = str(text or "")
-    if not text:
-        return 0
-    cjk_chars = len(re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
-    other_chars = len(text) - cjk_chars
-    # Conservative approximation for mixed repo text: CJK is denser, ASCII code/prose is usually ~4 chars/token.
-    return max(1, int((cjk_chars / 1.5) + (other_chars / 4.0) + 0.999))
-
-
-def _indent_block(text, prefix="  "):
-    lines = str(text or "").splitlines()
-    if not lines:
-        return [prefix + "- none"]
-    return [prefix + line for line in lines]
 
 
 @dataclass
@@ -97,6 +109,7 @@ class SectionRender:
     budget: int
     rendered: str
     details: dict | None = None
+    token_counter: Callable[[str], int] = count_tokens
 
     @property
     def raw_chars(self):
@@ -108,11 +121,11 @@ class SectionRender:
 
     @property
     def raw_tokens(self):
-        return _estimate_tokens(self.raw)
+        return self.token_counter(self.raw)
 
     @property
     def rendered_tokens(self):
-        return _estimate_tokens(self.rendered)
+        return self.token_counter(self.rendered)
 
     @property
     def budget_tokens(self):

@@ -17,7 +17,7 @@ from .config import (
     REPO_MAP_MAX_FILES,
     REPO_MAP_PAGE_RANK_ITERATIONS,
 )
-from .context_types import _estimate_tokens, _token_clip
+from .context_types import count_tokens, _token_clip
 
 
 PYTHON_LANGUAGE = Language(tree_sitter_python.language())
@@ -153,9 +153,7 @@ class Symbol:
     qualified_name: str
     kind: str
     line: int
-    end_line: int
     signature: str
-    parent_id: str = ""
 
     @property
     def is_renderable(self):
@@ -208,10 +206,6 @@ class RankedSymbol:
 @dataclass(frozen=True)
 class RepoMapRender:
     text: str
-    selected: tuple[RankedSymbol, ...]
-    budget_tokens: int
-    estimated_tokens: int
-    truncated: bool
     details: dict = field(default_factory=dict)
 
 
@@ -221,17 +215,14 @@ class RepoMapQuery:
     ranked: tuple[RankedSymbol, ...]
     snapshot: RepoSnapshot
 
-    def render(self, budget_tokens=1600, max_results=24):
+    def render(self, budget_tokens=1600, max_results=24, *, token_counter=None):
         """Render a diverse, deterministic symbol selection within a token budget."""
         budget_tokens = max(0, int(budget_tokens))
         max_results = max(1, int(max_results))
+        token_counter = token_counter or count_tokens
         if budget_tokens == 0:
             return RepoMapRender(
                 text="",
-                selected=(),
-                budget_tokens=0,
-                estimated_tokens=0,
-                truncated=bool(self.ranked),
                 details=self._details((), truncated=bool(self.ranked)),
             )
 
@@ -240,13 +231,13 @@ class RepoMapQuery:
             "use query_repo_map or read_file for details):"
         )
         if not self.ranked:
-            text = _token_clip(header + "\n- no Python symbols found", budget_tokens)
+            text = _token_clip(
+                header + "\n- no Python symbols found",
+                budget_tokens,
+                token_counter=token_counter,
+            )
             return RepoMapRender(
                 text=text,
-                selected=(),
-                budget_tokens=budget_tokens,
-                estimated_tokens=_estimate_tokens(text),
-                truncated=False,
                 details=self._details((), truncated=False),
             )
 
@@ -263,24 +254,24 @@ class RepoMapQuery:
                 f"  L{symbol.line} {symbol.kind} {symbol.qualified_name} — {symbol.signature}"
             )
             candidate = "\n".join([*lines, *additions])
-            if _estimate_tokens(candidate) > budget_tokens:
+            if token_counter(candidate) > budget_tokens:
                 continue
             lines.extend(additions)
             accepted.append(item)
             current_path = symbol.path
 
         if not accepted:
-            text = _token_clip(header + "\n- omitted: repo-map budget is too small", budget_tokens)
+            text = _token_clip(
+                header + "\n- omitted: repo-map budget is too small",
+                budget_tokens,
+                token_counter=token_counter,
+            )
         else:
             text = "\n".join(lines)
         truncated = len(accepted) < len(self.ranked)
         accepted_tuple = tuple(accepted)
         return RepoMapRender(
             text=text,
-            selected=accepted_tuple,
-            budget_tokens=budget_tokens,
-            estimated_tokens=_estimate_tokens(text),
-            truncated=truncated,
             details=self._details(accepted_tuple, truncated=truncated),
         )
 
@@ -384,10 +375,11 @@ class RepoMap:
         )
         return RepoMapQuery(query=str(query), ranked=tuple(ranked), snapshot=snapshot)
 
-    def render(self, query, *, budget_tokens=1600, max_results=24):
+    def render(self, query, *, budget_tokens=1600, max_results=24, token_counter=None):
         return self.query(query).render(
             budget_tokens=budget_tokens,
             max_results=max_results,
+            token_counter=token_counter,
         )
 
     def refresh(self):
@@ -506,7 +498,6 @@ class RepoMap:
                 qualified_name=module_name,
                 kind="module",
                 line=1,
-                end_line=max(1, tree.root_node.end_point.row + 1),
                 signature=f"module {module_name}",
             )
         ]
@@ -536,9 +527,7 @@ class RepoMap:
                     qualified_name=qualified_name,
                     kind=kind,
                     line=node.start_point.row + 1,
-                    end_line=node.end_point.row + 1,
                     signature=signature,
-                    parent_id=current_id,
                 )
                 symbols.append(symbol)
                 references.append(

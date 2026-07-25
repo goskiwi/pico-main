@@ -13,17 +13,24 @@ def build_report(agent, task_state):
         "final_answer": task_state.final_answer,
         "tool_steps": task_state.tool_steps,
         "attempts": task_state.attempts,
+        "tool_budget": {
+            "nominal": task_state.nominal_tool_budget,
+            "hard_limit": task_state.hard_tool_limit,
+        },
         "checkpoint_id": task_state.checkpoint_id,
         "resume_status": task_state.resume_status,
         "dry_run": bool(agent.dry_run),
-        "task_graph_path": str(agent.run_store.task_graph_path(task_state.run_id)),
+        "task_canvas_path": str(agent.run_store.task_canvas_path(task_state.run_id)),
+        "offload_path": str(agent.run_store.offload_path(task_state.run_id)),
+        "phase_index_path": str(agent.run_store.phase_index_path(task_state.run_id)),
+        "task_phase_summary": agent.run_store.phase_summary(task_state.run_id),
         "agent": agent.identity_metadata(),
         "summary": build_run_summary(agent, task_state),
         "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
         "repo_map": dict((agent.last_prompt_metadata or {}).get("repo_map", {})),
         "undo": (
             agent.current_undo_journal.summary()
-            if getattr(agent, "current_undo_journal", None) is not None
+            if agent.current_undo_journal is not None
             else {
                 "schema_version": "run-undo-v1",
                 "status": "unavailable",
@@ -35,16 +42,17 @@ def build_report(agent, task_state):
             }
         ),
         "tool_audit": list(agent.tool_audit_log),
-        "model_action_rejections": list(getattr(agent, "model_action_rejections", [])),
+        "model_action_rejections": list(agent.model_action_rejections),
         "task_state": task_state.to_dict(),
         "prompt_metadata": agent.last_prompt_metadata,
         "durable_promotions": list(agent.last_durable_promotions),
         "durable_rejections": list(agent.last_durable_rejections),
         "durable_superseded": list(agent.last_durable_superseded),
-        "llm_durable_promotions": list(getattr(agent, "last_llm_durable_promotions", [])),
-        "llm_durable_rejections": list(getattr(agent, "last_llm_durable_rejections", [])),
-        "llm_durable_superseded": list(getattr(agent, "last_llm_durable_superseded", [])),
-        "llm_memory_extractor_error": str(getattr(agent, "last_llm_memory_extractor_error", "")),
+        "llm_durable_promotions": list(agent.last_llm_durable_promotions),
+        "llm_durable_rejections": list(agent.last_llm_durable_rejections),
+        "llm_durable_superseded": list(agent.last_llm_durable_superseded),
+        "llm_memory_extractor_error": str(agent.last_llm_memory_extractor_error),
+        "semantic_memory_sync": dict(agent.last_semantic_memory_sync),
         "redacted_env": security.detected_secret_env_summary(agent),
     }
 
@@ -73,6 +81,7 @@ def record_tool_audit(agent, name, args, result, duration_ms):
             metadata.get("undo_recorded_paths") or []
         ),
         "result_preview": clip(result, 200),
+        "verification": dict(metadata.get("verification") or {}),
     }
     if name == "run_shell":
         entry["command"] = clip(str((args or {}).get("command", "")), 200)
@@ -88,7 +97,13 @@ def record_tool_audit(agent, name, args, result, duration_ms):
             "pids_limit": metadata.get("sandbox_pids_limit"),
             "timed_out": bool(metadata.get("sandbox_timed_out")),
         }
-    elif name in {"read_file", "write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
+    elif name == "read_file":
+        entry["paths"] = [
+            clip(str(file_args.get("path", "")), 200)
+            for file_args in (args or {}).get("files", [])
+            if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+        ]
+    elif name in {"write_file", "patch_file", "search", "list_files", "delegate", "delegate_many"}:
         entry["path"] = clip(str((args or {}).get("path", ".")), 200)
         if name in {"delegate", "delegate_many"}:
             entry["delegate_outcome"] = dict(metadata.get("delegate_outcome") or {})
@@ -118,13 +133,17 @@ def build_run_summary(agent, task_state):
         for entry in agent.tool_audit_log
         if entry.get("security_event_type")
     ]
-    action_rejections = list(getattr(agent, "model_action_rejections", []))
+    action_rejections = list(agent.model_action_rejections)
     return {
         "task": clip(task_state.user_request, 300),
         "status": task_state.status,
         "stop_reason": task_state.stop_reason,
         "attempts": task_state.attempts,
         "tool_steps": task_state.tool_steps,
+        "tool_budget": {
+            "nominal": task_state.nominal_tool_budget,
+            "hard_limit": task_state.hard_tool_limit,
+        },
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
         "skills": list((agent.last_prompt_metadata or {}).get("skills", {}).get("selected_names", [])),

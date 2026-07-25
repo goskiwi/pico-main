@@ -6,6 +6,8 @@
 """
 
 import argparse
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import textwrap
 
 from .config import DEFAULT_APPROVAL_POLICY
 from .models import OpenAICompatibleModelClient
+from .memory import LayeredMemory, default_memory_state
 from .run_undo import RunUndoConflictError, RunUndoError, restore_run
 from .runtime import Pico
 from .sandbox import (
@@ -26,6 +29,7 @@ from .sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
 )
+from .semantic_memory import SemanticMemoryConfig, SemanticMemoryIndex
 from .session_store import SessionStore
 from .workspace import WorkspaceContext, middle
 
@@ -43,6 +47,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
+    "PICO_QDRANT_API_KEY",
+    "PICO_EMBEDDINGS_API_KEY",
     "GITHUB_PAT",
     "GH_PAT",
 )
@@ -65,7 +71,7 @@ HELP_DETAILS = textwrap.dedent(
     /help    Show this help message.
     /memory  Show the agent's working state panel.
     /session Show the path to the saved session file.
-    /reset   Clear the current session history and memory.
+    /reset   Clear the current session memory.
     /reload-skills Reload .pico/skills from disk.
     /exit    Exit the agent.
     """
@@ -77,7 +83,6 @@ DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # 环境变量名称常量
-LEGACY_SECRET_ENV_NAMES_VAR = "MINI_CODING_AGENT_SECRET_ENV_NAMES"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
 ENV_LOCAL_FILENAME = ".env.local"
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -138,7 +143,7 @@ def _effective_model(args, env=None):
     3. 代码里的默认值
     """
     env = os.environ if env is None else env
-    explicit_model = getattr(args, "model", None)
+    explicit_model = args.model
     if explicit_model:
         logger.info(f"使用用户指定的模型: {explicit_model}")
         return explicit_model
@@ -158,8 +163,6 @@ def _configured_secret_names(args, env=None):
     configured_secret_names = set(DEFAULT_SECRET_ENV_NAMES)
     configured_secret_names.update(str(name).upper() for name in args.secret_env_names)
     extra_names = env.get(SECRET_ENV_NAMES_VAR, "")
-    if not extra_names.strip():
-        extra_names = env.get(LEGACY_SECRET_ENV_NAMES_VAR, "")
     if extra_names.strip():
         configured_secret_names.update(
             item.strip().upper()
@@ -174,15 +177,20 @@ def _build_model_client(args, env=None):
     """Build Pico's sole OpenAI-compatible model client."""
     env = os.environ if env is None else env
     model = _effective_model(args, env=env)
-    base_url = getattr(args, "base_url", None) or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
+    base_url = args.base_url or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
     api_key = env.get("OPENAI_API_KEY", "")
-    logger.info(f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}")
+    reasoning_effort = env.get("OPENAI_REASONING_EFFORT", "").strip() or None
+    logger.info(
+        f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}, "
+        f"reasoning_effort: {reasoning_effort or 'provider default'}"
+    )
     return OpenAICompatibleModelClient(
         model=model,
         base_url=base_url,
         api_key=api_key,
         temperature=args.temperature,
         timeout=args.openai_timeout,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -276,19 +284,20 @@ def build_agent(args):
 
     # 构建模型客户端
     model = _build_model_client(args, env=workspace_env)
+    semantic_memory_config = SemanticMemoryConfig.from_env(workspace_env)
     sandbox_config = DockerSandboxConfig(
-        image=getattr(args, "sandbox_image", None)
+        image=args.sandbox_image
         or os.environ.get("PICO_SANDBOX_IMAGE")
         or DEFAULT_SANDBOX_IMAGE,
-        cpus=float(getattr(args, "sandbox_cpus", DEFAULT_SANDBOX_CPUS)),
-        memory=str(getattr(args, "sandbox_memory", DEFAULT_SANDBOX_MEMORY)),
-        pids_limit=int(getattr(args, "sandbox_pids_limit", DEFAULT_SANDBOX_PIDS_LIMIT)),
+        cpus=float(args.sandbox_cpus),
+        memory=str(args.sandbox_memory),
+        pids_limit=int(args.sandbox_pids_limit),
     )
     sandbox = DockerSandbox(workspace.repo_root, config=sandbox_config)
 
     # 判断是恢复旧 session 还是创建新 session
     session_id = args.resume
-    dry_run = bool(getattr(args, "dry_run", False))
+    dry_run = bool(args.dry_run)
 
     if session_id == "latest":
         session_id = store.latest()
@@ -311,6 +320,7 @@ def build_agent(args):
             dry_run=dry_run,
             secret_env_names=configured_secret_names,
             sandbox=sandbox,
+            semantic_memory_config=semantic_memory_config,
         )
 
     logger.info("创建新的 Pico 实例")
@@ -325,6 +335,7 @@ def build_agent(args):
         dry_run=dry_run,
         secret_env_names=configured_secret_names,
         sandbox=sandbox,
+        semantic_memory_config=semantic_memory_config,
     )
 
 
@@ -441,6 +452,39 @@ def build_undo_arg_parser():
     return parser
 
 
+def build_memory_sync_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="pico memory-sync",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Synchronize canonical durable Markdown memories to Qdrant.",
+    )
+    parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    return parser
+
+
+def run_memory_sync_command(argv):
+    args = build_memory_sync_arg_parser().parse_args(argv)
+    workspace = WorkspaceContext.build(args.cwd)
+    workspace_env = _load_workspace_env(args.cwd)
+    config = SemanticMemoryConfig.from_env(workspace_env)
+    if config is None:
+        print("semantic memory is not configured; set PICO_QDRANT_* and PICO_EMBEDDINGS_* in .env.local", file=sys.stderr)
+        return 1
+    workspace_id = hashlib.sha256(workspace.repo_root.encode("utf-8")).hexdigest()
+    index = SemanticMemoryIndex(config, workspace_id=workspace_id)
+    try:
+        memory = LayeredMemory(
+            default_memory_state(),
+            workspace_root=workspace.repo_root,
+            semantic_index=index,
+        )
+        result = memory.sync_semantic_memory()
+    finally:
+        index.close()
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("status") == "ok" else 1
+
+
 def run_undo_command(argv):
     args = build_undo_arg_parser().parse_args(argv)
     workspace = WorkspaceContext.build(args.cwd)
@@ -484,6 +528,8 @@ def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv and raw_argv[0] == "undo":
         return run_undo_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "memory-sync":
+        return run_memory_sync_command(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     # Parse first so ``pico --help`` remains a clean, side-effect-free CLI
     # surface instead of printing startup logs before argparse exits.
@@ -493,8 +539,8 @@ def main(argv=None):
     agent = build_agent(args)
     logger.info("Pico agent 构建完成")
 
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL))
-    base_url = getattr(agent.model_client, "base_url", getattr(args, "base_url", DEFAULT_OPENAI_BASE_URL))
+    model = agent.model_client.model
+    base_url = agent.model_client.base_url
     print(build_welcome(agent, model=model, host=base_url))
 
     if args.prompt:
@@ -516,7 +562,7 @@ def main(argv=None):
     logger.info("进入交互模式")
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 session history 和 working memory 会跨轮延续。
+        # 因此 working memory 和 checkpoint 会跨轮延续。
         try:
             user_input = input("\npico> ").strip()
         except (EOFError, KeyboardInterrupt):

@@ -499,20 +499,30 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                 "patch_file",
             }:
                 continue
-            raw_path = str((event.get("args") or {}).get("path", ".")).strip() or "."
-            candidate = Path(raw_path)
-            if not candidate.is_absolute():
-                candidate = expected_root / candidate
-            if not _path_is_within(candidate, expected_root):
-                add_violation(
-                    "tool_path_outside_workspace",
-                    run_id,
-                    tool=name,
-                    path=raw_path,
-                )
+            args = event.get("args") or {}
+            raw_paths = (
+                [
+                    str(file_args.get("path", "")).strip()
+                    for file_args in args.get("files", [])
+                    if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
+                ]
+                if name == "read_file"
+                else [str(args.get("path", ".")).strip() or "."]
+            )
+            for raw_path in raw_paths:
+                candidate = Path(raw_path)
+                if not candidate.is_absolute():
+                    candidate = expected_root / candidate
+                if not _path_is_within(candidate, expected_root):
+                    add_violation(
+                        "tool_path_outside_workspace",
+                        run_id,
+                        tool=name,
+                        path=raw_path,
+                    )
 
         artifact_paths = [trace_path, run_dir / "report.json"]
-        artifact_paths.extend(sorted((run_dir / "tool_outputs").glob("*.txt")))
+        artifact_paths.extend(sorted((run_dir / "refs").glob("*.txt")))
         for artifact_path in artifact_paths:
             if not artifact_path.is_file():
                 continue
@@ -534,7 +544,7 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                     artifact=str(artifact_path.relative_to(run_dir)),
                 )
 
-        for output_path in sorted((run_dir / "tool_outputs").glob("*_search.txt")):
+        for output_path in sorted((run_dir / "refs").glob("*_search.txt")):
             for line in output_path.read_text(
                 encoding="utf-8", errors="replace"
             ).splitlines():

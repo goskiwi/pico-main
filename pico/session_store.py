@@ -33,13 +33,11 @@ class SessionStore:
     def load(self, session_id):
         return json.loads(self.path(session_id).read_text(encoding="utf-8"))
 
-    def latest(self, *, include_children=False):
+    def latest(self):
         """Return the newest resumable session.
 
         Delegate sessions are audit artifacts, not interactive conversations,
-        so ``--resume latest`` must not select them.  Sessions written before
-        ``session_kind`` existed remain resumable and are treated as main
-        sessions for backward compatibility.
+        so ``--resume latest`` must not select them.
         """
         files = sorted(
             self.root.glob("*.json"),
@@ -47,15 +45,12 @@ class SessionStore:
             reverse=True,
         )
         for path in files:
-            if include_children:
-                return path.stem
             try:
                 session = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             if not isinstance(session, dict):
                 continue
-            session_kind = session.get("session_kind")
-            if session_kind is None or session_kind == "main":
+            if session.get("session_kind") == "main":
                 return path.stem
         return None

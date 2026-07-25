@@ -1,11 +1,11 @@
 import subprocess
 from types import SimpleNamespace
 
-from pico.models import FakeModelClient
 from pico.runtime import Pico
 from pico.sandbox import SandboxResult
 from pico.session_store import SessionStore
 from pico.workspace import WorkspaceContext
+from tests.fakes import FakeModelClient
 
 
 class UnitTestSandbox:
@@ -66,7 +66,7 @@ def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
-    feature_flags = {"llm_memory_extract": False, "llm_history_compaction": False}
+    feature_flags = {"llm_memory_extract": False}
     feature_flags.update(kwargs.pop("feature_flags", {}) or {})
     sandbox = kwargs.pop("sandbox", UnitTestSandbox(tmp_path))
     return Pico(

@@ -719,7 +719,7 @@ class ReliabilityBenchmarkRunner:
             if path.is_dir() and path.name not in existing_run_ids
         ]
         attempt_trace = evidence._attempt_trace_metrics(
-            run_store.run_dir(task_state),
+            run_store.run_dir(task_state.run_id),
             run_dirs,
             workspace_root,
         )

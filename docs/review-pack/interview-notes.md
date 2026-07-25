@@ -1,82 +1,117 @@
-# pico 秋招面试讲稿
+# pico 面试讲稿
 
 ## 30 秒项目介绍
 
-pico 是一个面向本地代码仓库的轻量 coding agent runtime，不是简单的 LLM API 包装。它包含受约束的文件/命令工具、强制 Docker 沙箱、上下文和记忆管理、checkpoint、逐事件审计，以及带隐藏测试的真实模型仓库微基准。我的重点不是做一个大而全的平台，而是把“模型动作如何可靠进入工程控制流”做完整。
+`pico` 是一个本地 coding agent runtime，重点不是接通 LLM，而是解决三个工程问题：
+如何在有限 token 内选对上下文，如何让工具调用持续、受控且可恢复，以及如何在不破坏用户 Git
+状态的前提下撤销一次 Agent 修改。
 
-## 最值得讲的亮点
+我的主线是“上下文选择 → 受控执行 → 可审计恢复”；真实模型 fixture 与隐藏 verifier 用来验证
+这些设计，而不是只展示 demo。
 
-原始版本让模型输出 XML/JSON 文本，再由 runtime 猜测它是工具调用还是最终答案。这种方式容易出现格式错误、混入解释文字、重复读取，以及结束条件不明确。
+## 最值得讲的亮点：任务相关上下文，而不是历史拼接
 
-改造后，OpenAI-compatible 主循环把所有工具暴露为 strict functions，并增加独立的 `submit_final`：
+直接把仓库全文或整段聊天历史塞进 prompt 会浪费 token，也会让干扰实现稀释注意力。`pico` 用
+真实 `tiktoken` 计数分配预算：Repo Map 用 tree-sitter 构建符号图与 Personalized PageRank，
+工作记忆保存当前任务事实，Markdown durable memory 通过 Qdrant 做混合召回。
+
+它既能自动注入每轮上下文，也暴露只读 `query_repo_map`，让模型对新的子问题重新排序。向量库
+只是 Markdown 事实的可丢弃检索镜像，不索引源码或工具输出；源码真相仍通过工具读取。
+
+另一个关键取舍是：Mermaid task canvas 只做 UI、审计和上下文溢出后的恢复导航；它不会替代
+provider 会话中的原始 tool result。这样 patch 与测试修复仍基于精确证据，而画布可以阶段折叠。
+
+## 第二亮点：连续工具会话与有界恢复
+
+Responses 的 function-call output 会原样回放到同一 provider 会话，不会每个工具调用后重新拼
+一份“历史 prompt”。只有 provider 明确报告 context overflow 时，runtime 才重建一次受 tokenizer
+约束的恢复包；第二次溢出透明停止，避免反复摘要导致细节悄悄丢失。
+
+这不是只靠单元测试的取舍：删除重复的 session history 后，`gpt-5.4` 在 clean worktree 的
+V5 `full` 三轮中通过 15/15，且没有 model failure 或 Action rejection。它验证的是这次简化没有
+损失固定回归集的端到端行为，不是泛化能力排名。
+
+## 第三亮点：可恢复但不改写 Git
+
+自动 commit + `git reset` 会污染用户分支、index 和已有脏文件。`pico` 改为 run-level Undo：
 
 ```text
-prompt
-  -> function_call(name, arguments, call_id)
-  -> 本地参数校验 / 审批 / Docker 工具执行
-  -> function_call_output(call_id, result)
-  -> 下一次结构化 Action
+写操作前记录首触前像
+  -> 执行工具
+  -> 记录实际变化路径与运行后状态
+  -> Undo 时全量冲突预检
+  -> 全部安全才逐路径恢复
 ```
 
-主循环只处理统一的 `ModelAction(tool | final | retry)`。兼容端点不保存 `previous_response_id` 时，客户端会重发结构化 conversation items，而不是退回文本协议。非法参数、缺失调用和运行时拒绝都会进入 `trace.jsonl` 与 `report.json`。
+如果 Agent 结束后用户又修改了任一路径，整次恢复拒绝，不会恢复一半。原本已经 dirty 的文件会
+回到 Agent 开始前的 dirty 内容，而不是回到 `HEAD`。
 
-## 用数据说明证据
-
-早期在同一个 `gpt-5.4`、同一组 10 个 task ID、同一 fixture snapshot 上观察到：
-
-| 指标 | 文本/XML | Structured Actions |
-|---|---:|---:|
-| 隐藏测试通过率 | 60% | 90% |
-| 平均模型调用 | 9.50 | 6.40 |
-| Action 格式拒绝 | 未单独记录 | 0 |
-
-旧 artifact 没有记录完整 runtime snapshot 和 working-tree dirty 状态，因此不能声称协议是唯一变量。
-面试时把它表述为促使后续实验设计升级的历史观察，不包装成严格因果消融。
-
-当前主证据是冻结 V3：在干净 commit 上运行 3 轮共通过 13/15，4/5 任务稳定 3/3。所有 verifier
-都在 Agent 停止后注入，并在无网络 Docker 中执行。后续提示实验降到 12/15 后被回滚，这段失败
-分析比单次成功 demo 更能说明评测闭环。
+真实可靠性回归中，Repo Map 定位 3/3，两个 Undo 场景 6/6 恢复，完整 workspace digest 6/6
+回到运行前状态，原有脏 README 3/3 被保留。
 
 ## 2 分钟架构讲解
 
-1. `ContextManager` 把稳定规则、memory、history 和当前请求按预算组 prompt。
-2. OpenAI-compatible client 通过 strict function calling 返回 `ModelAction`。
-3. `agent_loop` 执行有界循环，工具先经过 schema、路径、read-only、approval 和危险命令校验。
-4. `run_shell` 没有宿主机回退，只能进入 4 CPU / 4 GB / 512 PIDs、无网络、只读根文件系统的 Docker 容器。
-5. 每一步写入 task state、trace、checkpoint、task graph 和最终 report，便于恢复、复盘和评测。
+1. `RepoMap`、工作记忆与语义记忆由 `ContextManager` 按真实 token 预算组装。
+2. Responses strict function calling 返回统一 `ModelAction(tool | final | retry)`，工具输出保留在
+   provider 会话。
+3. `agent_loop` 执行有界状态转换，并只在明确溢出时进行一次恢复。
+4. `tools.py` 用同一份 Pydantic model 做 schema、提示展示和本地校验。
+5. 高风险动作经过 capability、approval 和危险命令检查；`run_shell` 只能进无网络、只读 RootFS、
+   资源受限的 Docker。
+6. task state、trace、完整工具输出、阶段折叠的 canvas 和 Undo journal 分层落盘。
 
 ## 面试官可能追问
 
-### 为什么不直接解析 JSON？
+### 为什么 provider strict schema 之后还要本地校验？
 
-JSON 仍是字符串，模型可能在前后加解释、给出多个动作或输出半截内容。function calling 把“选哪个动作”和“参数是什么”放到 provider 协议中；runtime 仍保留自己的 schema 与权限校验，不能因为 provider 声称 strict 就跳过本地边界。
+Provider 只负责输出形状，不能替代本地权限边界。调用可能来自兼容端点、重放 artifact 或未来的
+其他入口；路径保护、read-only、approval 和危险命令规则都必须由 runtime 自己执行。
 
-### 为什么需要 submit_final？
+### 为什么画布不直接替代即时上下文？
 
-最终回答也是状态转换。显式函数让 runtime 能在结束前执行“必须有有效 workspace change”等 guard；被拒绝时可把原因作为对应 call 的结果返回模型，而不是把自然语言误当完成。
+画布是低 token 的任务导航和审计视图，适合折叠旧步骤；但 patch、测试失败和冲突恢复需要完整
+源码与原始工具输出。即时上下文由 provider 会话保存精确证据，画布只在该会话确实溢出时提供
+可控的恢复入口。
 
-### 为什么不用 previous_response_id？
+### 为什么需要 Qdrant，又不把代码放进去？
 
-测试的 compatible endpoint 返回 response ID，但不保存服务端状态。客户端因此维护并重发 `function_call` 和 `function_call_output` items。代价是输入会增长，优点是行为可审计、端点无状态也能工作。
+它解决的是用户偏好、项目约束、反馈等稳定 Markdown 记忆的语义改写召回。代码会变，且需要
+行级精确性，因此仍由 Repo Map 定位、工具读取；Qdrant 只存可重建的检索镜像。
+
+### 为什么还要 LangGraph，普通 while 循环不够吗？
+
+普通循环完全可以实现当前控制流。这里使用 LangGraph 的价值是把 model、tool、retry、final
+转换显式化，便于以后增加分支；但 durable state、checkpoint、trace 和恢复语义仍由 Pico 自己
+维护，而不是把框架的内存状态当作持久化边界。如果项目规模继续保持当前大小，移除 LangGraph
+也是合理的依赖简化方向。
+
+### Repo Map 会不会把同名调用连错？
+
+会。当前实现是轻量静态近似，不做完整类型推断或动态分派分析；同名符号、运行时导入和反射都会
+产生歧义。项目通过 import、containment、测试关联和词法命中共同排序，并保留 `query_repo_map`
+与文件工具供模型二次确认。它解决的是预算内的候选定位，不声称构建精确调用图。
+
+### 为什么不把 Repo Map 预算直接降到 600？
+
+V5 预先规定：600 cap 至少 13/15、不能低于动态预算、每次成功尝试成本至少下降 5%，才改默认。
+实际两边都是 14/15，但成本只下降 3.36%，所以没有为了一个看起来更小的数字改默认。这说明项目
+会用门槛做工程决策，而不是看到一次正结果就上线。
+
+### Docker 就等于安全吗？
+
+不是。这里的边界是本地执行 containment：无网络、只读容器 RootFS、capability drop 和资源限制。
+Workspace 仍需可写，Docker daemon、本地模型端点、多租户身份和供应链安全都在项目边界之外。
 
 ### 这是不是生产级 Agent 平台？
 
-不是。它是本地单用户 runtime。生产化仍需要远程隔离执行、多租户身份与配额、集中式 secret manager、持久队列、幂等任务、横向扩容、限流重试、监控告警和供应链策略。项目刻意把边界写清楚，避免用“本地 Docker + trace”冒充完整生产平台。
-
-### 4 CPU / 4 GB / 512 PIDs 合理吗？
-
-它是适合当前 Python 小仓库测试镜像的默认上限，不是安全常数。面试时强调三点：资源必须有界；默认值要避免测试框架正常并发被误杀；CPU、内存和 PID 上限可通过 CLI 参数按仓库调整。安全边界还包括无网络、只读容器根文件系统和 workspace 定向挂载；支持其他语言需要另行构建包含对应工具链的镜像。
+不是。它是本地单用户 runtime。生产化仍需要远程隔离池、多租户身份与配额、集中式 secret
+manager、持久队列、幂等任务、监控告警和供应链策略。
 
 ## 3 分钟演示顺序
 
-1. 展示 `pico/actions.py` 和 `pico/tools.py` 的 strict function schema。
-2. 展示一条 run 的 `trace.jsonl`：`model_parsed -> tool_executed -> checkpoint_created`。
-3. 展示 V3 clean-worktree 三轮报告、失败分类和后续负向实验回滚。
-4. 展示 frozen manifest 与隐藏 verifier，说明它们在 Agent 结束后才注入。
-5. 最后主动说明本地单用户边界与仓库微基准的外部有效性限制。
-
-## 投递前检查
-
-1. 确认工作区干净，提交历史能按功能、验证和证据顺序阅读。
-2. 运行离线测试、Docker integration suite 和 runtime package smoke test。
-3. 不提交 API Key、`.pico/` 运行目录或 benchmark workspace 副本；只保留已脱敏的指标、报告、fixture 和 verifier。
+1. 展示 `pico/context_manager.py` 的预算和 `pico/repo_map.py` 的 symbol graph 排序入口。
+2. 展示一次 run 的连续 tool output、`task.mmd`、`phases/`、`offload.jsonl` 和 `refs/`。
+3. 展示 `pico/tools.py` 的单一 Pydantic schema 和 `pico/sandbox.py`。
+4. 展示 `undo/manifest.json`，再用 reliability 报告说明脏文件恢复和 digest 验证。
+5. 用 V5 预算门槛说明为什么保持动态默认，而不是追求更小数字。
+6. 最后主动说明本地单用户与微基准的外部有效性边界。

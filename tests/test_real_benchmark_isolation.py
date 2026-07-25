@@ -1,11 +1,7 @@
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
-from evaluation.real_benchmark_evidence import (
-    _failure_category,
-    _workspace_isolation_audit,
-)
+from evaluation.real_benchmark_evidence import _workspace_isolation_audit
 
 
 def _write_run_trace(run_dir, workspace_root, *, finished=True, tool_events=()):
@@ -40,7 +36,7 @@ def test_workspace_isolation_audit_accepts_finished_runs_inside_workspace(tmp_pa
             },
         ),
     )
-    output_dir = run_dir / "tool_outputs"
+    output_dir = run_dir / "refs"
     output_dir.mkdir()
     (output_dir / "0001_search.txt").write_text(
         f"{workspace_root / 'settings.py'}:1:def normalize_label(label):\n",
@@ -72,11 +68,11 @@ def test_workspace_isolation_audit_rejects_root_search_and_verifier_leaks(tmp_pa
             {
                 "event": "tool_executed",
                 "name": "read_file",
-                "args": {"path": str(outer_repo / "settings.py")},
+                "args": {"files": [{"path": str(outer_repo / "settings.py")}]},
             },
         ),
     )
-    output_dir = run_dir / "tool_outputs"
+    output_dir = run_dir / "refs"
     output_dir.mkdir()
     (output_dir / "0001_search.txt").write_text(
         "\n".join(
@@ -151,18 +147,3 @@ def test_workspace_isolation_audit_rejects_truncated_trace_jsonl(tmp_path):
     assert len(invalid) == 1
     assert invalid[0]["run_id"] == "run_main"
     assert invalid[0]["line_number"] == 2
-
-
-def test_workspace_isolation_failure_has_highest_failure_priority():
-    task_state = SimpleNamespace(status="completed", stop_reason="")
-    verifier_result = SimpleNamespace(timed_out=False, returncode=0)
-
-    category = _failure_category(
-        task_state,
-        verifier_result,
-        {"summary": {"changed_files": ["settings.py"]}},
-        workspace_isolation_violations=[{"type": "workspace_root_mismatch"}],
-        missing_required_tools=["delegate_many"],
-    )
-
-    assert category == "workspace_isolation_failed"

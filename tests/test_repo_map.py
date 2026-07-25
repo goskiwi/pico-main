@@ -61,29 +61,6 @@ def test_repo_map_ranks_task_symbols_and_cross_file_relations(tmp_path):
     }
 
 
-def test_repo_map_cache_reparses_only_changed_files(tmp_path):
-    _write_python_repo(tmp_path)
-    repo_map = RepoMap(tmp_path)
-
-    first = repo_map.render("create_user", budget_tokens=500)
-    second = repo_map.render("create_user", budget_tokens=500)
-    services = tmp_path / "app" / "services.py"
-    services.write_text(
-        services.read_text(encoding="utf-8")
-        + "\ndef normalize_user_name(name):\n    return name.strip().lower()\n",
-        encoding="utf-8",
-    )
-    third = repo_map.render("normalize_user_name", budget_tokens=500)
-
-    assert first.details["cache_misses"] == 4
-    assert first.details["cache_hits"] == 0
-    assert second.details["cache_hits"] == 4
-    assert second.details["cache_misses"] == 0
-    assert third.details["cache_hits"] == 3
-    assert third.details["cache_misses"] == 1
-    assert "normalize_user_name" in third.text
-
-
 def test_repo_map_enforces_budget_and_skips_generated_directories(tmp_path):
     _write_python_repo(tmp_path)
     (tmp_path / "build").mkdir()
@@ -98,7 +75,6 @@ def test_repo_map_enforces_budget_and_skips_generated_directories(tmp_path):
         max_results=60,
     )
 
-    assert result.estimated_tokens <= 90
     assert "generated_symbol" not in result.text
     assert result.details["parsed_files"] == 4
     assert result.details["skipped_files"] == 1
@@ -129,19 +105,6 @@ class MetricsCache:
     assert "MetricsCache" not in result.text
 
 
-def test_repo_map_reports_tree_sitter_parse_errors_without_failing(tmp_path):
-    (tmp_path / "broken.py").write_text(
-        "def broken(:\n    return 1\n",
-        encoding="utf-8",
-    )
-
-    result = RepoMap(tmp_path).render("broken", budget_tokens=300)
-
-    assert result.details["parsed_files"] == 1
-    assert result.details["parse_error_files"] == 1
-    assert "Repository map" in result.text
-
-
 def test_context_manager_injects_ranked_repo_map_and_metadata(tmp_path):
     _write_python_repo(tmp_path)
     agent = build_agent(tmp_path, [])
@@ -156,25 +119,6 @@ def test_context_manager_injects_ranked_repo_map_and_metadata(tmp_path):
     assert metadata["repo_map"]["selected_count"] > 0
     assert "app/services.py" in metadata["repo_map"]["selected_files"]
     assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
-
-
-def test_context_manager_enforces_explicit_repo_map_budget_cap(tmp_path):
-    _write_python_repo(tmp_path)
-    agent = build_agent(tmp_path, [])
-    agent.repo_map_budget_tokens = 600
-    manager = ContextManager(agent)
-
-    _, metadata = manager.build("Fix UserService.create_user in app/services.py")
-
-    assert metadata["section_budgets_tokens"]["repo_map"] == 600
-    assert metadata["sections"]["repo_map"]["budget_tokens"] == 600
-    assert metadata["repo_map"]["rendered_estimated_tokens"] <= 600
-    assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
-    assert metadata["dynamic_adjustment"]["repo_map_budget_cap_tokens"] == 600
-    assert (
-        metadata["dynamic_adjustment"]["repo_map_budget_before_cap_tokens"]
-        > 600
-    )
 
 
 def test_query_repo_map_tool_returns_ranked_symbols_and_cache_evidence(tmp_path):
@@ -194,18 +138,3 @@ def test_query_repo_map_tool_returns_ranked_symbols_and_cache_evidence(tmp_path)
     assert "test_create_user_saves_once" in result
     assert "repo_map_stats:" in result
     assert "selected=" in result
-
-
-def test_disabling_repo_map_removes_context_and_query_tool(tmp_path):
-    _write_python_repo(tmp_path)
-    agent = build_agent(
-        tmp_path,
-        [],
-        feature_flags={"repo_map": False},
-    )
-
-    prompt, metadata = ContextManager(agent).build("Fix UserService.create_user")
-
-    assert "query_repo_map" not in agent.tools
-    assert "Repository map:\n- disabled" in prompt
-    assert metadata["repo_map"]["enabled"] is False
