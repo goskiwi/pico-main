@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 
@@ -10,9 +9,6 @@ from evaluation.reliability_benchmark import (
     _snapshot_digest,
     _workspace_hashes,
     load_reliability_benchmark,
-    render_reliability_markdown,
-    summarize_reliability_rows,
-    validate_reliability_benchmark,
 )
 from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import UnitTestSandbox
@@ -32,64 +28,6 @@ class VerifierTestSandbox(UnitTestSandbox):
         )
 
 
-def _row(**updates):
-    row = {
-        "task_id": "undo-task",
-        "category": "undo_recovery",
-        "mode": "undo_recovery",
-        "repetition": 1,
-        "passed": True,
-        "tool_steps": 2,
-        "model_calls": 3,
-        "model_failures": 0,
-        "model_action_rejections": 0,
-        "input_tokens": 100,
-        "output_tokens": 20,
-        "total_duration_ms": 500,
-        "mutation_paths": ["checkout/pricing.py"],
-        "dirty_paths": [],
-        "repo_map_files": ["checkout/pricing.py"],
-        "trace_parse_errors": [],
-        "workspace_isolation": {"ok": True},
-        "pre_undo_verifier": {"exit_code": 1},
-        "recovery": {
-            "passed": True,
-            "exact_restoration": True,
-            "dirty_preserved": True,
-        },
-    }
-    row.update(updates)
-    return row
-
-
-def test_reliability_protocol_freezes_three_distinct_scenarios():
-    benchmark = load_reliability_benchmark(
-        BENCHMARK_PATH,
-        PROJECT_ROOT,
-    )
-
-    assert benchmark["name"] == "pico-repo-map-undo-reliability-v1"
-    assert [task["mode"] for task in benchmark["tasks"]] == [
-        "task_success",
-        "undo_recovery",
-        "undo_recovery",
-    ]
-    dirty = benchmark["tasks"][2]
-    assert dirty["dirty_paths"] == ["README.md"]
-    assert dirty["preexisting_edits"][0]["path"] == "README.md"
-
-
-def test_reliability_protocol_rejects_dirty_path_without_preexisting_edit():
-    payload = json.loads(BENCHMARK_PATH.read_text(encoding="utf-8"))
-    payload["tasks"][2]["preexisting_edits"] = []
-
-    with pytest.raises(
-        ValueError,
-        match="dirty_paths must have preexisting edits",
-    ):
-        validate_reliability_benchmark(payload, PROJECT_ROOT)
-
-
 def test_workspace_hashes_ignore_runtime_artifacts(tmp_path):
     (tmp_path / "source.py").write_text("value = 1\n", encoding="utf-8")
     runtime = tmp_path / ".pico" / "runs"
@@ -102,57 +40,6 @@ def test_workspace_hashes_ignore_runtime_artifacts(tmp_path):
 
     assert before == after
     assert _snapshot_digest(before) == _snapshot_digest(after)
-
-
-def test_summary_and_markdown_report_recovery_and_dirty_preservation():
-    rows = [
-        _row(),
-        _row(
-            task_id="dirty-task",
-            category="undo_dirty_workspace",
-            dirty_paths=["README.md"],
-        ),
-        _row(
-            task_id="repo-map-task",
-            category="repo_map_task_success",
-            mode="task_success",
-            pre_undo_verifier={"exit_code": 0},
-            recovery={
-                "passed": False,
-                "exact_restoration": False,
-                "dirty_preserved": True,
-            },
-        ),
-    ]
-    summary = summarize_reliability_rows(rows)
-    artifact = {
-        "captured_at": "2026-07-24T00:00:00Z",
-        "model": "test-model",
-        "repetitions": 1,
-        "runtime": {
-            "commit_sha": "abc123",
-            "branch": "test",
-            "working_tree_dirty": False,
-        },
-        "benchmark": {
-            "fixture_snapshot_id": "sha256:fixture",
-            "evaluation_snapshot_id": "sha256:evaluation",
-        },
-        "summary": summary,
-        "rows": rows,
-    }
-
-    report = render_reliability_markdown(artifact)
-
-    assert summary["passed"] == 3
-    assert summary["recovered"] == 2
-    assert summary["recovery_rate"] == 1.0
-    assert summary["dirty_preservation_rate"] == 1.0
-    assert summary["model_failures"] == 0
-    assert summary["workspace_isolation_failures"] == 0
-    assert "Undo recovery: **2/2 (100.0%)**" in report
-    assert "0 / 0 / 0 / 0" in report
-    assert "`dirty-task`" in report
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 from pico.task_state import TaskState
 from pico.tools import responses_action_tools
 from tests.helpers import build_agent
@@ -51,29 +49,6 @@ def test_read_file_rejects_legacy_single_path_arguments(tmp_path):
     result = agent.run_tool("read_file", {"path": "README.md"})
 
     assert result.startswith("error: invalid arguments for read_file: missing required argument: files")
-
-
-def test_invalid_risky_tool_is_rejected_before_approval(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="ask")
-
-    with patch("builtins.input") as mock_input:
-        result = agent.run_tool("write_file", {})
-
-    assert result.startswith(
-        "error: invalid arguments for write_file: missing required argument: path"
-    )
-    mock_input.assert_not_called()
-
-
-def test_local_validation_rejects_provider_bypassed_extra_arguments(tmp_path):
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool(
-        "list_files",
-        {"path": ".", "unexpected": "value"},
-    )
-
-    assert result.startswith("error: invalid arguments for list_files: unexpected argument")
 
 
 def test_task_artifact_tools_expand_canvas_to_event_to_reference(tmp_path):

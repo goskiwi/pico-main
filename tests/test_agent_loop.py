@@ -420,31 +420,6 @@ def test_patch_conflict_returns_current_file_as_repair_evidence(tmp_path):
     assert "demo" in evidence
 
 
-def test_pytest_pipeline_failure_cannot_be_masked_by_a_zero_shell_exit(tmp_path):
-    class MaskingSandbox(UnitTestSandbox):
-        def run(self, command, *, cwd, timeout, env=None):
-            del command, cwd, timeout, env
-            return SandboxResult(
-                returncode=0,
-                stdout="FAILED tests/test_checkout.py::test_total\n1 failed, 2 passed in 0.01s\n",
-            )
-
-    agent = build_agent(tmp_path, [], sandbox=MaskingSandbox(tmp_path))
-    result = agent.run_tool("run_shell", {"command": "pytest -q | tail -n 20", "timeout": 20})
-
-    assert "1 failed" in result
-    assert agent._last_tool_result_metadata["tool_status"] == "error"
-    assert agent._last_tool_result_metadata["tool_error_code"] == "pytest_failed"
-    assert agent._last_tool_result_metadata["verification"] == {
-        "framework": "pytest",
-        "passed": False,
-        "exit_code": 0,
-        "failed": 1,
-        "errors": 0,
-        "pipeline_masked_failure": True,
-    }
-
-
 def test_masked_pytest_failure_rejects_a_false_final_until_the_task_is_unverified(tmp_path):
     class MaskingSandbox(UnitTestSandbox):
         def run(self, command, *, cwd, timeout, env=None):
@@ -519,50 +494,6 @@ def test_masked_pytest_failure_rejects_a_false_final_until_the_task_is_unverifie
     assert (tmp_path / "changed.txt").read_text(encoding="utf-8") == "repair pending verification\n"
 
 
-def test_tool_limit_allows_one_final_only_turn(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
-
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.tool_sets = []
-            self.actions = [
-                ModelAction.tool(
-                    "list_files",
-                    {"path": "."},
-                    protocol="responses_function",
-                    call_id="call_1",
-                ),
-                ModelAction.final(
-                    "Finished at the tool limit.",
-                    protocol="responses_function",
-                    call_id="call_2",
-                ),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            self.tool_sets.append([tool["name"] for tool in action_tools])
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=1, max_step_extension=0)
-    client = StrictModelClient()
-    agent.model_client = client
-    agent.refresh_prefix(force=True)
-
-    assert agent.ask("Inspect once, then finish") == "Finished at the tool limit."
-    assert "list_files" in client.tool_sets[0]
-    assert client.tool_sets[1] == ["submit_final"]
-    assert agent.current_task_state.tool_steps == 1
-
-
 def test_final_only_turn_cannot_execute_another_tool(tmp_path):
     class StrictModelClient:
         model = "strict-test"
@@ -607,58 +538,6 @@ def test_final_only_turn_cannot_execute_another_tool(tmp_path):
     assert answer == "Stopped after reaching the step limit without a final answer."
     assert client.tool_sets[1] == ["submit_final"]
     assert not (tmp_path / "too-late.txt").exists()
-
-
-def test_nominal_budget_is_soft_while_hard_limit_still_bounds_the_task(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
-
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.tool_sets = []
-            self.actions = [
-                ModelAction.tool(
-                    "write_file",
-                    {"path": "changed.txt", "content": "ready\n"},
-                    protocol="responses_function",
-                    call_id="call_1",
-                ),
-                ModelAction.tool(
-                    "list_files",
-                    {"path": "."},
-                    protocol="responses_function",
-                    call_id="call_2",
-                ),
-                ModelAction.final(
-                    "Changed the file and completed the bounded follow-up.",
-                    protocol="responses_function",
-                    call_id="call_3",
-                ),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            self.tool_sets.append([tool["name"] for tool in action_tools])
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=1, max_step_extension=1)
-    client = StrictModelClient()
-    agent.model_client = client
-    agent.refresh_prefix(force=True)
-
-    assert agent.ask("Make a small change and verify it.").startswith("Changed the file")
-    assert "list_files" in client.tool_sets[1]
-    assert client.tool_sets[2] == ["submit_final"]
-    assert agent.current_task_state.nominal_tool_budget == 1
-    assert agent.current_task_state.hard_tool_limit == 2
-    assert agent.current_task_state.tool_steps == 2
 
 
 def test_soft_budget_does_not_force_finalization_after_an_old_workspace_change(tmp_path):

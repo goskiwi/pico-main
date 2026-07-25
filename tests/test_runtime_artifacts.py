@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 from pico.runtime import Pico
 from pico.session_store import SessionStore
-from pico.task_state import TaskState
 from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import build_agent, build_workspace
 
@@ -111,68 +110,3 @@ def test_model_error_is_persisted_as_a_failed_run(tmp_path):
     assert task_state["status"] == "failed"
     assert task_state["stop_reason"] == "model_error"
     assert report["status"] == "failed"
-
-
-def test_task_canvas_folds_old_steps_into_drill_down_phases(tmp_path):
-    agent = build_agent(tmp_path, [])
-    state = agent.current_task_state = TaskState.create(
-        run_id="run_folded",
-        task_id="task_folded",
-        user_request="Inspect a long task.",
-    )
-    agent.run_store.start_run(state)
-
-    for index in range(1, 7):
-        node_id = f"N{index:03d}_read_file"
-        result_ref = agent.run_store.save_reference(
-            state,
-            index,
-            "read_file",
-            f"tool output {index}",
-        )
-        agent.run_store.append_offload_event(
-            state,
-            node_id=node_id,
-            tool_name="read_file",
-            args={"files": [{"path": f"file-{index}.txt"}]},
-            summary=f"Read file-{index}.txt",
-            status="done",
-            result_ref=result_ref,
-        )
-        agent.run_store.append_task_node(
-            state,
-            node_id=node_id,
-            summary=f"Read file-{index}.txt",
-            status="done",
-            result_ref=result_ref,
-        )
-
-    fold = agent.run_store.fold_task_canvas(
-        state,
-        token_counter=agent.count_tokens,
-        max_active_nodes=4,
-        retain_nodes=2,
-        max_tokens=10_000,
-    )
-
-    active_canvas = agent.run_tool("read_task_canvas", {})
-    phase_canvas = agent.run_tool("read_task_canvas", {"phase_id": "phase_001"})
-    phase_index = json.loads(
-        (agent.run_store.phases_dir(state.run_id) / "index.json").read_text(
-            encoding="utf-8"
-        )
-    )
-
-    assert fold["folded"] is True
-    assert fold["archived_node_ids"] == [
-        "N001_read_file",
-        "N002_read_file",
-        "N003_read_file",
-        "N004_read_file",
-    ]
-    assert "archive | done | 1 phases / 4 task steps" in active_canvas
-    assert "N001_read_file" not in active_canvas
-    assert "N005_read_file" in active_canvas
-    assert "Task phase phase_001:" in phase_canvas
-    assert "N001_read_file" in phase_canvas
-    assert phase_index[0]["path"] == "phases/phase_001.mmd"

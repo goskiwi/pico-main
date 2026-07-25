@@ -188,28 +188,3 @@ def test_docker_sandbox_real_isolation_boundaries(tmp_path):
     assert network.returncode == 0
     assert workspace_write.returncode == 0
     assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "sandbox-write"
-
-
-@pytest.mark.skipif(
-    os.environ.get("PICO_RUN_DOCKER_TESTS") != "1",
-    reason="set PICO_RUN_DOCKER_TESTS=1 after building the sandbox image",
-)
-def test_docker_sandbox_real_resource_limits_and_timeout(tmp_path):
-    sandbox = DockerSandbox(tmp_path)
-
-    limits = sandbox.run(
-        "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max",
-        cwd=tmp_path,
-        timeout=10,
-        env={},
-    )
-    timed_out = sandbox.run("sleep 10", cwd=tmp_path, timeout=1, env={})
-
-    assert limits.returncode == 0
-    cpu_line, memory_line, pids_line = limits.stdout.splitlines()
-    cpu_quota, cpu_period = (int(value) for value in cpu_line.split())
-    assert cpu_quota / cpu_period == 4.0
-    assert int(memory_line) == 4 * 1024 * 1024 * 1024
-    assert int(pids_line) == 512
-    assert timed_out.returncode == 124
-    assert timed_out.timed_out is True

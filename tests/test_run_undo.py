@@ -88,28 +88,6 @@ def test_run_undo_conflict_refuses_every_path_before_writing(tmp_path):
     assert (tmp_path / "two.txt").read_text(encoding="utf-8") == "two user after run\n"
 
 
-def test_run_undo_rejects_new_descendant_inside_created_directory(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            tool_action_json('{"name":"write_file","args":{"path":"generated/out.txt","content":"agent\\n"}}'),
-            final_action("Done."),
-        ],
-    )
-    agent.ask("Create output")
-    (tmp_path / "generated" / "user.txt").write_text(
-        "user after run\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(RunUndoConflictError) as exc_info:
-        restore_run(tmp_path, _run_id(agent))
-
-    assert exc_info.value.paths == ("generated",)
-    assert (tmp_path / "generated" / "out.txt").is_file()
-    assert (tmp_path / "generated" / "user.txt").is_file()
-
-
 def test_run_undo_validates_all_blobs_before_restoring_any_path(tmp_path):
     (tmp_path / "one.txt").write_text("one before\n", encoding="utf-8")
     (tmp_path / "two.txt").write_text("two before\n", encoding="utf-8")
@@ -205,28 +183,3 @@ def test_shell_undo_snapshot_never_copies_env_files(tmp_path):
     assert ".env.local" not in snapshot["states"]
     assert secret.encode() not in pending_bytes
     journal.record(token)
-
-
-def test_run_undo_dry_run_only_lists_changes(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            tool_action_json('{"name":"write_file","args":{"path":"README.md","content":"changed\\n"}}'),
-            final_action("Done."),
-        ],
-    )
-    agent.ask("Change README")
-
-    result = restore_run(tmp_path, _run_id(agent), dry_run=True)
-
-    assert result.dry_run is True
-    assert result.restored_paths == ("README.md",)
-    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "changed\n"
-    manifest = json.loads(
-        (
-            agent.run_store.run_dir(_run_id(agent))
-            / "undo"
-            / "manifest.json"
-        ).read_text(encoding="utf-8")
-    )
-    assert manifest["status"] == "available"

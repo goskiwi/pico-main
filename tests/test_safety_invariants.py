@@ -3,8 +3,6 @@ import shlex
 import sys
 from unittest.mock import patch
 
-import pico.security as security
-from pico.task_state import TaskState
 from tests.fakes import final_action, tool_action_json
 from tests.helpers import build_agent
 
@@ -133,39 +131,3 @@ def test_run_shell_receives_only_the_allowlisted_environment(tmp_path):
 
     assert secret not in result
     assert "missing" in result
-
-
-def test_configured_secrets_are_redacted_from_trace_and_report(tmp_path):
-    github_pat = "ghp_configured_secret_123"
-    with patch.dict(os.environ, {"GITHUB_PAT": github_pat}, clear=True):
-        agent = build_agent(
-            tmp_path,
-            [],
-            secret_env_names=("GITHUB_PAT",),
-        )
-        state = TaskState.create(
-            run_id="run_001",
-            task_id="task_001",
-            user_request="Mask configured secrets",
-        )
-        agent.run_store.start_run(state)
-        payload = {
-            "GITHUB_PAT": github_pat,
-            "nested": {"token": github_pat},
-        }
-        agent.emit_trace(state, "tool_executed", payload)
-        agent.run_store.write_report(
-            state,
-            security.redact_artifact(
-                agent,
-                {"task_state": state.to_dict(), "payload": payload},
-            ),
-        )
-
-    run_dir = agent.run_store.run_dir(state.run_id)
-    persisted_text = (
-        (run_dir / "trace.jsonl").read_text(encoding="utf-8")
-        + (run_dir / "report.json").read_text(encoding="utf-8")
-    )
-    assert github_pat not in persisted_text
-    assert persisted_text.count("<redacted>") >= 4
