@@ -42,6 +42,8 @@ artifacts/*
 !artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json
 !artifacts/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.json
 !artifacts/reliability-benchmark-v1-live-3x.json
+!artifacts/live-llm-v5-post-simplification-3x.json
+!artifacts/live-llm-v5-post-simplification-3x.md
 readme_intro_locked/
 .idea/
 .claude/settings.local.json

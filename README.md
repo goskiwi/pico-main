@@ -33,6 +33,7 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 |---|---:|---|
 | V4 多文件、跨模块、含干扰实现的 Repo Map A/B | `full` 13/15，`no_repo_map` 6/15 | Repo Map 在目标场景中明显提高任务成功率 |
 | V5 Repo Map 预算决策 | 动态预算与 600-token cap 均 14/15 | 成本仅下降 3.36%，未过预注册 5% 阈值，保留动态默认 |
+| 精简运行时审计状态后的 V5 回归 | clean worktree 三轮 `full` 均 5/5，共 15/15 | 删除重复 session history 后未引入真实任务回归 |
 | Repo Map + Undo 可靠性回归 | 定位 3/3，Undo 6/6，完整 digest 恢复 6/6 | 检索和恢复链路可以一起工作 |
 | pytest 输出与停滞反馈 A/B | candidate 6/6，baseline 2/6 | 更可用的失败尾部和进度信号提高了恢复成功率 |
 

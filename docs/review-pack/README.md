@@ -46,6 +46,10 @@ dynamic default was not changed. The earlier V4 A/B result (`full` 13/15 versus
 `no_repo_map` 6/15) remains historical evidence for the Repo Map design; it is not
 duplicated as a second fixture-contract test suite.
 
+After the audit-state simplification, a clean-worktree V5 `full` rerun completed
+three times at 5/5 each (15/15 total), with no model failures or Action rejections;
+see the [post-simplification report](../../artifacts/live-llm-v5-post-simplification-3x.md).
+
 The reliability suite joins retrieval with recovery: Repo Map localization passed 3/3,
 both Undo scenarios recovered 6/6, and complete post-Undo workspace digests matched
 their pre-run digests 6/6.

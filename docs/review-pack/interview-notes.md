@@ -27,6 +27,10 @@ Responses 的 function-call output 会原样回放到同一 provider 会话，�
 一份“历史 prompt”。只有 provider 明确报告 context overflow 时，runtime 才重建一次受 tokenizer
 约束的恢复包；第二次溢出透明停止，避免反复摘要导致细节悄悄丢失。
 
+这不是只靠单元测试的取舍：删除重复的 session history 后，`gpt-5.4` 在 clean worktree 的
+V5 `full` 三轮中通过 15/15，且没有 model failure 或 Action rejection。它验证的是这次简化没有
+损失固定回归集的端到端行为，不是泛化能力排名。
+
 ## 第三亮点：可恢复但不改写 Git
 
 自动 commit + `git reset` 会污染用户分支、index 和已有脏文件。`pico` 改为 run-level Undo：

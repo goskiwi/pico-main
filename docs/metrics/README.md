@@ -41,6 +41,15 @@ input-plus-output token 下降 3.36%，未达到预注册的 5% 默认切换阈�
 在 snapshot-matched 的 `gpt-5.4` A/B 中，candidate 通过 6/6，baseline 通过 2/6。
 pytest tail 定位从 0/3 变为 3/3；停滞恢复从 2/3 变为 3/3，并减少模型调用。
 
+## 5. 精简后的 clean-worktree 回归
+
+[`live-llm-v5-post-simplification-3x.md`](../../artifacts/live-llm-v5-post-simplification-3x.md) ·
+[`reviewed JSON`](../../artifacts/live-llm-v5-post-simplification-3x.json)
+
+删除 session-level history、无引用上下文辅助代码与重复 V4 fixture 自检后，以
+`--require-clean-worktree` 对 V5 `full` 跑三轮：`gpt-5.4` 共通过 15/15，三轮均为 5/5，
+没有 model failure 或 Action rejection。该结果只证明这次运行时精简没有使固定 V5 回归集退化。
+
 ## 方法边界
 
 统一方法、快照身份、delegate 成本口径和解释限制见
