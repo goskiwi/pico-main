@@ -57,13 +57,14 @@ class UnitTestSandbox:
         )
 
 
-def build_workspace(tmp_path):
+def build_workspace(tmp_path, *, verification_command=""):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    return WorkspaceContext.build(tmp_path)
+    return WorkspaceContext.build(tmp_path, verification_command=verification_command)
 
 
 def build_agent(tmp_path, outputs, **kwargs):
-    workspace = build_workspace(tmp_path)
+    verification_command = kwargs.pop("verification_command", "")
+    workspace = build_workspace(tmp_path, verification_command=verification_command)
     store = SessionStore(tmp_path / ".pico" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
     feature_flags = {"llm_memory_extract": False}

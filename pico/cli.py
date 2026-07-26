@@ -275,7 +275,10 @@ def build_agent(args):
     logger.debug(f"敏感环境变量数量: {len(configured_secret_names)}")
 
     # 构建工作区上下文，包含文件快照和 git 状态
-    workspace = WorkspaceContext.build(args.cwd)
+    workspace = WorkspaceContext.build(
+        args.cwd,
+        verification_command=args.verify_cmd,
+    )
     logger.info(f"工作区路径: {workspace.cwd}, 分支: {workspace.branch}")
 
     # 初始化 session 存储器
@@ -410,6 +413,14 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
+    parser.add_argument(
+        "--verify-cmd",
+        default="",
+        help=(
+            "Explicit command run by Pico in the Docker sandbox before accepting a changed task. "
+            "A failed command grants one repair attempt; omit to disable runtime verification."
+        ),
+    )
     parser.add_argument(
         "--repo-map-budget",
         type=_positive_repo_map_budget,

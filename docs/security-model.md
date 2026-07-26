@@ -36,6 +36,15 @@ strict model action
 Provider-side strict function calling improves protocol reliability but does not
 replace local validation or authorization.
 
+When the user supplies `--verify-cmd`, Pico also runs that command after a
+changed task reaches `submit_final`. This is a runtime-owned verification step,
+not a model-selected `run_shell` action: it skips the model approval loop but
+uses the same Docker sandbox and is limited to the command explicitly supplied
+by the user. The command, exit status, sanitized output, duration, and outcome
+are written to the trace and report. A normal failure gets exactly one repair
+cycle; an unavailable sandbox or a second failure ends the task as
+`verification_failed`.
+
 ## Model endpoint and environment handling
 
 - The default endpoint is the official OpenAI API. Compatible or third-party

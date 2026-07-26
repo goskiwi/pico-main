@@ -199,6 +199,7 @@ class Pico:
         self.last_llm_memory_extractor_error = ""
         self.last_semantic_memory_sync = dict(self.memory.last_semantic_sync)
         self.tool_audit_log = []
+        self.runtime_verifications = []
         self.model_action_rejections = []
         self._last_tool_result_metadata = {}
         self._last_tool_full_result = None
@@ -301,6 +302,7 @@ class Pico:
                 self.semantic_memory.last_sync.get("status", "not_run")
             ),
             "workspace_root": str(self.root.resolve()),
+            "verification_command": self.workspace.verification_command,
             "sandbox": self.sandbox.identity(),
         }
 
@@ -367,7 +369,7 @@ class Pico:
             - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
-            - When Workspace provides a verification_command, use it for test verification unless current test output proves it is unsuitable.
+            - When Workspace provides a verification_command, use it when helpful; runtime executes that exact command before accepting a changed final answer.
             - New files should be complete and runnable, including obvious imports.
             - Never repeat read_file, list_files, search, or query_repo_map with identical arguments while the workspace is unchanged. Reuse the saved evidence, choose a different range or query, run a test, or make the needed edit.
             - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.
@@ -407,6 +409,7 @@ class Pico:
         refreshed_workspace = WorkspaceContext.build(
             self.root,
             repo_root_override=self.root,
+            verification_command=self.workspace.verification_command,
         )
         self._assert_workspace_root(refreshed_workspace)
         refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()

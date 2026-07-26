@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from langsmith import tracing_context
 
-from . import memory_runtime, report, run_undo, security
+from . import memory_runtime, report, run_undo, security, tool_runtime
 from . import tools as toolkit
 from .actions import ACTION_FINAL, ACTION_RETRY, ACTION_TOOL, ModelAction
 from .checkpoints import (
@@ -19,6 +19,7 @@ from .config import (
     TASK_CANVAS_MAX_ACTIVE_NODES,
     TASK_CANVAS_MAX_TOKENS,
     TASK_CANVAS_RETAIN_NODES,
+    DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS,
 )
 from .task_state import TaskState
 from .workspace import clip
@@ -39,47 +40,11 @@ def _is_context_limit_error(exc):
     return any(indicator in message for indicator in indicators)
 
 
-def _is_successful_pytest(name, args, metadata):
-    verification = dict(metadata.get("verification") or {})
-    return (
-        name == "run_shell"
-        and verification.get("framework") == "pytest"
-        and verification.get("passed") is True
-    )
-
-
 def _record_completion_progress(progress_tracker, task_state, name, args, metadata):
-    """Track deterministic completion evidence without trusting model narration."""
+    """Track whether this task made an effective workspace change."""
+    del name, args
     if metadata.get("workspace_changed"):
         progress_tracker["last_workspace_change_step"] = task_state.tool_steps
-        progress_tracker["last_recoverable_step"] = 0
-        progress_tracker["completion_ready"] = False
-        progress_tracker["completion_reason"] = ""
-        progress_tracker["last_verification_status"] = "not_run"
-        return
-    verification = dict(metadata.get("verification") or {})
-    if verification.get("framework") == "pytest":
-        progress_tracker["last_verification_status"] = (
-            "passed" if verification.get("passed") else "failed"
-        )
-        progress_tracker["last_verification_step"] = task_state.tool_steps
-        progress_tracker["last_verification"] = {
-            "command": str(args.get("command", "")).strip(),
-            "exit_code": verification.get("exit_code"),
-        }
-    if (
-        name in {"write_file", "patch_file", "run_shell"}
-        and str(metadata.get("tool_status", "")) in {"error", "rejected", "partial_success"}
-    ):
-        # A failed patch or public test is actionable evidence, not idle
-        # exploration.  The model needs one bounded repair cycle to respond.
-        progress_tracker["last_recoverable_step"] = task_state.tool_steps
-    if (
-        progress_tracker["last_workspace_change_step"]
-        and _is_successful_pytest(name, args, metadata)
-    ):
-        progress_tracker["completion_ready"] = True
-        progress_tracker["completion_reason"] = "workspace_change_followed_by_pytest_pass"
 
 
 def _budget_notice(task_state):
@@ -95,8 +60,71 @@ def _budget_notice(task_state):
     return ""
 
 
+def _verification_output(stdout, stderr, *, limit=3200):
+    output = "\n".join(part for part in (str(stdout or "").strip(), str(stderr or "").strip()) if part)
+    if len(output) <= limit:
+        return output
+    return f"...[runtime verification output truncated]...\n{output[-limit:]}"
+
+
+def _run_runtime_verification(agent, task_state):
+    """Run the user-configured verifier outside the model's tool/approval path."""
+    command = str(agent.workspace.verification_command or "").strip()
+    started = time.monotonic()
+    record = {
+        "command": command,
+        "status": "infrastructure_error",
+        "passed": False,
+        "exit_code": None,
+        "timed_out": False,
+        "duration_ms": 0,
+        "output": "",
+    }
+    try:
+        result = agent.sandbox.run(
+            command,
+            cwd=agent.root,
+            timeout=DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        record["output"] = security.redact_text(
+            agent, f"runtime verifier could not start: {type(exc).__name__}: {exc}"
+        )
+    else:
+        raw_output = _verification_output(result.stdout, result.stderr)
+        output = security.redact_text(agent, raw_output)
+        pytest = tool_runtime._pytest_verification(command, output, result.returncode)
+        passed = bool(pytest["passed"]) if pytest is not None else result.returncode == 0
+        record.update(
+            {
+                "status": "passed" if passed else "failed",
+                "passed": passed,
+                "exit_code": int(result.returncode),
+                "timed_out": bool(result.timed_out),
+                "output": output,
+                "pytest": pytest,
+            }
+        )
+    record["duration_ms"] = int((time.monotonic() - started) * 1000)
+    agent.runtime_verifications.append(record)
+    agent.emit_trace(task_state, "runtime_verification_finished", {"verification": record})
+    return record
+
+
+def _verification_feedback(record):
+    command = str(record.get("command", ""))
+    output = str(record.get("output", "")).strip() or "(no verifier output)"
+    return (
+        "Runtime verification failed. You have exactly one repair attempt. "
+        "Inspect the failure, make the smallest correct fix, then call submit_final again.\n"
+        f"Command: {command}\n"
+        f"Exit code: {record.get('exit_code')}\n"
+        f"Output:\n{output}"
+    )
+
+
 def _verified_change_final(agent, progress_tracker):
-    """Build the final response from audited change and pytest evidence only."""
+    """Build the final response from audited runtime verification evidence only."""
     changed_paths = sorted(
         {
             str(path)
@@ -105,12 +133,10 @@ def _verified_change_final(agent, progress_tracker):
             if str(path).strip()
         }
     )
-    verification = dict(progress_tracker.get("last_verification") or {})
-    command = str(verification.get("command", "pytest")).strip() or "pytest"
-    exit_code = verification.get("exit_code")
-    status = "pytest passed" if exit_code in (None, 0) else f"pytest passed (exit code {exit_code})"
+    verification = dict(progress_tracker.get("last_runtime_verification") or {})
+    command = str(verification.get("command", "verification command")).strip()
     changed = ", ".join(changed_paths) if changed_paths else "workspace changes"
-    return f"Completed verified changes.\nChanged files: {changed}\nVerification: {command} — {status}."
+    return f"Completed verified changes.\nChanged files: {changed}\nRuntime verification: {command} — passed."
 
 
 class AgentTurnState(TypedDict, total=False):
@@ -318,6 +344,7 @@ def _run_agent_turn(agent, user_message):
     )
     agent.current_undo_journal.start()
     agent.tool_audit_log = []
+    agent.runtime_verifications = []
     agent.model_action_rejections = []
     agent.model_client.reset_action_session()
     agent.emit_trace(
@@ -334,12 +361,8 @@ def _run_agent_turn(agent, user_message):
     max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
     progress_tracker = {
         "last_workspace_change_step": 0,
-        "last_recoverable_step": 0,
-        "completion_ready": False,
-        "completion_reason": "",
-        "last_verification_status": "not_run",
-        "last_verification_step": 0,
-        "last_verification": {},
+        "repair_attempted": False,
+        "last_runtime_verification": {},
     }
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
@@ -361,6 +384,17 @@ def _run_agent_turn(agent, user_message):
         memory_runtime.promote_durable_memory(agent, user_message, final)
         memory_runtime.llm_promote_durable_memory(agent, user_message, final)
         _create_checkpoint(agent, task_state, user_message, trigger)
+        return _write_finished_run(agent, task_state, final, run_started_at)
+
+    def finish_verification_failed(verification):
+        command = str(verification.get("command", "verification command")).strip()
+        final = (
+            "Stopped after runtime verification failed following one repair attempt. "
+            f"Command: {command}."
+        )
+        agent.mark_work_finished(final, stopped=True)
+        task_state.stop_verification_failed(final)
+        _create_checkpoint(agent, task_state, user_message, "runtime_verification_failed")
         return _write_finished_run(agent, task_state, final, run_started_at)
 
     def call_model(state: AgentTurnState):
@@ -512,24 +546,6 @@ def _run_agent_turn(agent, user_message):
             kind = ACTION_RETRY
             agent.emit_trace(task_state, "final_rejected", {"reason": "workspace_change_required"})
 
-        if (
-            kind == ACTION_FINAL
-            and progress_tracker["last_workspace_change_step"]
-            and progress_tracker["last_verification_status"] == "failed"
-        ):
-            payload = _retry_notice(
-                "the latest pytest verification failed after the workspace change; repair the failure "
-                "or report that the task remains unverified"
-            )
-            action = ModelAction.retry(
-                payload,
-                protocol="runtime_guard",
-                raw_preview=action.raw_preview,
-                call_id=action.call_id,
-            )
-            kind = ACTION_RETRY
-            agent.emit_trace(task_state, "final_rejected", {"reason": "verification_failed"})
-
         if kind == ACTION_RETRY:
             rejection = {
                 "reason": payload,
@@ -549,6 +565,47 @@ def _run_agent_turn(agent, user_message):
                 "duration_ms": int((time.monotonic() - model_started_at) * 1000),
             },
         )
+
+        if (
+            kind == ACTION_FINAL
+            and progress_tracker["last_workspace_change_step"]
+            and agent.workspace.verification_command
+        ):
+            verification = _run_runtime_verification(agent, task_state)
+            progress_tracker["last_runtime_verification"] = verification
+            if verification["status"] == "passed":
+                final = _verified_change_final(agent, progress_tracker)
+                agent.emit_trace(
+                    task_state,
+                    "runtime_finalized",
+                    {"verification": verification},
+                )
+                return Command(
+                    update={"result": finish_success(final, trigger="runtime_verification_passed")},
+                    goto=END,
+                )
+            if verification["status"] == "infrastructure_error":
+                return Command(
+                    update={"result": finish_verification_failed(verification)},
+                    goto=END,
+                )
+            if progress_tracker["repair_attempted"]:
+                return Command(
+                    update={"result": finish_verification_failed(verification)},
+                    goto=END,
+                )
+            progress_tracker["repair_attempted"] = True
+            feedback = _verification_feedback(verification)
+            _record_action_result(agent, action, feedback)
+            agent.mark_retry_needed(feedback)
+            _create_checkpoint(agent, task_state, user_message, "runtime_verification_failed")
+            return Command(
+                update={
+                    "prompt_snapshot": prompt_snapshot,
+                    "finalization_attempted": finalization_attempted,
+                },
+                goto="call_model",
+            )
 
         next_state = {
             "prompt_snapshot": prompt_snapshot,
@@ -574,20 +631,6 @@ def _run_agent_turn(agent, user_message):
             state["action"],
             progress_tracker,
         )
-        if progress_tracker["completion_ready"]:
-            final = _verified_change_final(agent, progress_tracker)
-            agent.emit_trace(
-                task_state,
-                "runtime_finalized",
-                {
-                    "reason": progress_tracker["completion_reason"],
-                    "verification": dict(progress_tracker["last_verification"]),
-                },
-            )
-            return Command(
-                update={"result": finish_success(final, trigger="verified_change_auto_finalized")},
-                goto=END,
-            )
         # The task canvas is a durable control-plane projection.  It must not
         # replace the live provider conversation: patching depends on the
         # exact source and test output returned by the preceding tool call.

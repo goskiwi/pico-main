@@ -58,7 +58,7 @@ class WorkspaceContext:
         self.verification_command = verification_command
 
     @classmethod
-    def build(cls, cwd, repo_root_override=None):
+    def build(cls, cwd, repo_root_override=None, *, verification_command=""):
         cwd = Path(cwd).resolve()
         overridden_repo_root = (
             Path(repo_root_override).resolve()
@@ -114,7 +114,7 @@ class WorkspaceContext:
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
-            verification_command=discover_verification_command(repo_root),
+            verification_command=str(verification_command or "").strip(),
         )
 
     def text(self):
@@ -152,26 +152,3 @@ class WorkspaceContext:
             "verification_command": self.verification_command,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def discover_verification_command(repo_root):
-    """Return one safe default test command when project structure makes it clear."""
-    root = Path(repo_root)
-    has_pytest = (root / "pytest.ini").is_file() or (root / "tests").is_dir()
-    if not has_pytest:
-        return ""
-
-    source_root = root / "src"
-    if source_root.is_dir() and any(
-        child.is_dir() and (child / "__init__.py").is_file()
-        for child in source_root.iterdir()
-    ):
-        return "PYTHONPATH=src pytest -q"
-    if any(
-        child.is_dir()
-        and not child.name.startswith(".")
-        and (child / "__init__.py").is_file()
-        for child in root.iterdir()
-    ):
-        return "PYTHONPATH=. pytest -q"
-    return "pytest -q"

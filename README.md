@@ -77,6 +77,7 @@ OPENAI_MODEL=gpt-5.4
 
 ```bash
 uv run pico --cwd /path/to/target-repo \
+  --verify-cmd 'PYTHONPATH=src python -m pytest -q' \
   "inspect the failing tests, patch the smallest safe fix, and verify it"
 ```
 
@@ -87,6 +88,22 @@ uv run pico --cwd /path/to/target-repo
 ```
 
 常用命令：`/help`、`/memory`、`/session`、`/reset`、`/reload-skills`、`/exit`。
+
+## 显式运行时验证
+
+Pico 不猜测项目的测试命令。用 `--verify-cmd` 显式指定后，只要本次任务实际修改了
+工作区，模型第一次调用 `submit_final` 时，runtime 会在同一个 Docker sandbox 中自行执行该
+命令。它不依赖模型声称“测试已通过”，也不受模型工具审批流影响；命令由启动 Pico 的用户
+显式提供。
+
+- 命令通过：任务以 runtime 记录的验证结果完成；
+- 命令失败：失败输出会回灌给同一模型会话，并仅允许一次最小修复；
+- 修复后的第二次失败：任务以 `verification_failed` 结束，报告会保留两次验证记录；
+- 未提供 `--verify-cmd`：不执行运行时验证。
+
+验证记录写入 `.pico/runs/<run_id>/trace.jsonl` 和 `report.json` 的
+`runtime_verifications` 字段。基准应把首次通过和一次修复后通过分开报告，不能把两者混为
+同一个成功率。
 
 ## Repo Map
 

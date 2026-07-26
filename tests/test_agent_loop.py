@@ -420,10 +420,17 @@ def test_patch_conflict_returns_current_file_as_repair_evidence(tmp_path):
     assert "demo" in evidence
 
 
-def test_masked_pytest_failure_rejects_a_false_final_until_the_task_is_unverified(tmp_path):
-    class MaskingSandbox(UnitTestSandbox):
+def test_runtime_verification_retries_once_with_structured_feedback(tmp_path):
+    class RepairSandbox(UnitTestSandbox):
+        def __init__(self, workspace_root):
+            super().__init__(workspace_root)
+            self.calls = 0
+
         def run(self, command, *, cwd, timeout, env=None):
             del command, cwd, timeout, env
+            self.calls += 1
+            if self.calls == 2:
+                return SandboxResult(returncode=0, stdout="2 passed in 0.01s\n")
             return SandboxResult(
                 returncode=0,
                 stdout="FAILED tests/test_checkout.py::test_total\n1 failed, 2 passed in 0.01s\n",
@@ -443,27 +450,25 @@ def test_masked_pytest_failure_rejects_a_false_final_until_the_task_is_unverifie
                     protocol="responses_function",
                     call_id="call_1",
                 ),
-                ModelAction.tool(
-                    "run_shell",
-                    {"command": "pytest -q | tail -n 20", "timeout": 20},
+                ModelAction.final(
+                    "The first implementation is complete.",
                     protocol="responses_function",
                     call_id="call_2",
                 ),
-                ModelAction.final(
-                    "The tests passed.",
+                ModelAction.tool(
+                    "patch_file",
+                    {
+                        "path": "changed.txt",
+                        "old_text": "first attempt\n",
+                        "new_text": "repaired\n",
+                    },
                     protocol="responses_function",
                     call_id="call_3",
                 ),
-                ModelAction.tool(
-                    "write_file",
-                    {"path": "changed.txt", "content": "repair pending verification\n"},
+                ModelAction.final(
+                    "The repair is complete.",
                     protocol="responses_function",
                     call_id="call_4",
-                ),
-                ModelAction.final(
-                    "Applied a repair, but pytest remains unverified.",
-                    protocol="responses_function",
-                    call_id="call_5",
                 ),
             ]
 
@@ -477,21 +482,84 @@ def test_masked_pytest_failure_rejects_a_false_final_until_the_task_is_unverifie
         def record_action_result(self, action, result):
             self.results.append((action.call_id, result))
 
-    agent = build_agent(tmp_path, [], sandbox=MaskingSandbox(tmp_path), max_steps=5)
+    sandbox = RepairSandbox(tmp_path)
+    agent = build_agent(
+        tmp_path,
+        [],
+        sandbox=sandbox,
+        max_steps=5,
+        verification_command="pytest -q",
+    )
     client = StrictModelClient()
     agent.model_client = client
     agent.refresh_prefix(force=True)
 
     answer = agent.ask("Change the workspace and run pytest.")
 
-    assert answer == "Applied a repair, but pytest remains unverified."
-    assert agent.tool_audit_log[1]["status"] == "error"
-    assert agent.tool_audit_log[1]["error_code"] == "pytest_failed"
-    assert any(
-        "latest pytest verification failed" in rejection["reason"]
-        for rejection in agent.model_action_rejections
+    assert answer == (
+        "Completed verified changes.\n"
+        "Changed files: changed.txt\n"
+        "Runtime verification: pytest -q — passed."
     )
-    assert (tmp_path / "changed.txt").read_text(encoding="utf-8") == "repair pending verification\n"
+    assert sandbox.calls == 2
+    assert (tmp_path / "changed.txt").read_text(encoding="utf-8") == "repaired\n"
+    assert any(
+        call_id == "call_2" and "exactly one repair attempt" in result
+        for call_id, result in client.results
+    )
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert [item["status"] for item in report["runtime_verifications"]] == [
+        "failed",
+        "passed",
+    ]
+
+
+def test_runtime_verification_stops_after_one_failed_repair(tmp_path):
+    class FailingSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout, env
+            return SandboxResult(returncode=1, stdout="1 failed in 0.01s\n")
+
+    actions = [
+        ModelAction.tool(
+            "write_file",
+            {"path": "changed.txt", "content": "first attempt\n"},
+            protocol="responses_function",
+            call_id="call_1",
+        ),
+        ModelAction.final("First implementation complete.", protocol="responses_function", call_id="call_2"),
+        ModelAction.tool(
+            "patch_file",
+            {
+                "path": "changed.txt",
+                "old_text": "first attempt\n",
+                "new_text": "second attempt\n",
+            },
+            protocol="responses_function",
+            call_id="call_3",
+        ),
+        ModelAction.final("Repair complete.", protocol="responses_function", call_id="call_4"),
+    ]
+    agent = build_agent(
+        tmp_path,
+        actions,
+        sandbox=FailingSandbox(tmp_path),
+        max_steps=5,
+        verification_command="pytest -q",
+    )
+
+    answer = agent.ask("Change the workspace and verify it.")
+
+    assert answer == (
+        "Stopped after runtime verification failed following one repair attempt. "
+        "Command: pytest -q."
+    )
+    assert agent.current_task_state.stop_reason == "verification_failed"
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert [item["status"] for item in report["runtime_verifications"]] == [
+        "failed",
+        "failed",
+    ]
 
 
 def test_final_only_turn_cannot_execute_another_tool(tmp_path):
@@ -585,7 +653,7 @@ def test_soft_budget_does_not_force_finalization_after_an_old_workspace_change(t
     assert "list_files" in client.tool_sets[-1]
 
 
-def test_successful_pytest_after_a_change_is_finalized_without_another_model_call(tmp_path):
+def test_explicit_runtime_verification_finalizes_a_changed_task(tmp_path):
     class PassingPytestSandbox(UnitTestSandbox):
         def run(self, command, *, cwd, timeout, env=None):
             del command, cwd, timeout, env
@@ -604,11 +672,7 @@ def test_successful_pytest_after_a_change_is_finalized_without_another_model_cal
                     {"path": "changed.txt", "content": "ready\n"},
                     protocol="responses_function",
                 ),
-                ModelAction.tool(
-                    "run_shell",
-                    {"command": "pytest -q", "timeout": 20},
-                    protocol="responses_function",
-                ),
+                ModelAction.final("Change complete.", protocol="responses_function"),
             ]
 
         def reset_action_session(self):
@@ -622,7 +686,13 @@ def test_successful_pytest_after_a_change_is_finalized_without_another_model_cal
         def record_action_result(self, action, result):
             del action, result
 
-    agent = build_agent(tmp_path, [], max_steps=6, sandbox=PassingPytestSandbox(tmp_path))
+    agent = build_agent(
+        tmp_path,
+        [],
+        max_steps=6,
+        sandbox=PassingPytestSandbox(tmp_path),
+        verification_command="pytest -q",
+    )
     client = StrictModelClient()
     agent.model_client = client
     agent.refresh_prefix(force=True)
@@ -632,7 +702,7 @@ def test_successful_pytest_after_a_change_is_finalized_without_another_model_cal
     assert answer == (
         "Completed verified changes.\n"
         "Changed files: changed.txt\n"
-        "Verification: pytest -q — pytest passed."
+        "Runtime verification: pytest -q — passed."
     )
     assert len(client.tool_sets) == 2
     assert agent.current_task_state.stop_reason == "final_answer_returned"

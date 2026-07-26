@@ -42,6 +42,7 @@ def build_report(agent, task_state):
             }
         ),
         "tool_audit": list(agent.tool_audit_log),
+        "runtime_verifications": list(agent.runtime_verifications),
         "model_action_rejections": list(agent.model_action_rejections),
         "task_state": task_state.to_dict(),
         "prompt_metadata": agent.last_prompt_metadata,
@@ -153,6 +154,10 @@ def build_run_summary(agent, task_state):
         "changed_files": changed_paths,
         "failed_tools": failed_tools,
         "security_events": security_events,
+        "runtime_verification_count": len(agent.runtime_verifications),
+        "runtime_verification_statuses": [
+            str(item.get("status", "")) for item in agent.runtime_verifications
+        ],
         "model_action_rejection_count": len(action_rejections),
         "model_action_rejection_reasons": [clip(item.get("reason", ""), 160) for item in action_rejections],
         "final_answer_preview": clip(task_state.final_answer, 300),
