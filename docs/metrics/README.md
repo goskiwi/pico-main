@@ -79,12 +79,20 @@ verifier；六次尝试均通过 hidden verifier 与 workspace-isolation audit�
 ## 8. 十仓库 Real OSS V2 冻结集
 
 [`V2 protocol`](../benchmarks/real-oss-v2.md) ·
-[`candidate freeze`](../benchmarks/real-oss-v2-candidates.md)
+[`candidate freeze`](../benchmarks/real-oss-v2-candidates.md) ·
+[`run report`](../../artifacts/real-oss-v2-repo-map-ablation-1x.md) ·
+[`reviewed JSON`](../../artifacts/real-oss-v2-repo-map-ablation-1x.json)
 
 V2 保留上述三项历史 smoke，并增加 tomlkit、tqdm、packaging、Werkzeug、more-itertools、
 Jinja 和 urllib3，形成十个仓库、十个 pre-fix task 的冻结集。每项均已通过本地 preflight：
 hidden verifier 在 pre-fix fixture 失败，应用对应上游 PR 补丁后通过。该结果验证了任务与
-verifier 的区分力，不是模型评测；V2 尚未运行真实模型，因而没有成功率、成本或 A/B 结论。
+verifier 的区分力。
+
+在干净 commit `3600c1d` 上，`gpt-5.6-luna` 对 `full` 与 `no_repo_map` 各跑一遍十题，
+两组均为 10/10 hidden verifier 通过，且 20/20 workspace-isolation audit 通过。`full`
+平均 14.30 个工具步骤、75.57 秒；`no_repo_map` 平均 16.90 个工具步骤、83.22 秒。由于只有
+一轮固定十题，成功率没有差异，工具数和时长差异只能视为观察信号，不能解释为稳定的 A/B
+或总体能力结论。
 
 ## 方法边界
 

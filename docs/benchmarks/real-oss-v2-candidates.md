@@ -1,8 +1,9 @@
 # Real OSS V2 candidate freeze
 
 This document freezes ten historical upstream Python bug tasks from ten
-repositories. It is not an Agent evaluation report: no model was run on V2 and
-it contains no Pico success-rate claim.
+repositories. Candidate preflight is separate from the recorded 1× Agent A/B:
+the latter is linked in [the V2 protocol](real-oss-v2.md) and is not a general
+Pico success-rate claim.
 
 Each task was materialized at the listed pre-fix commit. Its standalone hidden
 verifier failed against that fixture, then passed after applying the associated

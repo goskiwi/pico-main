@@ -50,6 +50,8 @@ artifacts/*
 !artifacts/runtime-verification-real-oss-smoke-pytest13974.json
 !artifacts/real-oss-v1-repo-map-ablation-1x.json
 !artifacts/real-oss-v1-repo-map-ablation-1x.md
+!artifacts/real-oss-v2-repo-map-ablation-1x.json
+!artifacts/real-oss-v2-repo-map-ablation-1x.md
 readme_intro_locked/
 .idea/
 .claude/settings.local.json

@@ -5,10 +5,9 @@ Python bugs in ten separate upstream repositories. It retains V1's three
 tasks and adds tomlkit, tqdm, packaging, Werkzeug, more-itertools, Jinja, and
 urllib3. It is a larger evaluation set, not an Agent-runtime feature.
 
-V1 remains unchanged as the historical three-task smoke benchmark behind the
-checked-in 1x artifact. V2 has no checked-in real-model score yet: do not
-combine V1's 3/3 result with V2 or represent the candidate preflight as Agent
-success.
+V1 remains unchanged as the historical three-task smoke benchmark behind its
+own checked-in artifact. V2 has one separately captured 1× external A/B on
+commit `3600c1d`; do not combine the V1 and V2 results.
 
 Every V2 task records an exact pre-fix SHA, public issue or PR, public prompt,
 and standalone hidden verifier. The Agent receives a fresh source checkout and
@@ -65,6 +64,19 @@ publish the artifact with the model identifier, fixture snapshot ID, evaluation
 snapshot ID, per-task results, tool counts, changed-file counts, and failure
 classes. `full` and `no_repo_map` must use the same tasks, prompts, model
 configuration, sandbox image, step budgets, and verifiers.
+
+## Recorded 1× external A/B
+
+The checked-in [JSON artifact](../../artifacts/real-oss-v2-repo-map-ablation-1x.json)
+and [Markdown report](../../artifacts/real-oss-v2-repo-map-ablation-1x.md) were
+captured on clean commit `3600c1d` using `gpt-5.6-luna`. Both `full` and
+`no_repo_map` passed all 10 hidden verifiers, and all 20 attempts passed the
+workspace-isolation audit. `full` averaged 14.30 tool steps and 75.57 seconds;
+`no_repo_map` averaged 16.90 tool steps and 83.22 seconds.
+
+This is one fixed 10-task repetition, not evidence of a general success-rate,
+latency, cost, or causal Repo Map advantage. The matching pass rates mean the
+only observed difference is a single-run tool-count and duration signal.
 
 This suite is now a visible regression set because it informed evaluation
 engineering. It is credible evidence of reproducibility, not a held-out or
