@@ -76,6 +76,16 @@ verifier；六次尝试均通过 hidden verifier 与 workspace-isolation audit�
 这组证据补充了真实上游代码上的可复现性，不构成通用 coding-capability benchmark，也不构成
 统计稳定的 A/B 结论。
 
+## 8. 十仓库 Real OSS V2 冻结集
+
+[`V2 protocol`](../benchmarks/real-oss-v2.md) ·
+[`candidate freeze`](../benchmarks/real-oss-v2-candidates.md)
+
+V2 保留上述三项历史 smoke，并增加 tomlkit、tqdm、packaging、Werkzeug、more-itertools、
+Jinja 和 urllib3，形成十个仓库、十个 pre-fix task 的冻结集。每项均已通过本地 preflight：
+hidden verifier 在 pre-fix fixture 失败，应用对应上游 PR 补丁后通过。该结果验证了任务与
+verifier 的区分力，不是模型评测；V2 尚未运行真实模型，因而没有成功率、成本或 A/B 结论。
+
 ## 方法边界
 
 统一方法、快照身份、delegate 成本口径和解释限制见

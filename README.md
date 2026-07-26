@@ -316,21 +316,24 @@ uv run python scripts/run_real_world_benchmark.py \
   --require-clean-worktree
 ```
 
-冻结真实 OSS 的最小外部复核（Pydantic、pytest、Click）：
+冻结真实 OSS 的外部复核使用十个独立 Python 仓库；历史三任务 smoke 仍保留为
+[Real OSS V1](docs/benchmarks/real-oss-v1.md)：
 
 ```bash
-uv run python scripts/materialize_real_oss_v1.py
-docker build -f Dockerfile.real-oss-v1 -t pico-real-oss-v1:latest .
+uv run python scripts/materialize_real_oss_v1.py \
+  --manifest benchmarks/real_oss_v2.json \
+  --replace
+docker build -f Dockerfile.real-oss-v2 -t pico-real-oss-v2:latest .
 uv run python scripts/run_real_world_benchmark.py \
-  --benchmark-path benchmarks/real_oss_v1.json \
-  --sandbox-image pico-real-oss-v1:latest \
+  --benchmark-path benchmarks/real_oss_v2.json \
+  --sandbox-image pico-real-oss-v2:latest \
   --variant full \
   --variant no_repo_map \
   --repetitions 1 \
   --require-clean-worktree
 ```
 
-任务来源、快照和解释边界见 [Real OSS V1 protocol](docs/benchmarks/real-oss-v1.md)。
+任务来源、快照和解释边界见 [Real OSS V2 protocol](docs/benchmarks/real-oss-v2.md)。
 
 面试用的单任务、真实 OSS 演示入口和逐秒讲稿见 [90 秒真实 OSS Demo](docs/demo-script.md)：
 

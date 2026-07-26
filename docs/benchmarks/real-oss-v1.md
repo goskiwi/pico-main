@@ -21,7 +21,7 @@ uv run python scripts/materialize_real_oss_v1.py
 
 The command fetches exactly one commit per task, verifies its SHA and required
 paths, removes `.git`, and records a tree digest in
-`artifacts/real-oss-fixtures/.materialization.json`. Removing Git metadata is
+`artifacts/real-oss-fixtures/.real_oss_v1.materialization.json`. Removing Git metadata is
 intentional: an Agent must not discover the later fix through local history.
 
 To recreate one existing fixture, use its exact task ID and explicitly opt into
@@ -80,3 +80,7 @@ evidence recorded in
 The three tasks are intentionally kept as a small external sanity suite. Any claim
 about a performance difference requires a new, larger frozen task set and repeated
 runs; do not tune the runtime against this suite and then present it as held out.
+
+The larger ten-repository successor is [Real OSS V2](real-oss-v2.md). V1's
+manifest and checked-in 1× artifact remain unchanged so its historical result
+is not mixed with the new suite.

@@ -172,7 +172,11 @@ def materialize_manifest(
     if missing:
         raise ValueError(f"unknown Real OSS task ids: {', '.join(sorted(missing))}")
     records = [materialize_task(repo_root, task, replace=replace) for task in tasks]
-    sidecar = _inside(repo_root, MATERIALIZATION_ROOT, label="materialization root") / ".materialization.json"
+    manifest_label = Path(manifest_path).stem
+    sidecar = (
+        _inside(repo_root, MATERIALIZATION_ROOT, label="materialization root")
+        / f".{manifest_label}.materialization.json"
+    )
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(
         json.dumps({"manifest": str(Path(manifest_path).resolve()), "tasks": records}, indent=2)
