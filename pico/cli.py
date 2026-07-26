@@ -498,10 +498,19 @@ def run_memory_sync_command(argv):
 
 def run_undo_command(argv):
     args = build_undo_arg_parser().parse_args(argv)
-    workspace = WorkspaceContext.build(args.cwd)
+    explicit_workspace = Path(args.cwd).resolve()
+    # A benchmark fixture can deliberately omit ``.git`` so an Agent cannot
+    # inspect history.  In that case WorkspaceContext would walk upward into
+    # the host repository, even though the explicit cwd owns its own Pico run
+    # store.  Prefer that direct run store; retain the Git-root fallback for
+    # callers that pass a nested directory inside a normal repository.
+    if (explicit_workspace / ".pico" / "runs").is_dir():
+        workspace_root = explicit_workspace
+    else:
+        workspace_root = Path(WorkspaceContext.build(args.cwd).repo_root)
     try:
         result = restore_run(
-            workspace.repo_root,
+            workspace_root,
             args.run_id,
             dry_run=args.dry_run,
         )

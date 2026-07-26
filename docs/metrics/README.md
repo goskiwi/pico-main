@@ -1,6 +1,6 @@
 # Metrics evidence map
 
-这里只保留能直接支撑当前设计的四组证据。每组都链接到报告；对应的 reviewed JSON 位于
+这里只保留能直接支撑当前设计的证据。每组都链接到报告；对应的 reviewed JSON 位于
 `artifacts/`，fixture 与隐藏 verifier 位于 `benchmarks/`。
 
 ## 1. Repo Map 的目标场景
@@ -58,6 +58,23 @@ pytest tail 定位从 0/3 变为 3/3；停滞恢复从 2/3 变为 3/3，并减�
 verifier 首次通过 82 项公开 collection 回归，随后独立隐藏 verifier 通过 1 项。它只证明
 运行时验证链路在一个真实任务上可审计地收敛；单任务、单次运行不能解释为总体成功率，且该次
 模型留下了临时文件，文档已如实记录这个输出整洁性缺陷。
+
+## 7. 冻结真实 OSS 的最小外部复核
+
+[`run report`](../../artifacts/real-oss-v1-repo-map-ablation-1x.md) ·
+[`reviewed JSON`](../../artifacts/real-oss-v1-repo-map-ablation-1x.json) ·
+[`protocol`](../benchmarks/real-oss-v1.md)
+
+在干净 commit 上，来自 Pydantic #13215、pytest #13974 和 Click #3487 的三个冻结 pre-fix
+checkout 各运行一次 `full` 与 `no_repo_map`。每次尝试都从新副本开始，Agent 结束后才注入隐藏
+verifier；六次尝试均通过 hidden verifier 与 workspace-isolation audit。
+
+- `full` 与 `no_repo_map` 均为 3/3，因此没有观察到可归因于 Repo Map 的成功率差异；
+- `full` 的平均工具步为 12.33，`no_repo_map` 为 19.00；这只是一次三题套件中的观察值；
+- `full` 的 Pydantic 尝试包含一次 276.94 秒的 provider 长尾，因此不能从本次运行推断时延或成本优势。
+
+这组证据补充了真实上游代码上的可复现性，不构成通用 coding-capability benchmark，也不构成
+统计稳定的 A/B 结论。
 
 ## 方法边界
 

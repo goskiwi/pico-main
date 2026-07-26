@@ -7,6 +7,7 @@
 [架构](docs/architecture/agent-harness-v1-overview.md) ·
 [安全模型](docs/security-model.md) ·
 [评测证据](docs/metrics/README.md) ·
+[90 秒真实 OSS Demo](docs/demo-script.md) ·
 [审阅入口](docs/review-pack/README.md)
 
 `pico` 把模型输出收敛为有界的 `tool / final / retry` 状态转换。工具调用经过
@@ -36,6 +37,7 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 | 精简运行时审计状态后的 V5 回归 | clean worktree 三轮 `full` 均 5/5，共 15/15 | 删除重复 session history 后未引入真实任务回归 |
 | Repo Map + Undo 可靠性回归 | 定位 3/3，Undo 6/6，完整 digest 恢复 6/6 | 检索和恢复链路可以一起工作 |
 | pytest 输出与停滞反馈 A/B | candidate 6/6，baseline 2/6 | 更可用的失败尾部和进度信号提高了恢复成功率 |
+| 冻结真实 OSS V1 外部复核（1×） | `full` 3/3，`no_repo_map` 3/3；平均工具步 12.33 vs 19.00 | 真实上游任务在两变体下都可复现完成；单次三题不能推断成功率或时延优势 |
 
 完整报告和原始 JSON 入口见 [metrics evidence map](docs/metrics/README.md)。
 
@@ -312,6 +314,28 @@ uv run python scripts/run_real_world_benchmark.py \
   --variant no_repo_map \
   --repetitions 3 \
   --require-clean-worktree
+```
+
+冻结真实 OSS 的最小外部复核（Pydantic、pytest、Click）：
+
+```bash
+uv run python scripts/materialize_real_oss_v1.py
+docker build -f Dockerfile.real-oss-v1 -t pico-real-oss-v1:latest .
+uv run python scripts/run_real_world_benchmark.py \
+  --benchmark-path benchmarks/real_oss_v1.json \
+  --sandbox-image pico-real-oss-v1:latest \
+  --variant full \
+  --variant no_repo_map \
+  --repetitions 1 \
+  --require-clean-worktree
+```
+
+任务来源、快照和解释边界见 [Real OSS V1 protocol](docs/benchmarks/real-oss-v1.md)。
+
+面试用的单任务、真实 OSS 演示入口和逐秒讲稿见 [90 秒真实 OSS Demo](docs/demo-script.md)：
+
+```bash
+uv run python scripts/run_real_oss_v1_demo.py
 ```
 
 离线质量门禁：

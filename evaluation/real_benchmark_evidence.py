@@ -568,6 +568,45 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
     }
 
 
+def public_workspace_isolation_audit(audit, workspace_root, workspace_label):
+    """Return publishable isolation evidence without host filesystem paths.
+
+    The audit itself needs resolved absolute paths for fail-closed comparisons.
+    Result artifacts do not: a reviewed artifact should identify the benchmark
+    workspace relative to its run root, while an attempted escape is useful
+    evidence even when the host path is withheld.
+    """
+    expected_root = Path(workspace_root).resolve()
+    label = str(workspace_label).replace("\\", "/").strip("/") or "workspace"
+
+    def public_path(value):
+        raw = str(value or "").strip()
+        if not raw:
+            return raw
+        try:
+            relative = Path(raw).resolve().relative_to(expected_root)
+        except (OSError, ValueError):
+            return "<outside-workspace>"
+        if str(relative) == ".":
+            return label
+        return f"{label}/{relative.as_posix()}"
+
+    public_violations = []
+    for raw_violation in audit.get("violations") or []:
+        violation = dict(raw_violation)
+        for key in ("expected", "actual", "path"):
+            if key in violation:
+                violation[key] = public_path(violation[key])
+        public_violations.append(violation)
+    return {
+        "ok": bool(audit.get("ok")),
+        "expected_workspace_root": label,
+        "run_count": int(audit.get("run_count") or 0),
+        "run_ids": [str(run_id) for run_id in audit.get("run_ids") or []],
+        "violations": public_violations,
+    }
+
+
 def _failure_category(
     task_state,
     verifier_result,

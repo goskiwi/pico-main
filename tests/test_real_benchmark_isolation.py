@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
-from evaluation.real_benchmark_evidence import _workspace_isolation_audit
+from evaluation.real_benchmark_evidence import (
+    _workspace_isolation_audit,
+    public_workspace_isolation_audit,
+)
 
 
 def _write_run_trace(run_dir, workspace_root, *, finished=True, tool_events=()):
@@ -147,3 +150,50 @@ def test_workspace_isolation_audit_rejects_truncated_trace_jsonl(tmp_path):
     assert len(invalid) == 1
     assert invalid[0]["run_id"] == "run_main"
     assert invalid[0]["line_number"] == 2
+
+
+def test_public_workspace_isolation_audit_redacts_host_paths(tmp_path):
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    outside_path = tmp_path / "outside" / "secret.py"
+    audit = {
+        "ok": False,
+        "expected_workspace_root": str(workspace_root),
+        "run_count": 1,
+        "run_ids": ["run_main"],
+        "violations": [
+            {
+                "type": "workspace_root_mismatch",
+                "run_id": "run_main",
+                "expected": str(workspace_root),
+                "actual": str(outside_path),
+            },
+            {
+                "type": "tool_path_outside_workspace",
+                "run_id": "run_main",
+                "path": str(workspace_root / "package" / "module.py"),
+            },
+        ],
+    }
+
+    public_audit = public_workspace_isolation_audit(
+        audit,
+        workspace_root,
+        "rep-1/full/task/workspace",
+    )
+
+    assert str(tmp_path) not in repr(public_audit)
+    assert public_audit["expected_workspace_root"] == "rep-1/full/task/workspace"
+    assert public_audit["violations"] == [
+        {
+            "type": "workspace_root_mismatch",
+            "run_id": "run_main",
+            "expected": "rep-1/full/task/workspace",
+            "actual": "<outside-workspace>",
+        },
+        {
+            "type": "tool_path_outside_workspace",
+            "run_id": "run_main",
+            "path": "rep-1/full/task/workspace/package/module.py",
+        },
+    ]

@@ -575,7 +575,11 @@ class RealWorldBenchmarkRunner:
             "total_duration_ms": agent_duration_ms + verifier_duration_ms,
             "changed_files": list(summary.get("changed_files") or []),
             "security_events": list(summary.get("security_events") or []),
-            "workspace_isolation": workspace_isolation,
+            "workspace_isolation": evidence.public_workspace_isolation_audit(
+                workspace_isolation,
+                workspace_root,
+                relative_workspace,
+            ),
             "workspace": str(relative_workspace),
             "run_id": task_state.run_id,
             "final_answer": str(final_answer),

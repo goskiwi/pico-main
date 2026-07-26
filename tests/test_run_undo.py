@@ -1,7 +1,9 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import pico.cli as cli
 from pico.run_undo import (
     RunUndoConflictError,
     RunUndoError,
@@ -183,3 +185,44 @@ def test_shell_undo_snapshot_never_copies_env_files(tmp_path):
     assert ".env.local" not in snapshot["states"]
     assert secret.encode() not in pending_bytes
     journal.record(token)
+
+
+def test_undo_prefers_an_explicit_workspace_run_store_over_an_ancestor_repo(
+    tmp_path, monkeypatch
+):
+    fixture_root = tmp_path / "fixture"
+    (fixture_root / ".pico" / "runs").mkdir(parents=True)
+    captured = {}
+
+    def fake_restore_run(workspace_root, run_id, *, dry_run):
+        captured.update(
+            {
+                "workspace_root": workspace_root,
+                "run_id": run_id,
+                "dry_run": dry_run,
+            }
+        )
+        return SimpleNamespace(
+            already_restored=False,
+            dry_run=dry_run,
+            run_id=run_id,
+            restored_paths=(),
+            deleted_paths=(),
+        )
+
+    monkeypatch.setattr(cli, "restore_run", fake_restore_run)
+    monkeypatch.setattr(
+        cli.WorkspaceContext,
+        "build",
+        lambda _: SimpleNamespace(repo_root=tmp_path / "ancestor-repo"),
+    )
+
+    assert cli.run_undo_command(
+        ["--cwd", str(fixture_root), "--run", "run_demo", "--dry-run"]
+    ) == 0
+
+    assert captured == {
+        "workspace_root": fixture_root.resolve(),
+        "run_id": "run_demo",
+        "dry_run": True,
+    }

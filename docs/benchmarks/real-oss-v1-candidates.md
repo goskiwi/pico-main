@@ -52,6 +52,9 @@ pre-fix source SHA, and a materialization digest. The fixed
 these source checkouts; the manifest records the public prompt, tool budget,
 and hidden-verifier command.
 
-This is intentionally a three-task smoke suite. It is evidence that Pico can
-operate on frozen real repositories, not enough data for a `full` versus
-`no_repo_map` comparison or a general coding-capability claim.
+This is intentionally a three-task external sanity suite. Its first 1× `full`
+versus `no_repo_map` run is recorded in the
+[reviewed artifact](../../artifacts/real-oss-v1-repo-map-ablation-1x.md): both
+variants completed 3/3 hidden verifiers. The run supplies reproducible evidence
+that Pico operates on frozen real repositories, but three tasks and one repetition
+are not enough for a stable A/B or general coding-capability claim.

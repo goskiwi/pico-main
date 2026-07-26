@@ -45,24 +45,38 @@ This image contains the runtime dependencies needed by all three source
 checkouts. Agent and verifier commands still execute with Docker networking
 disabled.
 
-## Run a hidden-verifier benchmark smoke
+## Run the minimal external A/B
 
-After materialization and image build, use the existing real benchmark runner:
+After materialization and image build, run the same frozen task set in `full` and
+`no_repo_map`. The two variants share model configuration, prompts, task snapshots,
+tools, step budgets, sandbox limits, and hidden verifiers. `no_repo_map` disables both
+the automatic Repo Map prompt section and the read-only `query_repo_map` tool.
 
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --benchmark-path benchmarks/real_oss_v1.json \
   --sandbox-image pico-real-oss-v1:latest \
   --variant full \
+  --variant no_repo_map \
   --repetitions 1 \
-  --artifact-path artifacts/real-oss-v1-smoke.json \
-  --report-path artifacts/real-oss-v1-smoke.md
+  --require-clean-worktree \
+  --artifact-path artifacts/real-oss-v1-repo-map-ablation-1x.json \
+  --report-path artifacts/real-oss-v1-repo-map-ablation-1x.md
 ```
 
-Do not report a score until this command is run from a clean worktree and the
-artifact records matching fixture and evaluation snapshot IDs. The first run is
-a smoke check, not a general coding-capability claim. This runner injects and
-runs the hidden verifier only after Pico stops; it does not configure
-`--verify-cmd`. The explicit runtime-verification gate is a separate runtime
-feature, with its real-OSS evidence recorded in
+The checked-in 1× artifact was captured at commit `622a797` with `gpt-5.6-luna`:
+both variants passed 3/3 hidden verifiers, while `full` used 12.33 average tool
+steps and `no_repo_map` used 19.00. This is an exploratory external replication,
+not a statistically stable success-rate, latency, or cost comparison. In particular,
+one `full` Pydantic request had a 276.94-second provider long tail.
+
+Do not report a score unless the command runs from a clean worktree and the artifact
+records matching fixture and evaluation snapshot IDs. The runner injects and runs the
+hidden verifier only after Pico stops; it does not configure `--verify-cmd`. The
+explicit runtime-verification gate is a separate runtime feature, with its real-OSS
+evidence recorded in
 [the runtime-verification smoke report](../metrics/runtime-verification-real-oss-smoke-pytest13974.md).
+
+The three tasks are intentionally kept as a small external sanity suite. Any claim
+about a performance difference requires a new, larger frozen task set and repeated
+runs; do not tune the runtime against this suite and then present it as held out.
