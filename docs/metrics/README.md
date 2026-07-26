@@ -50,6 +50,15 @@ pytest tail 定位从 0/3 变为 3/3；停滞恢复从 2/3 变为 3/3，并减�
 `--require-clean-worktree` 对 V5 `full` 跑三轮：`gpt-5.4` 共通过 15/15，三轮均为 5/5，
 没有 model failure 或 Action rejection。该结果只证明这次运行时精简没有使固定 V5 回归集退化。
 
+## 6. 显式运行时验证的真实 OSS smoke
+
+[`runtime-verification-real-oss-smoke-pytest13974.md`](runtime-verification-real-oss-smoke-pytest13974.md)
+
+在干净 commit 上对冻结 pytest #13974 跑一条真实模型 smoke：Pico 的显式 runtime
+verifier 首次通过 82 项公开 collection 回归，随后独立隐藏 verifier 通过 1 项。它只证明
+运行时验证链路在一个真实任务上可审计地收敛；单任务、单次运行不能解释为总体成功率，且该次
+模型留下了临时文件，文档已如实记录这个输出整洁性缺陷。
+
 ## 方法边界
 
 统一方法、快照身份、delegate 成本口径和解释限制见

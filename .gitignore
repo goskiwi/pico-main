@@ -47,6 +47,7 @@ artifacts/*
 !artifacts/reliability-benchmark-v1-live-3x.json
 !artifacts/live-llm-v5-post-simplification-3x.json
 !artifacts/live-llm-v5-post-simplification-3x.md
+!artifacts/runtime-verification-real-oss-smoke-pytest13974.json
 readme_intro_locked/
 .idea/
 .claude/settings.local.json
