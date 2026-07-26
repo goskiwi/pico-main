@@ -10,6 +10,7 @@ import re
 import textwrap
 import uuid
 import hashlib
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from .repo_map import RepoMap
 from .run_store import RunStore
 from .sandbox import DockerSandbox
 from .semantic_memory import DisabledSemanticMemoryIndex, SemanticMemoryIndex
+from .trace_events import TRACE_EVENT_NAMES
 from . import tools as toolkit
 from .workspace import WorkspaceContext, clip, now
 
@@ -87,12 +89,14 @@ class Pico:
         allowed_tools=None,
         sandbox=None,
         semantic_memory_config=None,
+        trace_sink=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self._assert_workspace_root()
         self.sandbox = sandbox or DockerSandbox(self.root)
+        self.trace_sink = trace_sink
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = int(max_steps)
@@ -213,6 +217,8 @@ class Pico:
         self._read_only_tool_signatures = set()
         self._read_only_tool_evidence = {}
         self._context_recovery_text = ""
+        self._trace_started_at = None
+        self._trace_sequence = 0
 
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
@@ -666,12 +672,31 @@ class Pico:
         metadata.update(security.detected_secret_env_summary(self))
         return prompt, metadata
 
+    def start_trace(self, started_at):
+        self._trace_started_at = float(started_at)
+        self._trace_sequence = 0
+
     def emit_trace(self, task_state, event, payload=None):
+        """Persist and optionally stream one normalized live trace event."""
+        if event not in TRACE_EVENT_NAMES:
+            raise ValueError(f"unsupported trace event: {event}")
+        if self._trace_started_at is None:
+            raise RuntimeError("trace must start before events are emitted")
         payload = security.redact_artifact(self, payload or {})
-        payload["event"] = event
-        payload["created_at"] = now()
-        # trace 是运行中的逐事件时间线，适合回答“这一轮 agent 到底做了什么”。
+        self._trace_sequence += 1
+        payload.update(
+            {
+                "event": event,
+                "timestamp": now(),
+                "run_id": task_state.run_id,
+                "task_id": task_state.task_id,
+                "seq": self._trace_sequence,
+                "elapsed_ms": int((time.monotonic() - self._trace_started_at) * 1000),
+            }
+        )
         self.run_store.append_trace(task_state, payload)
+        if self.trace_sink is not None:
+            self.trace_sink.emit(payload)
         return payload
 
     def create_checkpoint(self, task_state, user_message, trigger):

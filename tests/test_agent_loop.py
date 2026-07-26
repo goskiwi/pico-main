@@ -166,9 +166,12 @@ def test_provider_context_limit_recovers_once_with_recent_tool_evidence(tmp_path
     assert "Latest tool evidence N001_read_file" in client.prompts[2]
     assert "Fresh workspace snapshot | README.md:" in client.prompts[2]
     assert "alpha\nbeta" in client.prompts[2]
-    trace = (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8")
-    assert '"event": "context_recovery_started"' in trace
-    assert '"event": "context_recovery_completed"' in trace
+    trace = [
+        json.loads(line)
+        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(event["event"] == "model_start" for event in trace) == 3
+    assert trace[-1]["event"] == "run_end"
 
 
 def test_second_provider_context_limit_stops_instead_of_repeatedly_compacting(tmp_path):
@@ -202,9 +205,13 @@ def test_second_provider_context_limit_stops_instead_of_repeatedly_compacting(tm
     assert answer.startswith("Stopped after model error: RuntimeError: input is too long")
     assert client.calls == 2
     assert client.reset_count == 2  # task start + one recovery only
-    trace = (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8")
-    assert trace.count('"event": "context_recovery_started"') == 1
-    assert '"event": "context_recovery_completed"' not in trace
+    trace = [
+        json.loads(line)
+        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert sum(event["event"] == "model_start" for event in trace) == 2
+    assert trace[-1]["event"] == "run_end"
+    assert trace[-1]["model"]["failures"] == 1
 
 
 def test_pytest_failure_tail_stays_in_context_and_full_output_stays_on_disk(tmp_path):
@@ -706,8 +713,14 @@ def test_explicit_runtime_verification_finalizes_a_changed_task(tmp_path):
     )
     assert len(client.tool_sets) == 2
     assert agent.current_task_state.stop_reason == "final_answer_returned"
-    trace = (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8")
-    assert '"event": "runtime_finalized"' in trace
+    trace = [
+        json.loads(line)
+        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event["event"] == "verifier_end" and event["status"] == "passed"
+        for event in trace
+    )
 
 
 def test_agent_recovers_from_malformed_tool_payload_and_audits_it(tmp_path):

@@ -1,8 +1,10 @@
 import json
 import os
+from io import StringIO
 from unittest.mock import patch
 
 from pico.runtime import Pico
+from pico.trace_events import TRACE_EVENT_NAMES, TraceSink
 from pico.session_store import SessionStore
 from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import build_agent, build_workspace
@@ -10,6 +12,7 @@ from tests.helpers import build_agent, build_workspace
 
 def test_successful_run_persists_auditable_artifacts(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    live_trace = StringIO()
     agent = build_agent(
         tmp_path,
         [
@@ -18,6 +21,7 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
             ),
             final_action("Finished."),
         ],
+        trace_sink=TraceSink("jsonl", live_trace),
     )
 
     assert agent.ask("Do the thing") == "Finished."
@@ -44,9 +48,14 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     assert report["summary"]["tools"] == ["read_file"]
     assert "history" not in session
     assert report["tool_audit"][0]["status"] == "ok"
-    assert trace[0]["event"] == "run_started"
-    assert trace[-1]["event"] == "run_finished"
-    assert any(event["event"] == "tool_executed" for event in trace)
+    assert trace[0]["event"] == "model_start"
+    assert trace[-1]["event"] == "run_end"
+    assert any(event["event"] == "tool_end" for event in trace)
+    assert {event["event"] for event in trace} <= TRACE_EVENT_NAMES
+    assert [event["seq"] for event in trace] == list(range(1, len(trace) + 1))
+    assert {event["run_id"] for event in trace} == {task_state["run_id"]}
+    assert {event["task_id"] for event in trace} == {task_state["task_id"]}
+    assert [json.loads(line) for line in live_trace.getvalue().splitlines()] == trace
     task_canvas = (run_dir / "task.mmd").read_text(encoding="utf-8")
     index = json.loads((tmp_path / ".pico" / "runs" / "index.json").read_text(encoding="utf-8"))
     assert 'G["goal | done | Do the thing"]' in task_canvas

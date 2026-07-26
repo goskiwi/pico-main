@@ -56,8 +56,8 @@ def _nonnegative_int(value):
 
 def _delegate_attempt(event):
     """Validate one structured delegate tool outcome, never its text preview."""
-    name = str(event.get("name", "")).strip()
-    tool_status = str(event.get("tool_status", "")).strip()
+    name = str(event.get("tool", "")).strip()
+    tool_status = str(event.get("status", "")).strip()
     raw_outcome = event.get("delegate_outcome")
     issues = []
     if tool_status != "ok":
@@ -143,59 +143,41 @@ def _trace_metrics(trace_path):
         for event in events
         if event.get("event") == "trace_parse_error"
     ]
-    requested_events = [
-        event for event in events if event.get("event") == "model_requested"
-    ]
-    model_events = [event for event in events if event.get("event") == "model_parsed"]
-    failed_events = [event for event in events if event.get("event") == "model_failed"]
-    rejected_events = [
-        event for event in events if event.get("event") == "model_action_rejected"
-    ]
+    model_starts = [event for event in events if event.get("event") == "model_start"]
+    run_end = next(
+        (event for event in reversed(events) if event.get("event") == "run_end"),
+        {},
+    )
+    model = run_end.get("model") if isinstance(run_end.get("model"), dict) else {}
     executed_tools = [
-        str(event.get("name", "")).strip()
+        str(event.get("tool", "")).strip()
         for event in events
-        if event.get("event") == "tool_executed" and str(event.get("name", "")).strip()
+        if event.get("event") == "tool_end" and str(event.get("tool", "")).strip()
     ]
     delegate_attempts = [
         _delegate_attempt(event)
         for event in events
-        if event.get("event") == "tool_executed"
-        and str(event.get("name", "")).strip() in {"delegate", "delegate_many"}
+        if event.get("event") == "tool_end"
+        and str(event.get("tool", "")).strip() in {"delegate", "delegate_many"}
     ]
     failed_delegate_outcomes = [
         attempt["name"] for attempt in delegate_attempts if not attempt["successful"]
     ]
-    input_tokens = sum(
-        int((event.get("completion_metadata") or {}).get("input_tokens") or 0)
-        for event in model_events
-    )
-    output_tokens = sum(
-        int((event.get("completion_metadata") or {}).get("output_tokens") or 0)
-        for event in model_events
-    )
-    cached_tokens = sum(
-        int((event.get("completion_metadata") or {}).get("cached_tokens") or 0)
-        for event in model_events
-    )
-    model_duration_ms = sum(
-        int(event.get("duration_ms") or 0) for event in (*model_events, *failed_events)
-    )
-    action_protocols = sorted(
-        {
-            str(event.get("action_protocol", "")).strip()
-            for event in model_events
-            if str(event.get("action_protocol", "")).strip()
-        }
-    )
     return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cached_tokens": cached_tokens,
-        "model_calls": len(requested_events),
-        "model_duration_ms": model_duration_ms,
-        "model_failures": len(failed_events),
-        "model_action_rejections": len(rejected_events),
-        "action_protocols": action_protocols,
+        "input_tokens": _nonnegative_int(model.get("input_tokens")) or 0,
+        "output_tokens": _nonnegative_int(model.get("output_tokens")) or 0,
+        "cached_tokens": _nonnegative_int(model.get("cached_tokens")) or 0,
+        "model_calls": len(model_starts),
+        "model_duration_ms": _nonnegative_int(model.get("duration_ms")) or 0,
+        "model_failures": _nonnegative_int(model.get("failures")) or 0,
+        "model_action_rejections": _nonnegative_int(model.get("action_rejections")) or 0,
+        "action_protocols": sorted(
+            {
+                str(protocol).strip()
+                for protocol in model.get("action_protocols", [])
+                if str(protocol).strip()
+            }
+        ),
         "executed_tools": executed_tools,
         "delegate_attempts": delegate_attempts,
         "failed_delegate_outcomes": failed_delegate_outcomes,
@@ -243,7 +225,7 @@ def _attempt_trace_metrics(parent_run_dir, run_dirs, workspace_root):
             (
                 event
                 for event in _trace_events(run_dir / "trace.jsonl")
-                if event.get("event") == "run_started"
+                if event.get("event") == "model_start"
             ),
             None,
         )
@@ -468,11 +450,11 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                     continue
                 events.append(event)
         started = next(
-            (event for event in events if event.get("event") == "run_started"),
+            (event for event in events if event.get("event") == "model_start"),
             None,
         )
         if started is None:
-            add_violation("missing_run_started", run_id)
+            add_violation("missing_model_start", run_id)
         else:
             actual_root = str(started.get("workspace_root", "")).strip()
             if not actual_root:
@@ -484,13 +466,13 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                     expected=str(expected_root),
                     actual=str(Path(actual_root).resolve()),
                 )
-        if not any(event.get("event") == "run_finished" for event in events):
+        if not any(event.get("event") == "run_end" for event in events):
             add_violation("unfinished_run", run_id)
 
         for event in events:
-            if event.get("event") != "tool_executed":
+            if event.get("event") != "tool_end":
                 continue
-            name = str(event.get("name", "")).strip()
+            name = str(event.get("tool", "")).strip()
             if name not in {
                 "list_files",
                 "read_file",
@@ -499,15 +481,10 @@ def _workspace_isolation_audit(workspace_root, run_dirs, task):
                 "patch_file",
             }:
                 continue
-            args = event.get("args") or {}
             raw_paths = (
-                [
-                    str(file_args.get("path", "")).strip()
-                    for file_args in args.get("files", [])
-                    if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
-                ]
+                [str(path).strip() for path in event.get("paths", []) if str(path).strip()]
                 if name == "read_file"
-                else [str(args.get("path", ".")).strip() or "."]
+                else [str(event.get("path", ".")).strip() or "."]
             )
             for raw_path in raw_paths:
                 candidate = Path(raw_path)

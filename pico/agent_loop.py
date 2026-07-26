@@ -105,7 +105,19 @@ def _run_runtime_verification(agent, task_state):
         )
     record["duration_ms"] = int((time.monotonic() - started) * 1000)
     agent.runtime_verifications.append(record)
-    agent.emit_trace(task_state, "runtime_verification_finished", {"verification": record})
+    agent.emit_trace(
+        task_state,
+        "verifier_end",
+        {
+            "verifier": "runtime",
+            "status": record["status"],
+            "passed": record["passed"],
+            "exit_code": record["exit_code"],
+            "timed_out": record["timed_out"],
+            "duration_ms": record["duration_ms"],
+            "output_chars": len(record["output"]),
+        },
+    )
     return record
 
 
@@ -155,11 +167,6 @@ def run_agent_turn(agent, user_message):
 def _create_checkpoint(agent, task_state, user_message, trigger):
     checkpoint = agent.create_checkpoint(task_state, user_message, trigger=trigger)
     agent.run_store.write_task_state(task_state)
-    agent.emit_trace(
-        task_state,
-        "checkpoint_created",
-        {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": trigger},
-    )
     return checkpoint
 
 
@@ -168,11 +175,6 @@ def _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
     if resume_status == CHECKPOINT_PARTIAL_STALE_STATUS:
         _create_checkpoint(agent, task_state, user_message, "freshness_mismatch")
     elif resume_status == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
-        agent.emit_trace(
-            task_state,
-            "runtime_identity_mismatch",
-            {"fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", []))},
-        )
         _create_checkpoint(agent, task_state, user_message, "workspace_mismatch")
     if prompt_metadata.get("budget_reductions"):
         _create_checkpoint(agent, task_state, user_message, "context_reduction")
@@ -180,7 +182,6 @@ def _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
 
 def _prompt_for_attempt(agent, task_state, user_message, prompt_snapshot):
     """Build the first prompt once and reuse it for the Responses conversation."""
-    started_at = time.monotonic()
     reused = prompt_snapshot is not None
     if reused:
         prompt, original_metadata = prompt_snapshot
@@ -188,14 +189,6 @@ def _prompt_for_attempt(agent, task_state, user_message, prompt_snapshot):
     else:
         prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
     prompt_metadata["prompt_reused"] = reused
-    agent.emit_trace(
-        task_state,
-        "prompt_built",
-        {
-            "prompt_metadata": prompt_metadata,
-            "duration_ms": int((time.monotonic() - started_at) * 1000),
-        },
-    )
     if not reused:
         _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
     return prompt, prompt_metadata
@@ -217,15 +210,94 @@ def _retry_notice(problem):
     return f"Runtime notice: {problem}. Return exactly one valid function call."
 
 
+def _trace_tool_fields(name, args):
+    """Project only the small, safe tool details useful in a live event."""
+    fields = {"tool": str(name)}
+    if name == "read_file":
+        paths = [
+            str(item.get("path", "")).strip()
+            for item in args.get("files", [])
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        ]
+        if paths:
+            fields["paths"] = paths
+            fields["target"] = ", ".join(paths[:3])
+        return fields
+    path = str(args.get("path", "")).strip()
+    if path:
+        fields["path"] = path
+        fields["target"] = path
+        return fields
+    if name == "run_shell":
+        command = clip(str(args.get("command", "")).strip(), 160)
+        if command:
+            fields["target"] = command
+        return fields
+    if name in {"delegate", "delegate_many"}:
+        if name == "delegate":
+            fields["target"] = str(args.get("role", "delegate")).strip() or "delegate"
+        else:
+            fields["target"] = f"tasks={len(args.get('tasks') or [])}"
+        return fields
+    query = str(args.get("query", "")).strip()
+    if query:
+        fields["target"] = clip(query, 160)
+    return fields
+
+
+def _empty_model_metrics():
+    return {
+        "calls": 0,
+        "duration_ms": 0,
+        "failures": 0,
+        "action_rejections": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "action_protocols": set(),
+    }
+
+
+def _nonnegative_int(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_model_completion(metrics, duration_ms, completion_metadata=None, protocol=""):
+    metrics["duration_ms"] += _nonnegative_int(duration_ms)
+    metadata = dict(completion_metadata or {})
+    for field in ("input_tokens", "output_tokens", "cached_tokens"):
+        metrics[field] += _nonnegative_int(metadata.get(field))
+    if str(protocol).strip():
+        metrics["action_protocols"].add(str(protocol).strip())
+
+
+def _public_model_metrics(metrics):
+    return {
+        "calls": int(metrics["calls"]),
+        "duration_ms": int(metrics["duration_ms"]),
+        "failures": int(metrics["failures"]),
+        "action_rejections": int(metrics["action_rejections"]),
+        "input_tokens": int(metrics["input_tokens"]),
+        "output_tokens": int(metrics["output_tokens"]),
+        "cached_tokens": int(metrics["cached_tokens"]),
+        "action_protocols": sorted(metrics["action_protocols"]),
+    }
+
+
 def _execute_tool_action(agent, task_state, user_message, action, progress_tracker):
     name = action.name
     args = action.args
     agent.mark_tool_planned(name)
     task_state.record_tool(name)
+    safe_args = security.redact_artifact(agent, args)
+    trace_fields = _trace_tool_fields(name, safe_args)
+    agent.emit_trace(task_state, "tool_start", trace_fields)
     started_at = time.monotonic()
     result = agent.run_tool(name, args)
     result = security.redact_text(agent, result)
-    safe_args = security.redact_artifact(agent, args)
     duration_ms = int((time.monotonic() - started_at) * 1000)
     metadata = dict(agent._last_tool_result_metadata or {})
 
@@ -270,7 +342,7 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
         status=canvas_status,
         result_ref=result_ref,
     )
-    fold = agent.run_store.fold_task_canvas(
+    agent.run_store.fold_task_canvas(
         task_state,
         token_counter=agent.count_tokens,
         max_active_nodes=TASK_CANVAS_MAX_ACTIVE_NODES,
@@ -279,20 +351,23 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     )
     agent.run_store.write_task_state(task_state)
     agent.run_store.update_index(task_state, latest_node_id=node_id)
-    if fold["folded"]:
-        agent.emit_trace(task_state, "task_canvas_folded", fold)
+    trace_payload = {
+        **trace_fields,
+        "status": tool_status,
+        "error_code": str(metadata.get("tool_error_code", "")),
+        "duration_ms": duration_ms,
+        "workspace_changed": bool(metadata.get("workspace_changed")),
+        "affected_paths": list(metadata.get("affected_paths") or []),
+        "result_ref": result_ref,
+        "result_preview": clip(result, 500),
+        "result_chars": len(result),
+    }
+    if "delegate_outcome" in metadata:
+        trace_payload["delegate_outcome"] = dict(metadata["delegate_outcome"] or {})
     agent.emit_trace(
         task_state,
-        "tool_executed",
-        {
-            "name": name,
-            "args": safe_args,
-            "node_id": node_id,
-            "result_ref": result_ref,
-            "result": clip(result, 500),
-            "duration_ms": duration_ms,
-            **metadata,
-        },
+        "tool_end",
+        trace_payload,
     )
     # Keep the provider-side tool conversation intact.  The next model turn
     # receives this exact result as the matching tool_result instead of a
@@ -301,15 +376,17 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     _create_checkpoint(agent, task_state, user_message, "tool_executed")
 
 
-def _write_finished_run(agent, task_state, final, run_started_at):
+def _write_finished_run(agent, task_state, final, run_started_at, model_metrics):
     agent.emit_trace(
         task_state,
-        "run_finished",
+        "run_end",
         {
             "status": task_state.status,
             "stop_reason": task_state.stop_reason,
-            "final_answer": final,
+            "final_answer_preview": clip(final, 500),
+            "tool_steps": task_state.tool_steps,
             "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+            "model": _public_model_metrics(model_metrics),
         },
     )
     artifact = security.redact_artifact(agent, report.build_report(agent, task_state))
@@ -335,6 +412,7 @@ def _run_agent_turn(agent, user_message):
     task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
     agent.current_task_state = task_state
     agent.current_run_dir = agent.run_store.start_run(task_state)
+    agent.start_trace(run_started_at)
     agent.current_undo_journal = run_undo.RunUndoJournal(
         agent.root,
         agent.current_run_dir,
@@ -345,15 +423,6 @@ def _run_agent_turn(agent, user_message):
     agent.runtime_verifications = []
     agent.model_action_rejections = []
     agent.model_client.reset_action_session()
-    agent.emit_trace(
-        task_state,
-        "run_started",
-        {
-            "task_id": task_state.task_id,
-            "user_request": clip(user_message, 300),
-            **agent.identity_metadata(),
-        },
-    )
 
     max_retry_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
     max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
@@ -362,6 +431,7 @@ def _run_agent_turn(agent, user_message):
         "repair_attempted": False,
         "last_runtime_verification": {},
     }
+    model_metrics = _empty_model_metrics()
     action_tools = toolkit.responses_action_tools(agent.tools)
     final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
 
@@ -374,7 +444,9 @@ def _run_agent_turn(agent, user_message):
             task_state.stop_step_limit(final)
         agent.mark_work_finished(final, stopped=True)
         _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
-        return _write_finished_run(agent, task_state, final, run_started_at)
+        return _write_finished_run(
+            agent, task_state, final, run_started_at, model_metrics
+        )
 
     def finish_success(final, *, trigger):
         agent.mark_work_finished(final)
@@ -382,7 +454,9 @@ def _run_agent_turn(agent, user_message):
         memory_runtime.promote_durable_memory(agent, user_message, final)
         memory_runtime.llm_promote_durable_memory(agent, user_message, final)
         _create_checkpoint(agent, task_state, user_message, trigger)
-        return _write_finished_run(agent, task_state, final, run_started_at)
+        return _write_finished_run(
+            agent, task_state, final, run_started_at, model_metrics
+        )
 
     def finish_verification_failed(verification):
         command = str(verification.get("command", "verification command")).strip()
@@ -393,7 +467,9 @@ def _run_agent_turn(agent, user_message):
         agent.mark_work_finished(final, stopped=True)
         task_state.stop_verification_failed(final)
         _create_checkpoint(agent, task_state, user_message, "runtime_verification_failed")
-        return _write_finished_run(agent, task_state, final, run_started_at)
+        return _write_finished_run(
+            agent, task_state, final, run_started_at, model_metrics
+        )
 
     def call_model(state: AgentTurnState):
         if task_state.attempts >= max_retry_attempts:
@@ -427,23 +503,25 @@ def _run_agent_turn(agent, user_message):
             }
             prompt_snapshot = (prompt, dict(prompt_metadata))
 
-        agent.emit_trace(
-            task_state,
-            "model_requested",
-            {
-                "attempts": task_state.attempts,
-                "tool_steps": task_state.tool_steps,
-                "finalization_only": finalization_only,
-                "hard_tool_limit": task_state.hard_tool_limit,
-                "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-            },
-        )
         prompt_cache_key = None
         prompt_cache_retention = None
         if agent.feature_enabled("prompt_cache") and agent.model_client.supports_prompt_cache:
             prompt_cache_key = prompt_metadata.get("prompt_cache_key")
             prompt_cache_retention = "in_memory"
 
+        model_metrics["calls"] += 1
+        agent.emit_trace(
+            task_state,
+            "model_start",
+            {
+                "attempt": task_state.attempts,
+                "tool_steps": task_state.tool_steps,
+                "finalization_only": finalization_only,
+                "hard_tool_limit": task_state.hard_tool_limit,
+                "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
+                **agent.identity_metadata(),
+            },
+        )
         model_started_at = time.monotonic()
         try:
             action = agent.model_client.complete_action(
@@ -455,16 +533,11 @@ def _run_agent_turn(agent, user_message):
             )
         except Exception as exc:
             if _is_context_limit_error(exc) and not state.get("context_recovery_attempted", False):
-                recovery = agent.prepare_context_recovery()
+                agent.prepare_context_recovery()
                 agent.model_client.reset_action_session()
-                agent.emit_trace(
-                    task_state,
-                    "context_recovery_started",
-                    {
-                        "reason": "provider_context_limit",
-                        "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                        **recovery,
-                    },
+                _record_model_completion(
+                    model_metrics,
+                    int((time.monotonic() - model_started_at) * 1000),
                 )
                 return Command(
                     update={
@@ -482,21 +555,18 @@ def _run_agent_turn(agent, user_message):
             agent.last_prompt_metadata = prompt_metadata
             agent.last_completion_metadata = {}
             _create_checkpoint(agent, task_state, user_message, "model_error")
-            agent.emit_trace(
-                task_state,
-                "model_failed",
-                {
-                    "error_type": error_type,
-                    "error": error,
-                    "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-                },
+            _record_model_completion(
+                model_metrics,
+                int((time.monotonic() - model_started_at) * 1000),
             )
-            result = _write_finished_run(agent, task_state, final, run_started_at)
+            model_metrics["failures"] += 1
+            result = _write_finished_run(
+                agent, task_state, final, run_started_at, model_metrics
+            )
             return Command(update={"result": result}, goto=END)
 
         if state.get("context_recovery_attempted", False):
             agent.clear_context_recovery()
-            agent.emit_trace(task_state, "context_recovery_completed", {})
 
         completion_metadata = dict(agent.model_client.last_completion_metadata or {})
         if completion_metadata:
@@ -505,9 +575,14 @@ def _run_agent_turn(agent, user_message):
         agent.last_prompt_metadata = prompt_metadata
         kind = action.kind
         payload = _action_payload(action)
+        _record_model_completion(
+            model_metrics,
+            int((time.monotonic() - model_started_at) * 1000),
+            completion_metadata,
+            action.protocol,
+        )
 
         if finalization_only and kind == ACTION_TOOL:
-            rejected_tool_name = action.name
             finalization_reason = "the hard tool limit is reached"
             payload = _retry_notice(
                 f"{finalization_reason}; only submit_final is allowed"
@@ -519,14 +594,6 @@ def _run_agent_turn(agent, user_message):
                 call_id=action.call_id,
             )
             kind = ACTION_RETRY
-            agent.emit_trace(
-                task_state,
-                "finalization_rejected",
-                {
-                    "reason": "hard_tool_limit_reached",
-                    "tool_name": rejected_tool_name,
-                },
-            )
 
         if (
             kind == ACTION_FINAL
@@ -542,7 +609,6 @@ def _run_agent_turn(agent, user_message):
                 raw_preview=action.raw_preview,
             )
             kind = ACTION_RETRY
-            agent.emit_trace(task_state, "final_rejected", {"reason": "workspace_change_required"})
 
         if kind == ACTION_RETRY:
             rejection = {
@@ -551,18 +617,7 @@ def _run_agent_turn(agent, user_message):
                 "raw_preview": action.raw_preview,
             }
             agent.model_action_rejections.append(rejection)
-            agent.emit_trace(task_state, "model_action_rejected", rejection)
-        agent.emit_trace(
-            task_state,
-            "model_parsed",
-            {
-                "kind": kind,
-                "action_protocol": action.protocol,
-                "action_name": action.name,
-                "completion_metadata": completion_metadata,
-                "duration_ms": int((time.monotonic() - model_started_at) * 1000),
-            },
-        )
+            model_metrics["action_rejections"] += 1
 
         if (
             kind == ACTION_FINAL
@@ -573,11 +628,6 @@ def _run_agent_turn(agent, user_message):
             progress_tracker["last_runtime_verification"] = verification
             if verification["status"] == "passed":
                 final = _verified_change_final(agent, progress_tracker)
-                agent.emit_trace(
-                    task_state,
-                    "runtime_finalized",
-                    {"verification": verification},
-                )
                 return Command(
                     update={"result": finish_success(final, trigger="runtime_verification_passed")},
                     goto=END,
@@ -618,7 +668,7 @@ def _run_agent_turn(agent, user_message):
             return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
-        result = finish_success(final, trigger="run_finished")
+        result = finish_success(final, trigger="run_end")
         return Command(update={"result": result}, goto=END)
 
     def execute_tool(state: AgentTurnState):

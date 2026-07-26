@@ -112,6 +112,7 @@ class RunStore:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True, ensure_ascii=True))
             handle.write("\n")
+            handle.flush()
         return path
 
     def write_report(self, task_state, report):

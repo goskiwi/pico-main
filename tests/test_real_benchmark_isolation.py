@@ -11,13 +11,13 @@ def _write_run_trace(run_dir, workspace_root, *, finished=True, tool_events=()):
     run_dir.mkdir(parents=True)
     events = [
         {
-            "event": "run_started",
+            "event": "model_start",
             "workspace_root": str(Path(workspace_root).resolve()),
         },
         *tool_events,
     ]
     if finished:
-        events.append({"event": "run_finished"})
+        events.append({"event": "run_end"})
     (run_dir / "trace.jsonl").write_text(
         "\n".join(json.dumps(event) for event in events) + "\n",
         encoding="utf-8",
@@ -33,9 +33,9 @@ def test_workspace_isolation_audit_accepts_finished_runs_inside_workspace(tmp_pa
         workspace_root,
         tool_events=(
             {
-                "event": "tool_executed",
-                "name": "search",
-                "args": {"path": ".", "pattern": "normalize_label"},
+                "event": "tool_end",
+                "tool": "search",
+                "path": ".",
             },
         ),
     )
@@ -69,9 +69,9 @@ def test_workspace_isolation_audit_rejects_root_search_and_verifier_leaks(tmp_pa
         finished=False,
         tool_events=(
             {
-                "event": "tool_executed",
-                "name": "read_file",
-                "args": {"files": [{"path": str(outer_repo / "settings.py")}]},
+                "event": "tool_end",
+                "tool": "read_file",
+                "paths": [str(outer_repo / "settings.py")],
             },
         ),
     )
@@ -129,12 +129,12 @@ def test_workspace_isolation_audit_rejects_truncated_trace_jsonl(tmp_path):
             [
                 json.dumps(
                     {
-                        "event": "run_started",
+                        "event": "model_start",
                         "workspace_root": str(workspace_root.resolve()),
                     }
                 ),
-                '{"event":"tool_executed"',
-                json.dumps({"event": "run_finished"}),
+                '{"event":"tool_end"',
+                json.dumps({"event": "run_end"}),
             ]
         )
         + "\n",

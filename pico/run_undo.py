@@ -358,7 +358,6 @@ class RunUndoJournal:
         manifest["updated_at"] = _now()
         _write_json_atomic(self.manifest_path, manifest)
         self._update_report()
-        self._append_trace(restore_paths, deleted_paths)
         return RunUndoResult(
             run_id=self.run_id,
             dry_run=False,
@@ -532,21 +531,6 @@ class RunUndoJournal:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         report["undo"] = self.summary()
         _write_json_atomic(report_path, report)
-
-    def _append_trace(self, restored_paths, deleted_paths):
-        trace_path = self.run_dir / "trace.jsonl"
-        event = {
-            "event": "undo_applied",
-            "created_at": _now(),
-            "run_id": self.run_id,
-            "restored_paths": list(restored_paths),
-            "deleted_paths": list(deleted_paths),
-        }
-        with trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(event, ensure_ascii=True, sort_keys=True)
-            )
-            handle.write("\n")
 
     def _load_manifest(self):
         if not self.manifest_path.exists():

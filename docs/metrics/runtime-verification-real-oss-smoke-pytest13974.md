@@ -37,8 +37,8 @@ The run used `gpt-5.6-luna` at temperature 0 and the frozen upstream commit
 - Only after Pico stopped was the hidden test injected and run with the frozen
   verifier command. The hidden test passed.
 
-The runtime trace contains `runtime_verification_finished` followed by
-`runtime_finalized`; the captured sandbox output reports `exit_code=0` and
+The runtime trace contains `verifier_end` followed by
+`run_end`; the captured sandbox output reports `exit_code=0` and
 `82 passed`.
 
 ## Scope and limitation

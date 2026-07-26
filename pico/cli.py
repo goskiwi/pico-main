@@ -31,6 +31,7 @@ from .sandbox import (
 )
 from .semantic_memory import SemanticMemoryConfig, SemanticMemoryIndex
 from .session_store import SessionStore
+from .trace_events import TraceSink
 from .workspace import WorkspaceContext, middle
 
 # 配置日志：输出到 stderr，格式简洁，便于调试
@@ -244,7 +245,7 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 
-def build_agent(args):
+def build_agent(args, *, trace_sink=None):
     """根据 CLI 参数装配出一个可运行的 Pico 实例。
 
     为什么存在：
@@ -324,6 +325,7 @@ def build_agent(args):
             secret_env_names=configured_secret_names,
             sandbox=sandbox,
             semantic_memory_config=semantic_memory_config,
+            trace_sink=trace_sink,
         )
 
     logger.info("创建新的 Pico 实例")
@@ -339,6 +341,7 @@ def build_agent(args):
         secret_env_names=configured_secret_names,
         sandbox=sandbox,
         semantic_memory_config=semantic_memory_config,
+        trace_sink=trace_sink,
     )
 
 
@@ -431,7 +434,32 @@ def build_arg_parser():
         ),
     )
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the model.")
+    trace_group = parser.add_mutually_exclusive_group()
+    trace_group.add_argument(
+        "--trace",
+        action="store_true",
+        help="Print concise live trace events to stderr.",
+    )
+    trace_group.add_argument(
+        "--trace-jsonl",
+        metavar="PATH",
+        help="Mirror live JSONL events to PATH, or '-' for stdout in one-shot mode.",
+    )
     return parser
+
+
+def build_trace_sink(args):
+    """Build the optional live trace mirror; every run still persists its JSONL artifact."""
+    if bool(args.trace):
+        return TraceSink("terminal", sys.stderr)
+    raw_target = str(args.trace_jsonl or "").strip()
+    if not raw_target:
+        return None
+    if raw_target == "-":
+        return TraceSink("jsonl", sys.stdout)
+    path = Path(raw_target).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return TraceSink("jsonl", path.open("w", encoding="utf-8"), close_stream=True)
 
 
 def build_undo_arg_parser():
@@ -550,78 +578,88 @@ def main(argv=None):
         return run_undo_command(raw_argv[1:])
     if raw_argv and raw_argv[0] == "memory-sync":
         return run_memory_sync_command(raw_argv[1:])
-    args = build_arg_parser().parse_args(raw_argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(raw_argv)
+    if args.trace_jsonl == "-" and not args.prompt:
+        parser.error("--trace-jsonl - requires a one-shot prompt")
     # Parse first so ``pico --help`` remains a clean, side-effect-free CLI
     # surface instead of printing startup logs before argparse exits.
-    logger.info("pico 启动中...")
-    logger.debug(f"命令行参数: {args}")
+    trace_sink = build_trace_sink(args)
+    output_stream = sys.stderr if args.trace_jsonl == "-" else sys.stdout
+    try:
+        logger.info("pico 启动中...")
+        logger.debug(f"命令行参数: {args}")
 
-    agent = build_agent(args)
-    logger.info("Pico agent 构建完成")
+        agent = build_agent(args, trace_sink=trace_sink)
+        logger.info("Pico agent 构建完成")
 
-    model = agent.model_client.model
-    base_url = agent.model_client.base_url
-    print(build_welcome(agent, model=model, host=base_url))
+        model = agent.model_client.model
+        base_url = agent.model_client.base_url
+        print(build_welcome(agent, model=model, host=base_url), file=output_stream)
 
-    if args.prompt:
-        # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
-        prompt = " ".join(args.prompt).strip()
-        if prompt:
+        if args.prompt:
+            # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
+            prompt = " ".join(args.prompt).strip()
+            if not prompt:
+                return 0
             logger.info(f"one-shot 模式，提示词长度: {len(prompt)} 字符")
-            print()
+            print(file=output_stream)
             try:
                 result = agent.ask(prompt)
-                print(result)
+                print(result, file=output_stream)
                 logger.info("one-shot 执行完成")
             except RuntimeError as exc:
                 logger.error(f"执行出错: {exc}")
                 print(str(exc), file=sys.stderr)
                 return 1
-        return 0
-
-    logger.info("进入交互模式")
-    while True:
-        # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 working memory 和 checkpoint 会跨轮延续。
-        try:
-            user_input = input("\npico> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            logger.info("用户中断，退出程序")
-            print("")
             return 0
 
-        if not user_input:
-            continue
-        if user_input in {"/exit", "/quit"}:
-            logger.info("用户请求退出")
-            return 0
-        if user_input == "/help":
-            print(HELP_DETAILS)
-            continue
-        if user_input == "/memory":
-            logger.debug("显示 memory")
-            print(agent.memory_text())
-            continue
-        if user_input == "/session":
-            logger.debug(f"显示 session 路径: {agent.session_path}")
-            print(agent.session_path)
-            continue
-        if user_input == "/reset":
-            logger.info("重置 session")
-            agent.reset()
-            print("session reset")
-            continue
-        if user_input == "/reload-skills":
-            logger.info("重新加载 skills")
-            skills = agent.reload_skills()
-            print(f"skills reloaded: {len(skills)}")
-            continue
+        logger.info("进入交互模式")
+        while True:
+            # 交互模式：每次读取一条用户输入，交给同一个 agent，
+            # 因此 working memory 和 checkpoint 会跨轮延续。
+            try:
+                user_input = input("\npico> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                logger.info("用户中断，退出程序")
+                print("")
+                return 0
 
-        print()
-        try:
-            logger.debug(f"处理用户输入: {user_input[:50]}...")
-            result = agent.ask(user_input)
-            print(result)
-        except RuntimeError as exc:
-            logger.error(f"执行出错: {exc}")
-            print(str(exc), file=sys.stderr)
+            if not user_input:
+                continue
+            if user_input in {"/exit", "/quit"}:
+                logger.info("用户请求退出")
+                return 0
+            if user_input == "/help":
+                print(HELP_DETAILS)
+                continue
+            if user_input == "/memory":
+                logger.debug("显示 memory")
+                print(agent.memory_text())
+                continue
+            if user_input == "/session":
+                logger.debug(f"显示 session 路径: {agent.session_path}")
+                print(agent.session_path)
+                continue
+            if user_input == "/reset":
+                logger.info("重置 session")
+                agent.reset()
+                print("session reset")
+                continue
+            if user_input == "/reload-skills":
+                logger.info("重新加载 skills")
+                skills = agent.reload_skills()
+                print(f"skills reloaded: {len(skills)}")
+                continue
+
+            print()
+            try:
+                logger.debug(f"处理用户输入: {user_input[:50]}...")
+                result = agent.ask(user_input)
+                print(result)
+            except RuntimeError as exc:
+                logger.error(f"执行出错: {exc}")
+                print(str(exc), file=sys.stderr)
+    finally:
+        if trace_sink is not None:
+            trace_sink.close()

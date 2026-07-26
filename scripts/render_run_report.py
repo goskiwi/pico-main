@@ -41,8 +41,8 @@ def metric(label, value):
 
 
 def trace_duration(events):
-    started = next((item for item in events if item.get("event") == "run_started"), {})
-    finished = next((item for item in reversed(events) if item.get("event") == "run_finished"), {})
+    started = next((item for item in events if item.get("event") == "model_start"), {})
+    finished = next((item for item in reversed(events) if item.get("event") == "run_end"), {})
     duration = finished.get("run_duration_ms")
     if duration is not None:
         return f"{duration} ms"
@@ -141,7 +141,7 @@ def render_trace(events):
         items.append(
             f"""
             <details class="trace-item">
-              <summary><span>{esc(event)}</span><time>{esc(item.get('created_at', ''))}</time></summary>
+              <summary><span>{esc(event)}</span><time>{esc(item.get('timestamp', ''))}</time></summary>
               <pre>{esc(details)}</pre>
             </details>
             """

@@ -786,6 +786,7 @@ def run_delegate_child(agent, args):
         parent_agent_id=agent.agent_id,
         allowed_tools=role_config["allowed_tools"],
         semantic_memory_config=agent.semantic_memory_config,
+        trace_sink=agent.trace_sink,
     )
     child._assert_workspace_root()
     # 委派的目标是“调查”，不是“放权执行”。

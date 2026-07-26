@@ -83,6 +83,26 @@ uv run pico --cwd /path/to/target-repo \
   "inspect the failing tests, patch the smallest safe fix, and verify it"
 ```
 
+## 实时 Trace
+
+每次运行仍会把同一份 JSONL 事件写入 `.pico/runs/<run_id>/trace.jsonl`，也可以不打开文件、
+直接在命令行消费：
+
+```bash
+# 面试演示：紧凑的人读实时进度，写入 stderr
+uv run pico --trace --cwd /path/to/target-repo "fix the failing test"
+
+# 管道消费：stdout 只输出 JSONL；该形式只支持 one-shot 模式
+uv run pico --trace-jsonl - --cwd /path/to/target-repo "fix the failing test" | jq
+
+# 需要额外留档时，镜像到指定文件
+uv run pico --trace-jsonl ./pico-trace.jsonl --cwd /path/to/target-repo "fix the failing test"
+```
+
+事件只有 `model_start`、`tool_start`、`tool_end`、`verifier_end` 和 `run_end` 五类。每行均带
+`run_id`、`task_id`、递增 `seq`、UTC `timestamp` 与相对 `elapsed_ms`；工具参数和结果仅保留
+脱敏后的路径、摘要与长度，完整输出仍在运行工件中。
+
 也可以进入交互模式：
 
 ```bash

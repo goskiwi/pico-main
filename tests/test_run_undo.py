@@ -60,11 +60,13 @@ def test_run_undo_restores_dirty_preimage_and_removes_created_paths(tmp_path):
     assert not (tmp_path / "generated").exists()
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["undo"]["status"] == "restored"
-    assert json.loads(
-        agent.run_store.trace_path(run_id)
+    trace = [
+        json.loads(line)
+        for line in agent.run_store.trace_path(run_id)
         .read_text(encoding="utf-8")
-        .splitlines()[-1]
-    )["event"] == "undo_applied"
+        .splitlines()
+    ]
+    assert trace[-1]["event"] == "run_end"
 
 
 def test_run_undo_conflict_refuses_every_path_before_writing(tmp_path):

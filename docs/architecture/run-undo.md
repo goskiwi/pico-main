@@ -22,7 +22,7 @@ pico undo
   -> reject the entire operation on any conflict
   -> restore files, symlinks, directories, contents, and modes
   -> verify every restored path
-  -> append undo_applied to trace.jsonl
+  -> update report.json undo summary
 ```
 
 The first preimage is the actual workspace state immediately before Pico first
