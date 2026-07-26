@@ -3,7 +3,9 @@ import json
 import httpx
 from langchain_core.messages import AIMessage
 
-from pico.models import OpenAICompatibleModelClient
+import pico.cli as cli
+from pico.models import DeepSeekChatCompletionsModelClient, OpenAICompatibleModelClient
+from tests.helpers import build_agent
 
 
 READ_FILE_TOOL = {
@@ -89,6 +91,70 @@ def _mocked_client(*responses):
         OpenAICompatibleModelClient(
             "right.codes/codex-mini",
             "https://right.codes/v1",
+            "sk-test",
+            0.2,
+            30,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        ),
+        requests,
+    )
+
+
+def _chat_response(message, response_id="chatcmpl_1"):
+    return {
+        "id": response_id,
+        "object": "chat.completion",
+        "created": 1,
+        "model": "deepseek-v4-flash",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls" if message.get("tool_calls") else "stop",
+                "message": message,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+        },
+    }
+
+
+def _chat_call(name, args, call_id):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(args, separators=(",", ":")),
+        },
+    }
+
+
+def _chat_tool(response_tool):
+    return {
+        "type": "function",
+        "function": {
+            "name": response_tool["name"],
+            "description": response_tool["description"],
+            "parameters": response_tool["parameters"],
+        },
+    }
+
+
+def _mocked_deepseek_client(*responses):
+    queue = list(responses)
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=queue.pop(0))
+
+    return (
+        DeepSeekChatCompletionsModelClient(
+            "deepseek-v4-flash",
+            "https://api.deepseek.com",
             "sk-test",
             0.2,
             30,
@@ -241,3 +307,125 @@ def test_openai_client_audits_malformed_function_arguments():
     assert action.kind == "retry"
     assert "malformed JSON" in action.error
     assert action.raw_preview
+
+
+def test_deepseek_client_uses_chat_completions_non_thinking_tool_calls():
+    client, requests = _mocked_deepseek_client(
+        _chat_response(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_chat_call("read_file", {"files": [{"path": "README.md"}]}, "call_1")],
+            }
+        )
+    )
+    tools = [_chat_tool(READ_FILE_TOOL)]
+
+    action = client.complete_action("inspect", 100, action_tools=tools)
+
+    assert (action.kind, action.name, action.args, action.protocol) == (
+        "tool",
+        "read_file",
+        {"files": [{"path": "README.md"}]},
+        "deepseek_chat_function",
+    )
+    assert requests[0]["thinking"] == {"type": "disabled"}
+    assert requests[0]["max_tokens"] == 100
+    assert requests[0]["tool_choice"] == "required"
+    assert requests[0]["tools"] == tools
+    assert "strict" not in requests[0]["tools"][0]["function"]
+
+
+def test_deepseek_client_replays_tool_output_to_the_chat_conversation():
+    client, requests = _mocked_deepseek_client(
+        _chat_response(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_chat_call("read_file", {"files": [{"path": "README.md"}]}, "call_1")],
+            }
+        ),
+        _chat_response(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_chat_call("submit_final", {"answer": "Done."}, "call_2")],
+            },
+            response_id="chatcmpl_2",
+        ),
+    )
+    tools = [_chat_tool(READ_FILE_TOOL), _chat_tool(SUBMIT_FINAL_TOOL)]
+
+    first = client.complete_action("inspect", 100, action_tools=tools)
+    client.record_action_result(first, "README contents")
+    second = client.complete_action("ignored", 100, action_tools=tools)
+
+    assert second.kind == "final"
+    assert requests[1]["messages"][-1] == {
+        "role": "tool",
+        "content": "README contents",
+        "tool_call_id": "call_1",
+    }
+
+
+def test_cli_selects_the_deepseek_chat_completions_adapter(monkeypatch):
+    captured = {}
+
+    class FakeDeepSeekClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "DeepSeekChatCompletionsModelClient", FakeDeepSeekClient)
+    args = cli.build_arg_parser().parse_args(["--provider", "deepseek"])
+
+    client = cli._build_model_client(
+        args,
+        env={
+            "DEEPSEEK_API_KEY": "deepseek-key",
+            "DEEPSEEK_MODEL": "deepseek-v4-pro",
+        },
+    )
+
+    assert isinstance(client, FakeDeepSeekClient)
+    assert captured == {
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com",
+        "api_key": "deepseek-key",
+        "temperature": 0.2,
+        "timeout": 300,
+    }
+
+
+def test_deepseek_client_runs_through_picos_bounded_tool_loop(tmp_path):
+    (tmp_path / "hello.txt").write_text("hello\n", encoding="utf-8")
+    client, requests = _mocked_deepseek_client(
+        _chat_response(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_chat_call("read_file", {"files": [{"path": "hello.txt"}]}, "call_1")],
+            }
+        ),
+        _chat_response(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_chat_call("submit_final", {"answer": "Done."}, "call_2")],
+            },
+            response_id="chatcmpl_2",
+        ),
+    )
+    agent = build_agent(tmp_path, [])
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    assert agent.ask("Read hello.txt and finish.") == "Done."
+
+    assert {tool["function"]["name"] for tool in requests[0]["tools"]} >= {
+        "read_file",
+        "submit_final",
+    }
+    replayed_tool_result = requests[1]["messages"][-1]
+    assert replayed_tool_result["role"] == "tool"
+    assert replayed_tool_result["tool_call_id"] == "call_1"
+    assert "hello" in replayed_tool_result["content"]

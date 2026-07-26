@@ -18,7 +18,7 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 
 1. **任务相关上下文**：真实 tokenizer 预算下，Repo Map、工作记忆和 Qdrant 语义检索只注入
    当前任务需要的内容；Markdown 是记忆的唯一事实来源。
-2. **连续而可恢复的 Agent 循环**：Responses 原生 tool result 留在 provider 会话内；明确的
+2. **连续而可恢复的 Agent 循环**：provider 原生 tool result 留在连续会话内；明确的
    上下文溢出才会触发一次有界恢复，不用摘要覆盖原始证据。
 3. **强制执行边界与 Run Undo**：shell 只能进入无网络、只读 RootFS、资源受限的 Docker 容器；
    修改记录首触前像，冲突时整次拒绝恢复，不改写 Git。
@@ -55,8 +55,8 @@ flowchart LR
 
 ## 5 分钟运行
 
-需要 macOS/Linux（POSIX）、Python 3.10+、[`uv`](https://docs.astral.sh/uv/) 和 Docker。模型端点必须支持
-OpenAI-compatible Responses API。
+需要 macOS/Linux（POSIX）、Python 3.10+、[`uv`](https://docs.astral.sh/uv/) 和 Docker。默认模型端点必须支持
+OpenAI-compatible Responses API；官方 DeepSeek 走单独的 Chat Completions 适配器。
 
 ```bash
 git clone https://github.com/goskiwi/pico-main.git
@@ -82,6 +82,27 @@ uv run pico --cwd /path/to/target-repo \
   --verify-cmd 'PYTHONPATH=src python -m pytest -q' \
   "inspect the failing tests, patch the smallest safe fix, and verify it"
 ```
+
+### 官方 DeepSeek
+
+DeepSeek 使用官方 Chat Completions API，而不是 Pico 默认的 Responses transport。在目标仓库的
+`.env.local` 写入：
+
+```dotenv
+DEEPSEEK_API_KEY=your-deepseek-api-key
+DEEPSEEK_MODEL=deepseek-v4-flash
+# 可选：DEEPSEEK_API_BASE=https://api.deepseek.com
+```
+
+然后显式启用适配器；它固定使用 non-thinking mode，避免 thinking-mode 工具回合必须回放
+`reasoning_content` 的额外协议：
+
+```bash
+uv run pico --provider deepseek --trace --cwd "$PWD" "inspect the failing tests and make the smallest safe fix"
+```
+
+首轮建议使用 `deepseek-v4-flash`；需要质量优先的受控对比时，再以相同任务与预算测试
+`deepseek-v4-pro`。`deepseek-chat` 和 `deepseek-reasoner` 是已退役的旧模型名，不应写入新配置。
 
 ## 实时 Trace
 

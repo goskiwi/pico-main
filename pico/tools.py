@@ -287,6 +287,21 @@ def responses_action_tools(tool_registry):
     return definitions
 
 
+def chat_completions_action_tools(tool_registry):
+    """Build standard Chat Completions tools without provider-specific strict mode."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": definition["name"],
+                "description": definition["description"],
+                "parameters": definition["parameters"],
+            },
+        }
+        for definition in responses_action_tools(tool_registry)
+    ]
+
+
 def _responses_tool_definition(name, definition):
     return {
         "type": "function",

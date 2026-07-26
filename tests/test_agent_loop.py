@@ -3,9 +3,15 @@
 import json
 
 from pico.actions import ModelAction
+from pico.agent_loop import _action_tool_name
 from pico.sandbox import SandboxResult
 from tests.fakes import final_action, retry_action, tool_action_json
 from tests.helpers import UnitTestSandbox, build_agent
+
+
+def test_action_tool_name_supports_responses_and_chat_completion_shapes():
+    assert _action_tool_name({"name": "submit_final"}) == "submit_final"
+    assert _action_tool_name({"function": {"name": "submit_final"}}) == "submit_final"
 
 
 def test_agent_stops_at_the_exact_retry_limit(tmp_path):

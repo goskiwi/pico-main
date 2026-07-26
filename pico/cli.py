@@ -17,7 +17,7 @@ import sys
 import textwrap
 
 from .config import DEFAULT_APPROVAL_POLICY
-from .models import OpenAICompatibleModelClient
+from .models import DeepSeekChatCompletionsModelClient, OpenAICompatibleModelClient
 from .memory import LayeredMemory, default_memory_state
 from .run_undo import RunUndoConflictError, RunUndoError, restore_run
 from .runtime import Pico
@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
+    "DEEPSEEK_API_KEY",
     "PICO_QDRANT_API_KEY",
     "PICO_EMBEDDINGS_API_KEY",
     "GITHUB_PAT",
@@ -82,6 +83,8 @@ HELP_DETAILS = textwrap.dedent(
 # 默认模型配置
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # 环境变量名称常量
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
@@ -140,7 +143,7 @@ def _effective_model(args, env=None):
 
     模型选择优先级：
     1. 用户显式传入 --model
-    2. `.env.local` 中的 OPENAI_MODEL
+    2. provider 对应的 `.env.local` 模型名
     3. 代码里的默认值
     """
     env = os.environ if env is None else env
@@ -148,12 +151,16 @@ def _effective_model(args, env=None):
     if explicit_model:
         logger.info(f"使用用户指定的模型: {explicit_model}")
         return explicit_model
-    model = env.get("OPENAI_MODEL")
+    env_name = "DEEPSEEK_MODEL" if args.provider == "deepseek" else "OPENAI_MODEL"
+    default_model = (
+        DEFAULT_DEEPSEEK_MODEL if args.provider == "deepseek" else DEFAULT_OPENAI_MODEL
+    )
+    model = env.get(env_name)
     if model:
-        logger.info(f"使用环境变量 OPENAI_MODEL: {model}")
+        logger.info(f"使用环境变量 {env_name}: {model}")
         return model
-    logger.info(f"使用默认 OpenAI 模型: {DEFAULT_OPENAI_MODEL}")
-    return DEFAULT_OPENAI_MODEL
+    logger.info(f"使用默认模型: {default_model}")
+    return default_model
 
 
 def _configured_secret_names(args, env=None):
@@ -175,9 +182,29 @@ def _configured_secret_names(args, env=None):
 
 
 def _build_model_client(args, env=None):
-    """Build Pico's sole OpenAI-compatible model client."""
+    """Build the explicit Responses or DeepSeek Chat Completions client."""
     env = os.environ if env is None else env
     model = _effective_model(args, env=env)
+    if args.provider == "deepseek":
+        base_url = (
+            args.base_url
+            or env.get("DEEPSEEK_API_BASE")
+            or DEFAULT_DEEPSEEK_BASE_URL
+        )
+        api_key = env.get("DEEPSEEK_API_KEY") or env.get("OPENAI_API_KEY", "")
+        logger.info(
+            "DeepSeek Chat Completions 配置 - model: %s, base_url: %s, thinking: disabled",
+            model,
+            base_url,
+        )
+        return DeepSeekChatCompletionsModelClient(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            temperature=args.temperature,
+            timeout=args.openai_timeout,
+        )
+
     base_url = args.base_url or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
     api_key = env.get("OPENAI_API_KEY", "")
     reasoning_effort = env.get("OPENAI_REASONING_EFFORT", "").strip() or None
@@ -361,7 +388,7 @@ def build_arg_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Auditable, sandboxed local coding-agent runtime for "
-            "OpenAI-compatible Responses models."
+            "Responses models and DeepSeek Chat Completions."
         ),
         epilog=(
             "Restore one run with: "
@@ -373,10 +400,16 @@ def build_arg_parser():
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name override. Defaults to OPENAI_MODEL from .env.local when set.",
+        help="Model name override. Defaults to the selected provider's .env.local model setting.",
     )
-    parser.add_argument("--base-url", default=None, help="OpenAI-compatible Responses API base URL.")
-    parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
+    parser.add_argument(
+        "--provider",
+        choices=("responses", "deepseek"),
+        default="responses",
+        help="Model API transport. Use deepseek for DeepSeek's Chat Completions API.",
+    )
+    parser.add_argument("--base-url", default=None, help="API base URL override for the selected provider.")
+    parser.add_argument("--openai-timeout", type=int, default=300, help="Model request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
         "--approval",

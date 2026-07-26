@@ -202,6 +202,15 @@ def _action_payload(action):
     return action.error
 
 
+def _action_tool_name(definition):
+    function = definition.get("function") if isinstance(definition, dict) else None
+    return str(
+        (definition.get("name") if isinstance(definition, dict) else "")
+        or (function.get("name") if isinstance(function, dict) else "")
+        or ""
+    ).strip()
+
+
 def _record_action_result(agent, action, result):
     agent.model_client.record_action_result(action, result)
 
@@ -432,8 +441,11 @@ def _run_agent_turn(agent, user_message):
         "last_runtime_verification": {},
     }
     model_metrics = _empty_model_metrics()
-    action_tools = toolkit.responses_action_tools(agent.tools)
-    final_action_tools = [tool for tool in action_tools if tool.get("name") == "submit_final"]
+    tool_builder = getattr(agent.model_client, "action_tools", toolkit.responses_action_tools)
+    action_tools = tool_builder(agent.tools)
+    final_action_tools = [
+        tool for tool in action_tools if _action_tool_name(tool) == "submit_final"
+    ]
 
     def finish_stopped():
         if task_state.attempts >= max_retry_attempts and task_state.tool_steps < hard_tool_limit:

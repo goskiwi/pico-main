@@ -10,7 +10,7 @@ user request
   -> ContextManager budgets the map and builds the prompt
   -> model client returns a normalized ModelAction
   -> a transient LangGraph routes model, tool, retry, and final transitions
-  -> LangChain replays native function_call / function_call_output messages
+  -> provider adapter replays native tool-call and tool-result messages
   -> tool validation, approval, and execution run
   -> changed paths are attached to the run undo journal
   -> session, trace, task state, and report are persisted
@@ -25,7 +25,7 @@ the ranked signatures enter a dedicated ContextManager budget. The same graph is
 available through the read-only `query_repo_map` tool, which refreshes changed files
 before answering. Ranking evidence is stored in prompt metadata and `report.json`.
 
-The tool layer is intentionally explicit. Pydantic argument models are the single schema source for prompt signatures, local validation, tool identity, and strict Responses functions. The model can only request registered tools, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
+The tool layer is intentionally explicit. Pydantic argument models are the single schema source for prompt signatures, local validation, tool identity, and provider-native function definitions. The model can only request registered tools, and risky tools still pass through Pico's approval and workspace-diff accounting. Shell commands also pass a dangerous-command screen before execution.
 
 Risky workspace actions also pass through `run_undo.py`. Path-specific tools stage
 their target and its parent directories; shell actions stage the workspace scope
@@ -38,7 +38,7 @@ dirty worktree without changing Git refs or the index.
 
 Delegation has a separate boundary: `tools.py` validates requests and renders outcomes, while `DelegateScheduler` reserves the batch step budget and executes workspace-read-only `run_delegate_child` calls through a bounded thread pool. Single and multi-delegate requests therefore share the same concurrency, timeout, and outcome accounting. Child sessions are marked as delegate audit artifacts and excluded from the default `--resume latest` path; concurrent run-index updates use a shared lock plus atomic replacement so sibling completions cannot overwrite one another.
 
-For the OpenAI-compatible Responses backend, every workspace tool is exposed as a strict function and `submit_final` is a separate strict function. A thin Pico adapter uses LangChain's `ChatOpenAI` for transport, retries, Responses item conversion, and encrypted reasoning replay while preserving Pico's provider-neutral `ModelAction` boundary. The main loop sees only `tool`, `final`, or `retry`, and rejected actions are recorded in both trace and report artifacts.
+For the OpenAI-compatible Responses backend, every workspace tool is exposed as a strict function and `submit_final` is a separate strict function. A thin Pico adapter uses LangChain's `ChatOpenAI` for transport, retries, Responses item conversion, and encrypted reasoning replay. The official DeepSeek adapter instead posts standard Chat Completions function definitions and runs in non-thinking mode, so it can replay ordinary assistant tool calls and matching tool messages without persisting reasoning content. Both adapters preserve Pico's provider-neutral `ModelAction` boundary: the main loop sees only `tool`, `final`, or `retry`, and rejected actions are recorded in both trace and report artifacts.
 
 Run observability is split into two artifacts:
 

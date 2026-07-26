@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langsmith import tracing_context
 
@@ -22,8 +22,10 @@ def _normalize_versioned_base_url(base_url):
 
 
 def _message_text(message):
-    """Return text from a Responses-v1 ``AIMessage`` content block list."""
+    """Return text from either Responses-v1 or Chat Completions messages."""
     content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
     if not isinstance(content, list):
         return ""
     parts = []
@@ -148,6 +150,12 @@ class OpenAICompatibleModelClient:
 
     def tokenizer_metadata(self):
         return tokenizer_details(self.model)
+
+    def action_tools(self, tool_registry):
+        """Return this transport's native function-definition shape."""
+        from .tools import responses_action_tools
+
+        return responses_action_tools(tool_registry)
 
     def fork_for_delegate(self):
         """Create an independent Responses conversation for a child agent."""
@@ -277,8 +285,7 @@ class OpenAICompatibleModelClient:
         return action
 
     @staticmethod
-    def _action_from_message(message, action_tools):
-        protocol = "responses_function"
+    def _action_from_message(message, action_tools, *, protocol="responses_function"):
         calls = list(getattr(message, "tool_calls", []) or [])
         invalid_calls = list(getattr(message, "invalid_tool_calls", []) or [])
         raw_preview = _message_preview(message)
@@ -297,7 +304,10 @@ class OpenAICompatibleModelClient:
                 raw_preview=raw_preview,
             )
 
-        allowed_names = {str(item.get("name", "")) for item in action_tools}
+        allowed_names = {
+            str(item.get("name") or (item.get("function") or {}).get("name") or "")
+            for item in action_tools
+        }
         if len(calls) + len(invalid_calls) > 1:
             names = [str(call.get("name", "")).strip() for call in [*calls, *invalid_calls]]
             if "submit_final" in names or any(name not in allowed_names for name in names):
@@ -348,3 +358,241 @@ class OpenAICompatibleModelClient:
             raw_preview=raw_preview,
             call_id=call_id,
         )
+
+
+class DeepSeekChatCompletionsModelClient(OpenAICompatibleModelClient):
+    """DeepSeek's official Chat Completions tool-calling adapter.
+
+    Pico deliberately keeps DeepSeek in non-thinking mode. DeepSeek requires
+    replaying ``reasoning_content`` across thinking-mode tool turns, while this
+    adapter replays only the ordinary assistant tool-call and matching tool
+    message sequence.
+    """
+
+    def __init__(
+        self,
+        model,
+        base_url,
+        api_key,
+        temperature,
+        timeout,
+        *,
+        http_client=None,
+    ):
+        self.model = str(model)
+        # DeepSeek documents the OpenAI-format base URL without a forced
+        # ``/v1`` suffix. Preserve an explicitly configured gateway path.
+        self.base_url = str(base_url).rstrip("/")
+        self.api_key = str(api_key or "")
+        self.temperature = temperature
+        self.timeout = timeout
+        self.reasoning_effort = None
+        self.supports_prompt_cache = False
+        self.last_completion_metadata = {}
+        self._owned_http_client = None
+        if http_client is None:
+            hooks = {}
+            if not self.api_key:
+                hooks["request"] = [_remove_placeholder_authorization]
+            self._owned_http_client = httpx.Client(event_hooks=hooks)
+            http_client = self._owned_http_client
+        else:
+            if not self.api_key and _remove_placeholder_authorization not in http_client.event_hooks[
+                "request"
+            ]:
+                http_client.event_hooks["request"].append(_remove_placeholder_authorization)
+        self._http_client = http_client
+        self._endpoint = self.base_url + "/chat/completions"
+        self.reset_action_session()
+
+    def fork_for_delegate(self):
+        return DeepSeekChatCompletionsModelClient(
+            model=self.model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            temperature=self.temperature,
+            timeout=self.timeout,
+            http_client=self._http_client,
+        )
+
+    def action_tools(self, tool_registry):
+        from .tools import chat_completions_action_tools
+
+        return chat_completions_action_tools(tool_registry)
+
+    def reset_action_session(self):
+        self._action_messages = []
+        self._action_pending_call_ids = []
+        self._action_primary_call_id = ""
+        self._action_defer_extra_calls = False
+        self._action_pending_output = None
+
+    def _post(self, payload):
+        headers = {"content-type": "application/json"}
+        if self.api_key:
+            headers["authorization"] = f"Bearer {self.api_key}"
+        last_error = None
+        for attempt in range(DEFAULT_MODEL_MAX_RETRIES + 1):
+            try:
+                response = self._http_client.post(
+                    self._endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("DeepSeek API returned a non-object response")
+                return data
+            except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as exc:
+                last_error = exc
+                response = getattr(exc, "response", None)
+                retryable = response is None or int(response.status_code) >= 500
+                if not retryable or attempt >= DEFAULT_MODEL_MAX_RETRIES:
+                    break
+        raise RuntimeError(f"DeepSeek Chat Completions request failed: {last_error}") from last_error
+
+    def _invoke(self, max_new_tokens, *, tools=None):
+        payload = {
+            "model": self.model,
+            "messages": list(self._action_messages),
+            "max_tokens": int(max_new_tokens),
+            "temperature": self.temperature,
+            "thinking": {"type": "disabled"},
+        }
+        if tools is not None:
+            payload["tools"] = list(tools)
+            payload["tool_choice"] = "required"
+        data = self._post(payload)
+        usage = dict(data.get("usage") or {})
+        cached_tokens = int(usage.get("prompt_cache_hit_tokens") or 0)
+        self.last_completion_metadata = {
+            "prompt_cache_supported": False,
+            "prompt_cache_key": None,
+            "prompt_cache_retention": None,
+            "input_tokens": usage.get("prompt_tokens"),
+            "output_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+            "cached_tokens": cached_tokens,
+            "cache_hit": cached_tokens > 0,
+        }
+        choices = list(data.get("choices") or [])
+        if not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("DeepSeek API returned no completion choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("DeepSeek API returned no assistant message")
+        return message
+
+    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+        del prompt_cache_key, prompt_cache_retention
+        self._action_messages = [{"role": "user", "content": str(prompt)}]
+        message = self._invoke(max_new_tokens)
+        text = str(message.get("content") or "")
+        if text:
+            return text
+        raise RuntimeError("DeepSeek API returned an empty text response")
+
+    def _append_pending_outputs(self):
+        if not self._action_pending_call_ids:
+            return
+        if self._action_pending_output is None:
+            raise RuntimeError("pending DeepSeek function call has no recorded output")
+        for call_id in self._action_pending_call_ids:
+            output = self._action_pending_output
+            if self._action_defer_extra_calls and call_id != self._action_primary_call_id:
+                output = (
+                    "deferred_by_runtime: only the first function call is executed; "
+                    "call this function again if it is still needed"
+                )
+            self._action_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                }
+            )
+        self._action_pending_call_ids = []
+        self._action_pending_output = None
+
+    @staticmethod
+    def _action_from_chat_message(message, action_tools):
+        valid_calls = []
+        invalid_calls = []
+        for raw_call in message.get("tool_calls") or []:
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function") or {}
+            name = str(function.get("name", "")).strip()
+            call_id = str(raw_call.get("id", "")).strip()
+            raw_arguments = function.get("arguments", "{}")
+            try:
+                args = json.loads(raw_arguments)
+            except (TypeError, json.JSONDecodeError):
+                invalid_calls.append(
+                    {
+                        "name": name,
+                        "args": raw_arguments,
+                        "id": call_id,
+                        "error": "invalid JSON arguments",
+                    }
+                )
+                continue
+            valid_calls.append({"name": name, "args": args, "id": call_id})
+        parsed = AIMessage(
+            content=str(message.get("content") or ""),
+            tool_calls=valid_calls,
+            invalid_tool_calls=invalid_calls,
+        )
+        return OpenAICompatibleModelClient._action_from_message(
+            parsed,
+            action_tools,
+            protocol="deepseek_chat_function",
+        )
+
+    def complete_action(
+        self,
+        prompt,
+        max_new_tokens,
+        *,
+        action_tools,
+        prompt_cache_key=None,
+        prompt_cache_retention=None,
+    ):
+        if not self._action_messages:
+            self._action_messages = [{"role": "user", "content": str(prompt)}]
+        self._append_pending_outputs()
+
+        del prompt_cache_key, prompt_cache_retention
+        message = self._invoke(max_new_tokens, tools=action_tools)
+        raw_calls = list(message.get("tool_calls") or [])
+        self._action_messages.append(
+            {
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": raw_calls,
+            }
+        )
+        action = self._action_from_chat_message(message, action_tools)
+
+        all_calls = [call for call in raw_calls if isinstance(call, dict)]
+        self._action_pending_call_ids = [
+            str(call.get("id", "")).strip()
+            for call in all_calls
+            if str(call.get("id", "")).strip()
+        ]
+        self._action_primary_call_id = action.call_id
+        self._action_defer_extra_calls = len(all_calls) > 1 and action.kind == "tool"
+        self.last_completion_metadata.update(
+            {
+                "action_protocol": action.protocol,
+                "structured_action": True,
+                "action_kind": action.kind,
+                "deferred_function_calls": (
+                    len(all_calls) - 1 if self._action_defer_extra_calls else 0
+                ),
+                "thinking_mode": "disabled",
+            }
+        )
+        return action
