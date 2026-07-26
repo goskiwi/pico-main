@@ -43,22 +43,15 @@ runtime fixture or exposed to the Agent. The final benchmark should expose only
 the original issue text and the pre-fix checkout; it should inject a standalone
 hidden verifier after the Agent stops.
 
-## Integration gate
+## Frozen V1 boundary
 
-Before these candidates enter `real_oss_v1`, each needs all of the following:
+The three candidates above are now the `real_oss_v1` smoke suite. Each has a
+standalone hidden verifier with no PR text in the Agent workspace, an exact
+pre-fix source SHA, and a materialization digest. The fixed
+`Dockerfile.real-oss-v1` pins the base image and Python dependencies needed by
+these source checkouts; the manifest records the public prompt, tool budget,
+and hidden-verifier command.
 
-1. A small standalone hidden verifier derived from the official regression,
-   with no PR URL or solution text in the agent-visible workspace.
-2. A repository-specific, digest-pinned sandbox image containing the exact test
-   dependencies. The default Pico image intentionally contains only pytest and
-   ruff, which is insufficient for Pydantic's compiled `pydantic-core` runtime.
-3. Fixture materialization from the exact base SHA, plus a post-materialization
-   tree digest and a test proving the hidden verifier is absent before Agent
-   execution.
-4. A frozen manifest with the issue text, allowed tools, timeout, tool budget,
-   verifier command, image digest, and source/fixture snapshots committed before
-   the first live-model run.
-
-Run a small smoke suite first (the three candidates once each). Only after the
-runner and isolation checks are stable should the suite grow to roughly nine
-tasks and be used for a `full` versus `no_repo_map` comparison.
+This is intentionally a three-task smoke suite. It is evidence that Pico can
+operate on frozen real repositories, not enough data for a `full` versus
+`no_repo_map` comparison or a general coding-capability claim.

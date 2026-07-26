@@ -45,7 +45,7 @@ This image contains the runtime dependencies needed by all three source
 checkouts. Agent and verifier commands still execute with Docker networking
 disabled.
 
-## Run a live-model smoke evaluation
+## Run a hidden-verifier benchmark smoke
 
 After materialization and image build, use the existing real benchmark runner:
 
@@ -61,4 +61,8 @@ uv run python scripts/run_real_world_benchmark.py \
 
 Do not report a score until this command is run from a clean worktree and the
 artifact records matching fixture and evaluation snapshot IDs. The first run is
-a smoke check; grow the suite before interpreting an A/B difference.
+a smoke check, not a general coding-capability claim. This runner injects and
+runs the hidden verifier only after Pico stops; it does not configure
+`--verify-cmd`. The explicit runtime-verification gate is a separate runtime
+feature, with its real-OSS evidence recorded in
+[the runtime-verification smoke report](../metrics/runtime-verification-real-oss-smoke-pytest13974.md).

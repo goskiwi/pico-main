@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from langsmith import tracing_context
 
-from . import memory_runtime, report, run_undo, security, tool_runtime
+from . import memory_runtime, report, run_undo, security
 from . import tools as toolkit
 from .actions import ACTION_FINAL, ACTION_RETRY, ACTION_TOOL, ModelAction
 from .checkpoints import (
@@ -93,8 +93,7 @@ def _run_runtime_verification(agent, task_state):
     else:
         raw_output = _verification_output(result.stdout, result.stderr)
         output = security.redact_text(agent, raw_output)
-        pytest = tool_runtime._pytest_verification(command, output, result.returncode)
-        passed = bool(pytest["passed"]) if pytest is not None else result.returncode == 0
+        passed = result.returncode == 0
         record.update(
             {
                 "status": "passed" if passed else "failed",
@@ -102,7 +101,6 @@ def _run_runtime_verification(agent, task_state):
                 "exit_code": int(result.returncode),
                 "timed_out": bool(result.timed_out),
                 "output": output,
-                "pytest": pytest,
             }
         )
     record["duration_ms"] = int((time.monotonic() - started) * 1000)

@@ -432,7 +432,7 @@ def test_runtime_verification_retries_once_with_structured_feedback(tmp_path):
             if self.calls == 2:
                 return SandboxResult(returncode=0, stdout="2 passed in 0.01s\n")
             return SandboxResult(
-                returncode=0,
+                returncode=1,
                 stdout="FAILED tests/test_checkout.py::test_total\n1 failed, 2 passed in 0.01s\n",
             )
 

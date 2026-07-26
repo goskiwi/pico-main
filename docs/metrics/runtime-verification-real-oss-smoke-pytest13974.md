@@ -38,8 +38,8 @@ The run used `gpt-5.6-luna` at temperature 0 and the frozen upstream commit
   verifier command. The hidden test passed.
 
 The runtime trace contains `runtime_verification_finished` followed by
-`runtime_finalized`; its record reports `exit_code=0`, `82 passed`, and no
-pipeline-masked failure.
+`runtime_finalized`; the captured sandbox output reports `exit_code=0` and
+`82 passed`.
 
 ## Scope and limitation
 
