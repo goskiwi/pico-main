@@ -66,6 +66,10 @@ uv sync --locked
 docker build -f Dockerfile.sandbox -t pico/sandbox:latest .
 ```
 
+默认镜像根据 `uv.lock` 安装 Pico 自身的运行与测试依赖，因此可以在 Pico 仓库中安全执行
+`pytest`、`ruff` 等白名单命令；运行时不会使用宿主机的 `.venv`，也不会联网安装依赖。要操作
+其他项目时，请通过 `--sandbox-image` 指定一个已预装该项目依赖和 tokenizer 缓存的镜像。
+
 在目标仓库创建 `.env.local`：
 
 ```dotenv

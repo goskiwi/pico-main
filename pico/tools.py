@@ -427,7 +427,7 @@ def protected_write_reason(agent, raw_path):
 
 def protected_read_reason(agent, raw_path):
     path = agent.path(raw_path)
-    if path.name.startswith(".env"):
+    if path.name.startswith(".env") and path.name != ".env.example":
         return f"protected secret-like file: {path.name}"
     return ""
 

@@ -10,8 +10,9 @@ from pico.run_undo import (
     RunUndoJournal,
     restore_run,
 )
+from pico.sandbox import SandboxResult
 from tests.fakes import final_action, tool_action_json
-from tests.helpers import build_agent
+from tests.helpers import UnitTestSandbox, build_agent
 
 
 def _run_id(agent):
@@ -118,16 +119,23 @@ def test_run_undo_validates_all_blobs_before_restoring_any_path(tmp_path):
     assert (tmp_path / "two.txt").read_text(encoding="utf-8") == "two agent\n"
 
 
-def test_run_undo_captures_arbitrary_shell_changes_and_modes(tmp_path):
+def test_run_undo_captures_shell_changes_and_modes(tmp_path):
+    class MutationSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout, env
+            readme = self.workspace_root / "README.md"
+            readme.write_text("shell changed\n", encoding="utf-8")
+            readme.chmod(0o600)
+            generated = self.workspace_root / "generated"
+            generated.mkdir()
+            (generated / "out.txt").write_text("new\n", encoding="utf-8")
+            return SandboxResult(returncode=0, stdout="1 passed in 0.01s\n")
+
     shell_action = tool_action_json(json.dumps(
         {
             "name": "run_shell",
             "args": {
-                "command": (
-                    "printf 'shell changed\\n' > README.md && "
-                    "chmod 600 README.md && mkdir -p generated && "
-                    "printf 'new\\n' > generated/out.txt"
-                ),
+                "command": "python -m pytest -q",
                 "timeout": 20,
             },
         }
@@ -138,6 +146,7 @@ def test_run_undo_captures_arbitrary_shell_changes_and_modes(tmp_path):
             shell_action,
             final_action("Shell mutation complete."),
         ],
+        sandbox=MutationSandbox(tmp_path),
     )
     original_mode = (tmp_path / "README.md").stat().st_mode & 0o777
 

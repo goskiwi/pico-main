@@ -16,6 +16,7 @@ DEFAULT_SANDBOX_MEMORY = "4g"
 DEFAULT_SANDBOX_PIDS_LIMIT = 512
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+CONTAINER_TIKTOKEN_CACHE_DIR = "/opt/pico/tiktoken-cache"
 HOST_ENV_DENYLIST = {
     "HOME",
     "LOGNAME",
@@ -260,6 +261,7 @@ class DockerSandbox:
                 "HOME": "/tmp",
                 "PATH": CONTAINER_PATH,
                 "PWD": CONTAINER_WORKSPACE,
+                "TIKTOKEN_CACHE_DIR": CONTAINER_TIKTOKEN_CACHE_DIR,
                 "TMPDIR": "/tmp",
             }
         )

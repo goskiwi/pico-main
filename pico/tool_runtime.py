@@ -274,7 +274,7 @@ def run_tool(agent, name, args):
         )
         return permission_error["message"]
     shell_policy = tool_policy.shell_command_policy(name, args)
-    if shell_policy and not shell_policy["allowed"] and agent.approval_policy == "never":
+    if shell_policy and not shell_policy["allowed"]:
         _store_outcome(
             agent,
             name,
@@ -282,7 +282,7 @@ def run_tool(agent, name, args):
             status="rejected",
             error_code="shell_not_allowlisted",
             security_event_type="shell_not_allowlisted",
-            approval_required=True,
+            approval_required=False,
             approval_decision="denied",
             shell_policy=shell_policy,
         )

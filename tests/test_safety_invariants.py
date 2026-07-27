@@ -1,10 +1,8 @@
 import os
-import shlex
-import sys
 from unittest.mock import patch
 
 from tests.fakes import final_action, tool_action_json
-from tests.helpers import build_agent
+from tests.helpers import UnitTestSandbox, build_agent
 
 
 def test_workspace_escape_and_symlink_traversal_are_rejected(tmp_path):
@@ -35,6 +33,21 @@ def test_shell_composition_never_matches_the_allowlist(tmp_path):
         result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
         assert result == "error: shell command is not on the allowlist"
         assert agent._last_tool_result_metadata["shell_policy_reason"] == "shell_composition"
+
+
+def test_non_allowlisted_shell_command_is_rejected_before_approval(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="ask")
+
+    with patch("builtins.input") as mock_input:
+        result = agent.run_tool(
+            "run_shell",
+            {"command": "python -m pip install -e .", "timeout": 20},
+        )
+
+    assert result == "error: shell command is not on the allowlist"
+    assert agent._last_tool_result_metadata["tool_error_code"] == "shell_not_allowlisted"
+    assert agent._last_tool_result_metadata["approval_required"] is False
+    mock_input.assert_not_called()
 
 
 def test_allowlisted_shell_command_still_requires_approval(tmp_path):
@@ -93,6 +106,15 @@ def test_protected_runtime_and_env_paths_cannot_be_written_or_read(tmp_path):
     assert not (tmp_path / ".pico" / "runs" / "tamper.json").exists()
 
 
+def test_env_example_can_be_read_without_exposing_real_env_files(tmp_path):
+    (tmp_path / ".env.example").write_text("OPENAI_API_KEY=your-key\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("read_file", {"files": [{"path": ".env.example"}]})
+
+    assert "OPENAI_API_KEY=your-key" in result
+
+
 def test_structured_schema_rejects_wrong_types_before_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="ask")
 
@@ -121,13 +143,33 @@ def test_read_only_mode_denies_non_read_capabilities(tmp_path):
 
 
 def test_run_shell_receives_only_the_allowlisted_environment(tmp_path):
+    class InspectEnvironmentSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout
+            return self._result(env or {})
+
+        @staticmethod
+        def _result(env):
+            from pico.sandbox import SandboxResult
+
+            return SandboxResult(
+                returncode=0,
+                stdout=env.get("MCA_ALLOWLIST_SECRET", "missing"),
+            )
+
     secret = "shh-allowlist-secret"
-    agent = build_agent(tmp_path, [], approval_policy="auto")
-    script = 'import os; print(os.getenv("MCA_ALLOWLIST_SECRET", "missing"))'
-    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    agent = build_agent(
+        tmp_path,
+        [],
+        approval_policy="auto",
+        sandbox=InspectEnvironmentSandbox(tmp_path),
+    )
 
     with patch.dict(os.environ, {"MCA_ALLOWLIST_SECRET": secret}, clear=False):
-        result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+        result = agent.run_tool(
+            "run_shell",
+            {"command": "python -m compileall -q pico", "timeout": 20},
+        )
 
     assert secret not in result
     assert "missing" in result

@@ -6,6 +6,7 @@ import pytest
 
 from pico.sandbox import (
     CONTAINER_PATH,
+    CONTAINER_TIKTOKEN_CACHE_DIR,
     DockerSandbox,
     DockerSandboxConfig,
     SandboxImageMissingError,
@@ -49,6 +50,7 @@ def test_docker_command_enforces_isolation_and_resource_limits(tmp_path):
     assert any("source=/dev/null,target=/workspace/.env,readonly" in value for value in args)
     assert any("source=/dev/null,target=/workspace/service/.env.local,readonly" in value for value in args)
     assert f"PATH={CONTAINER_PATH}" in args
+    assert f"TIKTOKEN_CACHE_DIR={CONTAINER_TIKTOKEN_CACHE_DIR}" in args
     assert "HOME=/tmp" in args
     assert "PATH=/host/bin" not in args
     assert args[-4:] == ["pico/sandbox:test", "/bin/sh", "-lc", "pytest -q"]
@@ -115,7 +117,7 @@ def test_run_shell_does_not_fall_back_when_sandbox_is_unavailable(tmp_path):
     sandbox.config.image = "pico/sandbox:missing"
     agent = build_agent(tmp_path, [], sandbox=sandbox)
 
-    result = agent.run_tool("run_shell", {"command": "echo must-not-run", "timeout": 10})
+    result = agent.run_tool("run_shell", {"command": "pytest -q", "timeout": 10})
 
     assert "sandbox image is missing" in result
     assert agent._last_tool_result_metadata["tool_error_code"] == "sandbox_image_missing"
@@ -136,7 +138,7 @@ def test_run_shell_timeout_has_stable_audit_status(tmp_path):
 
     agent = build_agent(tmp_path, [], sandbox=TimeoutSandbox(tmp_path))
 
-    result = agent.run_tool("run_shell", {"command": "sleep 30", "timeout": 1})
+    result = agent.run_tool("run_shell", {"command": "pytest -q", "timeout": 1})
 
     assert "exit_code: 124" in result
     assert agent._last_tool_result_metadata["tool_error_code"] == "sandbox_timeout"
