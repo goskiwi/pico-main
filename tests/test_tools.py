@@ -125,3 +125,24 @@ def test_flat_tool_schemas_are_strict_and_share_pydantic_requirements(tmp_path):
         "start",
         "end",
     }
+
+
+def test_tool_schema_exposes_shell_and_delegate_constraints_to_the_model(tmp_path):
+    agent = build_agent(tmp_path, [])
+    definitions = responses_action_tools(agent.tools)
+    by_name = {item["name"]: item for item in definitions}
+
+    run_shell = by_name["run_shell"]
+    assert "PYTHONPATH=src python -m pytest" in run_shell["description"]
+
+    delegate_role = by_name["delegate"]["parameters"]["properties"]["role"]
+    assert delegate_role["enum"] == ["explore", "review", "verify"]
+    delegate_many_role = (
+        by_name["delegate_many"]["parameters"]["properties"]["tasks"]["items"]
+        ["properties"]["role"]
+    )
+    assert delegate_many_role["enum"] == ["explore", "review", "verify"]
+
+    prefix = agent.build_prefix().text
+    assert "PYTHONPATH=src python -m pytest" in prefix
+    assert "Do not use env, pipes, redirections" in prefix

@@ -125,8 +125,12 @@ PROTECTED_WRITE_FILENAMES: frozenset = frozenset({".env", ".env.local"})
 
 ALLOWED_SHELL_COMMANDS: Tuple[Tuple[str, ...], ...] = (
     ("python", "-m", "pytest"),
+    ("PYTHONPATH=.", "python", "-m", "pytest"),
+    ("PYTHONPATH=src", "python", "-m", "pytest"),
     ("python", "-m", "compileall"),
     ("pytest",),
+    ("PYTHONPATH=.", "pytest"),
+    ("PYTHONPATH=src", "pytest"),
     ("ruff", "check"),
     ("uv", "run", "pytest"),
     ("uv", "run", "ruff", "check"),

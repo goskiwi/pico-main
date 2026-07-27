@@ -19,7 +19,11 @@ from .config import (
     TASK_CANVAS_MAX_ACTIVE_NODES,
     TASK_CANVAS_MAX_TOKENS,
     TASK_CANVAS_RETAIN_NODES,
-    DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS,
+)
+from .runtime_verification import (
+    run_runtime_verification,
+    verification_feedback,
+    verified_change_final,
 )
 from .task_state import TaskState
 from .workspace import clip
@@ -64,101 +68,6 @@ def _budget_notice(task_state):
             "repair, verify, or finish the current task."
         )
     return ""
-
-
-def _verification_output(stdout, stderr, *, limit=3200):
-    output = "\n".join(part for part in (str(stdout or "").strip(), str(stderr or "").strip()) if part)
-    if len(output) <= limit:
-        return output
-    return f"...[runtime verification output truncated]...\n{output[-limit:]}"
-
-
-def _run_runtime_verification(agent, task_state):
-    """Run the user-configured verifier outside the model's tool/approval path."""
-    command = str(agent.workspace.verification_command or "").strip()
-    started = time.monotonic()
-    record = {
-        "command": command,
-        "status": "infrastructure_error",
-        "passed": False,
-        "freshness": "current",
-        "workspace_fingerprint": "",
-        "invalidated_by": {},
-        "exit_code": None,
-        "timed_out": False,
-        "duration_ms": 0,
-        "output": "",
-    }
-    try:
-        result = agent.sandbox.run(
-            command,
-            cwd=agent.root,
-            timeout=DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        record["output"] = security.redact_text(
-            agent, f"runtime verifier could not start: {type(exc).__name__}: {exc}"
-        )
-    else:
-        raw_output = _verification_output(result.stdout, result.stderr)
-        output = security.redact_text(agent, raw_output)
-        passed = result.returncode == 0
-        record.update(
-            {
-                "status": "passed" if passed else "failed",
-                "passed": passed,
-                "exit_code": int(result.returncode),
-                "timed_out": bool(result.timed_out),
-                "output": output,
-            }
-        )
-    record["duration_ms"] = int((time.monotonic() - started) * 1000)
-    record["workspace_fingerprint"] = agent.verification_workspace_fingerprint()
-    agent.runtime_verifications.append(record)
-    agent.emit_trace(
-        task_state,
-        "verifier_end",
-        {
-            "verifier": "runtime",
-            "status": record["status"],
-            "passed": record["passed"],
-            "freshness": record["freshness"],
-            "workspace_fingerprint": record["workspace_fingerprint"],
-            "exit_code": record["exit_code"],
-            "timed_out": record["timed_out"],
-            "duration_ms": record["duration_ms"],
-            "output_chars": len(record["output"]),
-        },
-    )
-    return record
-
-
-def _verification_feedback(record):
-    command = str(record.get("command", ""))
-    output = str(record.get("output", "")).strip() or "(no verifier output)"
-    return (
-        "Runtime verification failed. You have exactly one repair attempt. "
-        "Inspect the failure, make the smallest correct fix, then call submit_final again.\n"
-        f"Command: {command}\n"
-        f"Exit code: {record.get('exit_code')}\n"
-        f"Output:\n{output}"
-    )
-
-
-def _verified_change_final(agent, progress_tracker):
-    """Build the final response from audited runtime verification evidence only."""
-    changed_paths = sorted(
-        {
-            str(path)
-            for entry in agent.tool_audit_log
-            for path in entry.get("affected_paths", [])
-            if str(path).strip()
-        }
-    )
-    verification = dict(progress_tracker.get("last_runtime_verification") or {})
-    command = str(verification.get("command", "verification command")).strip()
-    changed = ", ".join(changed_paths) if changed_paths else "workspace changes"
-    return f"Completed verified changes.\nChanged files: {changed}\nRuntime verification: {command} — passed."
 
 
 class AgentTurnState(TypedDict, total=False):
@@ -483,12 +392,20 @@ def _run_agent_turn(agent, user_message):
             agent, task_state, final, run_started_at, model_metrics
         )
 
-    def finish_success(final, *, trigger):
-        agent.mark_work_finished(final)
-        task_state.finish_success(final)
+    def finish_with_transition(final, *, stopped, trigger, transition):
+        agent.mark_work_finished(final, stopped=stopped)
+        transition(final)
         _create_checkpoint(agent, task_state, user_message, trigger)
         return _write_finished_run(
             agent, task_state, final, run_started_at, model_metrics
+        )
+
+    def finish_success(final, *, trigger):
+        return finish_with_transition(
+            final,
+            stopped=False,
+            trigger=trigger,
+            transition=task_state.finish_success,
         )
 
     def finish_verification_failed(verification):
@@ -497,11 +414,11 @@ def _run_agent_turn(agent, user_message):
             "Stopped after runtime verification failed following one repair attempt. "
             f"Command: {command}."
         )
-        agent.mark_work_finished(final, stopped=True)
-        task_state.stop_verification_failed(final)
-        _create_checkpoint(agent, task_state, user_message, "runtime_verification_failed")
-        return _write_finished_run(
-            agent, task_state, final, run_started_at, model_metrics
+        return finish_with_transition(
+            final,
+            stopped=True,
+            trigger="runtime_verification_failed",
+            transition=task_state.stop_verification_failed,
         )
 
     def finish_verification_stale(verification):
@@ -510,11 +427,11 @@ def _run_agent_turn(agent, user_message):
             "Stopped because the workspace changed after runtime verification passed. "
             f"Run {command} again against the current workspace."
         )
-        agent.mark_work_finished(final, stopped=True)
-        task_state.stop_verification_stale(final)
-        _create_checkpoint(agent, task_state, user_message, "runtime_verification_stale")
-        return _write_finished_run(
-            agent, task_state, final, run_started_at, model_metrics
+        return finish_with_transition(
+            final,
+            stopped=True,
+            trigger="runtime_verification_stale",
+            transition=task_state.stop_verification_stale,
         )
 
     def call_model(state: AgentTurnState):
@@ -671,10 +588,10 @@ def _run_agent_turn(agent, user_message):
             and progress_tracker["last_workspace_change_step"]
             and agent.workspace.verification_command
         ):
-            verification = _run_runtime_verification(agent, task_state)
+            verification = run_runtime_verification(agent, task_state)
             progress_tracker["last_runtime_verification"] = verification
             if agent.runtime_verification_is_current(verification):
-                final = _verified_change_final(agent, progress_tracker)
+                final = verified_change_final(agent, progress_tracker)
                 return Command(
                     update={"result": finish_success(final, trigger="runtime_verification_passed")},
                     goto=END,
@@ -695,7 +612,7 @@ def _run_agent_turn(agent, user_message):
                     goto=END,
                 )
             progress_tracker["repair_attempted"] = True
-            feedback = _verification_feedback(verification)
+            feedback = verification_feedback(verification)
             _record_action_result(agent, action, feedback)
             agent.mark_retry_needed(feedback)
             _create_checkpoint(agent, task_state, user_message, "runtime_verification_failed")

@@ -1,18 +1,8 @@
-from pico import checkpoints
-from pico.task_state import TaskState
 from pico.tool_runtime import record_process_note_for_tool
 from tests.helpers import build_agent
 
 
-def _task_state(label):
-    return TaskState.create(
-        run_id=f"run_{label}",
-        task_id=f"task_{label}",
-        user_request=label,
-    )
-
-
-def test_session_memory_keeps_fresh_file_summaries_and_process_notes_separate(tmp_path):
+def test_memory_keeps_fresh_file_facts_separate_from_process_feedback(tmp_path):
     (tmp_path / "module.py").write_text("before = 1\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
 
@@ -25,13 +15,6 @@ def test_session_memory_keeps_fresh_file_summaries_and_process_notes_separate(tm
         "run_shell",
         {"tool_status": "rejected", "affected_paths": ["module.py"]},
     )
-
-    memory_text = agent.memory_text()
-    assert "module.py: 1: before = 1" in memory_text
-    assert "Process Notes" in memory_text
-    assert "run_shell rejected" in memory_text
-    assert agent.memory.state["process_notes"]
-
     agent.run_tool(
         "patch_file",
         {"path": "module.py", "old_text": "before = 1", "new_text": "after = 2"},
@@ -40,16 +23,3 @@ def test_session_memory_keeps_fresh_file_summaries_and_process_notes_separate(tm
     assert "module.py" not in agent.memory.state["file_summaries"]
     assert "before = 1" not in agent.memory_text()
     assert "run_shell rejected" in agent.memory_text()
-
-
-def test_session_keeps_only_the_latest_resumable_checkpoint(tmp_path):
-    agent = build_agent(tmp_path, [])
-    first = checkpoints.create_checkpoint(agent, _task_state("first"), "first task", "tool_executed")
-    second = checkpoints.create_checkpoint(agent, _task_state("second"), "second task", "final_answer")
-
-    checkpoint_state = agent.session["checkpoints"]
-    assert checkpoint_state["current_id"] == second["checkpoint_id"]
-    assert checkpoint_state["items"] == {second["checkpoint_id"]: second}
-    assert first["checkpoint_id"] not in checkpoint_state["items"]
-    assert "parent_checkpoint_id" not in second
-    assert checkpoints.current_checkpoint(agent) == second

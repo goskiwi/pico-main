@@ -1,6 +1,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.fakes import final_action, tool_action_json
 from tests.helpers import UnitTestSandbox, build_agent
 
@@ -57,6 +59,35 @@ def test_allowlisted_shell_command_still_requires_approval(tmp_path):
 
     assert result == "error: approval denied for run_shell"
     assert agent._last_tool_result_metadata["shell_allowlisted"] is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "PYTHONPATH=. pytest -q",
+        "PYTHONPATH=src pytest -q",
+        "PYTHONPATH=. python -m pytest -q",
+        "PYTHONPATH=src python -m pytest -q",
+    ),
+)
+def test_source_layout_pytest_commands_are_allowlisted(tmp_path, command):
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+
+    assert result == "error: approval denied for run_shell"
+    assert agent._last_tool_result_metadata["shell_allowlisted"] is True
+
+
+def test_generic_environment_wrapper_is_not_allowlisted(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool(
+        "run_shell", {"command": "env PYTHONPATH=. pytest -q", "timeout": 20}
+    )
+
+    assert result == "error: shell command is not on the allowlist"
+    assert agent._last_tool_result_metadata["shell_policy_reason"] == "not_allowlisted"
 
 
 def test_dangerous_shell_command_is_blocked_and_audited(tmp_path):

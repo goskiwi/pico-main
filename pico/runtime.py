@@ -6,7 +6,6 @@ Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型�
 
 import json
 import os
-import re
 import textwrap
 import uuid
 import hashlib
@@ -21,10 +20,13 @@ from . import context_compaction
 from . import memory as memorylib
 from . import security
 from . import skills as skillslib
+from . import tool_policy
 from . import tool_runtime
-from . import workspace_diff
+from . import runtime_state
+from . import runtime_verification
 from .checkpoints import CHECKPOINT_NONE_STATUS
 from .config import (
+    ALLOWED_SHELL_COMMANDS,
     CONTEXT_COMPACTION_INPUT_TOKENS,
     CONTEXT_COMPACTION_MAX_PER_TASK,
     DEFAULT_APPROVAL_POLICY,
@@ -42,11 +44,6 @@ from .sandbox import DockerSandbox
 from .trace_events import TRACE_EVENT_NAMES
 from . import tools as toolkit
 from .workspace import WorkspaceContext, clip, now
-
-
-_DEDUPLICATED_READ_ONLY_TOOLS = frozenset(
-    {"read_file", "list_files", "search", "query_repo_map"}
-)
 
 
 @dataclass
@@ -418,6 +415,9 @@ class Pico:
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     def build_prefix(self):
+        shell_prefixes = ", ".join(
+            f"`{' '.join(command)}`" for command in ALLOWED_SHELL_COMMANDS
+        )
         tool_lines = []
         for name, tool in self.tools.items():
             fields = ", ".join(
@@ -455,7 +455,7 @@ class Pico:
             - Before writing tests for existing code, read the implementation first.
             - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
             - When Workspace provides a verification_command, use it when helpful; runtime executes that exact command before accepting a changed final answer.
-            - run_shell already starts in the target repository mounted at /workspace. Use repository-relative paths; never cd to a host absolute path or install dependencies from the network.
+            - run_shell already starts in the target repository mounted at /workspace. Use repository-relative paths; never cd to a host absolute path or install dependencies from the network. Its command must begin with exactly one of: {shell_prefixes}. You may add flags and repository-relative paths after that prefix. Do not use env, pipes, redirections, command substitution, git, find, cat, or compound commands.
             - New files should be complete and runnable, including obvious imports.
             - For a bug fix, once you have the implementation and focused failure evidence, patch it before further broad exploration. Do not spend more than two consecutive read-only calls without either testing a concrete hypothesis or editing the likely source.
             - Never repeat read_file, list_files, search, or query_repo_map with identical arguments while the workspace is unchanged. Reuse the saved evidence, choose a different range or query, run a test, or make the needed edit.
@@ -713,226 +713,55 @@ class Pico:
         return checkpoints.create_checkpoint(self, task_state, user_message, trigger)
 
     def update_memory_after_tool(self, name, args, result):
-        """把少量高价值工具结果沉淀到 working memory。
-
-        为什么存在：
-        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进入
-        run artifact；这里只挑少量“下一轮大概率还会用到”的事实做提纯，
-        例如最近读写过哪些文件、某个文件读出来的短摘要。
-
-        输入 / 输出：
-        - 输入：工具名 `name`、参数 `args`、执行结果 `result`
-        - 输出：无显式返回值，副作用是更新 `self.memory`
-
-        在 agent 链路里的位置：
-        它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
-        也就是说：工具结果落盘后，再由这个函数择优沉淀成轻量记忆。
-        """
-        if not self.feature_enabled("memory"):
-            return
-        if name == "read_file":
-            skill_paths = {skill.path for skill in self.skills}
-            file_args = [
-                (index, item)
-                for index, item in enumerate(args.get("files", []))
-                if (
-                    isinstance(item, dict)
-                    and str(item.get("path", "")).strip()
-                    and self.memory.canonical_path(item["path"]) not in skill_paths
-                )
-            ]
-            sections = self._read_file_result_sections(result)
-            for index, item in file_args:
-                path = str(item["path"])
-                canonical_path = self.memory.canonical_path(path)
-                self.memory.remember_file(canonical_path)
-                summary = memorylib.summarize_read_result(
-                    sections[index] if index < len(sections) else result
-                )
-                self.memory.set_file_summary(canonical_path, summary)
-        elif name in {"write_file", "patch_file"}:
-            path = args.get("path")
-            if not path:
-                return
-            canonical_path = self.memory.canonical_path(path)
-            self.memory.remember_file(canonical_path)
-            self.memory.invalidate_file_summary(canonical_path)
-
-    def _read_file_result_sections(self, result):
-        """Extract one batch-read result so each file gets its own memory summary."""
-        text = str(result)
-        header = re.compile(
-            r"^=== read_file metadata: .+; header and line numbers are not file content ===$",
-            flags=re.MULTILINE,
-        )
-        matches = list(header.finditer(text))
-        return [
-            text[match.end(): matches[index + 1].start() if index + 1 < len(matches) else len(text)].strip()
-            for index, match in enumerate(matches)
-        ]
+        return runtime_state.update_memory_after_tool(self, name, args, result)
 
     def update_working_state(self, **updates):
-        if not self.feature_enabled("memory"):
-            return
-        self.memory.update_working_state(**updates)
-        self.session["memory"] = self.memory.to_dict()
-        self.session_path = self.session_store.save(self.session)
+        return runtime_state.update_working_state(self, **updates)
 
     def mark_work_started(self, user_message):
-        # A task may legitimately inspect the same file as a prior task.  The
-        # strict read de-duplication window is intentionally scoped to one ask.
-        self._read_only_tool_signatures.clear()
-        self._read_only_tool_evidence.clear()
-        self._context_checkpoint = None
-        self.update_working_state(
-            goal=user_message,
-            current_subtask="building prompt and asking model",
-            next_action="parse the model response",
-            last_error="",
-        )
+        return runtime_state.mark_work_started(self, user_message)
 
     def mark_tool_planned(self, name):
-        self.update_working_state(
-            current_subtask=f"running tool {name}",
-            next_action="inspect the tool result",
-        )
-
-    @staticmethod
-    def _read_only_tool_signature(name, args):
-        return json.dumps(
-            [str(name or ""), args or {}],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        return runtime_state.mark_tool_planned(self, name)
 
     def is_duplicate_read_only_tool(self, name, args):
-        if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
-            return False
-        return self._read_only_tool_signature(name, args) in self._read_only_tool_signatures
+        return runtime_state.is_duplicate_read_only_tool(self, name, args)
 
     def cached_read_only_evidence(self, name, args):
-        signature = self._read_only_tool_signature(name, args)
-        return dict(self._read_only_tool_evidence.get(signature, {}))
+        return runtime_state.cached_read_only_evidence(self, name, args)
 
     def cache_read_only_evidence(self, name, args, result, *, result_ref="", node_id=""):
-        if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
-            return
-        signature = self._read_only_tool_signature(name, args)
-        self._read_only_tool_signatures.add(signature)
-        # Preserve the first observation for this workspace version.  A later
-        # duplicate must never replace the original source evidence with its
-        # own rejection message.
-        self._read_only_tool_evidence.setdefault(
-            signature,
-            {
-                "result": str(result or ""),
-                "result_ref": str(result_ref or ""),
-                "node_id": str(node_id or ""),
-            },
+        return runtime_state.cache_read_only_evidence(
+            self,
+            name,
+            args,
+            result,
+            result_ref=result_ref,
+            node_id=node_id,
         )
 
     def mark_tool_finished(self, name, args, metadata, result):
-        # A successful workspace change invalidates all prior read evidence.
-        # The next read may therefore reuse the same tool arguments.
-        if metadata.get("workspace_changed"):
-            self._read_only_tool_signatures.clear()
-            self._read_only_tool_evidence.clear()
-        status = str(metadata.get("tool_status", "")).strip() or "ok"
-        error_code = str(metadata.get("tool_error_code", "")).strip()
-        if status in {"error", "rejected", "partial_success"}:
-            self.update_working_state(
-                current_subtask=f"handled tool {name} with status {status}",
-                next_action="recover from the tool result",
-                last_error=clip(f"{name} {status}: {error_code or result}", 240),
-            )
-            return
-        self.update_working_state(
-            current_subtask=f"processed tool {name}",
-            next_action="continue reasoning from the tool result",
-            last_error="",
-        )
+        return runtime_state.mark_tool_finished(self, name, args, metadata, result)
 
     def verification_workspace_fingerprint(self):
-        """Return an exact content fingerprint for runtime-verifier evidence.
-
-        ``WorkspaceContext.fingerprint()`` intentionally describes prompt
-        context (Git facts and selected docs), so it is not suitable for
-        proving that two modified versions of the same file are identical.
-        Runtime verification instead binds to the same ignored-path-aware file
-        snapshot used by workspace-change detection.
-        """
-        snapshot = workspace_diff.capture_workspace_snapshot(self)
-        payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _tool_invalidates_runtime_verification(name, metadata):
-        """Return whether a completed tool makes earlier verifier evidence stale."""
-        if bool(metadata.get("workspace_changed")):
-            return True
-        status = str(metadata.get("tool_status", "")).strip()
-        if status != "ok":
-            return False
-        # A successful shell command can modify files outside a tool's narrow
-        # diff target.  Treat it conservatively even if the tracked snapshot
-        # looks unchanged.  Direct file writes follow the same rule.
-        return name in {"write_file", "patch_file", "run_shell"}
+        return runtime_verification.workspace_fingerprint(self)
 
     def invalidate_runtime_verifications(self, name, metadata, *, tool_step):
-        """Mark current verifier records stale after a mutating tool outcome."""
-        current_records = [
-            record
-            for record in self.runtime_verifications
-            if str(record.get("freshness", "")) == "current"
-        ]
-        if not current_records or not self._tool_invalidates_runtime_verification(name, metadata):
-            return 0
-
-        current_fingerprint = self.verification_workspace_fingerprint()
-        for record in current_records:
-            record["freshness"] = "stale"
-            record["invalidated_by"] = {
-                "kind": "tool",
-                "tool": str(name),
-                "tool_step": int(tool_step),
-                "workspace_fingerprint": current_fingerprint,
-            }
-        return len(current_records)
+        return runtime_verification.invalidate_runtime_verifications(
+            self,
+            name,
+            metadata,
+            tool_step=tool_step,
+        )
 
     def runtime_verification_is_current(self, record):
-        """Return whether a passing verifier still proves the current workspace."""
-        if str(record.get("status", "")) != "passed":
-            return False
-        if str(record.get("freshness", "")) != "current":
-            return False
-
-        current_fingerprint = self.verification_workspace_fingerprint()
-        if str(record.get("workspace_fingerprint", "")) == current_fingerprint:
-            return True
-
-        # This catches an external writer that races the verifier itself.  A
-        # normal in-loop write is invalidated by ``invalidate_runtime_verifications``.
-        record["freshness"] = "stale"
-        record["invalidated_by"] = {
-            "kind": "workspace_fingerprint_mismatch",
-            "workspace_fingerprint": current_fingerprint,
-        }
-        return False
+        return runtime_verification.runtime_verification_is_current(self, record)
 
     def mark_retry_needed(self, notice):
-        self.update_working_state(
-            current_subtask="recovering from a rejected model action",
-            next_action="ask the model for one valid function call",
-            last_error=clip(notice, 240),
-        )
+        return runtime_state.mark_retry_needed(self, notice)
 
     def mark_work_finished(self, final, stopped=False):
-        self.update_working_state(
-            current_subtask="stopped" if stopped else "completed",
-            next_action="-",
-            last_error=clip(final, 240) if stopped else "",
-        )
+        return runtime_state.mark_work_finished(self, final, stopped=stopped)
 
     def ask(self, user_message):
         return agent_loop.run_agent_turn(self, user_message)
@@ -965,7 +794,7 @@ class Pico:
         ):
             allowed = ", ".join(sorted(self.active_tool_names)) or "(none)"
             raise ValueError(f"tool '{name}' is not available for the active skills. Available tools: {allowed}")
-        toolkit.validate_tool(self, name, args)
+        tool_policy.validate_tool(self, name, args, self.tools.get(name, {}))
         if name in {"delegate", "delegate_many"}:
             if self.depth >= self.max_depth:
                 raise ValueError("delegate depth exceeded")

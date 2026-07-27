@@ -5,54 +5,28 @@
 """
 
 import json
-import re
-import shlex
 import shutil
 import subprocess
-from enum import Enum
 from functools import partial
 from pathlib import Path
 
 from langchain_core.utils.function_calling import convert_to_openai_function
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from . import security
 from .delegate_scheduler import DelegateOutcome, DelegateScheduler
-from .config import (
-    ALLOWED_SHELL_COMMANDS,
-    PROTECTED_WRITE_FILENAMES,
-    PROTECTED_WRITE_PATH_PARTS,
-    IGNORED_PATH_NAMES,
-    _DANGEROUS_SHELL_PATTERNS_RAW,
+from .config import ALLOWED_SHELL_COMMANDS, IGNORED_PATH_NAMES
+from .tool_policy import (
+    DELEGATE_ROLES,
+    DelegateRole,
+    protected_read_reason,
+    validate_read_file_spec,
 )
 from .workspace import WorkspaceContext, clip
 
-# 在 import 时编译正则，避免每次调用都重编译
-DANGEROUS_SHELL_PATTERNS = tuple(
-    (reason, re.compile(pattern)) for reason, pattern in _DANGEROUS_SHELL_PATTERNS_RAW
+ALLOWED_SHELL_PREFIX_TEXT = ", ".join(
+    f"`{' '.join(command)}`" for command in ALLOWED_SHELL_COMMANDS
 )
-
-
-class DelegateRole(str, Enum):
-    EXPLORE = "explore"
-    REVIEW = "review"
-    VERIFY = "verify"
-
-
-DELEGATE_ROLES = {
-    DelegateRole.EXPLORE.value: {
-        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
-        "instruction": "Explore the repository for facts relevant to the task. Do not propose edits unless asked to report risks.",
-    },
-    DelegateRole.REVIEW.value: {
-        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
-        "instruction": "Review the relevant code for bugs, regressions, missing tests, and safety issues. Report findings with file references when possible.",
-    },
-    DelegateRole.VERIFY.value: {
-        "allowed_tools": ("query_repo_map", "list_files", "read_file", "search"),
-        "instruction": "Verify the current state by inspecting files, test output, and evidence. Report what is confirmed and what remains uncertain.",
-    },
-}
 
 
 class ToolArgs(BaseModel):
@@ -81,7 +55,10 @@ def _tool(model_name, description, *, capability="read", risky=False, **fields):
 DelegateTaskArgs = create_model(
     "DelegateTaskArgs",
     __base__=ToolArgs,
-    role=_arg(str, min_length=1),
+    role=_arg(
+        DelegateRole,
+        description="Child-agent role. Must be one of: explore, review, verify.",
+    ),
     task=_arg(str, min_length=1),
     max_steps=_arg(int, 3, ge=1, le=12),
 )
@@ -140,7 +117,12 @@ TOOL_DEFINITIONS = {
     ),
     "run_shell": _tool(
         "RunShellArgs",
-        "Run a shell command in the mandatory isolated Docker sandbox.",
+        (
+            "Run one allowlisted test, lint, or compile command in the mandatory "
+            f"isolated Docker sandbox. Allowed prefixes: {ALLOWED_SHELL_PREFIX_TEXT}. "
+            "Flags and repository-relative paths may follow; env, pipes, redirections, "
+            "and compound commands are rejected."
+        ),
         capability="execute",
         risky=True,
         command=_arg(
@@ -186,10 +168,12 @@ TOOL_DEFINITIONS = {
     ),
     "delegate": _tool(
         "DelegateArgs",
-        "Ask a bounded read-only child agent with a specific role to investigate.",
+        "Ask a bounded read-only child agent to investigate using explore, review, or verify.",
         capability="delegate",
-        # Keep role as str so the domain validator owns the stable unsupported-role error.
-        role=_arg(str, min_length=1),
+        role=_arg(
+            DelegateRole,
+            description="Child-agent role. Must be one of: explore, review, verify.",
+        ),
         task=_arg(str, min_length=1),
         max_steps=_arg(int, 3, ge=1, le=12),
     ),
@@ -327,232 +311,6 @@ def _render_runtime_defaults(schema):
     return rendered
 
 
-def _validation_location(parts):
-    location = ""
-    for part in parts:
-        if isinstance(part, int):
-            location += f"[{part + 1}]"
-        else:
-            location += ("." if location else "") + str(part)
-    return location
-
-
-def _validation_error_message(error):
-    location = _validation_location(error.get("loc", ()))
-    error_type = str(error.get("type", ""))
-    context = error.get("ctx", {})
-    if error_type == "missing":
-        return f"missing required argument: {location}"
-    if error_type == "extra_forbidden":
-        return f"unexpected argument: {location}"
-    if error_type == "string_type":
-        return f"{location} must be a string"
-    if error_type in {"int_type", "int_parsing"}:
-        return f"{location} must be an integer"
-    if error_type == "list_type":
-        return f"{location} must be a list"
-    if error_type == "string_too_short" and int(context.get("min_length", 0)) == 1:
-        return f"{location} must not be empty"
-    if error_type == "too_short":
-        return f"{location} must contain at least {context['min_length']} item(s)"
-    if error_type == "too_long":
-        return f"{location} must contain at most {context['max_length']} item(s)"
-    if error_type == "greater_than_equal":
-        return f"{location} must be >= {context['ge']}"
-    if error_type == "less_than_equal":
-        return f"{location} must be <= {context['le']}"
-    return f"{location}: {error.get('msg', 'invalid value')}".strip(": ")
-
-
-def detect_dangerous_shell_command(command):
-    normalized = " ".join(str(command or "").strip().split())
-    for reason, pattern in DANGEROUS_SHELL_PATTERNS:
-        if pattern.search(normalized):
-            return reason
-    return ""
-
-
-def shell_command_policy(command):
-    command = str(command or "").strip()
-    if not command:
-        return {
-            "allowed": False,
-            "matched_prefix": "",
-            "reason": "empty_command",
-        }
-    if any(marker in command for marker in (";", "&", "|", ">", "<", "$(", "`", "\n", "\r")):
-        return {
-            "allowed": False,
-            "matched_prefix": "",
-            "reason": "shell_composition",
-        }
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return {
-            "allowed": False,
-            "matched_prefix": "",
-            "reason": "parse_error",
-        }
-    if not parts:
-        return {
-            "allowed": False,
-            "matched_prefix": "",
-            "reason": "empty_command",
-        }
-    for allowed in ALLOWED_SHELL_COMMANDS:
-        if tuple(parts[: len(allowed)]) == allowed:
-            return {
-                "allowed": True,
-                "matched_prefix": " ".join(allowed),
-                "reason": "allowlisted",
-            }
-    return {
-        "allowed": False,
-        "matched_prefix": "",
-        "reason": "not_allowlisted",
-    }
-
-
-def protected_write_reason(agent, raw_path):
-    path = agent.path(raw_path)
-    relative_parts = path.relative_to(agent.root).parts
-    for part in relative_parts:
-        if part in PROTECTED_WRITE_PATH_PARTS:
-            return f"protected workspace path: {part}"
-    if path.name in PROTECTED_WRITE_FILENAMES:
-        return f"protected secret-like file: {path.name}"
-    return ""
-
-
-def protected_read_reason(agent, raw_path):
-    path = agent.path(raw_path)
-    if path.name.startswith(".env") and path.name != ".env.example":
-        return f"protected secret-like file: {path.name}"
-    return ""
-
-
-def validate_tool(agent, name, args):
-    args = args or {}
-    tool = agent.tools.get(name, {})
-    args_schema = tool.get("args_schema")
-    if args_schema is not None:
-        try:
-            args_schema.model_validate(args)
-        except ValidationError as exc:
-            error = exc.errors(include_url=False)[0]
-            raise ValueError(_validation_error_message(error)) from exc
-
-    if name == "list_files":
-        path = agent.path(args.get("path", "."))
-        if not path.is_dir():
-            raise ValueError("path is not a directory")
-        return
-
-    if name == "read_file":
-        for index, file_args in enumerate(args["files"], start=1):
-            validate_read_file_spec(agent, file_args, label=f"files[{index}]")
-        return
-
-    if name in {"read_task_canvas", "read_task_event", "read_tool_output"}:
-        run_id = str(args.get("run_id", "")).strip()
-        if run_id and (".." in run_id or "/" in run_id or "\\" in run_id):
-            raise ValueError("invalid run_id")
-        phase_id = str(args.get("phase_id", "")).strip()
-        if phase_id and not re.fullmatch(r"phase_\d{3,}", phase_id):
-            raise ValueError("invalid phase_id")
-        if name != "read_task_canvas":
-            node_id = str(args.get("node_id", "")).strip()
-            if not node_id:
-                raise ValueError("node_id must not be empty")
-            if ".." in node_id or "/" in node_id or "\\" in node_id:
-                raise ValueError("invalid node_id")
-        return
-
-    if name == "search":
-        pattern = str(args.get("pattern", "")).strip()
-        if not pattern:
-            raise ValueError("pattern must not be empty")
-        raw_path = args.get("path", ".")
-        agent.path(raw_path)
-        protected_reason = protected_read_reason(agent, raw_path)
-        if protected_reason:
-            raise ValueError(f"protected read path blocked: {protected_reason}")
-        return
-
-    if name == "run_shell":
-        command = str(args.get("command", "")).strip()
-        if not command:
-            raise ValueError("command must not be empty")
-        dangerous_reason = detect_dangerous_shell_command(command)
-        if dangerous_reason:
-            raise ValueError(f"dangerous shell command blocked: {dangerous_reason}")
-        timeout = int(args.get("timeout", 20))
-        if timeout < 1 or timeout > 120:
-            raise ValueError("timeout must be in [1, 120]")
-        return
-
-    if name == "write_file":
-        path = agent.path(args["path"])
-        protected_reason = protected_write_reason(agent, args["path"])
-        if protected_reason:
-            raise ValueError(f"protected write path blocked: {protected_reason}")
-        if path.exists() and path.is_dir():
-            raise ValueError("path is a directory")
-        if "content" not in args:
-            raise ValueError("missing content")
-        return
-
-    if name == "patch_file":
-        # patch_file 故意做得很严格：old_text 必须精确命中且只能出现一次，
-        # 这样修改行为才是确定的，失败原因也更容易解释。
-        path = agent.path(args["path"])
-        protected_reason = protected_write_reason(agent, args["path"])
-        if protected_reason:
-            raise ValueError(f"protected write path blocked: {protected_reason}")
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        old_text = str(args.get("old_text", ""))
-        if not old_text:
-            raise ValueError("old_text must not be empty")
-        if "new_text" not in args:
-            raise ValueError("missing new_text")
-        text = path.read_text(encoding="utf-8")
-        count = text.count(old_text)
-        if count != 1:
-            raise ValueError(
-                f"old_text must occur exactly once, found {count}; use exact file content "
-                "without the read_file metadata header or display line numbers"
-            )
-        return
-
-    if name == "delegate":
-        validate_delegate_task(args, label="delegate")
-        return
-
-    if name == "delegate_many":
-        tasks = args.get("tasks", [])
-        for index, task_args in enumerate(tasks, start=1):
-            if not isinstance(task_args, dict):
-                raise ValueError(f"tasks[{index}] must be an object")
-            validate_delegate_task(task_args, label=f"tasks[{index}]")
-        return
-
-
-def validate_delegate_task(args, label="delegate"):
-    role = str(args.get("role", "")).strip()
-    if not role:
-        raise ValueError(f"{label}.role must not be empty")
-    if role not in DELEGATE_ROLES:
-        raise ValueError(f"unsupported delegate role: {role}")
-    task = str(args.get("task", "")).strip()
-    if not task:
-        raise ValueError(f"{label}.task must not be empty")
-    max_steps = int(args.get("max_steps", 3))
-    if max_steps < 1 or max_steps > 12:
-        raise ValueError(f"{label}.max_steps must be in [1, 12]")
-
-
 def tool_list_files(agent, args):
     path = agent.path(args.get("path", "."))
     entries = [
@@ -564,21 +322,6 @@ def tool_list_files(agent, args):
         kind = "[D]" if entry.is_dir() else "[F]"
         lines.append(f"{kind} {entry.relative_to(agent.root)}")
     return "\n".join(lines) or "(empty)"
-
-
-def validate_read_file_spec(agent, file_args, *, label):
-    raw_path = file_args["path"]
-    path = agent.path(raw_path)
-    protected_reason = protected_read_reason(agent, raw_path)
-    if protected_reason:
-        raise ValueError(f"protected read path blocked: {protected_reason}")
-    if not path.is_file():
-        raise ValueError(f"{label}.path is not a file")
-    start = int(file_args.get("start", 1))
-    end = int(file_args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError(f"{label} has an invalid line range")
-    return path, start, end
 
 
 def _read_file_segment(path, start, end, root):
