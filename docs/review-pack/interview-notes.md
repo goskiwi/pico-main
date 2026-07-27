@@ -13,23 +13,34 @@
 
 直接把仓库全文或整段聊天历史塞进 prompt 会浪费 token，也会让干扰实现稀释注意力。`pico` 用
 真实 `tiktoken` 计数分配预算：Repo Map 用 tree-sitter 构建符号图与 Personalized PageRank，
-工作记忆保存当前任务事实，Markdown durable memory 通过 Qdrant 做混合召回。
+工作记忆保存当前任务事实；跨轮的完整证据保存在 session 与 run artifacts 中，只在继续任务时
+按需引用近期运行，而不在默认请求前做长期记忆检索。
 
-它既能自动注入每轮上下文，也暴露只读 `query_repo_map`，让模型对新的子问题重新排序。向量库
-只是 Markdown 事实的可丢弃检索镜像，不索引源码或工具输出；源码真相仍通过工具读取。
+文件事实只保留为带内容 hash 的短摘要，文件变化后立即失效；失败、拒绝等过程事实才进入有上限的
+process notes。session 只保存最新可恢复 checkpoint，完整 checkpoint 历史仍在对应 run artifact，
+不会把“记忆”做成另一份无界聊天记录。
 
-另一个关键取舍是：Mermaid task canvas 只做 UI、审计和上下文溢出后的恢复导航；它不会替代
+它既能自动注入每轮上下文，也暴露只读 `query_repo_map`，让模型对新的子问题重新排序；源码真相
+仍通过工具读取，而完整过程证据则留在可审计的运行工件中。
+
+Skill 同样按需加载：初始 prompt 只包含 `name`、`description` 和路径，模型需要时才读完整
+`SKILL.md`。metadata 对齐 Agent Skills 的小写 kebab-case 和必填描述；带
+`disable-model-invocation` 的审查流程不会自动暴露给模型，只能由用户 `/skill <name>` 显式启用。
+Pico 额外允许严格 Skill 只收缩工具 schema，因此 Skill 指令不能扩大本地权限边界。
+
+另一个关键取舍是：Mermaid task canvas 只做 UI、审计和 checkpoint 的下钻导航；它不会替代
 provider 会话中的原始 tool result。这样 patch 与测试修复仍基于精确证据，而画布可以阶段折叠。
 
-## 第二亮点：连续工具会话与有界恢复
+## 第二亮点：连续工具会话与任务内压缩
 
-Responses 的 function-call output 会原样回放到同一 provider 会话，不会每个工具调用后重新拼
-一份“历史 prompt”。只有 provider 明确报告 context overflow 时，runtime 才重建一次受 tokenizer
-约束的恢复包；第二次溢出透明停止，避免反复摘要导致细节悄悄丢失。
+Responses API 的加密 reasoning、function call 与匹配 function output 会原样回放到同一会话，不会每个工具调用后重新拼
+一份“历史 prompt”。运行时同时观察 provider 返回的 input token：到达阈值或 provider 明确报告
+context overflow 时，才用同一模型把任务历史编译成固定结构的 checkpoint，并保留最近原始工具证据。
+checkpoint 绑定当时 workspace 指纹、记录 verifier 状态和 artifact 引用；provider 会话重置后，Pico
+从 checkpoint、最新 Repo Map 与当前 workspace 继续。压缩次数有每任务上限，生成失败会透明停止而不是静默降级。
 
-这不是只靠单元测试的取舍：删除重复的 session history 后，`gpt-5.4` 在 clean worktree 的
-V5 `full` 三轮中通过 15/15，且没有 model failure 或 Action rejection。它验证的是这次简化没有
-损失固定回归集的端到端行为，不是泛化能力排名。
+归档的 V5 证据是在此前的 `gpt-5.4` 上采集，保留为历史基线；当前默认模型为
+`gpt-5.6-luna`，并有同一冻结 V2 十题的独立 1× 结果。
 
 ## 第三亮点：可恢复但不改写 Git
 
@@ -51,10 +62,10 @@ V5 `full` 三轮中通过 15/15，且没有 model failure 或 Action rejection�
 
 ## 2 分钟架构讲解
 
-1. `RepoMap`、工作记忆与语义记忆由 `ContextManager` 按真实 token 预算组装。
-2. Responses strict function calling 返回统一 `ModelAction(tool | final | retry)`，工具输出保留在
-   provider 会话。
-3. `agent_loop` 执行有界状态转换，并只在明确溢出时进行一次恢复。
+1. `RepoMap`、会话工作记忆与任务状态由 `ContextManager` 按真实 token 预算组装。
+2. 面向 GPT-5.6 Luna 的窄 Responses 适配层把 strict function calling 归一为
+   `ModelAction(tool | final | retry)`，工具输出保留在 provider 会话。
+3. `agent_loop` 执行有界状态转换；接近 token 阈值或明确溢出时，生成 task checkpoint 后继续。
 4. `tools.py` 用同一份 Pydantic model 做 schema、提示展示和本地校验。
 5. 高风险动作经过 capability、approval 和危险命令检查；`run_shell` 只能进无网络、只读 RootFS、
    资源受限的 Docker。
@@ -67,16 +78,18 @@ V5 `full` 三轮中通过 15/15，且没有 model failure 或 Action rejection�
 Provider 只负责输出形状，不能替代本地权限边界。调用可能来自兼容端点、重放 artifact 或未来的
 其他入口；路径保护、read-only、approval 和危险命令规则都必须由 runtime 自己执行。
 
+### 为什么不做多 provider / 多模型适配层？
+
+Pico 的目标是可审计的单用户 coding runtime，不是模型网关。当前只针对 GPT-5.6 Luna 的
+Responses contract 做窄适配：隔离 SDK message 和函数调用协议，使 runtime、测试与审计工件不直接
+依赖 SDK 类型；但不维护模型目录、OAuth、能力协商或跨 API 转译。后者会显著扩大测试矩阵，却不能
+改善当前任务的工具安全与恢复语义。
+
 ### 为什么画布不直接替代即时上下文？
 
 画布是低 token 的任务导航和审计视图，适合折叠旧步骤；但 patch、测试失败和冲突恢复需要完整
-源码与原始工具输出。即时上下文由 provider 会话保存精确证据，画布只在该会话确实溢出时提供
-可控的恢复入口。
-
-### 为什么需要 Qdrant，又不把代码放进去？
-
-它解决的是用户偏好、项目约束、反馈等稳定 Markdown 记忆的语义改写召回。代码会变，且需要
-行级精确性，因此仍由 Repo Map 定位、工具读取；Qdrant 只存可重建的检索镜像。
+源码与原始工具输出。即时上下文优先由 provider 会话保存精确证据；需要压缩时，checkpoint 只保存
+结构化状态和 artifact 引用，并额外保留一小段最近原始证据，模型仍可按需下钻。
 
 ### 为什么还要 LangGraph，普通 while 循环不够吗？
 

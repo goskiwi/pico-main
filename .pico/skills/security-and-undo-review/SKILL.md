@@ -2,7 +2,7 @@
 name: security-and-undo-review
 description: Review Pico changes affecting tool permissions, sandbox isolation, secrets, workspace paths, or all-or-nothing Run Undo recovery. 中文: 安全审查, 沙箱, 密钥, 路径逃逸, 审批, Undo, 恢复.
 when_to_use: Use for security reviews or changes to tools.py, tool_policy.py, sandbox.py, security.py, run_undo.py, or workspace boundaries.
-trigger_keywords: [security review, sandbox, approval, secret, path traversal, undo, recovery, 安全审查, 沙箱, 审批, 密钥, 路径逃逸, 恢复]
+when_not_to_use: A normal feature change with no permission, sandbox, secret, path, or Undo boundary involved.
 tools: [list_files, read_file, search, query_repo_map, read_task_canvas, read_task_event, read_tool_output]
 allowed_tools_strict: true
 priority: 100

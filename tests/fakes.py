@@ -31,7 +31,7 @@ def retry_action(error, *, raw_preview=""):
 
 
 class FakeModelClient:
-    """Return scripted structured actions or raw auxiliary-model completions."""
+    """Return scripted structured actions for offline runtime tests."""
 
     model = "fake"
     base_url = "test://fake"

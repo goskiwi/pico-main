@@ -45,7 +45,7 @@ def build_arg_parser():
         action="store_true",
         help="Refuse to run when tracked or untracked files are present.",
     )
-    parser.add_argument("--sandbox-image", default="pico-sandbox:latest")
+    parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
     parser.add_argument("--sandbox-cpus", type=float, default=4.0)
     parser.add_argument("--sandbox-memory", default="4g")
     parser.add_argument("--sandbox-pids-limit", type=int, default=512)

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_SANDBOX_IMAGE = "pico-sandbox:latest"
+DEFAULT_SANDBOX_IMAGE = "pico/sandbox:latest"
 DEFAULT_SANDBOX_CPUS = 4.0
 DEFAULT_SANDBOX_MEMORY = "4g"
 DEFAULT_SANDBOX_PIDS_LIMIT = 512

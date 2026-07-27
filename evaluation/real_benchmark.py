@@ -245,22 +245,18 @@ def _variant_feature_flags(variant):
         or variant in contract.REPO_MAP_BUDGET_VARIANTS
     ):
         return {
-            "llm_memory_extract": False,
             "require_workspace_change": True,
         }
     if variant == contract.VARIANT_NO_MEMORY_CONTEXT:
         return {
             "memory": False,
-            "relevant_memory": False,
             "context_reduction": False,
-            "llm_memory_extract": False,
             "dynamic_budget": False,
             "require_workspace_change": True,
         }
     if variant == contract.VARIANT_NO_REPO_MAP:
         return {
             "repo_map": False,
-            "llm_memory_extract": False,
             "require_workspace_change": True,
         }
     raise ValueError(f"unsupported benchmark variant: {variant}")
@@ -287,7 +283,6 @@ class RealWorldBenchmarkRunner:
     verifier_timeout: int = 90
     require_clean_worktree: bool = False
     sandbox_config: DockerSandboxConfig | None = None
-    reasoning_effort: str = ""
 
     def __post_init__(self):
         self.provider = str(self.provider).strip().lower()
@@ -313,9 +308,9 @@ class RealWorldBenchmarkRunner:
         self.model = str(
             self.model or workspace_env.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
         ).strip()
-        self.reasoning_effort = str(
-            workspace_env.get("OPENAI_REASONING_EFFORT", "")
-        ).strip()
+        self.reasoning_effort = (
+            workspace_env.get("OPENAI_REASONING_EFFORT", "").strip() or None
+        )
 
     def run(self, task_ids=None):
         benchmark = load_real_benchmark(self.benchmark_path, self.repo_root)
@@ -374,7 +369,7 @@ class RealWorldBenchmarkRunner:
             "repetitions": int(self.repetitions),
             "run_config": {
                 "temperature": 0.0,
-                "reasoning_effort": self.reasoning_effort or "provider_default",
+                "reasoning_effort": self.reasoning_effort,
                 "max_new_tokens": int(self.max_new_tokens),
                 "verifier_timeout_seconds": int(self.verifier_timeout),
                 "require_clean_worktree": bool(self.require_clean_worktree),

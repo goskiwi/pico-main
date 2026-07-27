@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TASK_ID = "click_empty_bytes_echo"
 FIXTURE_DIR = ROOT / "artifacts" / "real-oss-fixtures" / TASK_ID
-SANDBOX_IMAGE = "pico-real-oss-v1:latest"
+SANDBOX_IMAGE = "pico/real-oss-v1:latest"
 
 
 def _root_relative(path: Path) -> Path:

@@ -113,7 +113,7 @@ def test_context_manager_injects_ranked_repo_map_and_metadata(tmp_path):
         "Fix UserService.create_user duplicate save"
     )
 
-    assert prompt.index("Repository map") < prompt.index("Relevant memory:")
+    assert prompt.index("Repository map") < prompt.index("Task state:")
     assert "UserService.create_user" in prompt
     assert metadata["repo_map"]["enabled"] is True
     assert metadata["repo_map"]["selected_count"] > 0

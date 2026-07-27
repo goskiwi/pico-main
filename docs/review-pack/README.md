@@ -3,7 +3,7 @@
 ## 10–15 minute review route
 
 1. Read the project pitch and architecture map below.
-2. Inspect `pico/context_manager.py` → `pico/repo_map.py` → `pico/semantic_memory.py`.
+2. Inspect `pico/context_manager.py` → `pico/repo_map.py` → `pico/run_store.py`.
 3. Follow `pico/models.py` → `pico/agent_loop.py` → `pico/tools.py` → `pico/sandbox.py`.
 4. Inspect `pico/run_store.py` and `pico/run_undo.py`, then the
    [Repo Map + Undo result](../metrics/reliability-benchmark-v1-live-3x.md).
@@ -16,7 +16,7 @@
 `pico` is a local coding-agent runtime focused on task-aware context selection,
 continuous tool conversations, bounded execution, recoverable workspace changes, and
 auditable evidence. It is not a wrapper around one LLM call: the repository contains
-tokenizer-aware context budgeting, a Repo Map, hybrid durable-memory retrieval, the
+tokenizer-aware context budgeting, a Repo Map, session working memory, the
 model/tool state machine, Pydantic tool contracts, Docker-only shell boundary, run
 artifacts, an Undo journal, and a hidden-verifier benchmark runner.
 
@@ -24,10 +24,11 @@ artifacts, an Undo journal, and a hidden-verifier benchmark runner.
 
 - `pico/repo_map.py`: tree-sitter symbols, weighted relations, Personalized PageRank,
   incremental refresh, and budgeted rendering.
-- `pico/context_manager.py`: real-token budgets for Repo Map, memory, skills, and recovery evidence.
-- `pico/semantic_memory.py`: Qdrant mirror over canonical Markdown durable memories.
-- `pico/models.py`: strict Responses functions and native tool-result replay.
-- `pico/agent_loop.py`: bounded model/tool/final transitions plus one-shot context recovery.
+- `pico/context_manager.py`: real-token budgets for Repo Map, session state, on-demand skills, and compacted task evidence.
+- `pico/skills.py`: Agent Skills-compatible metadata validation, index-only discovery, and explicit manual-only skills.
+- `pico/context_compaction.py`: structured checkpoint compiler with bounded recent original evidence.
+- `pico/models.py`: Responses functions and native function-output replay.
+- `pico/agent_loop.py`: bounded model/tool/final transitions plus threshold/overflow task compaction.
 - `pico/tools.py`: one Pydantic schema source, capability checks, and tool execution.
 - `pico/sandbox.py`: mandatory network-disabled Docker execution.
 - `pico/run_undo.py`: first-touch preimages, conflict preflight, and restoration.
@@ -61,9 +62,9 @@ model-capability claims.
 
 For an interview, read the invariant tests rather than every fixture self-check:
 
-- `tests/test_agent_loop.py`: live tool-result continuity, context recovery, bounded completion;
+- `tests/test_agent_loop.py`: live tool-result continuity, task compaction, bounded completion;
 - `tests/test_safety_invariants.py` and `tests/test_run_undo.py`: local policy and all-or-nothing recovery;
-- `tests/test_context_tokens.py`, `tests/test_repo_map.py`, and `tests/test_semantic_memory.py`: bounded context selection;
+- `tests/test_context_tokens.py` and `tests/test_repo_map.py`: bounded context selection;
 - `tests/test_reliability_benchmark.py` and `tests/test_real_benchmark_v5.py`: frozen end-to-end evidence.
 
 Useful checks:
@@ -83,6 +84,7 @@ Each run writes under `.pico/runs/<run_id>/`:
 - `task.mmd`: active Mermaid task canvas with node-level evidence references;
 - `phases/phase_XXX.mmd`: archived task stages that can be opened from the active canvas;
 - `offload.jsonl`: tool-level summaries, node IDs, and reference paths;
+- `context_compactions.jsonl`: structured checkpoints, triggers, workspace fingerprints, and model metadata;
 - `report.json`: final status, prompt metadata, summary, audit, and rejected Actions;
 - `undo/manifest.json` plus blobs: restorable preimages and expected post-run states;
 - `refs/*.txt`: complete evidence kept out of normal prompt context.

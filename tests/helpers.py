@@ -67,7 +67,7 @@ def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path, verification_command=verification_command)
     store = SessionStore(tmp_path / ".pico" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
-    feature_flags = {"llm_memory_extract": False}
+    feature_flags = {}
     feature_flags.update(kwargs.pop("feature_flags", {}) or {})
     sandbox = kwargs.pop("sandbox", UnitTestSandbox(tmp_path))
     return Pico(

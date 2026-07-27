@@ -5,6 +5,17 @@ from .workspace import clip
 
 
 def build_report(agent, task_state):
+    skill_metadata = dict((agent.last_prompt_metadata or {}).get("skills", {}))
+    skill_metadata.update(
+        {
+            "active_count": len(agent.active_skills),
+            "active_names": [skill.name for skill in agent.active_skills],
+            "active_paths": [skill.path for skill in agent.active_skills],
+            "active_strict": [
+                bool(skill.allowed_tools_strict) for skill in agent.active_skills
+            ],
+        }
+    )
     return {
         "run_id": task_state.run_id,
         "task_id": task_state.task_id,
@@ -22,11 +33,12 @@ def build_report(agent, task_state):
         "dry_run": bool(agent.dry_run),
         "task_canvas_path": str(agent.run_store.task_canvas_path(task_state.run_id)),
         "offload_path": str(agent.run_store.offload_path(task_state.run_id)),
+        "context_compactions_path": str(agent.run_store.context_compactions_path(task_state.run_id)),
         "phase_index_path": str(agent.run_store.phase_index_path(task_state.run_id)),
         "task_phase_summary": agent.run_store.phase_summary(task_state.run_id),
         "agent": agent.identity_metadata(),
         "summary": build_run_summary(agent, task_state),
-        "skills": dict((agent.last_prompt_metadata or {}).get("skills", {})),
+        "skills": skill_metadata,
         "repo_map": dict((agent.last_prompt_metadata or {}).get("repo_map", {})),
         "undo": (
             agent.current_undo_journal.summary()
@@ -43,17 +55,11 @@ def build_report(agent, task_state):
         ),
         "tool_audit": list(agent.tool_audit_log),
         "runtime_verifications": list(agent.runtime_verifications),
+        "context_compactions": list(task_state.context_compactions),
         "model_action_rejections": list(agent.model_action_rejections),
+        "model": dict(agent.last_run_model_metrics),
         "task_state": task_state.to_dict(),
         "prompt_metadata": agent.last_prompt_metadata,
-        "durable_promotions": list(agent.last_durable_promotions),
-        "durable_rejections": list(agent.last_durable_rejections),
-        "durable_superseded": list(agent.last_durable_superseded),
-        "llm_durable_promotions": list(agent.last_llm_durable_promotions),
-        "llm_durable_rejections": list(agent.last_llm_durable_rejections),
-        "llm_durable_superseded": list(agent.last_llm_durable_superseded),
-        "llm_memory_extractor_error": str(agent.last_llm_memory_extractor_error),
-        "semantic_memory_sync": dict(agent.last_semantic_memory_sync),
         "redacted_env": security.detected_secret_env_summary(agent),
     }
 
@@ -70,12 +76,16 @@ def record_tool_audit(agent, name, args, result, duration_ms):
         "dry_run": bool(metadata.get("dry_run", False)),
         "approval_required": bool(metadata.get("approval_required", False)),
         "approval_decision": metadata.get("approval_decision", ""),
+        "activated_skills": list(metadata.get("activated_skills") or []),
         "shell_allowlisted": metadata.get("shell_allowlisted"),
         "shell_policy_reason": metadata.get("shell_policy_reason", ""),
         "shell_allowlist_match": metadata.get("shell_allowlist_match", ""),
         "duration_ms": int(duration_ms),
         "affected_paths": list(metadata.get("affected_paths") or []),
         "workspace_changed": bool(metadata.get("workspace_changed")),
+        "invalidated_runtime_verification_count": int(
+            metadata.get("invalidated_runtime_verification_count") or 0
+        ),
         "diff_summary": list(metadata.get("diff_summary") or []),
         "undo_status": metadata.get("undo_status", "not_applicable"),
         "undo_recorded_paths": list(
@@ -147,7 +157,7 @@ def build_run_summary(agent, task_state):
         },
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
-        "skills": list((agent.last_prompt_metadata or {}).get("skills", {}).get("selected_names", [])),
+        "skills": [skill.name for skill in agent.active_skills],
         "repo_map_files": list(
             (agent.last_prompt_metadata or {}).get("repo_map", {}).get("selected_files", [])
         ),
@@ -158,6 +168,10 @@ def build_run_summary(agent, task_state):
         "runtime_verification_statuses": [
             str(item.get("status", "")) for item in agent.runtime_verifications
         ],
+        "runtime_verification_freshness": [
+            str(item.get("freshness", "")) for item in agent.runtime_verifications
+        ],
+        "context_compaction_count": len(task_state.context_compactions),
         "model_action_rejection_count": len(action_rejections),
         "model_action_rejection_reasons": [clip(item.get("reason", ""), 160) for item in action_rejections],
         "final_answer_preview": clip(task_state.final_answer, 300),

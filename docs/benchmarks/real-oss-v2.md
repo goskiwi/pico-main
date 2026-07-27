@@ -35,7 +35,7 @@ fix commit from leaking through local Git history.
 ## Build the offline image
 
 ```bash
-docker build -f Dockerfile.real-oss-v2 -t pico-real-oss-v2:latest .
+docker build -f Dockerfile.real-oss-v2 -t pico/real-oss-v2:latest .
 ```
 
 The image pins the small set of runtime dependencies needed by the ten source
@@ -50,7 +50,7 @@ only as a smoke; use repeated, identical runs before reporting a comparison.
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --benchmark-path benchmarks/real_oss_v2.json \
-  --sandbox-image pico-real-oss-v2:latest \
+  --sandbox-image pico/real-oss-v2:latest \
   --variant full \
   --variant no_repo_map \
   --repetitions 1 \

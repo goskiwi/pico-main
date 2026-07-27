@@ -148,7 +148,6 @@ def render_checkpoint_text(agent):
 
 def create_checkpoint(agent, task_state, user_message, trigger):
     state = checkpoint_state(agent)
-    current = current_checkpoint(agent)
     checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
     key_files = []
     freshness = {}
@@ -158,7 +157,6 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         key_files.append({"path": path, "freshness": file_freshness})
     checkpoint = {
         "checkpoint_id": checkpoint_id,
-        "parent_checkpoint_id": current.get("checkpoint_id", "") if current else "",
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "created_at": now(),
         "current_goal": str(user_message),
@@ -171,7 +169,11 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         "summary": f"{trigger}: {clip(str(user_message), 120)}",
         "runtime_identity": current_runtime_identity(agent),
     }
-    state["items"][checkpoint_id] = checkpoint
+    # Session state carries only the latest resumable checkpoint. The complete
+    # history is already persisted in task-local run artifacts, so retaining a
+    # checkpoint chain here creates unbounded duplicate state without helping
+    # prompt construction or recovery.
+    state["items"] = {checkpoint_id: checkpoint}
     state["current_id"] = checkpoint_id
     task_state.checkpoint_id = checkpoint_id
     agent.session["runtime_identity"] = checkpoint["runtime_identity"]

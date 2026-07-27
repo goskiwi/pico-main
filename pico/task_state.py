@@ -4,7 +4,7 @@
 这个对象会被不断写入 task_state.json，供运行中观察和运行后复盘。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import uuid4
 
@@ -18,6 +18,7 @@ STOP_REASON_STEP_LIMIT_REACHED = "step_limit_reached"
 STOP_REASON_RETRY_LIMIT_REACHED = "retry_limit_reached"
 STOP_REASON_MODEL_ERROR = "model_error"
 STOP_REASON_VERIFICATION_FAILED = "verification_failed"
+STOP_REASON_VERIFICATION_STALE = "verification_stale"
 
 
 @dataclass
@@ -37,6 +38,7 @@ class TaskState:
     resume_status: str = ""
     agent_mode: str = "main"
     parent_agent_id: str = ""
+    context_compactions: list[dict] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -73,6 +75,20 @@ class TaskState:
         self.hard_tool_limit = int(hard_tool_limit)
         return self
 
+    def record_context_compaction(self, record):
+        self.context_compactions.append(
+            {
+                "sequence": int(record.get("sequence", len(self.context_compactions) + 1)),
+                "trigger": str(record.get("trigger", "")),
+                "workspace_fingerprint": str(record.get("workspace_fingerprint", "")),
+                "checkpoint_tokens": int(record.get("checkpoint_tokens", 0)),
+                "recent_evidence_tokens": int(record.get("recent_evidence_tokens", 0)),
+                "source_event_count": int(record.get("source_event_count", 0)),
+                "artifact_path": str(record.get("artifact_path", "")),
+            }
+        )
+        return self
+
     def stop(self, stop_reason, status=STATUS_STOPPED, final_answer=""):
         # stop_reason 和 status 分开存，是为了区分“怎么停的”和“停下时是什么状态”。
         self.status = status
@@ -93,6 +109,13 @@ class TaskState:
     def stop_verification_failed(self, final_answer=""):
         return self.stop(
             STOP_REASON_VERIFICATION_FAILED,
+            status=STATUS_FAILED,
+            final_answer=final_answer,
+        )
+
+    def stop_verification_stale(self, final_answer=""):
+        return self.stop(
+            STOP_REASON_VERIFICATION_STALE,
             status=STATUS_FAILED,
             final_answer=final_answer,
         )
@@ -120,4 +143,5 @@ class TaskState:
             "resume_status": self.resume_status,
             "agent_mode": self.agent_mode,
             "parent_agent_id": self.parent_agent_id,
+            "context_compactions": list(self.context_compactions),
         }

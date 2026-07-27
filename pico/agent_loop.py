@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from langsmith import tracing_context
 
-from . import memory_runtime, report, run_undo, security
+from . import report, run_undo, security
 from . import tools as toolkit
 from .actions import ACTION_FINAL, ACTION_RETRY, ACTION_TOOL, ModelAction
 from .checkpoints import (
@@ -40,11 +40,17 @@ def _is_context_limit_error(exc):
     return any(indicator in message for indicator in indicators)
 
 
-def _record_completion_progress(progress_tracker, task_state, name, args, metadata):
-    """Track whether this task made an effective workspace change."""
-    del name, args
+def _record_completion_progress(agent, progress_tracker, task_state, name, args, metadata):
+    """Track workspace progress and invalidate superseded verifier evidence."""
+    del args
+    invalidated_count = agent.invalidate_runtime_verifications(
+        name,
+        metadata,
+        tool_step=task_state.tool_steps,
+    )
     if metadata.get("workspace_changed"):
         progress_tracker["last_workspace_change_step"] = task_state.tool_steps
+    return invalidated_count
 
 
 def _budget_notice(task_state):
@@ -75,6 +81,9 @@ def _run_runtime_verification(agent, task_state):
         "command": command,
         "status": "infrastructure_error",
         "passed": False,
+        "freshness": "current",
+        "workspace_fingerprint": "",
+        "invalidated_by": {},
         "exit_code": None,
         "timed_out": False,
         "duration_ms": 0,
@@ -104,6 +113,7 @@ def _run_runtime_verification(agent, task_state):
             }
         )
     record["duration_ms"] = int((time.monotonic() - started) * 1000)
+    record["workspace_fingerprint"] = agent.verification_workspace_fingerprint()
     agent.runtime_verifications.append(record)
     agent.emit_trace(
         task_state,
@@ -112,6 +122,8 @@ def _run_runtime_verification(agent, task_state):
             "verifier": "runtime",
             "status": record["status"],
             "passed": record["passed"],
+            "freshness": record["freshness"],
+            "workspace_fingerprint": record["workspace_fingerprint"],
             "exit_code": record["exit_code"],
             "timed_out": record["timed_out"],
             "duration_ms": record["duration_ms"],
@@ -153,8 +165,9 @@ class AgentTurnState(TypedDict, total=False):
     """Transient routing state; durable audit/resume state stays in ``TaskState``."""
 
     prompt_snapshot: tuple[str, dict[str, Any]] | None
-    finalization_attempted: bool
-    context_recovery_attempted: bool
+    finalization_attempts: int
+    context_compaction_trigger: str
+    compact_after_tool: bool
     action: ModelAction
     result: str
 
@@ -181,7 +194,7 @@ def _record_prompt_checkpoints(agent, task_state, user_message, prompt_metadata)
 
 
 def _prompt_for_attempt(agent, task_state, user_message, prompt_snapshot):
-    """Build the first prompt once and reuse it for the Responses conversation."""
+    """Build the first prompt once and reuse it for the provider conversation."""
     reused = prompt_snapshot is not None
     if reused:
         prompt, original_metadata = prompt_snapshot
@@ -263,6 +276,7 @@ def _empty_model_metrics():
         "input_tokens": 0,
         "output_tokens": 0,
         "cached_tokens": 0,
+        "compaction_calls": 0,
         "action_protocols": set(),
     }
 
@@ -292,6 +306,7 @@ def _public_model_metrics(metrics):
         "input_tokens": int(metrics["input_tokens"]),
         "output_tokens": int(metrics["output_tokens"]),
         "cached_tokens": int(metrics["cached_tokens"]),
+        "compaction_calls": int(metrics["compaction_calls"]),
         "action_protocols": sorted(metrics["action_protocols"]),
     }
 
@@ -310,8 +325,17 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     duration_ms = int((time.monotonic() - started_at) * 1000)
     metadata = dict(agent._last_tool_result_metadata or {})
 
+    invalidated_verification_count = _record_completion_progress(
+        agent,
+        progress_tracker,
+        task_state,
+        name,
+        args,
+        metadata,
+    )
+    metadata["invalidated_runtime_verification_count"] = invalidated_verification_count
+    agent._last_tool_result_metadata = metadata
     report.record_tool_audit(agent, name, safe_args, result, duration_ms)
-    _record_completion_progress(progress_tracker, task_state, name, args, metadata)
     tool_status = str(metadata.get("tool_status", "")).strip() or "ok"
     safe_name = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in str(name or "tool"))
     node_id = f"N{task_state.tool_steps:03d}_{safe_name}"
@@ -370,9 +394,12 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
         "result_ref": result_ref,
         "result_preview": clip(result, 500),
         "result_chars": len(result),
+        "invalidated_runtime_verification_count": invalidated_verification_count,
     }
     if "delegate_outcome" in metadata:
         trace_payload["delegate_outcome"] = dict(metadata["delegate_outcome"] or {})
+    if "activated_skills" in metadata:
+        trace_payload["activated_skills"] = list(metadata["activated_skills"] or [])
     agent.emit_trace(
         task_state,
         "tool_end",
@@ -386,6 +413,8 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
 
 
 def _write_finished_run(agent, task_state, final, run_started_at, model_metrics):
+    public_model_metrics = _public_model_metrics(model_metrics)
+    agent.last_run_model_metrics = public_model_metrics
     agent.emit_trace(
         task_state,
         "run_end",
@@ -395,7 +424,7 @@ def _write_finished_run(agent, task_state, final, run_started_at, model_metrics)
             "final_answer_preview": clip(final, 500),
             "tool_steps": task_state.tool_steps,
             "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
-            "model": _public_model_metrics(model_metrics),
+            "model": public_model_metrics,
         },
     )
     artifact = security.redact_artifact(agent, report.build_report(agent, task_state))
@@ -432,6 +461,7 @@ def _run_agent_turn(agent, user_message):
     agent.runtime_verifications = []
     agent.model_action_rejections = []
     agent.model_client.reset_action_session()
+    agent.start_task_skills()
 
     max_retry_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
     max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
@@ -441,11 +471,9 @@ def _run_agent_turn(agent, user_message):
         "last_runtime_verification": {},
     }
     model_metrics = _empty_model_metrics()
+    # Scripted offline clients use the same flat Responses definitions as the
+    # production client when they do not expose ``action_tools`` themselves.
     tool_builder = getattr(agent.model_client, "action_tools", toolkit.responses_action_tools)
-    action_tools = tool_builder(agent.tools)
-    final_action_tools = [
-        tool for tool in action_tools if _action_tool_name(tool) == "submit_final"
-    ]
 
     def finish_stopped():
         if task_state.attempts >= max_retry_attempts and task_state.tool_steps < hard_tool_limit:
@@ -463,8 +491,6 @@ def _run_agent_turn(agent, user_message):
     def finish_success(final, *, trigger):
         agent.mark_work_finished(final)
         task_state.finish_success(final)
-        memory_runtime.promote_durable_memory(agent, user_message, final)
-        memory_runtime.llm_promote_durable_memory(agent, user_message, final)
         _create_checkpoint(agent, task_state, user_message, trigger)
         return _write_finished_run(
             agent, task_state, final, run_started_at, model_metrics
@@ -483,16 +509,32 @@ def _run_agent_turn(agent, user_message):
             agent, task_state, final, run_started_at, model_metrics
         )
 
+    def finish_verification_stale(verification):
+        command = str(verification.get("command", "verification command")).strip()
+        final = (
+            "Stopped because the workspace changed after runtime verification passed. "
+            f"Run {command} again against the current workspace."
+        )
+        agent.mark_work_finished(final, stopped=True)
+        task_state.stop_verification_stale(final)
+        _create_checkpoint(agent, task_state, user_message, "runtime_verification_stale")
+        return _write_finished_run(
+            agent, task_state, final, run_started_at, model_metrics
+        )
+
     def call_model(state: AgentTurnState):
         if task_state.attempts >= max_retry_attempts:
             return Command(update={"result": finish_stopped()}, goto=END)
 
         finalization_only = task_state.tool_steps >= task_state.hard_tool_limit
-        finalization_attempted = bool(state.get("finalization_attempted", False))
+        finalization_attempts = int(state.get("finalization_attempts", 0))
         if finalization_only:
-            if finalization_attempted:
+            # A provider can choose a stale tool after the hard limit. Return
+            # that rejection as a matching tool result, then give it one
+            # bounded chance to submit the required final answer.
+            if finalization_attempts >= 2:
                 return Command(update={"result": finish_stopped()}, goto=END)
-            finalization_attempted = True
+            finalization_attempts += 1
 
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
@@ -536,6 +578,10 @@ def _run_agent_turn(agent, user_message):
         )
         model_started_at = time.monotonic()
         try:
+            action_tools = tool_builder(agent.tools)
+            final_action_tools = [
+                tool for tool in action_tools if _action_tool_name(tool) == "submit_final"
+            ]
             action = agent.model_client.complete_action(
                 prompt,
                 agent.max_new_tokens,
@@ -544,20 +590,17 @@ def _run_agent_turn(agent, user_message):
                 prompt_cache_retention=prompt_cache_retention,
             )
         except Exception as exc:
-            if _is_context_limit_error(exc) and not state.get("context_recovery_attempted", False):
-                agent.prepare_context_recovery()
-                agent.model_client.reset_action_session()
+            if _is_context_limit_error(exc) and agent.can_compact_task_context(task_state):
                 _record_model_completion(
                     model_metrics,
                     int((time.monotonic() - model_started_at) * 1000),
                 )
                 return Command(
                     update={
-                        "prompt_snapshot": None,
-                        "finalization_attempted": finalization_attempted,
-                        "context_recovery_attempted": True,
+                        "finalization_attempts": finalization_attempts,
+                        "context_compaction_trigger": "provider_overflow",
                     },
-                    goto="call_model",
+                    goto="compact_context",
                 )
             error_type = type(exc).__name__
             error = str(exc)
@@ -577,9 +620,6 @@ def _run_agent_turn(agent, user_message):
             )
             return Command(update={"result": result}, goto=END)
 
-        if state.get("context_recovery_attempted", False):
-            agent.clear_context_recovery()
-
         completion_metadata = dict(agent.model_client.last_completion_metadata or {})
         if completion_metadata:
             prompt_metadata.update(completion_metadata)
@@ -594,7 +634,7 @@ def _run_agent_turn(agent, user_message):
             action.protocol,
         )
 
-        if finalization_only and kind == ACTION_TOOL:
+        if finalization_only and kind != ACTION_FINAL:
             finalization_reason = "the hard tool limit is reached"
             payload = _retry_notice(
                 f"{finalization_reason}; only submit_final is allowed"
@@ -638,10 +678,15 @@ def _run_agent_turn(agent, user_message):
         ):
             verification = _run_runtime_verification(agent, task_state)
             progress_tracker["last_runtime_verification"] = verification
-            if verification["status"] == "passed":
+            if agent.runtime_verification_is_current(verification):
                 final = _verified_change_final(agent, progress_tracker)
                 return Command(
                     update={"result": finish_success(final, trigger="runtime_verification_passed")},
+                    goto=END,
+                )
+            if verification["status"] == "passed":
+                return Command(
+                    update={"result": finish_verification_stale(verification)},
                     goto=END,
                 )
             if verification["status"] == "infrastructure_error":
@@ -662,21 +707,41 @@ def _run_agent_turn(agent, user_message):
             return Command(
                 update={
                     "prompt_snapshot": prompt_snapshot,
-                    "finalization_attempted": finalization_attempted,
+                    "finalization_attempts": finalization_attempts,
                 },
                 goto="call_model",
             )
 
         next_state = {
             "prompt_snapshot": prompt_snapshot,
-            "finalization_attempted": finalization_attempted,
+            "finalization_attempts": finalization_attempts,
         }
         if kind == ACTION_TOOL:
-            return Command(update={**next_state, "action": action}, goto="execute_tool")
+            return Command(
+                update={
+                    **next_state,
+                    "action": action,
+                    "compact_after_tool": agent.input_reaches_context_threshold(
+                        completion_metadata.get("input_tokens")
+                    ),
+                },
+                goto="execute_tool",
+            )
         if kind == ACTION_RETRY:
             _record_action_result(agent, action, payload)
             agent.mark_retry_needed(payload)
             agent.run_store.write_task_state(task_state)
+            if agent.needs_context_compaction(
+                task_state,
+                completion_metadata.get("input_tokens"),
+            ):
+                return Command(
+                    update={
+                        **next_state,
+                        "context_compaction_trigger": "input_threshold",
+                    },
+                    goto="compact_context",
+                )
             return Command(update=next_state, goto="call_model")
 
         final = str(payload).strip()
@@ -691,25 +756,121 @@ def _run_agent_turn(agent, user_message):
             state["action"],
             progress_tracker,
         )
-        # The task canvas is a durable control-plane projection.  It must not
-        # replace the live provider conversation: patching depends on the
-        # exact source and test output returned by the preceding tool call.
+        if state.get("compact_after_tool", False) and agent.can_compact_task_context(task_state):
+            return Command(
+                update={
+                    "finalization_attempts": state.get("finalization_attempts", 0),
+                    "context_compaction_trigger": "input_threshold",
+                },
+                goto="compact_context",
+            )
         return Command(
             update={"prompt_snapshot": state.get("prompt_snapshot")},
             goto="call_model",
         )
 
+    def compact_context(state: AgentTurnState):
+        trigger = str(state.get("context_compaction_trigger", "provider_overflow"))
+        if not agent.can_compact_task_context(task_state):
+            final = "Stopped because provider context was exhausted before a task checkpoint could be created."
+            agent.mark_work_finished(final, stopped=True)
+            task_state.stop_model_error(final)
+            _create_checkpoint(agent, task_state, user_message, "context_compaction_unavailable")
+            return Command(
+                update={"result": _write_finished_run(agent, task_state, final, run_started_at, model_metrics)},
+                goto=END,
+            )
+
+        agent.emit_trace(
+            task_state,
+            "compaction_start",
+            {
+                "trigger": trigger,
+                "sequence": len(task_state.context_compactions) + 1,
+                "tool_steps": task_state.tool_steps,
+            },
+        )
+        model_metrics["calls"] += 1
+        model_metrics["compaction_calls"] += 1
+        agent.emit_trace(
+            task_state,
+            "model_start",
+            {
+                "attempt": task_state.attempts,
+                "tool_steps": task_state.tool_steps,
+                "kind": "context_compaction",
+                "trigger": trigger,
+                **agent.identity_metadata(),
+            },
+        )
+        started_at = time.monotonic()
+        try:
+            record = agent.compact_task_context(task_state, user_message, trigger)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            _record_model_completion(model_metrics, duration_ms)
+            model_metrics["failures"] += 1
+            final = f"Stopped after context compaction failed: {type(exc).__name__}: {exc}"
+            agent.mark_work_finished(final, stopped=True)
+            task_state.stop_model_error(final)
+            _create_checkpoint(agent, task_state, user_message, "context_compaction_failed")
+            agent.emit_trace(
+                task_state,
+                "compaction_end",
+                {
+                    "trigger": trigger,
+                    "status": "failed",
+                    "duration_ms": duration_ms,
+                    "error": str(exc),
+                },
+            )
+            return Command(
+                update={"result": _write_finished_run(agent, task_state, final, run_started_at, model_metrics)},
+                goto=END,
+            )
+
+        completion_metadata = dict(agent.model_client.last_completion_metadata or {})
+        _record_model_completion(
+            model_metrics,
+            int(record.get("duration_ms", 0)),
+            completion_metadata,
+            "context_compaction",
+        )
+        agent.model_client.reset_action_session()
+        agent.emit_trace(
+            task_state,
+            "compaction_end",
+            {
+                "trigger": trigger,
+                "status": "completed",
+                "sequence": record["sequence"],
+                "duration_ms": int(record["duration_ms"]),
+                "checkpoint_tokens": int(record["checkpoint_tokens"]),
+                "recent_evidence_tokens": int(record["recent_evidence_tokens"]),
+                "workspace_fingerprint": record["workspace_fingerprint"],
+                "artifact_path": record["artifact_path"],
+            },
+        )
+        return Command(
+            update={
+                "prompt_snapshot": None,
+                "finalization_attempts": state.get("finalization_attempts", 0),
+            },
+            goto="call_model",
+        )
+
     workflow = StateGraph(AgentTurnState)
     workflow.add_node(
-        "call_model", call_model, destinations=("call_model", "execute_tool", END)
+        "call_model", call_model, destinations=("call_model", "execute_tool", "compact_context", END)
     )
-    workflow.add_node("execute_tool", execute_tool, destinations=("call_model",))
+    workflow.add_node("execute_tool", execute_tool, destinations=("call_model", "compact_context"))
+    workflow.add_node("compact_context", compact_context, destinations=("call_model", END))
     workflow.add_edge(START, "call_model")
 
     graph = workflow.compile()
     with tracing_context(enabled=False):
         result = graph.invoke(
-            {"finalization_attempted": False},
+            {"finalization_attempts": 0},
             config={"recursion_limit": max(32, max_graph_iterations * 4 + 16)},
         )
     return result["result"]

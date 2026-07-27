@@ -6,7 +6,6 @@
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -16,9 +15,13 @@ import shutil
 import sys
 import textwrap
 
-from .config import DEFAULT_APPROVAL_POLICY
-from .models import DeepSeekChatCompletionsModelClient, OpenAICompatibleModelClient
-from .memory import LayeredMemory, default_memory_state
+from .config import (
+    CONTEXT_COMPACTION_INPUT_TOKENS,
+    CONTEXT_COMPACTION_MAX_PER_TASK,
+    DEFAULT_APPROVAL_POLICY,
+)
+from .models import OpenAICompatibleModelClient
+from .repo_map import RepoMap
 from .run_undo import RunUndoConflictError, RunUndoError, restore_run
 from .runtime import Pico
 from .sandbox import (
@@ -29,7 +32,6 @@ from .sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
 )
-from .semantic_memory import SemanticMemoryConfig, SemanticMemoryIndex
 from .session_store import SessionStore
 from .trace_events import TraceSink
 from .workspace import WorkspaceContext, middle
@@ -48,9 +50,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_SECRET_ENV_NAMES = (
     "OPENAI_API_KEY",
     "OPENAI_API_TOKEN",
-    "DEEPSEEK_API_KEY",
-    "PICO_QDRANT_API_KEY",
-    "PICO_EMBEDDINGS_API_KEY",
     "GITHUB_PAT",
     "GH_PAT",
 )
@@ -71,25 +70,27 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
+    /status  Show the model, session, prompt, and last-task status.
+    /runs [limit] List recent main runs and their Undo availability.
     /memory  Show the agent's working state panel.
     /session Show the path to the saved session file.
     /reset   Clear the current session memory.
-    /reload-skills Reload .pico/skills from disk.
+    /skill <name> Queue one trusted project skill for the next task.
+    /reload-skills Reload trusted .pico/skills from disk.
     /exit    Exit the agent.
     """
 ).strip()
 
 
 # 默认模型配置
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # 环境变量名称常量
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
 ENV_LOCAL_FILENAME = ".env.local"
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_RUN_HISTORY_LIMIT = 10
 
 
 def _positive_repo_map_budget(value):
@@ -104,6 +105,34 @@ def _positive_repo_map_budget(value):
             "repo map budget must be a positive integer"
         )
     return budget
+
+
+def _positive_run_history_limit(value):
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "run history limit must be a positive integer"
+        ) from exc
+    if limit <= 0:
+        raise argparse.ArgumentTypeError(
+            "run history limit must be a positive integer"
+        )
+    return limit
+
+
+def _positive_repo_map_result_limit(value):
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "repo map result limit must be a positive integer"
+        ) from exc
+    if limit <= 0:
+        raise argparse.ArgumentTypeError(
+            "repo map result limit must be a positive integer"
+        )
+    return limit
 
 
 def _load_workspace_env(cwd):
@@ -139,11 +168,11 @@ def _load_workspace_env(cwd):
 
 
 def _effective_model(args, env=None):
-    """根据 provider 和参数确定最终使用的模型名称。
+    """Resolve the configured GPT-5.6-luna Responses model.
 
     模型选择优先级：
     1. 用户显式传入 --model
-    2. provider 对应的 `.env.local` 模型名
+    2. `.env.local` 中的 `OPENAI_MODEL`
     3. 代码里的默认值
     """
     env = os.environ if env is None else env
@@ -151,16 +180,12 @@ def _effective_model(args, env=None):
     if explicit_model:
         logger.info(f"使用用户指定的模型: {explicit_model}")
         return explicit_model
-    env_name = "DEEPSEEK_MODEL" if args.provider == "deepseek" else "OPENAI_MODEL"
-    default_model = (
-        DEFAULT_DEEPSEEK_MODEL if args.provider == "deepseek" else DEFAULT_OPENAI_MODEL
-    )
-    model = env.get(env_name)
+    model = env.get("OPENAI_MODEL")
     if model:
-        logger.info(f"使用环境变量 {env_name}: {model}")
+        logger.info(f"使用环境变量 OPENAI_MODEL: {model}")
         return model
-    logger.info(f"使用默认模型: {default_model}")
-    return default_model
+    logger.info(f"使用默认模型: {DEFAULT_OPENAI_MODEL}")
+    return DEFAULT_OPENAI_MODEL
 
 
 def _configured_secret_names(args, env=None):
@@ -182,42 +207,24 @@ def _configured_secret_names(args, env=None):
 
 
 def _build_model_client(args, env=None):
-    """Build the explicit Responses or DeepSeek Chat Completions client."""
+    """Build Pico's GPT-5.6-luna Responses client."""
     env = os.environ if env is None else env
     model = _effective_model(args, env=env)
-    if args.provider == "deepseek":
-        base_url = (
-            args.base_url
-            or env.get("DEEPSEEK_API_BASE")
-            or DEFAULT_DEEPSEEK_BASE_URL
-        )
-        api_key = env.get("DEEPSEEK_API_KEY") or env.get("OPENAI_API_KEY", "")
-        logger.info(
-            "DeepSeek Chat Completions 配置 - model: %s, base_url: %s, thinking: disabled",
-            model,
-            base_url,
-        )
-        return DeepSeekChatCompletionsModelClient(
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            temperature=args.temperature,
-            timeout=args.openai_timeout,
-        )
-
     base_url = args.base_url or env.get("OPENAI_API_BASE") or DEFAULT_OPENAI_BASE_URL
     api_key = env.get("OPENAI_API_KEY", "")
     reasoning_effort = env.get("OPENAI_REASONING_EFFORT", "").strip() or None
     logger.info(
-        f"OpenAI 客户端配置 - model: {model}, base_url: {base_url}, "
-        f"reasoning_effort: {reasoning_effort or 'provider default'}"
+        "Responses API 配置 - model: %s, base_url: %s, reasoning_effort: %s",
+        model,
+        base_url,
+        reasoning_effort or "provider default",
     )
     return OpenAICompatibleModelClient(
         model=model,
         base_url=base_url,
         api_key=api_key,
         temperature=args.temperature,
-        timeout=args.openai_timeout,
+        timeout=args.model_timeout,
         reasoning_effort=reasoning_effort,
     )
 
@@ -272,6 +279,167 @@ def build_welcome(agent, model, host):
     return "\n".join([line, *rows, line])
 
 
+def build_status(agent):
+    """Render the REPL state without changing the active session."""
+    prompt_metadata = agent.last_prompt_metadata
+    task_state = agent.current_task_state
+
+    if prompt_metadata:
+        prompt = (
+            f"{int(prompt_metadata['prompt_tokens'])}/"
+            f"{int(prompt_metadata['prompt_budget_tokens'])} tokens"
+        )
+        workspace_refresh = (
+            "refreshed" if agent._last_prefix_refresh["workspace_changed"] else "reused"
+        )
+    else:
+        prompt = "not built yet"
+        workspace_refresh = "not evaluated yet"
+
+    if task_state is None:
+        last_task = "none"
+    else:
+        last_task = (
+            f"{task_state.run_id} | {task_state.status} | "
+            f"{len(task_state.context_compactions)} compaction(s)"
+        )
+
+    return "\n".join(
+        (
+            f"model: {agent.model_client.model}",
+            f"session: {agent.session_path}",
+            f"workspace refresh for last task: {workspace_refresh}",
+            f"prompt: {prompt}",
+            "task compaction policy: "
+            f"{CONTEXT_COMPACTION_INPUT_TOKENS} tokens, "
+            f"max {CONTEXT_COMPACTION_MAX_PER_TASK} per task",
+            f"last task: {last_task}",
+        )
+    )
+
+
+def _workspace_root_for_run_history(cwd):
+    """Resolve the workspace that owns the requested, local run index."""
+    explicit_workspace = Path(cwd).expanduser().resolve()
+    if (explicit_workspace / ".pico" / "runs").is_dir():
+        return explicit_workspace
+    return Path(WorkspaceContext.build(explicit_workspace).repo_root)
+
+
+def load_run_history(workspace_root, *, limit=DEFAULT_RUN_HISTORY_LIMIT):
+    """Load current-schema main-run summaries without creating runtime files."""
+    runs_root = Path(workspace_root) / ".pico" / "runs"
+    index_path = runs_root / "index.json"
+    if not index_path.is_file():
+        return []
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(index, list):
+        return []
+
+    main_entries = [
+        entry
+        for entry in index
+        if isinstance(entry, dict)
+        and entry.get("agent_mode") == "main"
+        and entry.get("parent_agent_id") == ""
+    ]
+    main_entries.sort(key=lambda entry: str(entry.get("updated_at", "")), reverse=True)
+
+    history = []
+    for entry in main_entries[:limit]:
+        run_id = str(entry.get("run_id", ""))
+        if not run_id or Path(run_id).name != run_id:
+            continue
+        report_path = runs_root / run_id / "report.json"
+        report = {}
+        if report_path.is_file():
+            try:
+                loaded_report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                loaded_report = {}
+            if isinstance(loaded_report, dict):
+                report = loaded_report
+        undo = report.get("undo", {})
+        undo = undo if isinstance(undo, dict) else {}
+        history.append(
+            {
+                "run_id": run_id,
+                "status": str(entry.get("status", "unknown")),
+                "updated_at": str(entry.get("updated_at", "")),
+                "undo": (
+                    "available"
+                    if undo.get("available") is True
+                    else str(undo.get("status", "pending"))
+                ),
+                "changed_paths": [
+                    str(path)
+                    for path in undo.get("changed_paths", [])
+                    if isinstance(path, str) and path
+                ],
+            }
+        )
+    return history
+
+
+def build_run_history(workspace_root, *, limit=DEFAULT_RUN_HISTORY_LIMIT):
+    """Render a compact, read-only main-run history for CLI and REPL users."""
+    workspace_root = Path(workspace_root).resolve()
+    lines = [f"Pico runs: {workspace_root}"]
+    history = load_run_history(workspace_root, limit=limit)
+    if not history:
+        lines.append("no main runs recorded")
+        return "\n".join(lines)
+
+    for entry in history:
+        changed_paths = entry["changed_paths"]
+        if not changed_paths:
+            changed = "-"
+        elif len(changed_paths) <= 3:
+            changed = ", ".join(changed_paths)
+        else:
+            changed = ", ".join(changed_paths[:3]) + f" (+{len(changed_paths) - 3})"
+        lines.extend(
+            (
+                f"{entry['run_id']} | {entry['status']} | {entry['updated_at']}",
+                f"  undo: {entry['undo']} | changed: {changed}",
+            )
+        )
+    return "\n".join(lines)
+
+
+def build_repo_map_output(workspace_root, query, *, budget_tokens, max_results):
+    """Render the same task-ranked map used by the agent without a model call."""
+    workspace_root = Path(workspace_root).resolve()
+    rendered = RepoMap(workspace_root).render(
+        str(query),
+        budget_tokens=int(budget_tokens),
+        max_results=int(max_results),
+    )
+    details = rendered.details
+    lines = [rendered.text, "", "repo_map_stats:"]
+    lines.append(f"- workspace: {workspace_root}")
+    lines.append(
+        "- files={parsed_files} nodes={graph_nodes} edges={graph_edges} "
+        "selected={selected_count} cache_hits={cache_hits} cache_misses={cache_misses}".format(
+            **details
+        )
+    )
+    selected = list(details.get("selected_symbols", []))
+    if selected:
+        lines.append("rank_evidence:")
+        for item in selected:
+            reasons = ", ".join(item.get("reasons", [])) or "-"
+            lines.append(
+                "- {path}:L{line} {qualified_name} "
+                "score={score} lexical={lexical_score} graph={graph_score} "
+                "reasons={reasons}".format(**{**item, "reasons": reasons})
+            )
+    return "\n".join(lines).strip()
+
+
 def build_agent(args, *, trace_sink=None):
     """根据 CLI 参数装配出一个可运行的 Pico 实例。
 
@@ -315,7 +483,6 @@ def build_agent(args, *, trace_sink=None):
 
     # 构建模型客户端
     model = _build_model_client(args, env=workspace_env)
-    semantic_memory_config = SemanticMemoryConfig.from_env(workspace_env)
     sandbox_config = DockerSandboxConfig(
         image=args.sandbox_image
         or os.environ.get("PICO_SANDBOX_IMAGE")
@@ -349,9 +516,9 @@ def build_agent(args, *, trace_sink=None):
             max_new_tokens=args.max_new_tokens,
             repo_map_budget_tokens=args.repo_map_budget,
             dry_run=dry_run,
+            trust_project=args.trust_project,
             secret_env_names=configured_secret_names,
             sandbox=sandbox,
-            semantic_memory_config=semantic_memory_config,
             trace_sink=trace_sink,
         )
 
@@ -365,9 +532,9 @@ def build_agent(args, *, trace_sink=None):
         max_new_tokens=args.max_new_tokens,
         repo_map_budget_tokens=args.repo_map_budget,
         dry_run=dry_run,
+        trust_project=args.trust_project,
         secret_env_names=configured_secret_names,
         sandbox=sandbox,
-        semantic_memory_config=semantic_memory_config,
         trace_sink=trace_sink,
     )
 
@@ -379,7 +546,7 @@ def build_arg_parser():
     - prompt: one-shot 模式的提示词
     - --cwd: 工作区目录
     - --model: 模型名称
-    - --base-url: OpenAI-compatible API 地址
+    - --base-url: Responses API 地址
     - --approval: 审批策略
     - --dry-run: 模拟模式
     等
@@ -388,7 +555,7 @@ def build_arg_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Auditable, sandboxed local coding-agent runtime for "
-            "Responses models and DeepSeek Chat Completions."
+            "GPT-5.6-luna through an OpenAI-compatible Responses API."
         ),
         epilog=(
             "Restore one run with: "
@@ -400,17 +567,19 @@ def build_arg_parser():
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name override. Defaults to the selected provider's .env.local model setting.",
+        help="Model override. Defaults to OPENAI_MODEL in .env.local.",
     )
-    parser.add_argument(
-        "--provider",
-        choices=("responses", "deepseek"),
-        default="responses",
-        help="Model API transport. Use deepseek for DeepSeek's Chat Completions API.",
-    )
-    parser.add_argument("--base-url", default=None, help="API base URL override for the selected provider.")
-    parser.add_argument("--openai-timeout", type=int, default=300, help="Model request timeout in seconds.")
+    parser.add_argument("--base-url", default=None, help="Responses API base URL override.")
+    parser.add_argument("--model-timeout", type=int, default=300, help="Model request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
+    parser.add_argument(
+        "--trust-project",
+        action="store_true",
+        help=(
+            "Allow discovery of project-local .pico/skills. Disabled by default "
+            "because skills can become model instructions."
+        ),
+    )
     parser.add_argument(
         "--approval",
         choices=("ask", "auto", "never"),
@@ -524,37 +693,82 @@ def build_undo_arg_parser():
     return parser
 
 
-def build_memory_sync_arg_parser():
+def build_runs_arg_parser():
     parser = argparse.ArgumentParser(
-        prog="pico memory-sync",
+        prog="pico runs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Synchronize canonical durable Markdown memories to Qdrant.",
+        description=(
+            "List recent main-task run artifacts and whether their workspace "
+            "changes remain eligible for Undo."
+        ),
     )
-    parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Workspace directory or a path inside its Git repository.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=_positive_run_history_limit,
+        default=DEFAULT_RUN_HISTORY_LIMIT,
+        help="Maximum number of main runs to display.",
+    )
     return parser
 
 
-def run_memory_sync_command(argv):
-    args = build_memory_sync_arg_parser().parse_args(argv)
-    workspace = WorkspaceContext.build(args.cwd)
-    workspace_env = _load_workspace_env(args.cwd)
-    config = SemanticMemoryConfig.from_env(workspace_env)
-    if config is None:
-        print("semantic memory is not configured; set PICO_QDRANT_* and PICO_EMBEDDINGS_* in .env.local", file=sys.stderr)
-        return 1
-    workspace_id = hashlib.sha256(workspace.repo_root.encode("utf-8")).hexdigest()
-    index = SemanticMemoryIndex(config, workspace_id=workspace_id)
-    try:
-        memory = LayeredMemory(
-            default_memory_state(),
-            workspace_root=workspace.repo_root,
-            semantic_index=index,
+def build_repo_map_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="pico repo-map",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Render Pico's task-ranked Python Repo Map without constructing an "
+            "agent, calling a model, or writing run artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--cwd",
+        default=".",
+        help="Workspace directory or a path inside its Git repository.",
+    )
+    parser.add_argument(
+        "--query",
+        required=True,
+        help="Task or code-navigation question used to rank symbols.",
+    )
+    parser.add_argument(
+        "--budget-tokens",
+        type=_positive_repo_map_budget,
+        default=1200,
+        help="Hard token budget for rendered signatures.",
+    )
+    parser.add_argument(
+        "--max-results",
+        type=_positive_repo_map_result_limit,
+        default=24,
+        help="Maximum number of ranked symbols to render.",
+    )
+    return parser
+
+
+def run_repo_map_command(argv):
+    args = build_repo_map_arg_parser().parse_args(argv)
+    workspace_root = Path(WorkspaceContext.build(args.cwd).repo_root)
+    print(
+        build_repo_map_output(
+            workspace_root,
+            args.query,
+            budget_tokens=args.budget_tokens,
+            max_results=args.max_results,
         )
-        result = memory.sync_semantic_memory()
-    finally:
-        index.close()
-    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0 if result.get("status") == "ok" else 1
+    )
+    return 0
+
+
+def run_runs_command(argv):
+    args = build_runs_arg_parser().parse_args(argv)
+    workspace_root = _workspace_root_for_run_history(args.cwd)
+    print(build_run_history(workspace_root, limit=args.limit))
+    return 0
 
 
 def run_undo_command(argv):
@@ -607,10 +821,12 @@ def main(argv=None):
     解析参数 -> 构建 agent -> 显示欢迎信息 -> 进入 one-shot 或交互模式。
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "repo-map":
+        return run_repo_map_command(raw_argv[1:])
+    if raw_argv and raw_argv[0] == "runs":
+        return run_runs_command(raw_argv[1:])
     if raw_argv and raw_argv[0] == "undo":
         return run_undo_command(raw_argv[1:])
-    if raw_argv and raw_argv[0] == "memory-sync":
-        return run_memory_sync_command(raw_argv[1:])
     parser = build_arg_parser()
     args = parser.parse_args(raw_argv)
     if args.trace_jsonl == "-" and not args.prompt:
@@ -666,6 +882,22 @@ def main(argv=None):
             if user_input == "/help":
                 print(HELP_DETAILS)
                 continue
+            if user_input == "/status":
+                print(build_status(agent))
+                continue
+            if user_input == "/runs" or user_input.startswith("/runs "):
+                _, _, raw_limit = user_input.partition(" ")
+                try:
+                    limit = (
+                        _positive_run_history_limit(raw_limit)
+                        if raw_limit.strip()
+                        else DEFAULT_RUN_HISTORY_LIMIT
+                    )
+                except argparse.ArgumentTypeError as exc:
+                    print(f"runs not shown: {exc}")
+                else:
+                    print(build_run_history(agent.workspace.repo_root, limit=limit))
+                continue
             if user_input == "/memory":
                 logger.debug("显示 memory")
                 print(agent.memory_text())
@@ -683,6 +915,22 @@ def main(argv=None):
                 logger.info("重新加载 skills")
                 skills = agent.reload_skills()
                 print(f"skills reloaded: {len(skills)}")
+                if not agent.trust_project:
+                    print("project skills are disabled; restart with --trust-project to load .pico/skills")
+                for diagnostic in agent.skill_diagnostics:
+                    print(f"skill warning: {diagnostic['path']}: {diagnostic['message']}")
+                continue
+            if user_input.startswith("/skill"):
+                command, _, name = user_input.partition(" ")
+                if command != "/skill":
+                    print("unknown command; use /help")
+                    continue
+                try:
+                    skill = agent.queue_manual_skill(name)
+                except ValueError as exc:
+                    print(f"skill not queued: {exc}")
+                else:
+                    print(f"skill queued for next task: {skill.name}")
                 continue
 
             print()

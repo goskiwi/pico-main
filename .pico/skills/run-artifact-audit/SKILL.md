@@ -2,7 +2,7 @@
 name: run-artifact-audit
 description: Audit a completed Pico run from trace, report, task canvas, phases, and saved tool references without changing the workspace. 中文: 运行审计, trace, 报告, 任务画布, 阶段, 证据.
 when_to_use: Use when asked why a run stopped, whether evidence is complete, whether a canvas folded correctly, or whether a result can be trusted.
-trigger_keywords: [run audit, artifact audit, trace, report, task canvas, phase, evidence, 运行审计, 任务画布, 阶段, 证据, trace]
+when_not_to_use: Implementing a source-code change, reproducing a live bug, or reviewing a diff that has no Pico run artifacts.
 tools: [list_files, read_file, search, query_repo_map, read_task_canvas, read_task_event, read_tool_output]
 allowed_tools_strict: true
 priority: 100

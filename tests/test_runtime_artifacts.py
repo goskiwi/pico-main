@@ -46,6 +46,7 @@ def test_successful_run_persists_auditable_artifacts(tmp_path):
     } <= {path.name for path in run_dir.iterdir()}
     assert task_state["stop_reason"] == "final_answer_returned"
     assert report["summary"]["tools"] == ["read_file"]
+    assert report["agent"]["trust_project"] is False
     assert "history" not in session
     assert report["tool_audit"][0]["status"] == "ok"
     assert trace[0]["event"] == "model_start"

@@ -38,7 +38,7 @@ The source checkouts have dependencies that are not part of Pico's minimal
 default sandbox image. Build the fixed V1 image before running a task:
 
 ```bash
-docker build -f Dockerfile.real-oss-v1 -t pico-real-oss-v1:latest .
+docker build -f Dockerfile.real-oss-v1 -t pico/real-oss-v1:latest .
 ```
 
 This image contains the runtime dependencies needed by all three source
@@ -55,7 +55,7 @@ the automatic Repo Map prompt section and the read-only `query_repo_map` tool.
 ```bash
 uv run python scripts/run_real_world_benchmark.py \
   --benchmark-path benchmarks/real_oss_v1.json \
-  --sandbox-image pico-real-oss-v1:latest \
+  --sandbox-image pico/real-oss-v1:latest \
   --variant full \
   --variant no_repo_map \
   --repetitions 1 \

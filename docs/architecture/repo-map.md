@@ -61,6 +61,11 @@ Omitting the option preserves dynamic budgeting. The option affects automatic
 context injection only; the read-only `query_repo_map` tool keeps its own explicit
 per-call budget.
 
+`pico repo-map --query "..."` uses the same parser, graph, ranking, and renderer
+without constructing an agent, calling a model, or creating run artifacts. It
+prints the selected signatures plus their lexical/graph scores and match reasons,
+which makes the retrieval decision inspectable in a demo or regression triage.
+
 Prompt metadata and the final report retain:
 
 - graph node and edge counts;

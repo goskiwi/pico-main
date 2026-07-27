@@ -278,42 +278,27 @@ def schema_display(args_schema):
 
 
 def responses_action_tools(tool_registry):
-    """Build strict Responses API function definitions for one agent turn."""
+    """Build strict Responses function definitions."""
     definitions = [
-        _responses_tool_definition(name, tool)
+        _flat_action_definition(name, tool)
         for name, tool in sorted(dict(tool_registry).items())
     ]
-    definitions.append(_responses_tool_definition("submit_final", SUBMIT_FINAL_DEFINITION))
+    definitions.append(_flat_action_definition("submit_final", SUBMIT_FINAL_DEFINITION))
     return definitions
 
 
-def chat_completions_action_tools(tool_registry):
-    """Build standard Chat Completions tools without provider-specific strict mode."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": definition["name"],
-                "description": definition["description"],
-                "parameters": definition["parameters"],
-            },
-        }
-        for definition in responses_action_tools(tool_registry)
-    ]
-
-
-def _responses_tool_definition(name, definition):
+def _flat_action_definition(name, definition):
     return {
         "type": "function",
         "name": name,
         "description": str(definition.get("description", "")),
-        "parameters": strict_response_schema(definition["args_schema"]),
+        "parameters": function_schema(definition["args_schema"]),
         "strict": True,
     }
 
 
-def strict_response_schema(args_schema):
-    """Convert a model to Pico's established strict Responses schema."""
+def function_schema(args_schema):
+    """Convert a Pydantic model to the function schema shared by Pico tools."""
     function = convert_to_openai_function(args_schema, strict=True)
     return _render_runtime_defaults(function["parameters"])
 
@@ -677,7 +662,10 @@ def tool_search(agent, args):
             text=True,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            root_prefix = f"{agent.root}{Path('/')}"
+            return "\n".join(
+                line.removeprefix(root_prefix) for line in result.stdout.splitlines()
+            ).strip()
         if result.returncode == 1:
             return "(no matches)"
         return f"error: search failed: {(result.stderr or result.stdout).strip() or f'rg exited with {result.returncode}'}"
@@ -773,11 +761,8 @@ def run_delegate_child(agent, args):
     child_model_client = agent.model_client.fork_for_delegate()
     child_feature_flags = dict(agent.feature_flags)
     # Delegate children are intentionally read-only. Requiring a workspace
-    # change would reject their valid investigation final answers forever, and
-    # investigation summaries must not mutate the shared durable-memory store.
+    # change would reject their valid investigation final answers forever.
     child_feature_flags["require_workspace_change"] = False
-    child_feature_flags["durable_memory_promotion"] = False
-    child_feature_flags["llm_memory_extract"] = False
     child_workspace = WorkspaceContext.build(
         agent.root,
         repo_root_override=agent.root,
@@ -797,10 +782,10 @@ def run_delegate_child(agent, args):
         secret_env_names=agent.secret_env_names,
         shell_env_allowlist=agent.shell_env_allowlist,
         feature_flags=child_feature_flags,
+        trust_project=agent.trust_project,
         agent_mode=role,
         parent_agent_id=agent.agent_id,
         allowed_tools=role_config["allowed_tools"],
-        semantic_memory_config=agent.semantic_memory_config,
         trace_sink=agent.trace_sink,
     )
     child._assert_workspace_root()

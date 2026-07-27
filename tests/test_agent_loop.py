@@ -9,7 +9,7 @@ from tests.fakes import final_action, retry_action, tool_action_json
 from tests.helpers import UnitTestSandbox, build_agent
 
 
-def test_action_tool_name_supports_responses_and_chat_completion_shapes():
+def test_action_tool_name_supports_flat_and_chat_completion_shapes():
     assert _action_tool_name({"name": "submit_final"}) == "submit_final"
     assert _action_tool_name({"function": {"name": "submit_final"}}) == "submit_final"
 
@@ -121,7 +121,80 @@ def test_strict_action_loop_keeps_live_tool_conversation_after_each_tool(tmp_pat
     assert agent.last_prompt_metadata["prompt_reused"] is True
 
 
-def test_provider_context_limit_recovers_once_with_recent_tool_evidence(tmp_path):
+def _checkpoint_text(label="checkpoint"):
+    return "\n".join(
+        [
+            "## Goal",
+            label,
+            "## Constraints",
+            "- preserve verifier evidence",
+            "## Progress",
+            "- inspected the workspace",
+            "## Current State",
+            "- implementation is still in progress",
+            "## Verification",
+            "- no runtime verifier has run",
+            "## Next Step",
+            "- continue from the latest evidence",
+            "## Evidence",
+            "- refs/0001_read_file.txt",
+        ]
+    )
+
+
+def test_context_compaction_proactively_resets_a_large_tool_conversation(tmp_path):
+    class ThresholdClient:
+        model = "strict-test"
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.prompts = []
+            self.compaction_prompts = []
+            self.reset_count = 0
+            self.last_completion_metadata = {}
+            self.actions = [
+                ModelAction.tool(
+                    "read_file",
+                    {"files": [{"path": "README.md", "start": 1, "end": 2}]},
+                    protocol="responses_function",
+                    call_id="call_1",
+                ),
+                ModelAction.final("Finished after proactive compaction.", protocol="responses_function"),
+            ]
+
+        def reset_action_session(self):
+            self.reset_count += 1
+
+        def complete(self, prompt, max_new_tokens, **kwargs):
+            del max_new_tokens, kwargs
+            self.compaction_prompts.append(prompt)
+            self.last_completion_metadata = {"input_tokens": 600, "output_tokens": 120}
+            return _checkpoint_text("proactive checkpoint")
+
+        def complete_action(self, prompt, max_new_tokens, **kwargs):
+            del max_new_tokens, kwargs
+            self.prompts.append(prompt)
+            self.last_completion_metadata = {"input_tokens": 24_000, "output_tokens": 40}
+            return self.actions.pop(0)
+
+        def record_action_result(self, action, result):
+            del action, result
+
+    agent = build_agent(tmp_path, [])
+    client = ThresholdClient()
+    agent.model_client = client
+    agent.refresh_prefix(force=True)
+
+    assert agent.ask("Inspect README.md") == "Finished after proactive compaction."
+    assert client.reset_count == 2  # task start + proactive checkpoint reset
+    assert len(client.compaction_prompts) == 1
+    assert "<task-evidence>" in client.compaction_prompts[0]
+    assert "Task context checkpoint" in client.prompts[1]
+    assert "proactive checkpoint" in client.prompts[1]
+    assert agent.current_task_state.context_compactions[0]["trigger"] == "input_threshold"
+
+
+def test_provider_context_overflow_compacts_then_continues(tmp_path):
     class ContextLimitClient:
         model = "strict-test"
         supports_prompt_cache = False
@@ -131,10 +204,17 @@ def test_provider_context_limit_recovers_once_with_recent_tool_evidence(tmp_path
             self.results = []
             self.reset_count = 0
             self.calls = 0
+            self.compaction_prompts = []
             self.last_completion_metadata = {}
 
         def reset_action_session(self):
             self.reset_count += 1
+
+        def complete(self, prompt, max_new_tokens, **kwargs):
+            del max_new_tokens, kwargs
+            self.compaction_prompts.append(prompt)
+            self.last_completion_metadata = {"input_tokens": 600, "output_tokens": 120}
+            return _checkpoint_text("overflow checkpoint")
 
         def complete_action(self, prompt, max_new_tokens, **kwargs):
             del max_new_tokens, kwargs
@@ -167,57 +247,93 @@ def test_provider_context_limit_recovers_once_with_recent_tool_evidence(tmp_path
     assert agent.ask("Inspect README.md") == "Recovered from the provider context limit."
 
     assert client.calls == 3
-    assert client.reset_count == 2  # task start + one recovery, never a loop
-    assert "Context recovery after a provider context-limit error:" in client.prompts[2]
-    assert "Latest tool evidence N001_read_file" in client.prompts[2]
-    assert "Fresh workspace snapshot | README.md:" in client.prompts[2]
+    assert client.reset_count == 2  # task start + checkpoint reset
+    assert len(client.compaction_prompts) == 1
+    assert "Trigger: provider_overflow" in client.compaction_prompts[0]
+    assert "Task context checkpoint" in client.prompts[2]
+    assert "overflow checkpoint" in client.prompts[2]
+    assert "Recent original tool evidence" in client.prompts[2]
     assert "alpha\nbeta" in client.prompts[2]
     trace = [
         json.loads(line)
         for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert sum(event["event"] == "model_start" for event in trace) == 3
+    assert sum(event["event"] == "model_start" for event in trace) == 4
+    assert any(event["event"] == "compaction_end" and event["status"] == "completed" for event in trace)
     assert trace[-1]["event"] == "run_end"
 
 
-def test_second_provider_context_limit_stops_instead_of_repeatedly_compacting(tmp_path):
-    class AlwaysContextLimitedClient:
+def test_second_compaction_keeps_verifier_bound_to_current_workspace(tmp_path):
+    class PassingPytestSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout, env
+            return SandboxResult(returncode=0, stdout="1 passed in 0.01s\n")
+
+    class TwoCompactionClient:
         model = "strict-test"
         supports_prompt_cache = False
 
         def __init__(self):
-            self.calls = 0
             self.reset_count = 0
             self.last_completion_metadata = {}
+            self.actions = [
+                ModelAction.tool("list_files", {"path": "."}, protocol="responses_function"),
+                ModelAction.tool(
+                    "write_file",
+                    {"path": "changed.txt", "content": "ready\n"},
+                    protocol="responses_function",
+                ),
+                ModelAction.final("Done.", protocol="responses_function"),
+            ]
+            self.compaction_calls = 0
 
         def reset_action_session(self):
             self.reset_count += 1
 
+        def complete(self, prompt, max_new_tokens, **kwargs):
+            del prompt, max_new_tokens, kwargs
+            self.compaction_calls += 1
+            self.last_completion_metadata = {"input_tokens": 600, "output_tokens": 120}
+            return _checkpoint_text(f"checkpoint {self.compaction_calls}")
+
         def complete_action(self, prompt, max_new_tokens, **kwargs):
             del prompt, max_new_tokens, kwargs
-            self.calls += 1
-            raise RuntimeError("input is too long for this context window")
+            self.last_completion_metadata = {"input_tokens": 24_000, "output_tokens": 40}
+            return self.actions.pop(0)
 
         def record_action_result(self, action, result):
             del action, result
 
-    agent = build_agent(tmp_path, [])
-    client = AlwaysContextLimitedClient()
+    agent = build_agent(
+        tmp_path,
+        [],
+        sandbox=PassingPytestSandbox(tmp_path),
+        verification_command="pytest -q",
+    )
+    client = TwoCompactionClient()
     agent.model_client = client
     agent.refresh_prefix(force=True)
 
-    answer = agent.ask("Inspect the workspace.")
-
-    assert answer.startswith("Stopped after model error: RuntimeError: input is too long")
-    assert client.calls == 2
-    assert client.reset_count == 2  # task start + one recovery only
-    trace = [
+    assert agent.ask("Change the workspace and verify it.").startswith("Completed verified changes.")
+    assert client.reset_count == 3  # task start + two checkpoint resets
+    assert client.compaction_calls == 2
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert report["summary"]["context_compaction_count"] == 2
+    assert len(report["runtime_verifications"]) == 1
+    verification = report["runtime_verifications"][0]
+    assert verification["status"] == "passed"
+    assert verification["freshness"] == "current"
+    assert (
+        agent.current_task_state.context_compactions[-1]["workspace_fingerprint"]
+        == verification["workspace_fingerprint"]
+    )
+    records = [
         json.loads(line)
-        for line in (agent.current_run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (agent.current_run_dir / "context_compactions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
-    assert sum(event["event"] == "model_start" for event in trace) == 2
-    assert trace[-1]["event"] == "run_end"
-    assert trace[-1]["model"]["failures"] == 1
+    assert [record["sequence"] for record in records] == [1, 2]
 
 
 def test_pytest_failure_tail_stays_in_context_and_full_output_stays_on_disk(tmp_path):
@@ -525,6 +641,18 @@ def test_runtime_verification_retries_once_with_structured_feedback(tmp_path):
         "failed",
         "passed",
     ]
+    first, second = report["runtime_verifications"]
+    assert first["freshness"] == "stale"
+    assert first["workspace_fingerprint"] != second["workspace_fingerprint"]
+    assert first["invalidated_by"] == {
+        "kind": "tool",
+        "tool": "patch_file",
+        "tool_step": 2,
+        "workspace_fingerprint": second["workspace_fingerprint"],
+    }
+    assert second["freshness"] == "current"
+    assert report["tool_audit"][1]["invalidated_runtime_verification_count"] == 1
+    assert report["summary"]["runtime_verification_freshness"] == ["stale", "current"]
 
 
 def test_runtime_verification_stops_after_one_failed_repair(tmp_path):
@@ -596,6 +724,7 @@ def test_final_only_turn_cannot_execute_another_tool(tmp_path):
                     protocol="responses_function",
                     call_id="call_2",
                 ),
+                ModelAction.final("Budget closed.", protocol="responses_function"),
             ]
 
         def reset_action_session(self):
@@ -616,8 +745,9 @@ def test_final_only_turn_cannot_execute_another_tool(tmp_path):
 
     answer = agent.ask("Try to exceed the tool budget")
 
-    assert answer == "Stopped after reaching the step limit without a final answer."
+    assert answer == "Budget closed."
     assert client.tool_sets[1] == ["submit_final"]
+    assert client.tool_sets[2] == ["submit_final"]
     assert not (tmp_path / "too-late.txt").exists()
 
 
@@ -727,6 +857,49 @@ def test_explicit_runtime_verification_finalizes_a_changed_task(tmp_path):
         event["event"] == "verifier_end" and event["status"] == "passed"
         for event in trace
     )
+
+
+def test_runtime_verification_never_accepts_a_pass_for_a_stale_workspace(tmp_path):
+    class PassingPytestSandbox(UnitTestSandbox):
+        def run(self, command, *, cwd, timeout, env=None):
+            del command, cwd, timeout, env
+            return SandboxResult(returncode=0, stdout="1 passed in 0.01s\n")
+
+    actions = [
+        ModelAction.tool(
+            "write_file",
+            {"path": "changed.txt", "content": "ready\n"},
+            protocol="responses_function",
+        ),
+        ModelAction.final("Change complete.", protocol="responses_function"),
+    ]
+    agent = build_agent(
+        tmp_path,
+        actions,
+        max_steps=4,
+        sandbox=PassingPytestSandbox(tmp_path),
+        verification_command="pytest -q",
+    )
+    original_is_current = agent.runtime_verification_is_current
+
+    def mutate_before_freshness_check(record):
+        (tmp_path / "external-change.txt").write_text("race\n", encoding="utf-8")
+        return original_is_current(record)
+
+    agent.runtime_verification_is_current = mutate_before_freshness_check
+
+    answer = agent.ask("Change the workspace and verify it.")
+
+    assert answer == (
+        "Stopped because the workspace changed after runtime verification passed. "
+        "Run pytest -q again against the current workspace."
+    )
+    assert agent.current_task_state.stop_reason == "verification_stale"
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    verification = report["runtime_verifications"][0]
+    assert verification["status"] == "passed"
+    assert verification["freshness"] == "stale"
+    assert verification["invalidated_by"]["kind"] == "workspace_fingerprint_mismatch"
 
 
 def test_agent_recovers_from_malformed_tool_payload_and_audits_it(tmp_path):

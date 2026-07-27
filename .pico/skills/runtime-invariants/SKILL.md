@@ -2,7 +2,7 @@
 name: runtime-invariants
 description: Change Pico's agent loop, context assembly, memory, tool conversation, or task-canvas runtime without breaking its audited execution invariants. 中文: Agent 运行时, 上下文, 记忆, 工具调用, 任务画布.
 when_to_use: Use for behavior changes in pico/agent_loop.py, context_manager.py, models.py, tools.py, tool_runtime.py, run_store.py, or their tests.
-trigger_keywords: [agent loop, agent runtime, context manager, prompt, provider session, tool result, task canvas, memory, 上下文, 记忆, 工具调用, 任务画布]
+when_not_to_use: Ordinary application-code changes, a read-only PR review, or generic debugging outside Pico runtime control flow.
 tools: [list_files, read_file, search, query_repo_map, read_task_canvas, read_task_event, read_tool_output, write_file, patch_file, run_shell]
 allowed_tools_strict: true
 priority: 90

@@ -1,6 +1,8 @@
 ---
 name: test-driven-development
 description: Add features or bug fixes by writing one test first, using TDD and regression tests. 中文: 测试先行, 先写测试, 补测试, 单元测试, 回归测试.
+when_to_use: A feature or bug fix changes observable behavior and a focused test can be added or updated.
+when_not_to_use: Read-only analysis, documentation-only work, or a formatting-only change with no behavior change.
 ---
 
 # Test Driven Development

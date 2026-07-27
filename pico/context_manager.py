@@ -1,21 +1,19 @@
 """Prompt 组装与上下文预算控制。
 
-这个模块负责决定：新任务或上下文恢复时，把多少 prefix、memory、相关笔记、
-任务控制状态和当前用户请求送进模型。正常工具回合由 provider 的连续
-tool-result 会话承载，不会用画布摘要替代原始证据。
+这个模块负责决定：新任务或任务内 checkpoint compaction 后，把多少
+prefix、memory、任务控制状态和当前用户请求送进模型。正常工具回合由
+provider 的连续 tool-result 会话承载，不会用画布摘要替代原始证据。
 """
 
 from __future__ import annotations
 
 import re
 
-from . import memory as memorylib
 from . import skills as skillslib
 from .config import (
     DEFAULT_TOTAL_BUDGET,
     DEFAULT_SECTION_BUDGETS,
     DEFAULT_REDUCTION_ORDER,
-    RELEVANT_MEMORY_LIMIT,
 )
 from .context_types import (
     SectionRender,
@@ -28,7 +26,6 @@ SECTION_ORDER = (
     "memory",
     "skills",
     "repo_map",
-    "relevant_memory",
     "task_context",
     "current_request",
 )
@@ -78,7 +75,7 @@ class ContextManager:
         为什么存在：
         仅靠用户这一轮输入，模型并不知道当前仓库状态、会话里已经读过什么、
         哪些旧信息还值得继续参考。这个函数负责把“稳定基线 + 工作记忆 +
-        相关笔记 + 任务控制状态 + 当前请求”拼成首次（或超限恢复时）发给模型的
+        任务控制状态 + 当前请求”拼成首次（或超限恢复时）发给模型的
         prompt。任务内的后续回合继续使用 provider 保存的精确 tool-result 对话；
         画布只是可审计、可下钻的控制平面。
 
@@ -98,15 +95,10 @@ class ContextManager:
         user_message = str(user_message)
         self.section_floors = self._compute_section_floors()
         memory_enabled = self.agent.feature_enabled("memory")
-        relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
         repo_map_enabled = self.agent.feature_enabled("repo_map")
         context_reduction_enabled = self.agent.feature_enabled("context_reduction")
         dynamic_budget_enabled = self.agent.feature_enabled("dynamic_budget")
-        selected_notes = []
-        if memory_enabled and relevant_memory_enabled:
-            selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
         selected_recent_runs = self._recent_runs_for_request(user_message)
-        selected_skills = self.agent.select_skills(user_message)
         repo_map_query = self.agent.repo_map.query(user_message) if repo_map_enabled else None
         prefix_text = str(self.agent.prefix)
         checkpoint_text = str(self.agent.render_checkpoint_text() or "").strip()
@@ -120,12 +112,18 @@ class ContextManager:
             "task_context": "",
             CURRENT_REQUEST_SECTION: f"Current user request:\n{user_message}",
         }
-        section_texts["skills"] = skillslib.render_skills(selected_skills)
+        section_texts["skills"] = "\n\n".join(
+            item
+            for item in (
+                skillslib.render_skill_index(self.agent.skills),
+                self.agent.active_skill_instructions(),
+            )
+            if item
+        )
 
         if not context_reduction_enabled:
             rendered = self._render_sections_without_reduction(
                 section_texts,
-                selected_notes=selected_notes,
                 recent_runs=selected_recent_runs,
                 repo_map_query=repo_map_query,
             )
@@ -135,9 +133,7 @@ class ContextManager:
                 rendered=rendered,
                 budgets={section: render.budget for section, render in rendered.items() if section != CURRENT_REQUEST_SECTION},
                 reduction_log=[],
-                selected_notes=selected_notes,
                 selected_recent_runs=selected_recent_runs,
-                selected_skills=selected_skills,
                 user_message=user_message,
                 section_texts=section_texts,
                 dynamic_adjustment={},
@@ -164,7 +160,6 @@ class ContextManager:
         rendered = self._render_sections(
             section_texts,
             budgets,
-            selected_notes=selected_notes,
             recent_runs=selected_recent_runs,
             repo_map_query=repo_map_query,
         )
@@ -173,7 +168,7 @@ class ContextManager:
 
         # 如果 prompt 超过 token 预算，就按固定顺序不断压缩。
         # 这里的顺序体现了平台偏好：
-        # 先牺牲 relevant_memory、skills 和任务画布，然后才动 repo map、
+        # 先牺牲 skills 和任务画布，然后才动 repo map、
         # memory 和 prefix。
         # 优先压缩旧上下文；仍然超预算时，保留当前请求的首尾并截断。
         prompt_tokens = self._count_tokens(prompt)
@@ -200,7 +195,6 @@ class ContextManager:
                 rendered = self._render_sections(
                     section_texts,
                     budgets,
-                    selected_notes=selected_notes,
                     recent_runs=selected_recent_runs,
                     repo_map_query=repo_map_query,
                 )
@@ -218,9 +212,7 @@ class ContextManager:
             rendered=rendered,
             budgets=budgets,
             reduction_log=reduction_log,
-            selected_notes=selected_notes,
             selected_recent_runs=selected_recent_runs,
-            selected_skills=selected_skills,
             user_message=user_message,
             section_texts=section_texts,
             dynamic_adjustment=dynamic_adjustment,
@@ -230,27 +222,11 @@ class ContextManager:
     def _render_sections_without_reduction(
         self,
         section_texts,
-        selected_notes=None,
         recent_runs=None,
         repo_map_query=None,
     ):
-        selected_notes = selected_notes or []
         recent_runs = recent_runs or []
-        relevant_lines = ["Relevant memory:"]
-        if selected_notes:
-            relevant_lines.extend(
-                f"- {memorylib.render_relevant_memory_note(note)}"
-                for note in selected_notes
-                if memorylib.render_relevant_memory_note(note)
-            )
-        if recent_runs:
-            relevant_lines.append("Recent runs:")
-            relevant_lines.append(RECENT_RUN_GUIDANCE)
-            relevant_lines.extend(f"- {self._render_recent_run(item)}" for item in recent_runs)
-        if len(relevant_lines) == 1:
-            relevant_lines.append("- none")
-        relevant_raw = "\n".join(relevant_lines)
-        task_context_raw = self.agent.task_context_text()
+        task_context_raw = self._task_context_raw(recent_runs)
         return {
             "prefix": self._section(raw=section_texts["prefix"], budget=self._count_tokens(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
             "memory": self._section(raw=section_texts["memory"], budget=self._count_tokens(section_texts["memory"]), rendered=section_texts["memory"], details={}),
@@ -260,23 +236,14 @@ class ContextManager:
                 int(self.section_budgets.get("repo_map", 0)),
                 section_texts["repo_map"],
             ),
-            "relevant_memory": self._section(
-                raw=relevant_raw,
-                budget=self._count_tokens(relevant_raw),
-                rendered=relevant_raw,
-                details={
-                    "selected_notes": [memorylib.render_relevant_memory_note(note) for note in selected_notes],
-                    "rendered_notes": [memorylib.render_relevant_memory_note(note) for note in selected_notes],
-                    "selected_count": len(selected_notes),
-                    "rendered_count": len(selected_notes),
-                    "note_budget": 0,
-                },
-            ),
             "task_context": self._section(
                 raw=task_context_raw,
                 budget=self._count_tokens(task_context_raw),
                 rendered=task_context_raw,
-                details={"active_run_id": self._active_run_id()},
+                details={
+                    "active_run_id": self._active_run_id(),
+                    "recent_run_count": len(recent_runs),
+                },
             ),
             CURRENT_REQUEST_SECTION: self._section(
                 raw=section_texts[CURRENT_REQUEST_SECTION],
@@ -298,7 +265,6 @@ class ContextManager:
         self,
         section_texts,
         budgets,
-        selected_notes=None,
         recent_runs=None,
         repo_map_query=None,
     ):
@@ -308,8 +274,6 @@ class ContextManager:
             if section == CURRENT_REQUEST_SECTION:
                 raw = section_texts[section]
                 rendered[section] = self._section(raw=raw, budget=0, rendered=raw, details={})
-            elif section == "relevant_memory":
-                rendered[section] = self._render_relevant_memory(selected_notes or [], int(budget or 0), recent_runs=recent_runs or [])
             elif section == "repo_map":
                 rendered[section] = self._render_repo_map(
                     repo_map_query,
@@ -317,7 +281,7 @@ class ContextManager:
                     section_texts[section],
                 )
             elif section == "task_context":
-                rendered[section] = self._render_task_context(int(budget or 0))
+                rendered[section] = self._render_task_context(int(budget or 0), recent_runs=recent_runs or [])
             else:
                 raw = section_texts[section]
                 rendered_text = _token_clip(raw, int(budget), token_counter=self._count_tokens) if budget is not None else raw
@@ -356,107 +320,28 @@ class ContextManager:
             details={"enabled": True, **selected_render.details},
         )
 
-    def _render_relevant_memory(self, selected_notes, budget, recent_runs=None):
-        header = "Relevant memory:"
-        recent_runs = recent_runs or []
-        note_texts = [
-            memorylib.render_relevant_memory_note(note)
-            for note in selected_notes
-            if str(note.get("text", "")).strip()
-        ]
-        note_texts = [text for text in note_texts if str(text).strip()]
-        run_texts = [self._render_recent_run(item) for item in recent_runs]
-        raw_lines = [header] + [f"- {text}" for text in note_texts]
-        if run_texts:
-            raw_lines.append("Recent runs:")
-            raw_lines.append(RECENT_RUN_GUIDANCE)
-            raw_lines.extend(f"- {text}" for text in run_texts)
-        raw = "\n".join(raw_lines) if (note_texts or run_texts) else "\n".join([header, "- none"])
-        if not note_texts and not run_texts:
-            rendered = raw
-            return self._section(
-                raw=raw,
-                budget=budget,
-                rendered=rendered,
-                details={
-                    "selected_notes": [],
-                    "rendered_notes": [],
-                    "selected_count": 0,
-                    "rendered_count": 0,
-                    "note_budget": 0,
-                },
-            )
-        if run_texts and not note_texts:
-            per_run_budget = self._per_note_budget(budget, len(run_texts), header + "\nRecent runs:")
-            rendered = "\n".join(
-                [
-                    header,
-                    "Recent runs:",
-                    RECENT_RUN_GUIDANCE,
-                    *[f"- {_token_clip(text, per_run_budget, token_counter=self._count_tokens)}" for text in run_texts],
-                ]
-            )
-            if self._count_tokens(rendered) > budget and budget > 0:
-                rendered = _token_clip(raw, budget, token_counter=self._count_tokens)
-            return self._section(
-                raw=raw,
-                budget=budget,
-                rendered=rendered,
-                details={
-                    "selected_notes": [],
-                    "rendered_notes": [],
-                    "selected_count": 0,
-                    "rendered_count": 0,
-                    "note_budget": per_run_budget,
-                },
-            )
-
-        per_note_budget = self._per_note_budget(budget, len(note_texts), header)
-        rendered_notes = []
-        while True:
-            # 让每条 note 平分这一段的预算，避免一条超长笔记把其他笔记都挤掉。
-            rendered_notes = [_token_clip(text, per_note_budget, token_counter=self._count_tokens) for text in note_texts]
-            lines = [header] + [f"- {text}" for text in rendered_notes]
-            if run_texts:
-                lines.append("Recent runs:")
-                lines.append(RECENT_RUN_GUIDANCE)
-                lines.extend(f"- {_token_clip(text, max(30, per_note_budget), token_counter=self._count_tokens)}" for text in run_texts)
-            rendered = "\n".join(lines)
-            if self._count_tokens(rendered) <= budget or per_note_budget <= 1:
-                break
-            per_note_budget -= 1
-
-        if self._count_tokens(rendered) > budget and budget > 0:
-            rendered = _token_clip(raw, budget, token_counter=self._count_tokens)
-            rendered_notes = [rendered]
-
-        return self._section(
-            raw=raw,
-            budget=budget,
-            rendered=rendered,
-            details={
-                "selected_notes": note_texts,
-                "rendered_notes": rendered_notes,
-                "selected_count": len(note_texts),
-                "rendered_count": len(rendered_notes),
-                "note_budget": per_note_budget,
-            },
-        )
-
-    def _per_note_budget(self, budget, note_count, header):
-        if note_count <= 0:
-            return 0
-        overhead = self._count_tokens(header) + note_count
-        usable = max(0, budget - overhead)
-        return max(1, usable // note_count)
-
-    def _render_task_context(self, budget):
+    def _task_context_raw(self, recent_runs):
         raw = self.agent.task_context_text()
+        if not recent_runs:
+            return raw
+        recent_run_lines = [
+            "Recent runs:",
+            RECENT_RUN_GUIDANCE,
+            *[f"- {self._render_recent_run(item)}" for item in recent_runs],
+        ]
+        return "\n\n".join([raw, "\n".join(recent_run_lines)]) if raw else "\n".join(recent_run_lines)
+
+    def _render_task_context(self, budget, recent_runs=None):
+        recent_runs = recent_runs or []
+        raw = self._task_context_raw(recent_runs)
         return self._section(
             raw=raw,
             budget=budget,
             rendered=_token_clip(raw, budget, token_counter=self._count_tokens) if budget else "",
-            details={"active_run_id": self._active_run_id()},
+            details={
+                "active_run_id": self._active_run_id(),
+                "recent_run_count": len(recent_runs),
+            },
         )
 
     def _active_run_id(self):
@@ -585,9 +470,7 @@ class ContextManager:
         rendered,
         budgets,
         reduction_log,
-        selected_notes,
         selected_recent_runs,
-        selected_skills,
         user_message,
         section_texts,
         dynamic_adjustment=None,
@@ -630,7 +513,7 @@ class ContextManager:
             "sections": section_metadata,
             "budget_reductions": reduction_log,
             "reduction_order": list(self.reduction_order),
-            "skills": skillslib.skill_metadata(selected_skills, rendered["skills"].rendered),
+            "skills": self.agent.skill_metadata(rendered["skills"].rendered),
             "repo_map": {
                 "enabled": bool(rendered["repo_map"].details.get("enabled", False)),
                 "query": str(rendered["repo_map"].details.get("query", "")),
@@ -648,23 +531,6 @@ class ContextManager:
                 "raw_tokens": rendered["repo_map"].raw_tokens,
                 "rendered_tokens": rendered["repo_map"].rendered_tokens,
             },
-            "relevant_memory": {
-                "limit": RELEVANT_MEMORY_LIMIT,
-                "selected_count": len(selected_notes),
-                "selected_notes": [memorylib.render_relevant_memory_note(note) for note in selected_notes],
-                "selected_sources": [str(note.get("source", "")).strip() for note in selected_notes],
-                "selected_kinds": [str(note.get("kind", "episodic")).strip() or "episodic" for note in selected_notes],
-                "selected_durable_count": sum(
-                    1 for note in selected_notes if (str(note.get("kind", "episodic")).strip() or "episodic") == "durable"
-                ),
-                "raw_chars": rendered["relevant_memory"].raw_chars,
-                "rendered_chars": rendered["relevant_memory"].rendered_chars,
-                "raw_tokens": rendered["relevant_memory"].raw_tokens,
-                "rendered_tokens": rendered["relevant_memory"].rendered_tokens,
-                "rendered_notes": list(rendered["relevant_memory"].details.get("rendered_notes", [])),
-                "rendered_count": int(rendered["relevant_memory"].details.get("rendered_count", 0)),
-                "retrieval": dict(self.agent.memory.last_retrieval_metadata),
-            },
             "recent_runs": {
                 "included": bool(selected_recent_runs),
                 "selected_count": len(selected_recent_runs),
@@ -676,6 +542,7 @@ class ContextManager:
                 "raw_tokens": rendered["task_context"].raw_tokens,
                 "rendered_tokens": rendered["task_context"].rendered_tokens,
                 "active_run_id": str(rendered["task_context"].details.get("active_run_id", "")),
+                "recent_run_count": int(rendered["task_context"].details.get("recent_run_count", 0)),
             },
             "dynamic_adjustment": dict(dynamic_adjustment or {}),
             "current_request": {

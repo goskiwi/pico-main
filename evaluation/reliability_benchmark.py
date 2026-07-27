@@ -563,6 +563,9 @@ class ReliabilityBenchmarkRunner:
             or workspace_env.get("OPENAI_MODEL")
             or DEFAULT_OPENAI_MODEL
         ).strip()
+        self.reasoning_effort = (
+            workspace_env.get("OPENAI_REASONING_EFFORT", "").strip() or None
+        )
         self._shared_model_client = None
 
     def run(self, task_ids=None):
@@ -637,6 +640,7 @@ class ReliabilityBenchmarkRunner:
             "repetitions": int(self.repetitions),
             "run_config": {
                 "temperature": 0.0,
+                "reasoning_effort": self.reasoning_effort,
                 "max_new_tokens": int(self.max_new_tokens),
                 "verifier_timeout_seconds": int(self.verifier_timeout),
                 "require_clean_worktree": bool(

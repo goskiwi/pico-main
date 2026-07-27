@@ -22,7 +22,7 @@ def test_docker_command_enforces_isolation_and_resource_limits(tmp_path):
     sandbox = DockerSandbox(
         tmp_path,
         config=DockerSandboxConfig(
-            image="pico-sandbox:test",
+            image="pico/sandbox:test",
             cpus=0.5,
             memory="256m",
             pids_limit=64,
@@ -51,13 +51,13 @@ def test_docker_command_enforces_isolation_and_resource_limits(tmp_path):
     assert f"PATH={CONTAINER_PATH}" in args
     assert "HOME=/tmp" in args
     assert "PATH=/host/bin" not in args
-    assert args[-4:] == ["pico-sandbox:test", "/bin/sh", "-lc", "pytest -q"]
+    assert args[-4:] == ["pico/sandbox:test", "/bin/sh", "-lc", "pytest -q"]
 
 
 def test_docker_sandbox_rejects_missing_prebuilt_image(tmp_path):
     sandbox = DockerSandbox(
         tmp_path,
-        config=DockerSandboxConfig(image="pico-sandbox:missing"),
+        config=DockerSandboxConfig(image="pico/sandbox:missing"),
         docker_binary="docker",
     )
     version = subprocess.CompletedProcess(["docker", "version"], 0, "29.0", "")
@@ -112,7 +112,7 @@ def test_run_shell_does_not_fall_back_when_sandbox_is_unavailable(tmp_path):
             raise SandboxImageMissingError("sandbox image is missing")
 
     sandbox = MissingSandbox(tmp_path)
-    sandbox.config.image = "pico-sandbox:missing"
+    sandbox.config.image = "pico/sandbox:missing"
     agent = build_agent(tmp_path, [], sandbox=sandbox)
 
     result = agent.run_tool("run_shell", {"command": "echo must-not-run", "timeout": 10})

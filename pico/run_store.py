@@ -67,6 +67,9 @@ class RunStore:
     def offload_path(self, run_id):
         return self.run_dir(run_id) / "offload.jsonl"
 
+    def context_compactions_path(self, run_id):
+        return self.run_dir(run_id) / "context_compactions.jsonl"
+
     def refs_dir(self, run_id):
         path = self.run_dir(run_id) / "refs"
         path.mkdir(parents=True, exist_ok=True)
@@ -94,6 +97,7 @@ class RunStore:
         self.write_task_state(task_state)
         self.write_task_canvas(task_state, self.initial_task_canvas(task_state))
         self.offload_path(task_state.run_id).touch()
+        self.context_compactions_path(task_state.run_id).touch()
         self._write_json_atomic(self.phase_index_path(task_state.run_id), [])
         self.update_index(task_state)
         return run_dir
@@ -167,6 +171,15 @@ class RunStore:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
         return record
+
+    def append_context_compaction(self, task_state, record):
+        """Append a full task-context checkpoint audit record."""
+        path = self.context_compactions_path(task_state.run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(record or {}), ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+        return path
 
     def append_task_node(self, task_state, *, node_id, summary, status, result_ref):
         """Attach one completed task step to the active Mermaid canvas.

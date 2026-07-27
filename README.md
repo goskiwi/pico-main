@@ -16,10 +16,11 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 
 项目刻意只突出四件事：
 
-1. **任务相关上下文**：真实 tokenizer 预算下，Repo Map、工作记忆和 Qdrant 语义检索只注入
-   当前任务需要的内容；Markdown 是记忆的唯一事实来源。
-2. **连续而可恢复的 Agent 循环**：provider 原生 tool result 留在连续会话内；明确的
-   上下文溢出才会触发一次有界恢复，不用摘要覆盖原始证据。
+1. **任务相关上下文**：真实 tokenizer 预算下，Repo Map、会话工作记忆和可审计的近期运行证据
+   只注入当前任务需要的内容。
+2. **连续且可压缩的 Agent 循环**：provider 原生 tool result 留在连续会话内；输入达到
+   tokenizer 阈值或 provider 明确报告 overflow 时，runtime 才生成结构化任务 checkpoint，
+   保留最近原始证据后重置会话继续执行。
 3. **强制执行边界与 Run Undo**：shell 只能进入无网络、只读 RootFS、资源受限的 Docker 容器；
    修改记录首触前像，冲突时整次拒绝恢复，不改写 Git。
 4. **可审计的任务过程**：task canvas 是导航与恢复控制面，完整工具输出、trace、报告和隐藏
@@ -55,23 +56,24 @@ flowchart LR
 
 ## 5 分钟运行
 
-需要 macOS/Linux（POSIX）、Python 3.10+、[`uv`](https://docs.astral.sh/uv/) 和 Docker。默认模型端点必须支持
-OpenAI-compatible Responses API；官方 DeepSeek 走单独的 Chat Completions 适配器。
+需要 macOS/Linux（POSIX）、Python 3.10+、[`uv`](https://docs.astral.sh/uv/) 和 Docker。Pico 使用
+OpenAI-compatible Responses API，默认模型为 GPT-5.6-luna。
 
 ```bash
 git clone https://github.com/goskiwi/pico-main.git
 cd pico-main
 uv sync --locked
-docker build -f Dockerfile.sandbox -t pico-sandbox:latest .
+docker build -f Dockerfile.sandbox -t pico/sandbox:latest .
 ```
 
 在目标仓库创建 `.env.local`：
 
 ```dotenv
 OPENAI_API_KEY=your-api-key
-OPENAI_MODEL=gpt-5.4
+OPENAI_MODEL=gpt-5.6-luna
 # 可选：
 # OPENAI_API_BASE=https://your-api.example/v1
+# OPENAI_REASONING_EFFORT=low
 # PICO_SECRET_ENV_NAMES=MY_EXTRA_SECRET
 ```
 
@@ -83,26 +85,16 @@ uv run pico --cwd /path/to/target-repo \
   "inspect the failing tests, patch the smallest safe fix, and verify it"
 ```
 
-### 官方 DeepSeek
+### GPT-5.6-luna
 
-DeepSeek 使用官方 Chat Completions API，而不是 Pico 默认的 Responses transport。在目标仓库的
-`.env.local` 写入：
-
-```dotenv
-DEEPSEEK_API_KEY=your-deepseek-api-key
-DEEPSEEK_MODEL=deepseek-v4-flash
-# 可选：DEEPSEEK_API_BASE=https://api.deepseek.com
-```
-
-然后显式启用适配器；它固定使用 non-thinking mode，避免 thinking-mode 工具回合必须回放
-`reasoning_content` 的额外协议：
+Pico 使用 Responses 原生 strict function calling，并回放加密 reasoning 与每轮工具结果。
+需要调整推理强度时设置 `OPENAI_REASONING_EFFORT`：
 
 ```bash
-uv run pico --provider deepseek --trace --cwd "$PWD" "inspect the failing tests and make the smallest safe fix"
+uv run pico --trace --cwd "$PWD" "inspect the failing tests and make the smallest safe fix"
 ```
 
-首轮建议使用 `deepseek-v4-flash`；需要质量优先的受控对比时，再以相同任务与预算测试
-`deepseek-v4-pro`。`deepseek-chat` 和 `deepseek-reasoner` 是已退役的旧模型名，不应写入新配置。
+默认 `gpt-5.6-luna` 是当前已完成 Real OSS V2 十题验证的模型配置。
 
 ## 实时 Trace
 
@@ -130,7 +122,15 @@ uv run pico --trace-jsonl ./pico-trace.jsonl --cwd /path/to/target-repo "fix the
 uv run pico --cwd /path/to/target-repo
 ```
 
-常用命令：`/help`、`/memory`、`/session`、`/reset`、`/reload-skills`、`/exit`。
+常用命令：`/help`、`/status`、`/runs [limit]`、`/memory`、`/session`、`/reset`、`/skill <name>`、`/reload-skills`、`/exit`。
+
+查看近期主任务的状态和 Undo 可用性，不会启动模型或创建运行工件：
+
+```bash
+uv run pico runs --cwd /path/to/target-repo --limit 10
+```
+
+该列表只展示 main run；只读 delegate 子任务仍保留在工件中供审计，但不会混入用户的任务历史。
 
 ## 显式运行时验证
 
@@ -147,6 +147,11 @@ Pico 不猜测项目的测试命令。用 `--verify-cmd` 显式指定后，只�
 验证记录写入 `.pico/runs/<run_id>/trace.jsonl` 和 `report.json` 的
 `runtime_verifications` 字段。基准应把首次通过和一次修复后通过分开报告，不能把两者混为
 同一个成功率。
+
+每条验证记录还绑定一个受控工作区内容指纹。成功的 `write_file`、`patch_file`，以及成功的
+`run_shell` 会将此前仍为 `current` 的验证标记为 `stale`；报告记录具体是哪个工具、哪一步
+使其失效。最终完成态只接受指纹仍与当前工作区一致的 `passed` 记录。若验证结束后有外部进程
+改写工作区，Pico 会以 `verification_stale` 停止，而不会把旧结果当作当前代码的通过证据。
 
 ## Repo Map
 
@@ -166,6 +171,14 @@ Repo Map 有两条入口：
 - 每轮 prompt 自动获得一份受预算限制的相关签名地图；
 - 模型可调用只读的 `query_repo_map` 对新子问题重新排序。
 
+面试或调试时可以直接查看同一套索引、token 渲染和排名理由；该命令不会启动模型或写入运行工件：
+
+```bash
+uv run pico repo-map --cwd /path/to/target-repo \
+  --query "Fix UserService.create_user duplicate save and update its test" \
+  --budget-tokens 1200
+```
+
 ```bash
 uv run pico --cwd /path/to/target-repo --repo-map-budget 600
 ```
@@ -179,7 +192,7 @@ Pydantic model 是工具参数的唯一 schema 来源，同时用于：
 
 - 本地参数校验；
 - prompt 中的工具签名；
-- OpenAI Responses strict function schema；
+- Responses strict function schema；
 - tool signature 与 checkpoint identity。
 
 高风险动作受 `--approval ask|auto|never` 控制。`run_shell` 还会先拦截递归强删、
@@ -264,58 +277,30 @@ uv run python scripts/render_run_report.py .pico/runs --latest
 生成的 `report.html` 会在浏览器中用 Mermaid 渲染当前画布，并把折叠阶段显示为可展开的
 子画布；首次渲染需要能访问 Mermaid CDN，离线时仍会保留 Mermaid 源码。
 
-## 语义长期记忆（可选 Qdrant）
-
-稳定的 `user`、`feedback`、`project`、`reference` 记忆以 `.pico/memory/` 中的 Markdown
-为事实源。配置 Qdrant 与 embedding 服务后，Pico 会把这些记忆增量镜像为外部向量，并把
-Qdrant 语义排名与本地标签/关键词排名用 RRF 融合；代码、文件摘要、工具输出和任务工件
-不会进入向量库。
-
-项目根目录的 `docker-compose.yml` 已包含本地 Qdrant。它只监听 `127.0.0.1:6333`，数据放在
-Docker 命名卷 `qdrant_storage` 中；启动后也可在 <http://localhost:6333/dashboard> 查看集合：
-
-```bash
-docker compose up -d qdrant
-docker compose ps
-```
-
-复制示例配置到工作区 `.env.local`，再填入 embedding 服务的 Key：
-
-```bash
-cp .env.example .env.local
-```
-
-本地容器不需要 Qdrant API Key，保留 `PICO_QDRANT_API_KEY` 为空即可：
-
-```dotenv
-PICO_QDRANT_URL=http://localhost:6333
-PICO_QDRANT_API_KEY=
-PICO_QDRANT_COLLECTION=pico_memory
-PICO_EMBEDDINGS_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-PICO_EMBEDDINGS_API_KEY=<DASHSCOPE_API_KEY>
-PICO_EMBEDDINGS_MODEL=text-embedding-v4
-PICO_EMBEDDINGS_DIMENSION=1024
-```
-
-已有 Markdown 记忆可显式建立首次索引；日后的 durable-memory 写入会自动增量同步：
-
-```bash
-uv run pico memory-sync --cwd /path/to/target-repo
-```
-
-示例与 Glodex 当前环境对齐：它复用 `DASHSCOPE_API_KEY`，使用 DashScope OpenAI-compatible
-API 的 `text-embedding-v4`（1024 维）。`PICO_EMBEDDINGS_DIMENSION` 会原样传给 embedding
-接口；Qdrant 则在首次同步时以实际返回向量维度建 collection。若改用受保护的自托管实例或
-Qdrant Cloud，只需将 `PICO_QDRANT_URL` 和 `PICO_QDRANT_API_KEY` 换成对应值。
-`docker compose down` 会停止服务但保留记忆；只有 `docker compose down -v` 才会删除本地
-Qdrant 数据卷。
-
 ## 本地 Skills
 
-项目的可选工作流保存在 `.pico/skills/<name>/SKILL.md`，并与源码一起提交。当前包含
-调试、测试先行、代码审查、运行时不变量变更、运行工件审计和安全/Undo 审查。审查类 skills
-通过 `allowed_tools_strict` 只暴露读取与审计工具；它们只能收缩能力，不能绕过 Pico 的本地
-校验、审批和 Docker sandbox。
+项目的可选工作流保存在 `.pico/skills/<name>/SKILL.md`，并与源码一起提交。它们可能成为模型
+指令，因此默认**完全不发现也不读取**；只有在你确认目标仓库可信时，才显式启动：
+
+```bash
+uv run pico --trust-project --cwd /path/to/trusted-repo
+```
+
+`--trust-project` 只允许本次进程发现该工作区的 `.pico/skills`，不会写入全局信任记录，也不会
+信任其他仓库。受信任项目当前包含调试、测试先行、代码审查、运行时不变量变更、运行工件审计和
+安全/Undo 审查。审查类 skills 只在名称、描述与路径的轻量索引中出现；模型确认任务匹配后，才用
+`read_file` 读取完整 `SKILL.md`。读取后的 `allowed_tools_strict` 会立即收紧下一轮工具 schema；
+它只能收缩能力，不能绕过 Pico 的本地校验、审批和 Docker sandbox。普通请求不会产生额外的 Skill
+selector 模型调用。
+
+Skill 使用 Agent Skills 风格的 `name`、必填 `description` 和可选
+`disable-model-invocation` frontmatter；名称必须是小写 kebab-case。后者不会进入模型 Skill
+索引，只能由以 `--trust-project` 启动的交互模式的 `/skill <name>` 显式排入下一任务。Skill 内的相对路径始终以该
+`SKILL.md` 所在目录解析；`/reload-skills` 会显示元数据校验告警。
+
+内置 Skill 都在轻量索引中声明 `when_to_use` 与 `when_not_to_use`，帮助模型按任务语义而非
+关键词决定是否读取完整工作流。测试覆盖六个内置 Skill 的正向索引、默认不激活、显式读取后的
+激活，以及严格 Skill 的工具收缩；这验证的是运行时契约，不把离线单元测试伪装成模型路由准确率。
 
 ## 代码入口
 
@@ -323,10 +308,9 @@ Qdrant 数据卷。
 |---|---|
 | `pico/agent_loop.py` | 有界模型—工具循环与停止状态 |
 | `pico/runtime.py` | Agent 组合、prompt prefix 与运行生命周期 |
-| `pico/context_manager.py` | tokenizer 预算、Repo Map、记忆和恢复上下文的组装 |
-| `pico/models.py` | 原生 Responses 会话与 function-call output 回放 |
+| `pico/context_manager.py` | tokenizer 预算、Repo Map、会话状态和恢复上下文的组装 |
+| `pico/models.py` | Responses 会话与 function-call output 回放 |
 | `pico/repo_map.py` | tree-sitter、符号图、PageRank 与预算渲染 |
-| `pico/semantic_memory.py` | Qdrant 向量镜像与混合召回 |
 | `pico/tools.py` | 工具 schema、校验和执行 |
 | `pico/sandbox.py` | 强制 Docker shell 边界 |
 | `pico/run_undo.py` | 前像、冲突预检和恢复 |
@@ -364,10 +348,10 @@ uv run python scripts/run_real_world_benchmark.py \
 uv run python scripts/materialize_real_oss_v1.py \
   --manifest benchmarks/real_oss_v2.json \
   --replace
-docker build -f Dockerfile.real-oss-v2 -t pico-real-oss-v2:latest .
+docker build -f Dockerfile.real-oss-v2 -t pico/real-oss-v2:latest .
 uv run python scripts/run_real_world_benchmark.py \
   --benchmark-path benchmarks/real_oss_v2.json \
-  --sandbox-image pico-real-oss-v2:latest \
+  --sandbox-image pico/real-oss-v2:latest \
   --variant full \
   --variant no_repo_map \
   --repetitions 1 \

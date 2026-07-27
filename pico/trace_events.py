@@ -9,6 +9,8 @@ import threading
 TRACE_EVENT_NAMES = frozenset(
     {
         "model_start",
+        "compaction_start",
+        "compaction_end",
         "tool_start",
         "tool_end",
         "verifier_end",
@@ -30,9 +32,22 @@ def _elapsed_label(value):
 def _terminal_detail(event):
     event_name = event.get("event")
     if event_name == "model_start":
+        if event.get("kind") == "context_compaction":
+            return f"kind=context_compaction trigger={event.get('trigger', '?')}"
         return (
             f"attempt={event.get('attempt', '?')} "
             f"tool_steps={event.get('tool_steps', '?')}"
+        )
+    if event_name == "compaction_start":
+        return (
+            f"trigger={event.get('trigger', '?')} "
+            f"sequence={event.get('sequence', '?')}"
+        )
+    if event_name == "compaction_end":
+        return (
+            f"status={event.get('status', '?')} "
+            f"sequence={event.get('sequence', '?')} "
+            f"duration={event.get('duration_ms', 0)}ms"
         )
     if event_name == "tool_start":
         return " ".join(
@@ -44,14 +59,22 @@ def _terminal_detail(event):
             if part
         )
     if event_name == "tool_end":
-        return (
+        detail = (
             f"tool={event.get('tool', '?')} "
             f"status={event.get('status', '?')} "
             f"duration={event.get('duration_ms', 0)}ms"
         )
+        invalidated = int(event.get("invalidated_runtime_verification_count") or 0)
+        activated = list(event.get("activated_skills") or [])
+        if invalidated:
+            detail += f" stale_verifiers={invalidated}"
+        if activated:
+            detail += f" activated_skills={','.join(activated)}"
+        return detail
     if event_name == "verifier_end":
         return (
             f"status={event.get('status', '?')} "
+            f"freshness={event.get('freshness', '?')} "
             f"duration={event.get('duration_ms', 0)}ms"
         )
     if event_name == "run_end":

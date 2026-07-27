@@ -41,6 +41,7 @@ def test_read_file_reads_multiple_files_in_one_tool_action(tmp_path):
     assert set(agent.memory.state["file_summaries"]) == {"first.txt", "second.txt"}
     assert "beta" in agent.memory.state["file_summaries"]["first.txt"]["summary"]
     assert "gamma" in agent.memory.state["file_summaries"]["second.txt"]["summary"]
+    assert agent.memory.state["episodic_notes"] == []
 
 
 def test_read_file_rejects_legacy_single_path_arguments(tmp_path):
@@ -105,7 +106,7 @@ def test_read_tool_output_rejects_refs_outside_the_artifact_directory(tmp_path):
     assert "invalid ref" in result
 
 
-def test_responses_tool_schemas_are_strict_and_share_pydantic_requirements(tmp_path):
+def test_flat_tool_schemas_are_strict_and_share_pydantic_requirements(tmp_path):
     definitions = responses_action_tools(build_agent(tmp_path, []).tools)
 
     assert definitions[-1]["name"] == "submit_final"
