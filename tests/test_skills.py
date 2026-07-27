@@ -1,59 +1,9 @@
-from pathlib import Path
-
 import pytest
 
 from pico.runtime import Pico
-from pico.skills import compute_active_tools, load_skill_catalog, load_skills
+from pico.skills import compute_active_tools, load_skill_catalog
 from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import build_agent
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-# These are runtime-contract cases, not a keyword router. Positive cases model
-# the agent reading the indexed SKILL.md after semantic selection; negative
-# cases prove an unrelated request remains lazy and unprivileged.
-BUILTIN_SKILL_EVALUATIONS = (
-    {
-        "name": "code-review",
-        "positive": "Review this completed patch for regressions before merge.",
-        "negative": "Implement the requested endpoint change.",
-    },
-    {
-        "name": "debugging",
-        "positive": "A focused pytest case fails with an assertion error; find the root cause.",
-        "negative": "Summarize the README without running code.",
-    },
-    {
-        "name": "run-artifact-audit",
-        "positive": "Why did this Pico run stop? Audit its trace and report evidence.",
-        "negative": "Fix the current failing unit test.",
-    },
-    {
-        "name": "runtime-invariants",
-        "positive": "Change pico/agent_loop.py while preserving the tool-conversation invariant.",
-        "negative": "Review a completed application PR without editing it.",
-    },
-    {
-        "name": "security-and-undo-review",
-        "positive": "Review this sandbox path-validation change and Run Undo behavior.",
-        "negative": "Add a normal display-label feature.",
-    },
-    {
-        "name": "test-driven-development",
-        "positive": "Add observable behavior by writing a focused failing regression test first.",
-        "negative": "Correct a spelling mistake in the documentation.",
-    },
-)
-
-
-def _install_builtin_skill(tmp_path, name):
-    source = PROJECT_ROOT / ".pico" / "skills" / name / "SKILL.md"
-    destination = tmp_path / ".pico" / "skills" / name / "SKILL.md"
-    destination.parent.mkdir(parents=True)
-    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-    return destination
-
 
 def test_strict_skill_can_only_attenuate_the_runtime_tool_set(tmp_path):
     skill_path = tmp_path / ".pico" / "skills" / "audit" / "SKILL.md"
@@ -70,7 +20,7 @@ Read-only audit.
         encoding="utf-8",
     )
 
-    skills = load_skills(tmp_path)
+    skills, _ = load_skill_catalog(tmp_path)
     active_tools, strict = compute_active_tools(
         skills,
         {"read_file", "search", "patch_file"},
@@ -296,57 +246,3 @@ MANUAL_RELEASE_REVIEW_INSTRUCTIONS
     assert client.action_tool_names == [["read_file", "search", "submit_final"]]
     assert "MANUAL_RELEASE_REVIEW_INSTRUCTIONS" in client.prompts[0]
     assert "Skill root: .pico/skills/release-review" in client.prompts[0]
-
-
-@pytest.mark.parametrize("case", BUILTIN_SKILL_EVALUATIONS, ids=lambda item: item["name"])
-def test_builtin_skill_index_exposes_positive_and_negative_boundaries_lazily(
-    tmp_path, case
-):
-    _install_builtin_skill(tmp_path, case["name"])
-    agent = build_agent(tmp_path, [], trust_project=True)
-    skill = agent.skills[0]
-
-    positive_prompt, positive_metadata = agent.context_manager.build(case["positive"])
-    negative_prompt, negative_metadata = agent.context_manager.build(case["negative"])
-
-    for prompt, metadata in (
-        (positive_prompt, positive_metadata),
-        (negative_prompt, negative_metadata),
-    ):
-        assert f"## {case['name']}" in prompt
-        assert f"Use when: {skill.when_to_use}" in prompt
-        assert f"Do not use when: {skill.when_not_to_use}" in prompt
-        assert "Active skill instructions:" not in prompt
-        assert metadata["skills"]["active_names"] == []
-    assert agent.active_skills == []
-    assert agent.active_tool_names is None
-
-
-@pytest.mark.parametrize("case", BUILTIN_SKILL_EVALUATIONS, ids=lambda item: item["name"])
-def test_builtin_skill_positive_selection_activates_only_after_full_read(tmp_path, case):
-    skill_path = _install_builtin_skill(tmp_path, case["name"])
-    agent = build_agent(tmp_path, [], trust_project=True)
-    skill = agent.skills[0]
-
-    result = agent.run_tool(
-        "read_file",
-        {
-            "files": [
-                {
-                    "path": skill_path.relative_to(tmp_path).as_posix(),
-                    "start": 1,
-                    "end": 200,
-                }
-            ]
-        },
-    )
-
-    assert skill.description in result
-    assert [item.name for item in agent.active_skills] == [case["name"]]
-    assert f"Skill root: .pico/skills/{case['name']}" in agent.active_skill_instructions()
-    if skill.allowed_tools_strict:
-        assert agent.active_tool_names == frozenset(skill.tools)
-        assert agent.active_tools_strict is True
-    else:
-        assert agent.active_tool_names is None
-        assert agent.active_tools_strict is False

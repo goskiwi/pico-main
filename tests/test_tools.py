@@ -41,7 +41,7 @@ def test_read_file_reads_multiple_files_in_one_tool_action(tmp_path):
     assert set(agent.memory.state["file_summaries"]) == {"first.txt", "second.txt"}
     assert "beta" in agent.memory.state["file_summaries"]["first.txt"]["summary"]
     assert "gamma" in agent.memory.state["file_summaries"]["second.txt"]["summary"]
-    assert agent.memory.state["episodic_notes"] == []
+    assert agent.memory.state["process_notes"] == []
 
 
 def test_read_file_rejects_legacy_single_path_arguments(tmp_path):

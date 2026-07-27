@@ -796,7 +796,6 @@ def run_delegate_child(agent, args):
         clip(agent.task_context_text(), 300),
         tags=("delegated_context",),
         source=agent.agent_id,
-        kind="process",
     )
     child.session["memory"] = child.memory.to_dict()
     answer = child.ask(child_task)

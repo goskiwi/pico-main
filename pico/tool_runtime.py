@@ -104,7 +104,7 @@ def record_process_note_for_tool(agent, name, metadata):
     else:
         text = f"{name} rejected; choose a different action before retry"
     tags = ["process", status, *affected_paths]
-    agent.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
+    agent.memory.append_note(text, tags=tuple(tags), source=name)
     agent.session["memory"] = agent.memory.to_dict()
 
 

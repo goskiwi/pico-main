@@ -101,12 +101,6 @@ def load_skill_catalog(root):
     return skills, diagnostics
 
 
-def load_skills(root):
-    """Return valid project-local skills; use ``load_skill_catalog`` for diagnostics."""
-    skills, _ = load_skill_catalog(root)
-    return skills
-
-
 def parse_skill(raw):
     text = str(raw or "").strip()
     metadata = {}

@@ -22,7 +22,7 @@ def default_memory_state():
             "last_error": "",
             "recent_files": [],
         },
-        "episodic_notes": [],
+        "process_notes": [],
         "file_summaries": {},
         "next_note_index": 0,
     }
@@ -82,27 +82,25 @@ def file_freshness(raw_path, workspace_root=None):
 
 def _normalize_note(note, index):
     if not isinstance(note, dict):
-        raise ValueError(f"memory episodic_notes[{index}] must be an object")
-    required_fields = ("text", "tags", "source", "created_at", "note_index", "kind")
+        raise ValueError(f"memory process_notes[{index}] must be an object")
+    required_fields = ("text", "tags", "source", "created_at", "note_index")
     missing = [field for field in required_fields if field not in note]
     if missing:
         raise ValueError(
-            f"memory episodic_notes[{index}] missing required fields: {', '.join(missing)}"
+            f"memory process_notes[{index}] missing required fields: {', '.join(missing)}"
         )
     if not isinstance(note["text"], str):
-        raise ValueError(f"memory episodic_notes[{index}].text must be a string")
+        raise ValueError(f"memory process_notes[{index}].text must be a string")
     if not isinstance(note["tags"], list) or not all(
         isinstance(tag, str) for tag in note["tags"]
     ):
-        raise ValueError(f"memory episodic_notes[{index}].tags must be a list of strings")
+        raise ValueError(f"memory process_notes[{index}].tags must be a list of strings")
     if not isinstance(note["source"], str):
-        raise ValueError(f"memory episodic_notes[{index}].source must be a string")
+        raise ValueError(f"memory process_notes[{index}].source must be a string")
     if not isinstance(note["created_at"], str) or not note["created_at"].strip():
-        raise ValueError(f"memory episodic_notes[{index}].created_at must be a non-empty string")
+        raise ValueError(f"memory process_notes[{index}].created_at must be a non-empty string")
     if not isinstance(note["note_index"], int) or isinstance(note["note_index"], bool):
-        raise ValueError(f"memory episodic_notes[{index}].note_index must be an integer")
-    if not isinstance(note["kind"], str) or not note["kind"].strip():
-        raise ValueError(f"memory episodic_notes[{index}].kind must be a non-empty string")
+        raise ValueError(f"memory process_notes[{index}].note_index must be an integer")
 
     return {
         "text": clip(note["text"].strip(), 500),
@@ -112,7 +110,6 @@ def _normalize_note(note, index):
         "source": note["source"].strip(),
         "created_at": note["created_at"].strip(),
         "note_index": note["note_index"],
-        "kind": note["kind"].strip(),
     }
 
 
@@ -122,7 +119,7 @@ def normalize_memory_state(state, workspace_root=None):
     elif not isinstance(state, dict):
         raise TypeError("memory state must be a mapping")
 
-    required_fields = ("working", "episodic_notes", "file_summaries", "next_note_index")
+    required_fields = ("working", "process_notes", "file_summaries", "next_note_index")
     missing = [field for field in required_fields if field not in state]
     if missing:
         raise ValueError(f"memory state missing required fields: {', '.join(missing)}")
@@ -152,18 +149,13 @@ def normalize_memory_state(state, workspace_root=None):
     )[-WORKING_FILE_LIMIT:]
     state["working"] = working
 
-    episodic_notes = state["episodic_notes"]
-    if not isinstance(episodic_notes, list):
-        raise ValueError("memory episodic_notes must be a list")
-    # File reads are represented exclusively by freshness-checked summaries.
-    # Drop the legacy duplicated read notes instead of carrying unversioned
-    # source facts into another prompt after the file changes.
-    episodic_notes = [
-        normalized
-        for index, note in enumerate(episodic_notes)
-        if (normalized := _normalize_note(note, index))["kind"] == "process"
+    process_notes = state["process_notes"]
+    if not isinstance(process_notes, list):
+        raise ValueError("memory process_notes must be a list")
+    state["process_notes"] = [
+        _normalize_note(note, index)
+        for index, note in enumerate(process_notes)
     ][-EPISODIC_NOTE_LIMIT:]
-    state["episodic_notes"] = episodic_notes
 
     file_summaries = state["file_summaries"]
     if not isinstance(file_summaries, dict):
@@ -215,9 +207,8 @@ def normalize_memory_state(state, workspace_root=None):
         or next_note_index < 0
     ):
         raise ValueError("memory next_note_index must be a non-negative integer")
-    max_index = max([note["note_index"] for note in episodic_notes], default=-1)
+    max_index = max([note["note_index"] for note in state["process_notes"]], default=-1)
     state["next_note_index"] = max(next_note_index, max_index + 1)
-    state.pop("durable_types", None)
     return state
 
 
@@ -252,7 +243,7 @@ def remember_file(state, path, workspace_root=None):
     return state
 
 
-def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None, kind="process"):
+def append_note(state, text, tags=(), source="", created_at=None, workspace_root=None):
     state = normalize_memory_state(state, workspace_root)
     text = clip(str(text).strip(), 500)
     if not text:
@@ -266,12 +257,11 @@ def append_note(state, text, tags=(), source="", created_at=None, workspace_root
         "source": str(source).strip(),
         "created_at": str(created_at).strip() if created_at else now(),
         "note_index": int(state["next_note_index"]),
-        "kind": str(kind).strip() or "process",
     }
     state["next_note_index"] = note["note_index"] + 1
-    notes = [item for item in state["episodic_notes"] if item["text"] != note["text"]]
+    notes = [item for item in state["process_notes"] if item["text"] != note["text"]]
     notes.append(note)
-    state["episodic_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
+    state["process_notes"] = notes[-EPISODIC_NOTE_LIMIT:]
     return state
 
 
@@ -330,7 +320,7 @@ def render_memory_text(state, workspace_root=None):
 
     note_lines = [
         f"- {note['text']}"
-        for note in state["episodic_notes"][-EPISODIC_NOTE_LIMIT:]
+        for note in state["process_notes"][-EPISODIC_NOTE_LIMIT:]
         if note.get("text")
     ]
     recent_file_lines = [f"- {path}" for path in working["recent_files"]] or ["- none"]
@@ -378,7 +368,7 @@ class LayeredMemory:
         self.state = remember_file(self.state, path, self.workspace_root)
         return self
 
-    def append_note(self, text, tags=(), source="", created_at=None, kind="episodic"):
+    def append_note(self, text, tags=(), source="", created_at=None):
         self.state = append_note(
             self.state,
             text,
@@ -386,7 +376,6 @@ class LayeredMemory:
             source=source,
             created_at=created_at,
             workspace_root=self.workspace_root,
-            kind=kind,
         )
         return self
 

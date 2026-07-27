@@ -216,12 +216,7 @@ def _action_payload(action):
 
 
 def _action_tool_name(definition):
-    function = definition.get("function") if isinstance(definition, dict) else None
-    return str(
-        (definition.get("name") if isinstance(definition, dict) else "")
-        or (function.get("name") if isinstance(function, dict) else "")
-        or ""
-    ).strip()
+    return str(definition["name"]).strip()
 
 
 def _record_action_result(agent, action, result):

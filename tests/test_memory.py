@@ -1,4 +1,4 @@
-from pico import checkpoints, memory
+from pico import checkpoints
 from pico.task_state import TaskState
 from pico.tool_runtime import record_process_note_for_tool
 from tests.helpers import build_agent
@@ -30,7 +30,7 @@ def test_session_memory_keeps_fresh_file_summaries_and_process_notes_separate(tm
     assert "module.py: 1: before = 1" in memory_text
     assert "Process Notes" in memory_text
     assert "run_shell rejected" in memory_text
-    assert all(note["kind"] == "process" for note in agent.memory.state["episodic_notes"])
+    assert agent.memory.state["process_notes"]
 
     agent.run_tool(
         "patch_file",
@@ -40,24 +40,6 @@ def test_session_memory_keeps_fresh_file_summaries_and_process_notes_separate(tm
     assert "module.py" not in agent.memory.state["file_summaries"]
     assert "before = 1" not in agent.memory_text()
     assert "run_shell rejected" in agent.memory_text()
-
-
-def test_session_normalization_drops_legacy_file_read_notes(tmp_path):
-    state = memory.default_memory_state()
-    state["episodic_notes"] = [
-        {
-            "text": "stale source fact",
-            "tags": ["module.py"],
-            "source": "module.py",
-            "created_at": "2026-07-27T00:00:00+00:00",
-            "note_index": 0,
-            "kind": "episodic",
-        }
-    ]
-
-    restored = memory.LayeredMemory(state, workspace_root=tmp_path)
-
-    assert restored.to_dict()["episodic_notes"] == []
 
 
 def test_session_keeps_only_the_latest_resumable_checkpoint(tmp_path):

@@ -9,9 +9,8 @@ from tests.fakes import final_action, retry_action, tool_action_json
 from tests.helpers import UnitTestSandbox, build_agent
 
 
-def test_action_tool_name_supports_flat_and_chat_completion_shapes():
+def test_action_tool_name_reads_the_responses_schema():
     assert _action_tool_name({"name": "submit_final"}) == "submit_final"
-    assert _action_tool_name({"function": {"name": "submit_final"}}) == "submit_final"
 
 
 def test_agent_stops_at_the_exact_retry_limit(tmp_path):

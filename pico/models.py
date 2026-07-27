@@ -290,7 +290,7 @@ class OpenAICompatibleModelClient:
                 raw_preview=raw_preview,
             )
         allowed_names = {
-            str(item.get("name") or (item.get("function") or {}).get("name") or "")
+            str(item["name"])
             for item in action_tools
         }
         if len(calls) + len(invalid_calls) > 1:
