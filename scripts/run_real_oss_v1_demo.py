@@ -90,7 +90,7 @@ def _require_prerequisites():
     ).returncode:
         missing.append(
             "sandbox image missing; run: "
-            "docker build -f Dockerfile.real-oss-v1 "
+            "docker build -f docker/real-oss-v1.Dockerfile "
             f"-t {SANDBOX_IMAGE} ."
         )
     if missing:

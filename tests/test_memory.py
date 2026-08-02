@@ -1,4 +1,4 @@
-from pico.tool_runtime import record_process_note_for_tool
+from pico.tools.runtime import record_process_note_for_tool
 from tests.helpers import build_agent
 
 

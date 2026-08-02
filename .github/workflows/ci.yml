@@ -56,7 +56,7 @@ jobs:
         run: uv sync --locked
 
       - name: Build sandbox image
-        run: docker build -f Dockerfile.sandbox -t pico-sandbox:latest .
+        run: docker build -f docker/sandbox.Dockerfile -t pico/sandbox:latest .
 
       - name: Verify real Docker boundaries
         env:

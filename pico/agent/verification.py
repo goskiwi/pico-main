@@ -4,8 +4,8 @@ import hashlib
 import json
 import time
 
-from . import security, workspace_diff
-from .config import DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS
+from .. import security, workspace_diff
+from ..config import DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS
 
 
 def workspace_fingerprint(agent):

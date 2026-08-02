@@ -1,7 +1,8 @@
 # Metrics evidence map
 
 这里只保留能直接支撑当前设计的证据。每组都链接到报告；对应的 reviewed JSON 位于
-`artifacts/`，fixture 与隐藏 verifier 位于 `benchmarks/`。
+`artifacts/`，fixture 与隐藏 verifier 位于 `benchmarks/`。经过审阅、随仓库提交的结果收在
+`benchmarks/results/`。
 
 ## 1. Repo Map 的目标场景
 
@@ -43,8 +44,8 @@ pytest tail 定位从 0/3 变为 3/3；停滞恢复从 2/3 变为 3/3，并减�
 
 ## 5. 精简后的 clean-worktree 回归
 
-[`live-llm-v5-post-simplification-3x.md`](../../artifacts/live-llm-v5-post-simplification-3x.md) ·
-[`reviewed JSON`](../../artifacts/live-llm-v5-post-simplification-3x.json)
+[`live-llm-v5-post-simplification-3x.md`](../../benchmarks/results/live-llm-v5-post-simplification-3x.md) ·
+[`reviewed JSON`](../../benchmarks/results/live-llm-v5-post-simplification-3x.json)
 
 删除 session-level history、无引用上下文辅助代码与重复 V4 fixture 自检后，以
 `--require-clean-worktree` 对 V5 `full` 跑三轮：`gpt-5.4` 共通过 15/15，三轮均为 5/5，
@@ -61,8 +62,8 @@ verifier 首次通过 82 项公开 collection 回归，随后独立隐藏 verifi
 
 ## 7. 冻结真实 OSS 的最小外部复核
 
-[`run report`](../../artifacts/real-oss-v1-repo-map-ablation-1x.md) ·
-[`reviewed JSON`](../../artifacts/real-oss-v1-repo-map-ablation-1x.json) ·
+[`run report`](../../benchmarks/results/real-oss-v1-repo-map-ablation-1x.md) ·
+[`reviewed JSON`](../../benchmarks/results/real-oss-v1-repo-map-ablation-1x.json) ·
 [`protocol`](../benchmarks/real-oss-v1.md)
 
 在干净 commit 上，来自 Pydantic #13215、pytest #13974 和 Click #3487 的三个冻结 pre-fix
@@ -80,8 +81,8 @@ verifier；六次尝试均通过 hidden verifier 与 workspace-isolation audit�
 
 [`V2 protocol`](../benchmarks/real-oss-v2.md) ·
 [`candidate freeze`](../benchmarks/real-oss-v2-candidates.md) ·
-[`run report`](../../artifacts/real-oss-v2-repo-map-ablation-1x.md) ·
-[`reviewed JSON`](../../artifacts/real-oss-v2-repo-map-ablation-1x.json)
+[`run report`](../../benchmarks/results/real-oss-v2-repo-map-ablation-1x.md) ·
+[`reviewed JSON`](../../benchmarks/results/real-oss-v2-repo-map-ablation-1x.json)
 
 V2 保留上述三项历史 smoke，并增加 tomlkit、tqdm、packaging、Werkzeug、more-itertools、
 Jinja 和 urllib3，形成十个仓库、十个 pre-fix task 的冻结集。每项均已通过本地 preflight：

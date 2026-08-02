@@ -4,7 +4,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from pico.runtime import Pico
-from pico.trace_events import TRACE_EVENT_NAMES, TraceSink
+from pico.agent.trace import TRACE_EVENT_NAMES, TraceSink
 from pico.session_store import SessionStore
 from tests.fakes import FakeModelClient, final_action, tool_action_json
 from tests.helpers import build_agent, build_workspace

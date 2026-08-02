@@ -126,7 +126,7 @@ class DockerSandbox:
         if image.returncode != 0:
             raise SandboxImageMissingError(
                 f"Docker sandbox image '{self.config.image}' is not available. "
-                "Build it with: docker build -f Dockerfile.sandbox -t "
+                "Build it with: docker build -f docker/sandbox.Dockerfile -t "
                 f"{self.config.image} ."
             )
 

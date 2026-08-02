@@ -48,13 +48,13 @@ hidden verifier after the Agent stops.
 The three candidates above are now the `real_oss_v1` smoke suite. Each has a
 standalone hidden verifier with no PR text in the Agent workspace, an exact
 pre-fix source SHA, and a materialization digest. The fixed
-`Dockerfile.real-oss-v1` pins the base image and Python dependencies needed by
+`docker/real-oss-v1.Dockerfile` pins the base image and Python dependencies needed by
 these source checkouts; the manifest records the public prompt, tool budget,
 and hidden-verifier command.
 
 This is intentionally a three-task external sanity suite. Its first 1× `full`
 versus `no_repo_map` run is recorded in the
-[reviewed artifact](../../artifacts/real-oss-v1-repo-map-ablation-1x.md): both
+[reviewed artifact](../../benchmarks/results/real-oss-v1-repo-map-ablation-1x.md): both
 variants completed 3/3 hidden verifiers. The run supplies reproducible evidence
 that Pico operates on frozen real repositories, but three tasks and one repetition
 are not enough for a stable A/B or general coding-capability claim.

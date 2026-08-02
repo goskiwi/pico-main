@@ -1,5 +1,6 @@
-from pico.task_state import TaskState
+from pico.agent.task_state import TaskState
 from pico.tools import responses_action_tools
+from tests.fakes import FakeModelClient, final_action
 from tests.helpers import build_agent
 
 
@@ -146,3 +147,22 @@ def test_tool_schema_exposes_shell_and_delegate_constraints_to_the_model(tmp_pat
     prefix = agent.build_prefix().text
     assert "PYTHONPATH=src python -m pytest" in prefix
     assert "Do not use env, pipes, redirections" in prefix
+
+
+def test_delegate_runs_a_read_only_child_agent(tmp_path):
+    class ForkingModelClient(FakeModelClient):
+        def fork_for_delegate(self):
+            return FakeModelClient([final_action("README.md contains the project overview.")])
+
+    agent = build_agent(tmp_path, [])
+    agent.model_client = ForkingModelClient([])
+
+    result = agent.run_tool(
+        "delegate",
+        {"role": "explore", "task": "Inspect README.md.", "max_steps": 2},
+    )
+
+    assert "delegate_result role=explore" in result
+    assert "README.md contains the project overview." in result
+    assert agent._last_tool_result_metadata["tool_status"] == "ok"
+    assert agent._last_tool_result_metadata["delegate_outcome"]["completed_count"] == 1

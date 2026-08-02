@@ -2,7 +2,7 @@
 
 import json
 
-from pico.actions import ModelAction
+from pico.agent.actions import ModelAction
 from pico.context_types import count_tokens, tokenizer_details
 
 

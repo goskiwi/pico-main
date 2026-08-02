@@ -7,26 +7,29 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from langsmith import tracing_context
 
-from . import report, run_undo, security
-from . import tools as toolkit
+from . import report
+from .. import run_undo, security
+from .. import tools as toolkit
 from .actions import ACTION_FINAL, ACTION_RETRY, ACTION_TOOL, ModelAction
 from .checkpoints import (
     CHECKPOINT_NONE_STATUS,
     CHECKPOINT_PARTIAL_STALE_STATUS,
     CHECKPOINT_WORKSPACE_MISMATCH_STATUS,
 )
-from .config import (
+from ..config import (
+    MAX_CONSECUTIVE_INVALID_ACTIONS,
     TASK_CANVAS_MAX_ACTIVE_NODES,
     TASK_CANVAS_MAX_TOKENS,
     TASK_CANVAS_RETAIN_NODES,
 )
-from .runtime_verification import (
+from .verification import (
     run_runtime_verification,
     verification_feedback,
     verified_change_final,
 )
+from .state import read_only_tool_signature
 from .task_state import TaskState
-from .workspace import clip
+from ..workspace import clip
 
 
 def _is_context_limit_error(exc):
@@ -57,26 +60,15 @@ def _record_completion_progress(agent, progress_tracker, task_state, name, args,
     return invalidated_count
 
 
-def _budget_notice(task_state):
-    if task_state.tool_steps >= task_state.hard_tool_limit:
-        return "Runtime notice: the hard tool limit is reached; submit_final is the only action allowed."
-    if task_state.tool_steps >= task_state.nominal_tool_budget:
-        remaining = max(0, task_state.hard_tool_limit - task_state.tool_steps)
-        return (
-            "Runtime notice: the soft planning budget has been crossed. "
-            f"You have at most {remaining} safety-limit tool calls remaining; use them only to "
-            "repair, verify, or finish the current task."
-        )
-    return ""
-
-
 class AgentTurnState(TypedDict, total=False):
     """Transient routing state; durable audit/resume state stays in ``TaskState``."""
 
     prompt_snapshot: tuple[str, dict[str, Any]] | None
-    finalization_attempts: int
     context_compaction_trigger: str
     compact_after_tool: bool
+    invalid_action_streak: int
+    duplicate_read_only_signature: str
+    duplicate_read_only_rejections: int
     action: ModelAction
     result: str
 
@@ -122,10 +114,6 @@ def _action_payload(action):
     if action.kind == ACTION_FINAL:
         return action.answer
     return action.error
-
-
-def _action_tool_name(definition):
-    return str(definition["name"]).strip()
 
 
 def _record_action_result(agent, action, result):
@@ -314,6 +302,7 @@ def _execute_tool_action(agent, task_state, user_message, action, progress_track
     # lossy task-canvas summary.
     _record_action_result(agent, action, result)
     _create_checkpoint(agent, task_state, user_message, "tool_executed")
+    return metadata
 
 
 def _write_finished_run(agent, task_state, final, run_started_at, model_metrics):
@@ -347,10 +336,6 @@ def _run_agent_turn(agent, user_message):
         agent_mode=agent.agent_mode,
         parent_agent_id=agent.parent_agent_id,
     )
-    hard_tool_limit = (
-        agent.hard_max_steps if agent.feature_enabled("dynamic_budget") else agent.max_steps
-    )
-    task_state.configure_tool_budget(agent.max_steps, hard_tool_limit)
     task_state.resume_status = agent.resume_state.get("status", CHECKPOINT_NONE_STATUS)
     agent.current_task_state = task_state
     agent.current_run_dir = agent.run_store.start_run(task_state)
@@ -367,8 +352,6 @@ def _run_agent_turn(agent, user_message):
     agent.model_client.reset_action_session()
     agent.start_task_skills()
 
-    max_retry_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
-    max_graph_iterations = max(hard_tool_limit * 3, hard_tool_limit + 4)
     progress_tracker = {
         "last_workspace_change_step": 0,
         "repair_attempted": False,
@@ -378,19 +361,6 @@ def _run_agent_turn(agent, user_message):
     # Scripted offline clients use the same flat Responses definitions as the
     # production client when they do not expose ``action_tools`` themselves.
     tool_builder = getattr(agent.model_client, "action_tools", toolkit.responses_action_tools)
-
-    def finish_stopped():
-        if task_state.attempts >= max_retry_attempts and task_state.tool_steps < hard_tool_limit:
-            final = "Stopped after too many rejected model actions without a valid tool call or final answer."
-            task_state.stop_retry_limit(final)
-        else:
-            final = "Stopped after reaching the step limit without a final answer."
-            task_state.stop_step_limit(final)
-        agent.mark_work_finished(final, stopped=True)
-        _create_checkpoint(agent, task_state, user_message, task_state.stop_reason or "run_stopped")
-        return _write_finished_run(
-            agent, task_state, final, run_started_at, model_metrics
-        )
 
     def finish_with_transition(final, *, stopped, trigger, transition):
         agent.mark_work_finished(final, stopped=stopped)
@@ -434,19 +404,44 @@ def _run_agent_turn(agent, user_message):
             transition=task_state.stop_verification_stale,
         )
 
-    def call_model(state: AgentTurnState):
-        if task_state.attempts >= max_retry_attempts:
-            return Command(update={"result": finish_stopped()}, goto=END)
+    def finish_duplicate_read_only_loop():
+        final = (
+            "Stopped after the same read-only call was rejected twice as a duplicate. "
+            "Use the cached evidence or choose a different tool call."
+        )
+        return finish_with_transition(
+            final,
+            stopped=True,
+            trigger="duplicate_read_only_loop",
+            transition=task_state.stop_duplicate_read_only_loop,
+        )
 
-        finalization_only = task_state.tool_steps >= task_state.hard_tool_limit
-        finalization_attempts = int(state.get("finalization_attempts", 0))
-        if finalization_only:
-            # A provider can choose a stale tool after the hard limit. Return
-            # that rejection as a matching tool result, then give it one
-            # bounded chance to submit the required final answer.
-            if finalization_attempts >= 2:
-                return Command(update={"result": finish_stopped()}, goto=END)
-            finalization_attempts += 1
+    def finish_invalid_action_limit():
+        final = (
+            "Stopped after 8 consecutive invalid model actions. "
+            "Submit a valid tool call or final answer."
+        )
+        return finish_with_transition(
+            final,
+            stopped=True,
+            trigger="invalid_action_limit",
+            transition=task_state.stop_invalid_action_limit,
+        )
+
+    def finish_requested_tool_limit():
+        final = (
+            f"Stopped after reaching the configured {agent.max_steps} tool call limit."
+        )
+        return finish_with_transition(
+            final,
+            stopped=True,
+            trigger="requested_tool_limit",
+            transition=task_state.stop_requested_tool_limit,
+        )
+
+    def call_model(state: AgentTurnState):
+        if task_state.tool_steps >= agent.max_steps:
+            return Command(update={"result": finish_requested_tool_limit()}, goto=END)
 
         task_state.record_attempt()
         agent.run_store.write_task_state(task_state)
@@ -458,15 +453,6 @@ def _run_agent_turn(agent, user_message):
             prompt_snapshot,
         )
         if prompt_snapshot is None:
-            budget_notice = _budget_notice(
-                task_state,
-            )
-            if budget_notice:
-                prompt = f"{prompt}\n\n{budget_notice}"
-            prompt_metadata["tool_budget"] = {
-                "nominal": task_state.nominal_tool_budget,
-                "hard_limit": task_state.hard_tool_limit,
-            }
             prompt_snapshot = (prompt, dict(prompt_metadata))
 
         prompt_cache_key = None
@@ -482,8 +468,6 @@ def _run_agent_turn(agent, user_message):
             {
                 "attempt": task_state.attempts,
                 "tool_steps": task_state.tool_steps,
-                "finalization_only": finalization_only,
-                "hard_tool_limit": task_state.hard_tool_limit,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
                 **agent.identity_metadata(),
             },
@@ -491,13 +475,10 @@ def _run_agent_turn(agent, user_message):
         model_started_at = time.monotonic()
         try:
             action_tools = tool_builder(agent.tools)
-            final_action_tools = [
-                tool for tool in action_tools if _action_tool_name(tool) == "submit_final"
-            ]
             action = agent.model_client.complete_action(
                 prompt,
                 agent.max_new_tokens,
-                action_tools=final_action_tools if finalization_only else action_tools,
+                action_tools=action_tools,
                 prompt_cache_key=prompt_cache_key,
                 prompt_cache_retention=prompt_cache_retention,
             )
@@ -509,7 +490,6 @@ def _run_agent_turn(agent, user_message):
                 )
                 return Command(
                     update={
-                        "finalization_attempts": finalization_attempts,
                         "context_compaction_trigger": "provider_overflow",
                     },
                     goto="compact_context",
@@ -545,19 +525,6 @@ def _run_agent_turn(agent, user_message):
             completion_metadata,
             action.protocol,
         )
-
-        if finalization_only and kind != ACTION_FINAL:
-            finalization_reason = "the hard tool limit is reached"
-            payload = _retry_notice(
-                f"{finalization_reason}; only submit_final is allowed"
-            )
-            action = ModelAction.retry(
-                payload,
-                protocol="runtime_guard",
-                raw_preview=action.raw_preview,
-                call_id=action.call_id,
-            )
-            kind = ACTION_RETRY
 
         if (
             kind == ACTION_FINAL
@@ -619,14 +586,14 @@ def _run_agent_turn(agent, user_message):
             return Command(
                 update={
                     "prompt_snapshot": prompt_snapshot,
-                    "finalization_attempts": finalization_attempts,
+                    "invalid_action_streak": 0,
                 },
                 goto="call_model",
             )
 
         next_state = {
             "prompt_snapshot": prompt_snapshot,
-            "finalization_attempts": finalization_attempts,
+            "invalid_action_streak": 0,
         }
         if kind == ACTION_TOOL:
             return Command(
@@ -643,41 +610,80 @@ def _run_agent_turn(agent, user_message):
             _record_action_result(agent, action, payload)
             agent.mark_retry_needed(payload)
             agent.run_store.write_task_state(task_state)
+            invalid_action_streak = int(state.get("invalid_action_streak", 0)) + 1
+            if invalid_action_streak >= MAX_CONSECUTIVE_INVALID_ACTIONS:
+                return Command(
+                    update={"result": finish_invalid_action_limit()},
+                    goto=END,
+                )
+            retry_state = {
+                **next_state,
+                "invalid_action_streak": invalid_action_streak,
+                "duplicate_read_only_signature": "",
+                "duplicate_read_only_rejections": 0,
+            }
             if agent.needs_context_compaction(
                 task_state,
                 completion_metadata.get("input_tokens"),
             ):
                 return Command(
                     update={
-                        **next_state,
+                        **retry_state,
                         "context_compaction_trigger": "input_threshold",
                     },
                     goto="compact_context",
                 )
-            return Command(update=next_state, goto="call_model")
+            return Command(update=retry_state, goto="call_model")
 
         final = str(payload).strip()
         result = finish_success(final, trigger="run_end")
         return Command(update={"result": result}, goto=END)
 
     def execute_tool(state: AgentTurnState):
-        _execute_tool_action(
+        metadata = _execute_tool_action(
             agent,
             task_state,
             user_message,
             state["action"],
             progress_tracker,
         )
+        duplicate_signature = ""
+        duplicate_rejections = 0
+        if metadata.get("tool_error_code") == "duplicate_read_only_call":
+            duplicate_signature = read_only_tool_signature(
+                state["action"].name,
+                state["action"].args,
+            )
+            previous_signature = str(state.get("duplicate_read_only_signature", ""))
+            previous_rejections = int(state.get("duplicate_read_only_rejections", 0))
+            duplicate_rejections = (
+                previous_rejections + 1
+                if duplicate_signature == previous_signature
+                else 1
+            )
+            if duplicate_rejections >= 2:
+                return Command(
+                    update={"result": finish_duplicate_read_only_loop()},
+                    goto=END,
+                )
+
+        duplicate_state = {
+            "duplicate_read_only_signature": duplicate_signature,
+            "duplicate_read_only_rejections": duplicate_rejections,
+        }
         if state.get("compact_after_tool", False) and agent.can_compact_task_context(task_state):
             return Command(
                 update={
-                    "finalization_attempts": state.get("finalization_attempts", 0),
+                    **duplicate_state,
                     "context_compaction_trigger": "input_threshold",
                 },
                 goto="compact_context",
             )
         return Command(
-            update={"prompt_snapshot": state.get("prompt_snapshot")},
+            update={
+                **duplicate_state,
+                "prompt_snapshot": state.get("prompt_snapshot"),
+            },
             goto="call_model",
         )
 
@@ -766,7 +772,6 @@ def _run_agent_turn(agent, user_message):
         return Command(
             update={
                 "prompt_snapshot": None,
-                "finalization_attempts": state.get("finalization_attempts", 0),
             },
             goto="call_model",
         )
@@ -782,7 +787,13 @@ def _run_agent_turn(agent, user_message):
     graph = workflow.compile()
     with tracing_context(enabled=False):
         result = graph.invoke(
-            {"finalization_attempts": 0},
-            config={"recursion_limit": max(32, max_graph_iterations * 4 + 16)},
+            {
+                "invalid_action_streak": 0,
+                "duplicate_read_only_signature": "",
+                "duplicate_read_only_rejections": 0,
+            },
+            # LangGraph requires a recursion fuse. This is not a task or tool
+            # budget; ordinary stopping remains governed by the runtime rules.
+            config={"recursion_limit": 10_000},
         )
     return result["result"]

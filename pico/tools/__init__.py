@@ -13,16 +13,16 @@ from pathlib import Path
 from langchain_core.utils.function_calling import convert_to_openai_function
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from . import security
-from .delegate_scheduler import DelegateOutcome, DelegateScheduler
-from .config import ALLOWED_SHELL_COMMANDS, IGNORED_PATH_NAMES
-from .tool_policy import (
+from .. import security
+from .delegation import DelegateOutcome, DelegateScheduler
+from ..config import ALLOWED_SHELL_COMMANDS, IGNORED_PATH_NAMES
+from .policy import (
     DELEGATE_ROLES,
     DelegateRole,
     protected_read_reason,
     validate_read_file_spec,
 )
-from .workspace import WorkspaceContext, clip
+from ..workspace import WorkspaceContext, clip
 
 ALLOWED_SHELL_PREFIX_TEXT = ", ".join(
     f"`{' '.join(command)}`" for command in ALLOWED_SHELL_COMMANDS
@@ -497,7 +497,7 @@ def run_delegate_child(agent, args):
     if not task:
         raise ValueError("task must not be empty")
 
-    from .runtime import Pico
+    from ..runtime import Pico
 
     role_config = DELEGATE_ROLES[role]
     child_task = f"{role_config['instruction']}\n\nTask:\n{task}"

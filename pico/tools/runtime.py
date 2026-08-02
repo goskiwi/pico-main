@@ -3,12 +3,11 @@
 import re
 
 from . import approval
-from . import security
-from . import tool_policy
-from . import workspace_diff
-from .config import MAX_TOOL_OUTPUT
-from .sandbox import SandboxError
-from .workspace import clip
+from .. import security, workspace_diff
+from . import policy as tool_policy
+from ..config import MAX_TOOL_OUTPUT
+from ..sandbox import SandboxError
+from ..workspace import clip
 
 
 def _is_pytest_shell_command(shell_policy):

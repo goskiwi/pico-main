@@ -72,7 +72,7 @@ def test_docker_sandbox_rejects_missing_prebuilt_image(tmp_path):
         with pytest.raises(SandboxImageMissingError) as exc_info:
             sandbox.ensure_ready()
 
-    assert "docker build -f Dockerfile.sandbox" in str(exc_info.value)
+    assert "docker build -f docker/sandbox.Dockerfile" in str(exc_info.value)
 
 
 def test_docker_sandbox_timeout_force_removes_container(tmp_path):

@@ -7,8 +7,8 @@ the state rules stay reusable without creating an import cycle with runtime.
 import json
 import re
 
-from . import memory as memorylib
-from .workspace import clip
+from .. import memory as memorylib
+from ..workspace import clip
 
 
 _DEDUPLICATED_READ_ONLY_TOOLS = frozenset(
@@ -96,7 +96,7 @@ def mark_tool_planned(agent, name):
     )
 
 
-def _read_only_tool_signature(name, args):
+def read_only_tool_signature(name, args):
     return json.dumps(
         [str(name or ""), args or {}],
         ensure_ascii=False,
@@ -108,18 +108,18 @@ def _read_only_tool_signature(name, args):
 def is_duplicate_read_only_tool(agent, name, args):
     if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
         return False
-    return _read_only_tool_signature(name, args) in agent._read_only_tool_signatures
+    return read_only_tool_signature(name, args) in agent._read_only_tool_signatures
 
 
 def cached_read_only_evidence(agent, name, args):
-    signature = _read_only_tool_signature(name, args)
+    signature = read_only_tool_signature(name, args)
     return dict(agent._read_only_tool_evidence.get(signature, {}))
 
 
 def cache_read_only_evidence(agent, name, args, result, *, result_ref="", node_id=""):
     if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
         return
-    signature = _read_only_tool_signature(name, args)
+    signature = read_only_tool_signature(name, args)
     agent._read_only_tool_signatures.add(signature)
     agent._read_only_tool_evidence.setdefault(
         signature,

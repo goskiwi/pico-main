@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langsmith import tracing_context
 
-from .actions import ModelAction
+from .agent.actions import ModelAction
 from .config import DEFAULT_MODEL_MAX_RETRIES
 from .context_types import count_tokens, tokenizer_details
 

@@ -124,7 +124,7 @@ manager、持久队列、幂等任务、监控告警和供应链策略。
 
 1. 展示 `pico/context_manager.py` 的预算和 `pico/repo_map.py` 的 symbol graph 排序入口。
 2. 展示一次 run 的连续 tool output、`task.mmd`、`phases/`、`offload.jsonl` 和 `refs/`。
-3. 展示 `pico/tools.py` 的单一 Pydantic schema 和 `pico/sandbox.py`。
+3. 展示 `pico/tools/` 的单一 Pydantic schema 和 `pico/sandbox.py`。
 4. 展示 `undo/manifest.json`，再用 reliability 报告说明脏文件恢复和 digest 验证。
 5. 用 V5 预算门槛说明为什么保持动态默认，而不是追求更小数字。
 6. 最后主动说明本地单用户与微基准的外部有效性边界。

@@ -6,7 +6,7 @@ from enum import Enum
 
 from pydantic import ValidationError
 
-from .config import (
+from ..config import (
     ALLOWED_SHELL_COMMANDS,
     PROTECTED_WRITE_FILENAMES,
     PROTECTED_WRITE_PATH_PARTS,

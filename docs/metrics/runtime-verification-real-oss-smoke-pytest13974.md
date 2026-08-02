@@ -19,7 +19,7 @@ result, and then the independently injected hidden verifier passed.
 
 The run used `gpt-5.6-luna` at temperature 0 and the frozen upstream commit
 `774372083b9555d41cc1c56cc1375f4011cc0054`. The reviewed summary is
-[tracked JSON](../../artifacts/runtime-verification-real-oss-smoke-pytest13974.json).
+[tracked JSON](../../benchmarks/results/runtime-verification-real-oss-smoke-pytest13974.json).
 
 ## Protocol
 

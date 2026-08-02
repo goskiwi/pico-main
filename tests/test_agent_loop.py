@@ -1,27 +1,38 @@
-"""Interview-focused tests for the bounded structured-action loop."""
+"""Interview-focused tests for the controlled structured-action loop."""
 
 import json
 
-from pico.actions import ModelAction
-from pico.agent_loop import _action_tool_name
+from pico.agent.actions import ModelAction
 from pico.sandbox import SandboxResult
 from tests.fakes import final_action, retry_action, tool_action_json
 from tests.helpers import UnitTestSandbox, build_agent
 
 
-def test_action_tool_name_reads_the_responses_schema():
-    assert _action_tool_name({"name": "submit_final"}) == "submit_final"
-
-
-def test_agent_stops_at_the_exact_retry_limit(tmp_path):
+def test_agent_stops_after_eight_consecutive_invalid_actions(tmp_path):
     malformed = retry_action("function read_file returned malformed JSON arguments")
-    agent = build_agent(tmp_path, [malformed] * 5, max_steps=1)
+    agent = build_agent(tmp_path, [malformed] * 8)
 
     answer = agent.ask("Keep returning malformed actions")
 
-    assert answer.startswith("Stopped after too many rejected model actions")
-    assert agent.current_task_state.attempts == 5
-    assert agent.current_task_state.stop_reason == "retry_limit_reached"
+    assert answer.startswith("Stopped after 8 consecutive invalid model actions")
+    assert agent.current_task_state.attempts == 8
+    assert agent.current_task_state.stop_reason == "invalid_action_limit_reached"
+
+
+def test_valid_tool_call_resets_invalid_action_streak(tmp_path):
+    malformed = retry_action("function read_file returned malformed JSON arguments")
+    agent = build_agent(
+        tmp_path,
+        [
+            *[malformed for _ in range(7)],
+            tool_action_json('{"name":"list_files","args":{"path":"."}}'),
+            *[malformed for _ in range(7)],
+            final_action("Recovered after valid work."),
+        ],
+    )
+
+    assert agent.ask("Recover after invalid actions.") == "Recovered after valid work."
+    assert agent.current_task_state.attempts == 16
 
 
 def test_agent_runs_tool_then_final_and_records_the_task_canvas(tmp_path):
@@ -51,8 +62,10 @@ def test_agent_automatically_folds_long_task_canvas_into_phase_artifacts(tmp_pat
         tmp_path,
         [
             *[
-                tool_action_json('{"name":"list_files","args":{"path":"."}}')
-                for _ in range(13)
+                tool_action_json(
+                    f'{{"name":"search","args":{{"pattern":"needle_{index}"}}}}'
+                )
+                for index in range(13)
             ],
             final_action("Finished the long inspection."),
         ],
@@ -64,10 +77,10 @@ def test_agent_automatically_folds_long_task_canvas_into_phase_artifacts(tmp_pat
     run_dir = agent.current_run_dir
     active_canvas = (run_dir / "task.mmd").read_text(encoding="utf-8")
     phase_canvas = (run_dir / "phases" / "phase_001.mmd").read_text(encoding="utf-8")
-    assert 'A["archive | attention | 1 phases / 5 task steps' in active_canvas
-    assert "N001_list_files" not in active_canvas
-    assert "N006_list_files" in active_canvas
-    assert "N001_list_files" in phase_canvas
+    assert 'A["archive | done | 1 phases / 5 task steps' in active_canvas
+    assert "N001_search" not in active_canvas
+    assert "N006_search" in active_canvas
+    assert "N001_search" in phase_canvas
 
 
 def test_strict_action_loop_keeps_live_tool_conversation_after_each_tool(tmp_path):
@@ -449,6 +462,56 @@ def test_identical_read_only_tool_is_rejected_after_first_call(tmp_path):
     assert "[F] README.md" in client.results[1][1]
 
 
+def test_agent_stops_after_same_duplicate_read_only_call_is_rejected_twice(tmp_path):
+    duplicate_list_files = tool_action_json('{"name":"list_files","args":{"path":"."}}')
+    agent = build_agent(
+        tmp_path,
+        [
+            duplicate_list_files,
+            duplicate_list_files,
+            duplicate_list_files,
+            final_action("This action must not be reached."),
+        ],
+        max_steps=5,
+    )
+
+    answer = agent.ask("Inspect the workspace.")
+
+    assert answer.startswith("Stopped after the same read-only call was rejected twice")
+    assert agent.current_task_state.stop_reason == "duplicate_read_only_loop"
+    assert agent.current_task_state.attempts == 3
+    assert [item["status"] for item in agent.tool_audit_log] == ["ok", "rejected", "rejected"]
+    assert [item["error_code"] for item in agent.tool_audit_log] == [
+        "",
+        "duplicate_read_only_call",
+        "duplicate_read_only_call",
+    ]
+
+
+def test_different_successful_tool_call_resets_duplicate_read_only_guard(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            tool_action_json('{"name":"list_files","args":{"path":"."}}'),
+            tool_action_json('{"name":"list_files","args":{"path":"."}}'),
+            tool_action_json(
+                '{"name":"read_file","args":{"files":[{"path":"README.md"}]}}'
+            ),
+            tool_action_json('{"name":"list_files","args":{"path":"."}}'),
+            final_action("Used a different tool and completed."),
+        ],
+        max_steps=5,
+    )
+
+    assert agent.ask("Inspect the workspace.") == "Used a different tool and completed."
+    assert [item["status"] for item in agent.tool_audit_log] == [
+        "ok",
+        "rejected",
+        "ok",
+        "rejected",
+    ]
+
+
 def test_identical_read_only_tool_is_allowed_after_workspace_change(tmp_path):
     class StrictModelClient:
         model = "strict-test"
@@ -702,97 +765,22 @@ def test_runtime_verification_stops_after_one_failed_repair(tmp_path):
     ]
 
 
-def test_final_only_turn_cannot_execute_another_tool(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
+def test_default_loop_can_use_more_than_thirty_tools(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            *[
+                ModelAction.tool("read_task_canvas", {}, protocol="responses_function")
+                for _ in range(31)
+            ],
+            ModelAction.final("Completed without an automatic tool cap.", protocol="responses_function"),
+        ],
+    )
 
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.tool_sets = []
-            self.actions = [
-                ModelAction.tool(
-                    "list_files",
-                    {"path": "."},
-                    protocol="responses_function",
-                    call_id="call_1",
-                ),
-                ModelAction.tool(
-                    "write_file",
-                    {"path": "too-late.txt", "content": "blocked"},
-                    protocol="responses_function",
-                    call_id="call_2",
-                ),
-                ModelAction.final("Budget closed.", protocol="responses_function"),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            self.tool_sets.append([tool["name"] for tool in action_tools])
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=1, max_step_extension=0)
-    client = StrictModelClient()
-    agent.model_client = client
-    agent.refresh_prefix(force=True)
-
-    answer = agent.ask("Try to exceed the tool budget")
-
-    assert answer == "Budget closed."
-    assert client.tool_sets[1] == ["submit_final"]
-    assert client.tool_sets[2] == ["submit_final"]
-    assert not (tmp_path / "too-late.txt").exists()
-
-
-def test_soft_budget_does_not_force_finalization_after_an_old_workspace_change(tmp_path):
-    class StrictModelClient:
-        model = "strict-test"
-        supports_prompt_cache = False
-
-        def __init__(self):
-            self.last_completion_metadata = {}
-            self.tool_sets = []
-            self.actions = [
-                ModelAction.tool(
-                    "write_file",
-                    {"path": "changed.txt", "content": "ready\n"},
-                    protocol="responses_function",
-                ),
-                *[
-                    ModelAction.tool(
-                        "list_files",
-                        {"path": "."},
-                        protocol="responses_function",
-                    )
-                    for _ in range(4)
-                ],
-                ModelAction.final("No more useful progress remained.", protocol="responses_function"),
-            ]
-
-        def reset_action_session(self):
-            pass
-
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
-            del prompt, max_new_tokens, kwargs
-            self.tool_sets.append([tool["name"] for tool in action_tools])
-            return self.actions.pop(0)
-
-        def record_action_result(self, action, result):
-            del action, result
-
-    agent = build_agent(tmp_path, [], max_steps=5, max_step_extension=5)
-    client = StrictModelClient()
-    agent.model_client = client
-    agent.refresh_prefix(force=True)
-
-    assert agent.ask("Avoid looping after an old edit.").startswith("No more useful progress")
-    assert "list_files" in client.tool_sets[-1]
+    assert agent.ask("Inspect the task canvas repeatedly.") == (
+        "Completed without an automatic tool cap."
+    )
+    assert agent.current_task_state.tool_steps == 31
 
 
 def test_explicit_runtime_verification_finalizes_a_changed_task(tmp_path):

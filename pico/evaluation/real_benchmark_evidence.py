@@ -603,7 +603,10 @@ def _failure_category(
         return "trace_parse_error"
     if str(task_state.status) == "failed":
         return "model_error"
-    if str(task_state.stop_reason) in {"step_limit_reached", "retry_limit_reached"}:
+    if str(task_state.stop_reason) in {
+        "requested_tool_limit_reached",
+        "invalid_action_limit_reached",
+    }:
         return str(task_state.stop_reason)
     if verifier_result.timed_out:
         return "verifier_timeout"

@@ -10,7 +10,7 @@ Agent 停止后注入。
 
 ```bash
 uv run python scripts/materialize_real_oss_v1.py --task click_empty_bytes_echo
-docker build -f Dockerfile.real-oss-v1 -t pico/real-oss-v1:latest .
+docker build -f docker/real-oss-v1.Dockerfile -t pico/real-oss-v1:latest .
 ```
 
 如果 fixture 已存在，不要重复 materialize；脚本会复用冻结 checkout。运行时始终无网络，模型端点

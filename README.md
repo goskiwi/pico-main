@@ -63,7 +63,7 @@ OpenAI-compatible Responses API，默认模型为 GPT-5.6-luna。
 git clone https://github.com/goskiwi/pico-main.git
 cd pico-main
 uv sync --locked
-docker build -f Dockerfile.sandbox -t pico/sandbox:latest .
+docker build -f docker/sandbox.Dockerfile -t pico/sandbox:latest .
 ```
 
 默认镜像根据 `uv.lock` 安装 Pico 自身的运行与测试依赖，因此可以在 Pico 仓库中安全执行
@@ -88,6 +88,8 @@ uv run pico --cwd /path/to/target-repo \
   --verify-cmd 'PYTHONPATH=src python -m pytest -q' \
   "inspect the failing tests, patch the smallest safe fix, and verify it"
 ```
+
+每个请求默认最多执行 32 次工具调用；可用 `--max-steps` 为调试或冻结评测设置更小的显式预算。
 
 ### GPT-5.6-luna
 
@@ -310,16 +312,16 @@ Skill 使用 Agent Skills 风格的 `name`、必填 `description` 和可选
 
 | 模块 | 职责 |
 |---|---|
-| `pico/agent_loop.py` | 有界模型—工具循环与停止状态 |
+| `pico/agent/loop.py` | 有界模型—工具循环与停止状态 |
 | `pico/runtime.py` | Agent 组合、prompt prefix 与运行生命周期 |
 | `pico/context_manager.py` | tokenizer 预算、Repo Map、会话状态和恢复上下文的组装 |
 | `pico/models.py` | Responses 会话与 function-call output 回放 |
 | `pico/repo_map.py` | tree-sitter、符号图、PageRank 与预算渲染 |
-| `pico/tools.py` | 工具 schema、校验和执行 |
+| `pico/tools/` | 工具 schema、校验、执行、审批与委派 |
 | `pico/sandbox.py` | 强制 Docker shell 边界 |
 | `pico/run_undo.py` | 前像、冲突预检和恢复 |
 | `pico/run_store.py` | trace、报告、任务画布分阶段归档和完整工具输出 |
-| `evaluation/real_benchmark.py` | 真实模型 fixture、隐藏 verifier 与证据采集 |
+| `pico/evaluation/real_benchmark.py` | 真实模型 fixture、隐藏 verifier 与证据采集 |
 
 10–15 分钟代码审阅顺序见 [review pack](docs/review-pack/README.md)。
 
@@ -352,7 +354,7 @@ uv run python scripts/run_real_world_benchmark.py \
 uv run python scripts/materialize_real_oss_v1.py \
   --manifest benchmarks/real_oss_v2.json \
   --replace
-docker build -f Dockerfile.real-oss-v2 -t pico/real-oss-v2:latest .
+docker build -f docker/real-oss-v2.Dockerfile -t pico/real-oss-v2:latest .
 uv run python scripts/run_real_world_benchmark.py \
   --benchmark-path benchmarks/real_oss_v2.json \
   --sandbox-image pico/real-oss-v2:latest \

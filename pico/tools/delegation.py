@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from .config import (
+from ..config import (
     DELEGATE_BATCH_TIMEOUT_SECONDS,
     DELEGATE_MAX_CONCURRENCY,
     DELEGATE_TOTAL_STEP_BUDGET,
@@ -115,7 +115,7 @@ class DelegateScheduler:
             return self._child_runner
         # A late import avoids a tools <-> scheduler import cycle while keeping
         # this module independent of tool registration.
-        from .tools import run_delegate_child
+        from . import run_delegate_child
 
         return run_delegate_child
 

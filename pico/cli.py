@@ -19,6 +19,7 @@ from .config import (
     CONTEXT_COMPACTION_INPUT_TOKENS,
     CONTEXT_COMPACTION_MAX_PER_TASK,
     DEFAULT_APPROVAL_POLICY,
+    DEFAULT_MAX_STEPS,
 )
 from .models import OpenAICompatibleModelClient
 from .repo_map import RepoMap
@@ -33,7 +34,7 @@ from .sandbox import (
     DockerSandboxConfig,
 )
 from .session_store import SessionStore
-from .trace_events import TraceSink
+from .agent.trace import TraceSink
 from .workspace import WorkspaceContext, middle
 
 # 配置日志：输出到 stderr，格式简洁，便于调试
@@ -442,7 +443,6 @@ def build_repo_map_output(workspace_root, query, *, budget_tokens, max_results):
 
 def build_agent(args, *, trace_sink=None):
     """根据 CLI 参数装配出一个可运行的 Pico 实例。
-
     为什么存在：
     命令行参数只是字符串和开关，runtime 需要的是已经装配好的对象图：
     model client、workspace snapshot、session store、secret 配置等。
@@ -616,7 +616,12 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_MAX_STEPS,
+        help="Maximum tool calls per request.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
     parser.add_argument(
         "--verify-cmd",
@@ -817,7 +822,6 @@ def run_undo_command(argv):
 
 def main(argv=None):
     """命令行主入口函数。
-
     解析参数 -> 构建 agent -> 显示欢迎信息 -> 进入 one-shot 或交互模式。
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)

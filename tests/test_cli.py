@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
 import pico.cli as cli
+from pico.config import DEFAULT_MAX_STEPS
+
+
+def test_cli_has_bounded_default_tool_limit():
+    assert cli.build_arg_parser().parse_args([]).max_steps == DEFAULT_MAX_STEPS
 
 
 def test_repl_status_command_renders_status_without_starting_a_task(monkeypatch, capsys):

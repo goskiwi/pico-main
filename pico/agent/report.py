@@ -1,7 +1,7 @@
 """Run report and tool audit helpers."""
 
-from . import security
-from .workspace import clip
+from .. import security
+from ..workspace import clip
 
 
 def build_report(agent, task_state):
@@ -24,10 +24,6 @@ def build_report(agent, task_state):
         "final_answer": task_state.final_answer,
         "tool_steps": task_state.tool_steps,
         "attempts": task_state.attempts,
-        "tool_budget": {
-            "nominal": task_state.nominal_tool_budget,
-            "hard_limit": task_state.hard_tool_limit,
-        },
         "checkpoint_id": task_state.checkpoint_id,
         "resume_status": task_state.resume_status,
         "dry_run": bool(agent.dry_run),
@@ -151,10 +147,6 @@ def build_run_summary(agent, task_state):
         "stop_reason": task_state.stop_reason,
         "attempts": task_state.attempts,
         "tool_steps": task_state.tool_steps,
-        "tool_budget": {
-            "nominal": task_state.nominal_tool_budget,
-            "hard_limit": task_state.hard_tool_limit,
-        },
         "dry_run": bool(agent.dry_run),
         "tools": [entry.get("name", "") for entry in agent.tool_audit_log],
         "skills": [skill.name for skill in agent.active_skills],

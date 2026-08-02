@@ -14,17 +14,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import agent_loop
-from . import checkpoints
-from . import context_compaction
+from .agent import checkpoints
+from .agent import compaction as context_compaction
+from .agent import loop as agent_loop
+from .agent import state as runtime_state
+from .agent import verification as runtime_verification
+from .agent.checkpoints import CHECKPOINT_NONE_STATUS
+from .agent.trace import TRACE_EVENT_NAMES
 from . import memory as memorylib
 from . import security
 from . import skills as skillslib
-from . import tool_policy
-from . import tool_runtime
-from . import runtime_state
-from . import runtime_verification
-from .checkpoints import CHECKPOINT_NONE_STATUS
+from .tools import policy as tool_policy
+from .tools import runtime as tool_runtime
 from .config import (
     ALLOWED_SHELL_COMMANDS,
     CONTEXT_COMPACTION_INPUT_TOKENS,
@@ -41,7 +42,6 @@ from .context_types import count_tokens, tokenizer_details
 from .repo_map import RepoMap
 from .run_store import RunStore
 from .sandbox import DockerSandbox
-from .trace_events import TRACE_EVENT_NAMES
 from . import tools as toolkit
 from .workspace import WorkspaceContext, clip, now
 
@@ -70,7 +70,6 @@ class Pico:
         run_store=None,
         approval_policy=DEFAULT_APPROVAL_POLICY,
         max_steps=DEFAULT_MAX_STEPS,
-        max_step_extension=None,
         max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
         depth=0,
         max_depth=DEFAULT_MAX_DEPTH,
@@ -96,20 +95,9 @@ class Pico:
         self.trace_sink = trace_sink
         self.session_store = session_store
         self.approval_policy = approval_policy
-        self.max_steps = int(max_steps)
+        self.max_steps = DEFAULT_MAX_STEPS if max_steps is None else int(max_steps)
         if self.max_steps < 1:
             raise ValueError("max_steps must be a positive integer")
-        if max_step_extension is None:
-            max_step_extension = self.max_steps
-        if isinstance(max_step_extension, bool):
-            raise ValueError("max_step_extension must be a non-negative integer")
-        try:
-            self.max_step_extension = int(max_step_extension)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("max_step_extension must be a non-negative integer") from exc
-        if self.max_step_extension < 0:
-            raise ValueError("max_step_extension must be a non-negative integer")
-        self.hard_max_steps = self.max_steps + self.max_step_extension
         self.max_new_tokens = max_new_tokens
         self.depth = depth
         self.max_depth = max_depth
@@ -378,6 +366,7 @@ class Pico:
             "agent_mode": self.agent_mode,
             "depth": self.depth,
             "max_depth": self.max_depth,
+            "max_steps": self.max_steps,
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "repo_map_budget_tokens": self.repo_map_budget_tokens,
             "trust_project": bool(self.trust_project),

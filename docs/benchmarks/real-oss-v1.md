@@ -38,7 +38,7 @@ The source checkouts have dependencies that are not part of Pico's minimal
 default sandbox image. Build the fixed V1 image before running a task:
 
 ```bash
-docker build -f Dockerfile.real-oss-v1 -t pico/real-oss-v1:latest .
+docker build -f docker/real-oss-v1.Dockerfile -t pico/real-oss-v1:latest .
 ```
 
 This image contains the runtime dependencies needed by all three source

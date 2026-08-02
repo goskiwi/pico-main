@@ -2,8 +2,8 @@
 
 import uuid
 
-from . import memory as memorylib
-from .workspace import clip, now
+from .. import memory as memorylib
+from ..workspace import clip, now
 
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
@@ -24,7 +24,7 @@ def current_runtime_identity(agent):
         "dry_run": bool(agent.dry_run),
         "agent_mode": str(agent.agent_mode),
         "allowed_tools": list(agent.allowed_tools) if agent.allowed_tools is not None else None,
-        "max_steps": int(agent.max_steps),
+        "max_steps": agent.max_steps,
         "max_new_tokens": int(agent.max_new_tokens),
         "repo_map_budget_tokens": agent.repo_map_budget_tokens,
         "feature_flags": dict(agent.feature_flags),
@@ -184,7 +184,7 @@ def create_checkpoint(agent, task_state, user_message, trigger):
 def infer_next_step(task_state):
     if task_state.status == "completed":
         return "No next step recorded."
-    if task_state.stop_reason == "step_limit_reached":
+    if task_state.stop_reason == "requested_tool_limit_reached":
         return "Resume from the latest checkpoint and continue the task."
     if task_state.last_tool:
         return f"Decide the next action after {task_state.last_tool}."

@@ -60,9 +60,9 @@ across three attempts, versus 31,230 input and 709 output tokens for the baselin
 
 Raw reviewed artifacts:
 
-- [baseline](../../artifacts/progress-feedback-live-ab-baseline-3x.json)
-- [candidate](../../artifacts/progress-feedback-live-ab-candidate-3x.json)
-- [reviewed comparison](../../artifacts/progress-feedback-live-ab-comparison.json)
+- [baseline](../../benchmarks/results/progress-feedback-live-ab-baseline-3x.json)
+- [candidate](../../benchmarks/results/progress-feedback-live-ab-candidate-3x.json)
+- [reviewed comparison](../../benchmarks/results/progress-feedback-live-ab-comparison.json)
 
 ## Validity and scope
 

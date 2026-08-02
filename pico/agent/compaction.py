@@ -6,14 +6,14 @@ import json
 import time
 from pathlib import Path
 
-from .config import (
+from ..config import (
     CONTEXT_COMPACTION_CHECKPOINT_TOKENS,
     CONTEXT_COMPACTION_RECENT_EVIDENCE_TOKENS,
     CONTEXT_COMPACTION_SOURCE_TOKENS,
     CONTEXT_COMPACTION_SUMMARY_MAX_NEW_TOKENS,
 )
-from .context_types import _token_clip
-from .workspace import clip, now
+from ..context_types import _token_clip
+from ..workspace import clip, now
 
 
 _CHECKPOINT_INSTRUCTIONS = """You are compiling a checkpoint for a local coding agent whose provider-side tool conversation is about to be discarded.

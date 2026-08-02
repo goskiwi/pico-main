@@ -45,8 +45,12 @@ dev = [
   "ruff>=0.4.4",
 ]
 
+[tool.setuptools.packages.find]
+include = ["pico*"]
+exclude = ["pico.evaluation*"]
+
 [tool.setuptools]
-packages = ["pico"]
+include-package-data = false
 
 [tool.ruff]
 target-version = "py310"

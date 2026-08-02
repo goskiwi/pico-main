@@ -13,11 +13,12 @@ from typing import Tuple
 # 运行时默认值
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_STEPS: int = 6
+DEFAULT_MAX_STEPS: int = 32
 DEFAULT_MAX_NEW_TOKENS: int = 512
 DEFAULT_MAX_DEPTH: int = 1
 DEFAULT_APPROVAL_POLICY: str = "ask"
 DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS: int = 90
+MAX_CONSECUTIVE_INVALID_ACTIONS: int = 8
 
 # 委派调度护栏。一个父 agent 最多同时运行三个只读子 agent，所有子 agent
 # 预留的步骤总数不能超过 12；超过预算的任务会得到明确结果而不是静默丢失。

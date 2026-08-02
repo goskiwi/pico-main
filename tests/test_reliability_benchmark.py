@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluation.reliability_benchmark import (
+from pico.evaluation.reliability_benchmark import (
     DEFAULT_RELIABILITY_BENCHMARK_PATH,
     ReliabilityBenchmarkRunner,
     load_reliability_benchmark,

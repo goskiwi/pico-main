@@ -36,22 +36,9 @@ tmp/
 output/
 .env
 .env.local
-# Live benchmark outputs are ignored by default because provider-backed runs
-# may contain local metadata. Keep only reviewed result summaries.
-artifacts/*
-!artifacts/progress-feedback-live-ab-baseline-3x.json
-!artifacts/progress-feedback-live-ab-candidate-3x.json
-!artifacts/progress-feedback-live-ab-comparison.json
-!artifacts/real-world-benchmark-v4-repo-map-ablation-3x.json
-!artifacts/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.json
-!artifacts/reliability-benchmark-v1-live-3x.json
-!artifacts/live-llm-v5-post-simplification-3x.json
-!artifacts/live-llm-v5-post-simplification-3x.md
-!artifacts/runtime-verification-real-oss-smoke-pytest13974.json
-!artifacts/real-oss-v1-repo-map-ablation-1x.json
-!artifacts/real-oss-v1-repo-map-ablation-1x.md
-!artifacts/real-oss-v2-repo-map-ablation-1x.json
-!artifacts/real-oss-v2-repo-map-ablation-1x.md
+# Provider-backed local outputs may contain environment metadata. Reviewed
+# evidence belongs under benchmarks/results; this directory is disposable.
+artifacts/
 readme_intro_locked/
 .idea/
 .claude/settings.local.json

@@ -134,7 +134,7 @@ network isolation, read-only root filesystem, secret masking, resource limits,
 workspace write behavior, and timeout cleanup:
 
 ```bash
-docker build -f Dockerfile.sandbox -t pico/sandbox:latest .
+docker build -f docker/sandbox.Dockerfile -t pico/sandbox:latest .
 PICO_RUN_DOCKER_TESTS=1 uv run pytest -q tests/test_sandbox.py
 ```
 

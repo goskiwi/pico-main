@@ -14,8 +14,9 @@ STATUS_STOPPED = "stopped"
 STATUS_FAILED = "failed"
 
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
-STOP_REASON_STEP_LIMIT_REACHED = "step_limit_reached"
-STOP_REASON_RETRY_LIMIT_REACHED = "retry_limit_reached"
+STOP_REASON_REQUESTED_TOOL_LIMIT_REACHED = "requested_tool_limit_reached"
+STOP_REASON_INVALID_ACTION_LIMIT_REACHED = "invalid_action_limit_reached"
+STOP_REASON_DUPLICATE_READ_ONLY_LOOP = "duplicate_read_only_loop"
 STOP_REASON_MODEL_ERROR = "model_error"
 STOP_REASON_VERIFICATION_FAILED = "verification_failed"
 STOP_REASON_VERIFICATION_STALE = "verification_stale"
@@ -29,8 +30,6 @@ class TaskState:
     status: str = STATUS_RUNNING
     tool_steps: int = 0
     attempts: int = 0
-    nominal_tool_budget: int = 0
-    hard_tool_limit: int = 0
     last_tool: str = ""
     stop_reason: str = ""
     final_answer: str = ""
@@ -70,11 +69,6 @@ class TaskState:
         self.last_tool = str(name or "")
         return self
 
-    def configure_tool_budget(self, nominal_tool_budget, hard_tool_limit):
-        self.nominal_tool_budget = int(nominal_tool_budget)
-        self.hard_tool_limit = int(hard_tool_limit)
-        return self
-
     def record_context_compaction(self, record):
         self.context_compactions.append(
             {
@@ -97,11 +91,14 @@ class TaskState:
             self.final_answer = final_answer
         return self
 
-    def stop_step_limit(self, final_answer=""):
-        return self.stop(STOP_REASON_STEP_LIMIT_REACHED, final_answer=final_answer)
+    def stop_requested_tool_limit(self, final_answer=""):
+        return self.stop(STOP_REASON_REQUESTED_TOOL_LIMIT_REACHED, final_answer=final_answer)
 
-    def stop_retry_limit(self, final_answer=""):
-        return self.stop(STOP_REASON_RETRY_LIMIT_REACHED, final_answer=final_answer)
+    def stop_invalid_action_limit(self, final_answer=""):
+        return self.stop(STOP_REASON_INVALID_ACTION_LIMIT_REACHED, final_answer=final_answer)
+
+    def stop_duplicate_read_only_loop(self, final_answer=""):
+        return self.stop(STOP_REASON_DUPLICATE_READ_ONLY_LOOP, final_answer=final_answer)
 
     def stop_model_error(self, final_answer=""):
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)
@@ -134,8 +131,6 @@ class TaskState:
             "status": self.status,
             "tool_steps": self.tool_steps,
             "attempts": self.attempts,
-            "nominal_tool_budget": self.nominal_tool_budget,
-            "hard_tool_limit": self.hard_tool_limit,
             "last_tool": self.last_tool,
             "stop_reason": self.stop_reason,
             "final_answer": self.final_answer,

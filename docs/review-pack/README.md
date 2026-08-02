@@ -4,7 +4,7 @@
 
 1. Read the project pitch and architecture map below.
 2. Inspect `pico/context_manager.py` → `pico/repo_map.py` → `pico/run_store.py`.
-3. Follow `pico/models.py` → `pico/agent_loop.py` → `pico/tools.py` → `pico/sandbox.py`.
+3. Follow `pico/models.py` → `pico/agent/loop.py` → `pico/tools/` → `pico/sandbox.py`.
 4. Inspect `pico/run_store.py` and `pico/run_undo.py`, then the
    [Repo Map + Undo result](../metrics/reliability-benchmark-v1-live-3x.md).
 5. Read the [V5 budget decision](../metrics/real-world-benchmark-v5-repo-map-budget-600-vs-full-first-3x.md),
@@ -26,14 +26,14 @@ artifacts, an Undo journal, and a hidden-verifier benchmark runner.
   incremental refresh, and budgeted rendering.
 - `pico/context_manager.py`: real-token budgets for Repo Map, session state, on-demand skills, and compacted task evidence.
 - `pico/skills.py`: Agent Skills-compatible metadata validation, index-only discovery, and explicit manual-only skills.
-- `pico/context_compaction.py`: structured checkpoint compiler with bounded recent original evidence.
+- `pico/agent/compaction.py`: structured checkpoint compiler with bounded recent original evidence.
 - `pico/models.py`: Responses functions and native function-output replay.
-- `pico/agent_loop.py`: bounded model/tool/final transitions plus threshold/overflow task compaction.
-- `pico/tools.py`: one Pydantic schema source, capability checks, and tool execution.
+- `pico/agent/loop.py`: bounded model/tool/final transitions plus threshold/overflow task compaction.
+- `pico/tools/`: one Pydantic schema source, capability checks, and tool execution.
 - `pico/sandbox.py`: mandatory network-disabled Docker execution.
 - `pico/run_undo.py`: first-touch preimages, conflict preflight, and restoration.
 - `pico/run_store.py`: task state, trace, foldable task canvas, reports, and full tool outputs.
-- `evaluation/real_benchmark.py`: frozen fixtures, hidden verifiers, isolation audit,
+- `pico/evaluation/real_benchmark.py`: frozen fixtures, hidden verifiers, isolation audit,
   and evidence collection.
 
 The detailed flow is in the
@@ -49,7 +49,7 @@ duplicated as a second fixture-contract test suite.
 
 After the audit-state simplification, a clean-worktree V5 `full` rerun completed
 three times at 5/5 each (15/15 total), with no model failures or Action rejections;
-see the [post-simplification report](../../artifacts/live-llm-v5-post-simplification-3x.md).
+see the [post-simplification report](../../benchmarks/results/live-llm-v5-post-simplification-3x.md).
 
 The reliability suite joins retrieval with recovery: Repo Map localization passed 3/3,
 both Undo scenarios recovered 6/6, and complete post-Undo workspace digests matched

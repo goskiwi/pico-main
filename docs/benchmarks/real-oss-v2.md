@@ -35,7 +35,7 @@ fix commit from leaking through local Git history.
 ## Build the offline image
 
 ```bash
-docker build -f Dockerfile.real-oss-v2 -t pico/real-oss-v2:latest .
+docker build -f docker/real-oss-v2.Dockerfile -t pico/real-oss-v2:latest .
 ```
 
 The image pins the small set of runtime dependencies needed by the ten source
@@ -67,8 +67,8 @@ configuration, sandbox image, step budgets, and verifiers.
 
 ## Recorded 1× external A/B
 
-The checked-in [JSON artifact](../../artifacts/real-oss-v2-repo-map-ablation-1x.json)
-and [Markdown report](../../artifacts/real-oss-v2-repo-map-ablation-1x.md) were
+The checked-in [JSON artifact](../../benchmarks/results/real-oss-v2-repo-map-ablation-1x.json)
+and [Markdown report](../../benchmarks/results/real-oss-v2-repo-map-ablation-1x.md) were
 captured on clean commit `3600c1d` using `gpt-5.6-luna`. Both `full` and
 `no_repo_map` passed all 10 hidden verifiers, and all 20 attempts passed the
 workspace-isolation audit. `full` averaged 14.30 tool steps and 75.57 seconds;

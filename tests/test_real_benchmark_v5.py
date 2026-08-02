@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluation.real_benchmark import load_real_benchmark
+from pico.evaluation.real_benchmark import load_real_benchmark
 from pico.repo_map import RepoMap
 
 
