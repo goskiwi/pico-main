@@ -95,6 +95,19 @@ verifier 的区分力。
 一轮固定十题，成功率没有差异，工具数和时长差异只能视为观察信号，不能解释为稳定的 A/B
 或总体能力结论。
 
+## 9. 确定性运行时契约
+
+[`frozen protocol`](runtime-contract-benchmark-v1-protocol.md)
+
+Context 预算、重复只读证据复用、checkpoint 校验和部分成功审计，不应被伪装成 live-LLM
+成功率。该独立 suite 用脚本化动作和受控工作区扰动，针对四个固定任务做三次隔离重复；每一行
+都落盘 control/candidate、逐项 expected/actual verifier、源码快照和归一化 outcome
+fingerprint。它用于证明运行时行为的可重复性，不衡量模型能力、真实仓库 token/cost 收益或
+跨会话长期记忆。
+
+可先将结果写到忽略的 `artifacts/` 目录进行本地迭代；可公开审阅的 JSON 和 Markdown 必须在
+clean worktree 下由 protocol 中的命令重新生成，再提交到 `benchmarks/results/` 和 `docs/metrics/`。
+
 ## 方法边界
 
 统一方法、快照身份、delegate 成本口径和解释限制见

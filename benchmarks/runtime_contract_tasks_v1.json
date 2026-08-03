@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "name": "pico-runtime-contract-v1",
+  "description": "Frozen deterministic, paired runtime-contract cases for context budgeting, duplicate read evidence, checkpoint validation, and mutating tool failures. This suite has no remote model calls.",
+  "tasks": [
+    {
+      "id": "ctx_budget_preserves_current_request",
+      "family": "context_management",
+      "handler": "context_budget",
+      "control": "context_reduction_disabled",
+      "candidate": "context_reduction_enabled",
+      "acceptance": [
+        "The control prompt is measurably over the fixed 220-token budget.",
+        "The candidate prompt is within budget.",
+        "The candidate keeps the complete current request without truncation.",
+        "The candidate records reduction of old context before current-request clipping."
+      ]
+    },
+    {
+      "id": "memory_deduplicates_unchanged_read",
+      "family": "working_memory",
+      "handler": "memory_dedup",
+      "control": "read_only_dedup_disabled",
+      "candidate": "read_only_dedup_enabled",
+      "acceptance": [
+        "The identical scripted read sequence performs all three physical reads in the control.",
+        "The candidate performs two physical reads, blocking exactly one unchanged duplicate.",
+        "The blocked duplicate returns cached evidence to the scripted model.",
+        "A workspace write invalidates the guard and permits a fresh read of changed content."
+      ]
+    },
+    {
+      "id": "resume_validates_checkpoint_freshness",
+      "family": "checkpoint_resume",
+      "handler": "resume_validation",
+      "control": "unchanged_checkpoint_resume",
+      "candidate": "controlled_file_runtime_schema_and_session_perturbations",
+      "acceptance": [
+        "An unchanged checkpoint restores as full-valid and is rendered into the resumed prompt.",
+        "A changed tracked file produces partial-stale and removes its stale summary.",
+        "Approval-policy and step-budget drift produce workspace-mismatch with both fields named.",
+        "An incompatible checkpoint schema produces schema-mismatch.",
+        "Latest-session selection excludes delegate and malformed session entries."
+      ]
+    },
+    {
+      "id": "tool_classifies_mutating_failure",
+      "family": "tool_governance",
+      "handler": "partial_success",
+      "control": "non_mutating_nonzero_shell_exit",
+      "candidate": "mutating_nonzero_shell_exit",
+      "acceptance": [
+        "A non-mutating non-zero shell exit is classified as error.",
+        "The same non-zero exit with a workspace write is classified as partial_success.",
+        "The partial-success record retains affected paths, a diff summary, and a process note."
+      ]
+    }
+  ]
+}

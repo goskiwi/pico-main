@@ -28,6 +28,9 @@ DELEGATE_BATCH_TIMEOUT_SECONDS: float = 180.0
 
 DEFAULT_FEATURE_FLAGS: dict = {
     "memory": True,
+    # Kept separate from memory: this guard replays cached read evidence and
+    # can be disabled for an explicit, deterministic evaluation control.
+    "read_only_dedup": True,
     "repo_map": True,
     "context_reduction": True,
     "prompt_cache": True,

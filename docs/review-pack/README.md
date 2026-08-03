@@ -35,6 +35,8 @@ artifacts, an Undo journal, and a hidden-verifier benchmark runner.
 - `pico/run_store.py`: task state, trace, foldable task canvas, reports, and full tool outputs.
 - `pico/evaluation/real_benchmark.py`: frozen fixtures, hidden verifiers, isolation audit,
   and evidence collection.
+- `pico/evaluation/runtime_contract_benchmark.py`: paired deterministic controls for
+  context budgets, duplicate reads, checkpoint validation, and partial success.
 
 The detailed flow is in the
 [agent harness overview](../architecture/agent-harness-v1-overview.md).
@@ -55,6 +57,11 @@ The reliability suite joins retrieval with recovery: Repo Map localization passe
 both Undo scenarios recovered 6/6, and complete post-Undo workspace digests matched
 their pre-run digests 6/6.
 
+For mechanisms that do not require a provider call, the
+[runtime-contract protocol](../metrics/runtime-contract-benchmark-v1-protocol.md)
+freezes paired controls and exports per-check JSON evidence. It is intentionally a
+runtime regression, not a coding-capability score.
+
 These are small, scenario-specific engineering regressions. They are not universal
 model-capability claims.
 
@@ -62,9 +69,11 @@ model-capability claims.
 
 For an interview, read the invariant tests rather than every fixture self-check:
 
-- `tests/test_agent_loop.py`: live tool-result continuity, task compaction, bounded completion;
-- `tests/test_safety_invariants.py` and `tests/test_run_undo.py`: local policy and all-or-nothing recovery;
-- `tests/test_context_tokens.py` and `tests/test_repo_map.py`: bounded context selection;
+- `tests/test_agent_loop.py` and `tests/test_resume.py`: live tool-result continuity, task compaction, persisted checkpoint recovery, and stale-workspace detection;
+- `tests/test_memory.py`: freshness-bound file summaries plus duplicate-read reuse and invalidation after workspace changes;
+- `tests/test_safety_invariants.py`, `tests/test_tool_runtime.py`, and `tests/test_run_undo.py`: local policy, partial-success audit, and all-or-nothing recovery;
+- `tests/test_context_tokens.py` and `tests/test_repo_map.py`: bounded context selection and current-request preservation;
+- `tests/test_runtime_contract_benchmark.py`: frozen paired controls plus artifact and report generation;
 - `tests/test_reliability_benchmark.py` and `tests/test_real_benchmark_v5.py`: frozen end-to-end evidence.
 
 Useful checks:
@@ -73,6 +82,7 @@ Useful checks:
 uv run ruff check .
 uv run pytest -q
 uv run python -m compileall -q pico tests scripts
+uv run python scripts/run_runtime_contract_benchmark.py --repetitions 3
 ```
 
 ## Sample run artifact list

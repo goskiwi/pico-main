@@ -39,8 +39,10 @@ task state、trace、workspace diff、Undo 前像和最终报告。
 | Repo Map + Undo 可靠性回归 | 定位 3/3，Undo 6/6，完整 digest 恢复 6/6 | 检索和恢复链路可以一起工作 |
 | pytest 输出与停滞反馈 A/B | candidate 6/6，baseline 2/6 | 更可用的失败尾部和进度信号提高了恢复成功率 |
 | 冻结真实 OSS V1 外部复核（1×） | `full` 3/3，`no_repo_map` 3/3；平均工具步 12.33 vs 19.00 | 真实上游任务在两变体下都可复现完成；单次三题不能推断成功率或时延优势 |
+| Scripted runtime-contract suite | 4 个成对控制任务、默认各 3 次隔离重复、0 次远程模型调用 | 为 Context、重复只读、Resume 与 partial-success 提供可审阅的运行时契约证据，不作为模型能力分数 |
 
 完整报告和原始 JSON 入口见 [metrics evidence map](docs/metrics/README.md)。
+离线契约的冻结口径和复现命令见 [runtime-contract protocol](docs/metrics/runtime-contract-benchmark-v1-protocol.md)。
 
 ```mermaid
 flowchart LR

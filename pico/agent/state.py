@@ -106,6 +106,8 @@ def read_only_tool_signature(name, args):
 
 
 def is_duplicate_read_only_tool(agent, name, args):
+    if not agent.feature_enabled("read_only_dedup"):
+        return False
     if name not in _DEDUPLICATED_READ_ONLY_TOOLS:
         return False
     return read_only_tool_signature(name, args) in agent._read_only_tool_signatures
