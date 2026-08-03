@@ -37,6 +37,8 @@ artifacts, an Undo journal, and a hidden-verifier benchmark runner.
   and evidence collection.
 - `pico/evaluation/runtime_contract_benchmark.py`: paired deterministic controls for
   context budgets, duplicate reads, checkpoint validation, and partial success.
+- `pico/evaluation/continuation_benchmark.py`: fresh-client multi-turn working-memory
+  comparison plus checkpointed interruption/resume evidence.
 
 The detailed flow is in the
 [agent harness overview](../architecture/agent-harness-v1-overview.md).
@@ -62,6 +64,10 @@ For mechanisms that do not require a provider call, the
 freezes paired controls and exports per-check JSON evidence. It is intentionally a
 runtime regression, not a coding-capability score.
 
+The [live continuation protocol](../metrics/live-continuation-benchmark-v1-protocol.md)
+adds real-model two-phase episodes, but no result is treated as published until it is
+regenerated from a clean worktree with the hidden verifier and provenance artifact.
+
 These are small, scenario-specific engineering regressions. They are not universal
 model-capability claims.
 
@@ -74,6 +80,8 @@ For an interview, read the invariant tests rather than every fixture self-check:
 - `tests/test_safety_invariants.py`, `tests/test_tool_runtime.py`, and `tests/test_run_undo.py`: local policy, partial-success audit, and all-or-nothing recovery;
 - `tests/test_context_tokens.py` and `tests/test_repo_map.py`: bounded context selection and current-request preservation;
 - `tests/test_runtime_contract_benchmark.py`: frozen paired controls plus artifact and report generation;
+- `tests/test_continuation_benchmark.py`: fresh-session boundary, memory-only control,
+  injected checkpoint interruption, status validation, and hidden-output verifier;
 - `tests/test_reliability_benchmark.py` and `tests/test_real_benchmark_v5.py`: frozen end-to-end evidence.
 
 Useful checks:

@@ -1,0 +1,3 @@
+# Frozen resume contract
+RESULT=resume-schema-77
+MODE=steady

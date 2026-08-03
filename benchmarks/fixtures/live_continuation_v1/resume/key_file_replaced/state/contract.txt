@@ -1,0 +1,3 @@
+# Frozen resume contract
+RESULT=resume-before-replace-14
+MODE=steady

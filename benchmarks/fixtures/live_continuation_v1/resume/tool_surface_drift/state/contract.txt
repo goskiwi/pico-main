@@ -1,0 +1,3 @@
+# Frozen resume contract
+RESULT=resume-tool-drift-52
+MODE=steady

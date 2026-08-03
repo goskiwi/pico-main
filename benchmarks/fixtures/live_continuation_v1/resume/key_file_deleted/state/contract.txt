@@ -1,0 +1,3 @@
+# Frozen resume contract
+RESULT=resume-before-delete-18
+MODE=steady

@@ -108,6 +108,16 @@ fingerprint。它用于证明运行时行为的可重复性，不衡量模型能
 可先将结果写到忽略的 `artifacts/` 目录进行本地迭代；可公开审阅的 JSON 和 Markdown 必须在
 clean worktree 下由 protocol 中的命令重新生成，再提交到 `benchmarks/results/` 和 `docs/metrics/`。
 
+## 10. 多轮 working memory 与 checkpoint resume（待正式运行）
+
+[`frozen protocol`](live-continuation-benchmark-v1-protocol.md)
+
+该 suite 将 provider-side conversation 和 session state 分开：phase two 总会以 fresh client +
+`Pico.from_session(...)` 重建。四个 paired memory task 只切换 `memory` feature flag，并按 phase-two
+物理 source-file access 计数；七个 resume 场景在 checkpointed read 之后注入可审计中断，再验证
+freshness、runtime identity、schema 和隐藏输出 verifier。结果尚未发布前，它只是一份冻结 protocol，
+不能支撑任何成功率或效率数字。
+
 ## 方法边界
 
 统一方法、快照身份、delegate 成本口径和解释限制见

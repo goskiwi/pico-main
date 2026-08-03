@@ -324,6 +324,7 @@ Skill 使用 Agent Skills 风格的 `name`、必填 `description` 和可选
 | `pico/run_undo.py` | 前像、冲突预检和恢复 |
 | `pico/run_store.py` | trace、报告、任务画布分阶段归档和完整工具输出 |
 | `pico/evaluation/real_benchmark.py` | 真实模型 fixture、隐藏 verifier 与证据采集 |
+| `pico/evaluation/continuation_benchmark.py` | 多轮 working-memory / checkpoint-resume 真实模型证据 |
 
 10–15 分钟代码审阅顺序见 [review pack](docs/review-pack/README.md)。
 
@@ -348,6 +349,18 @@ uv run python scripts/run_real_world_benchmark.py \
   --repetitions 3 \
   --require-clean-worktree
 ```
+
+多轮 memory / checkpoint-resume 证据使用独立冻结任务，并可显式提供不落盘的外部
+`.env.local`：
+
+```bash
+uv run python scripts/run_live_continuation_benchmark.py \
+  --env-file /absolute/path/to/.env.local \
+  --repetitions 3 \
+  --require-clean-worktree
+```
+
+口径、对照和恢复边界见 [live continuation protocol](docs/metrics/live-continuation-benchmark-v1-protocol.md)。
 
 冻结真实 OSS 的外部复核使用十个独立 Python 仓库；历史三任务 smoke 仍保留为
 [Real OSS V1](docs/benchmarks/real-oss-v1.md)：
