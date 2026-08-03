@@ -79,6 +79,7 @@ into the benchmark worktree:
 uv run python scripts/run_live_continuation_benchmark.py \
   --env-file /absolute/path/to/.env.local \
   --repetitions 1 \
+  --model-timeout 90 \
   --artifact-path artifacts/live-continuation-pilot.json \
   --report-path artifacts/live-continuation-pilot.md
 ```

@@ -606,6 +606,7 @@ class LiveContinuationBenchmarkRunner:
     env_file: Path | str | None = None
     repetitions: int = 3
     max_new_tokens: int = 512
+    model_timeout: int = 300
     verifier_timeout: int = 90
     require_clean_worktree: bool = False
     sandbox_config: DockerSandboxConfig | None = None
@@ -624,6 +625,8 @@ class LiveContinuationBenchmarkRunner:
             raise ValueError("repetitions must be positive")
         if int(self.max_new_tokens) < 1:
             raise ValueError("max_new_tokens must be positive")
+        if int(self.model_timeout) < 1:
+            raise ValueError("model_timeout must be positive")
         self._workspace_env = _load_benchmark_env(self.repo_root, self.env_file)
         self.model = str(
             self.model
@@ -713,6 +716,7 @@ class LiveContinuationBenchmarkRunner:
                 "temperature": 0.0,
                 "reasoning_effort": self.reasoning_effort,
                 "max_new_tokens": int(self.max_new_tokens),
+                "model_timeout_seconds": int(self.model_timeout),
                 "verifier_timeout_seconds": int(self.verifier_timeout),
                 "require_clean_worktree": bool(self.require_clean_worktree),
                 "phase_two_model_client": "fresh client and fresh Pico instance",
@@ -981,6 +985,7 @@ class LiveContinuationBenchmarkRunner:
         return build_real_model_client(
             self.model,
             self.base_url,
+            timeout=int(self.model_timeout),
             env=self._workspace_env,
         )
 

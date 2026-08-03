@@ -57,6 +57,12 @@ def build_arg_parser():
     parser.add_argument("--task", action="append", dest="task_ids")
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--model-timeout",
+        type=int,
+        default=300,
+        help="Maximum seconds for one provider request.",
+    )
     parser.add_argument("--verifier-timeout", type=int, default=90)
     parser.add_argument(
         "--require-clean-worktree",
@@ -82,6 +88,7 @@ def main(argv=None):
         env_file=args.env_file,
         repetitions=args.repetitions,
         max_new_tokens=args.max_new_tokens,
+        model_timeout=args.model_timeout,
         verifier_timeout=args.verifier_timeout,
         require_clean_worktree=args.require_clean_worktree,
         sandbox_config=DockerSandboxConfig(
