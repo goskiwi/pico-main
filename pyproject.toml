@@ -4,37 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pico"
-version = "0.2.0"
-description = "Auditable, sandboxed local coding-agent runtime for OpenAI-compatible Responses models"
-readme = "README.package.md"
+version = "0.1.0"
+description = "Small auditable coding-agent runtime for OpenAI-compatible Responses models"
 requires-python = ">=3.10"
 dependencies = [
-  "httpx>=0.28,<1",
-  "langchain-core>=1.5,<2",
-  "langchain-openai>=1.3,<2",
-  "langgraph>=1.2,<2",
-  "langsmith>=0.10,<1",
   "pydantic>=2.12,<3",
-  "tiktoken>=0.13,<1",
+  "tiktoken>=0.11,<1",
   "tree-sitter>=0.25,<0.26",
   "tree-sitter-python>=0.25,<0.26",
 ]
-keywords = ["ai-agent", "coding-agent", "llm", "sandbox", "evaluation"]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Environment :: Console",
-  "Intended Audience :: Developers",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Software Development :: Testing",
-]
-
-[project.urls]
-Repository = "https://github.com/goskiwi/pico-main"
-Documentation = "https://github.com/goskiwi/pico-main#readme"
-Issues = "https://github.com/goskiwi/pico-main/issues"
 
 [project.scripts]
 pico = "pico.cli:main"
@@ -47,16 +25,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["pico*"]
-exclude = ["pico.evaluation*"]
-
-[tool.setuptools]
-include-package-data = false
-
-[tool.ruff]
-target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-  "live: calls a configured remote LLM and is skipped unless explicitly enabled",
-]

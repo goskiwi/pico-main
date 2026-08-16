@@ -1,4 +1,0 @@
-# Repository-only evaluation and tests are not part of the runtime source distribution.
-prune pico/evaluation
-prune tests
-exclude README.md

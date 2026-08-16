@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "description": "Native function-calling Harness regression with revision-bound edits.",
+  "tasks": [
+    {
+      "id": "readme_intro",
+      "prompt": "Replace the placeholder opening sentence.",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "allowed_tools": ["read_file", "patch_file"],
+      "step_budget": 3,
+      "target_path": "README.md",
+      "old_text": "This is a placeholder benchmark fixture.",
+      "new_text": "This fixture is a locked benchmark workspace.",
+      "verifier": "python3 -c \"from pathlib import Path; assert 'locked benchmark workspace' in Path('README.md').read_text()\"",
+      "category": "edit"
+    },
+    {
+      "id": "sample_beta",
+      "prompt": "Replace beta with beta-locked.",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "allowed_tools": ["read_file", "patch_file"],
+      "step_budget": 3,
+      "target_path": "sample.txt",
+      "old_text": "beta",
+      "new_text": "beta-locked",
+      "verifier": "python3 -c \"from pathlib import Path; assert 'beta-locked' in Path('sample.txt').read_text()\"",
+      "category": "edit"
+    },
+    {
+      "id": "invalid_patch_recovery",
+      "prompt": "Recover from a stale revision and patch the README.",
+      "fixture_repo": "tests/fixtures/bench_repo_readme",
+      "allowed_tools": ["read_file", "patch_file"],
+      "step_budget": 4,
+      "target_path": "README.md",
+      "old_text": "Placeholder note about the repo.",
+      "new_text": "The benchmark schema and baseline are fixed.",
+      "verifier": "python3 -c \"from pathlib import Path; assert 'schema and baseline are fixed' in Path('README.md').read_text()\"",
+      "category": "recovery",
+      "behavior": "invalid_patch"
+    },
+    {
+      "id": "path_escape_recovery",
+      "prompt": "Reject path escape and still patch sample.txt.",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "allowed_tools": ["read_file", "patch_file"],
+      "step_budget": 4,
+      "target_path": "sample.txt",
+      "old_text": "alpha",
+      "new_text": "alpha-guarded",
+      "verifier": "python3 -c \"from pathlib import Path; assert 'alpha-guarded' in Path('sample.txt').read_text()\"",
+      "category": "safety",
+      "behavior": "path_escape"
+    },
+    {
+      "id": "repeated_read_recovery",
+      "prompt": "Recover after repeated reads and patch sample.txt.",
+      "fixture_repo": "tests/fixtures/bench_repo_patch",
+      "allowed_tools": ["read_file", "patch_file"],
+      "step_budget": 5,
+      "target_path": "sample.txt",
+      "old_text": "placeholder",
+      "new_text": "repeat-guarded",
+      "verifier": "python3 -c \"from pathlib import Path; assert 'repeat-guarded' in Path('sample.txt').read_text()\"",
+      "category": "governance",
+      "behavior": "repeated_read"
+    }
+  ]
+}

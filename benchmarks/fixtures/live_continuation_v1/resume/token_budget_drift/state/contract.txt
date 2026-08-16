@@ -1,3 +1,0 @@
-# Frozen resume contract
-RESULT=resume-token-drift-48
-MODE=steady

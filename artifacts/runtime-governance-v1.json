@@ -1,0 +1,9 @@
+{
+  "artifact_type": "runtime-governance-v1",
+  "summary": {
+    "hash_chain_valid": true,
+    "repeated_failure_replanned": true,
+    "replayable_progress": true,
+    "verification_structured": true
+  }
+}

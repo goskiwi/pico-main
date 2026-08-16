@@ -1,0 +1,64 @@
+{
+  "artifact_type": "working-memory-v3",
+  "rows": [
+    {
+      "hit": true,
+      "repeated_reads": 0,
+      "variant": "memory_on"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "stale_revision"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "memory_off"
+    },
+    {
+      "hit": true,
+      "repeated_reads": 0,
+      "variant": "memory_on"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "stale_revision"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "memory_off"
+    },
+    {
+      "hit": true,
+      "repeated_reads": 0,
+      "variant": "memory_on"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "stale_revision"
+    },
+    {
+      "hit": false,
+      "repeated_reads": 1,
+      "variant": "memory_off"
+    }
+  ],
+  "variants": {
+    "memory_off": {
+      "hit_rate": 0.0,
+      "mean_repeated_reads": 1.0
+    },
+    "memory_on": {
+      "hit_rate": 1.0,
+      "mean_repeated_reads": 0.0
+    },
+    "stale_revision": {
+      "hit_rate": 0.0,
+      "mean_repeated_reads": 1.0
+    }
+  }
+}

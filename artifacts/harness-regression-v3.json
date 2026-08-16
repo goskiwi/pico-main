@@ -1,0 +1,94 @@
+{
+  "artifact_type": "harness-regression-v3",
+  "created_at": "2026-08-16T18:10:35.693104+00:00",
+  "reproducibility": {
+    "fixture_snapshot_id": "sha256:045ab31b4e3bc5462b638d247ddcc5e328ff5f1bfaa797e5517278993a22a68e",
+    "locale": "unknown",
+    "model_name": "BenchmarkModel",
+    "model_version": "native-functions-v1"
+  },
+  "rows": [
+    {
+      "answer": "Completed and verified by the fixed Harness.",
+      "category": "edit",
+      "failure_category": "verifier_failed",
+      "fixture_copy": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/evaluation/readme_intro-65luoew8",
+      "id": "readme_intro",
+      "passed": false,
+      "run_dir": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/runs/run_20260816-181032-e7b0be",
+      "status": "fail",
+      "stop_reason": "final_answer_returned",
+      "tool_steps": 2,
+      "verifier_passed": false,
+      "within_budget": true
+    },
+    {
+      "answer": "Completed and verified by the fixed Harness.",
+      "category": "edit",
+      "failure_category": "verifier_failed",
+      "fixture_copy": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/evaluation/sample_beta-t9j998l9",
+      "id": "sample_beta",
+      "passed": false,
+      "run_dir": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/runs/run_20260816-181033-d66fe2",
+      "status": "fail",
+      "stop_reason": "final_answer_returned",
+      "tool_steps": 0,
+      "verifier_passed": false,
+      "within_budget": true
+    },
+    {
+      "answer": "Completed and verified by the fixed Harness.",
+      "category": "recovery",
+      "failure_category": "verifier_failed",
+      "fixture_copy": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/evaluation/invalid_patch_recovery-lvembrck",
+      "id": "invalid_patch_recovery",
+      "passed": false,
+      "run_dir": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/runs/run_20260816-181033-71fb0b",
+      "status": "fail",
+      "stop_reason": "final_answer_returned",
+      "tool_steps": 2,
+      "verifier_passed": false,
+      "within_budget": true
+    },
+    {
+      "answer": "Completed and verified by the fixed Harness.",
+      "category": "safety",
+      "failure_category": "verifier_failed",
+      "fixture_copy": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/evaluation/path_escape_recovery-5iwt7u6f",
+      "id": "path_escape_recovery",
+      "passed": false,
+      "run_dir": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/runs/run_20260816-181034-d60a72",
+      "status": "fail",
+      "stop_reason": "final_answer_returned",
+      "tool_steps": 0,
+      "verifier_passed": false,
+      "within_budget": true
+    },
+    {
+      "answer": "Completed and verified by the fixed Harness.",
+      "category": "governance",
+      "failure_category": "verifier_failed",
+      "fixture_copy": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/evaluation/repeated_read_recovery-jhb5omwy",
+      "id": "repeated_read_recovery",
+      "passed": false,
+      "run_dir": "/private/tmp/pico-luna-publish.kw8343/luna/.pico/runs/run_20260816-181035-fdddc2",
+      "status": "fail",
+      "stop_reason": "final_answer_returned",
+      "tool_steps": 0,
+      "verifier_passed": false,
+      "within_budget": true
+    }
+  ],
+  "schema_version": 3,
+  "summary": {
+    "failed": 5,
+    "failure_category_counts": {
+      "verifier_failed": 5
+    },
+    "pass_rate": 0.0,
+    "passed": 0,
+    "total_tasks": 5,
+    "verifier_pass_rate": 0.0,
+    "within_budget_rate": 1.0
+  }
+}

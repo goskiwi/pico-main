@@ -1,0 +1,73 @@
+{
+  "artifact_type": "context-governance-v3",
+  "rows": [
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 4001,
+      "repetition": 0,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 12001,
+      "repetition": 0,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 24001,
+      "repetition": 0,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 4001,
+      "repetition": 1,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 12001,
+      "repetition": 1,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 24001,
+      "repetition": 1,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 4001,
+      "repetition": 2,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 12001,
+      "repetition": 2,
+      "request_preserved": true,
+      "within_budget": true
+    },
+    {
+      "governed_tokens": 1110,
+      "raw_tokens": 24001,
+      "repetition": 2,
+      "request_preserved": true,
+      "within_budget": true
+    }
+  ],
+  "summary": {
+    "current_request_preserved_rate": 1.0,
+    "mean_token_reduction": 12224.333333333334,
+    "within_budget_rate": 1.0
+  }
+}

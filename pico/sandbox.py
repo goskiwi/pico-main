@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import os
+import queue
+import re
+import shlex
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
+from .execution import ExecutionBudget, ExecutionContext
 
 DEFAULT_SANDBOX_IMAGE = "pico/sandbox:latest"
 DEFAULT_SANDBOX_CPUS = 4.0
 DEFAULT_SANDBOX_MEMORY = "4g"
 DEFAULT_SANDBOX_PIDS_LIMIT = 512
+DEFAULT_SANDBOX_MAX_OUTPUT_BYTES = 1_048_576
+SANDBOX_OUTPUT_CHUNK_BYTES = 65_536
+SANDBOX_OUTPUT_QUEUE_CHUNKS = 8
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 CONTAINER_TIKTOKEN_CACHE_DIR = "/opt/pico/tiktoken-cache"
@@ -28,6 +38,31 @@ HOST_ENV_DENYLIST = {
     "TMPDIR",
     "USER",
 }
+
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+
+class SandboxProfile(str, Enum):
+    """Runtime-owned execution profiles; neither permits persistent shell writes."""
+
+    INSPECT = "inspect"
+    VERIFY = "verify"
+
+    @property
+    def workspace_read_only(self):
+        return True
+
+
+def parse_command_invocation(command):
+    """Split a trusted command once into direct argv and explicit environment."""
+    parts = shlex.split(str(command or ""))
+    command_env = {}
+    while parts and _ENV_ASSIGNMENT_RE.fullmatch(parts[0]):
+        name, value = parts.pop(0).split("=", 1)
+        command_env[name] = value
+    if not parts:
+        raise ValueError("command must contain an executable")
+    return tuple(parts), command_env
 
 
 class SandboxError(RuntimeError):
@@ -49,10 +84,19 @@ class SandboxImageMissingError(SandboxError):
 
 @dataclass(frozen=True)
 class SandboxResult:
-    returncode: int
+    returncode: int | None
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    cancelled: bool = False
+    killed: bool = False
+    cleanup_state: str = "not_required"
+    stop_reason: str = ""
+    output_limited: bool = False
+    output_truncated: bool = False
+    observed_output_bytes: int = 0
+    max_output_bytes: int = 0
+    retained_output_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +105,7 @@ class DockerSandboxConfig:
     cpus: float = DEFAULT_SANDBOX_CPUS
     memory: str = DEFAULT_SANDBOX_MEMORY
     pids_limit: int = DEFAULT_SANDBOX_PIDS_LIMIT
+    max_output_bytes: int = DEFAULT_SANDBOX_MAX_OUTPUT_BYTES
 
     def __post_init__(self):
         if not str(self.image).strip():
@@ -71,6 +116,8 @@ class DockerSandboxConfig:
             raise ValueError("sandbox memory must not be empty")
         if int(self.pids_limit) < 16:
             raise ValueError("sandbox pids_limit must be at least 16")
+        if int(self.max_output_bytes) < 1024:
+            raise ValueError("sandbox max_output_bytes must be at least 1024")
 
 
 class DockerSandbox:
@@ -90,11 +137,15 @@ class DockerSandbox:
             "cpus": float(self.config.cpus),
             "memory": self.config.memory,
             "pids_limit": int(self.config.pids_limit),
+            "max_output_bytes": int(self.config.max_output_bytes),
             "network": "none",
             "rootfs_read_only": True,
+            "profiles": [profile.value for profile in SandboxProfile],
+            "workspace_read_only": True,
         }
 
-    def audit_metadata(self, *, timed_out=False):
+    def audit_metadata(self, *, profile=SandboxProfile.INSPECT, timed_out=False):
+        profile = SandboxProfile(profile)
         return {
             "sandbox_backend": self.backend,
             "sandbox_image": self.config.image,
@@ -103,7 +154,10 @@ class DockerSandbox:
             "sandbox_cpus": float(self.config.cpus),
             "sandbox_memory": self.config.memory,
             "sandbox_pids_limit": int(self.config.pids_limit),
+            "sandbox_max_output_bytes": int(self.config.max_output_bytes),
             "sandbox_timed_out": bool(timed_out),
+            "sandbox_profile": profile.value,
+            "sandbox_workspace_read_only": profile.workspace_read_only,
         }
 
     def ensure_ready(self):
@@ -138,60 +192,256 @@ class DockerSandbox:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxUnavailableError(f"Docker readiness check failed: {exc}") from exc
 
-    def run(self, command, *, cwd, timeout, env=None):
+    def run(
+        self,
+        argv,
+        *,
+        cwd,
+        timeout,
+        env=None,
+        execution_context=None,
+        profile=SandboxProfile.INSPECT,
+    ):
         self.ensure_ready()
+        profile = SandboxProfile(profile)
+        argv = tuple(str(item) for item in argv)
+        if not argv or any(not item for item in argv):
+            raise ValueError("sandbox argv must contain a non-empty executable")
+        context = execution_context or ExecutionContext.standalone(
+            owner="docker_sandbox", max_seconds=timeout
+        )
+        effective_timeout = context.bounded_timeout(timeout)
         cwd = Path(cwd).resolve()
         try:
             relative_cwd = cwd.relative_to(self.workspace_root)
         except ValueError as exc:
             raise SandboxError(f"sandbox cwd escapes workspace: {cwd}") from exc
 
-        container_name = "pico-" + uuid.uuid4().hex[:12]
+        container_name = self.container_name_for_execution(context.execution_id)
         container_cwd = Path(CONTAINER_WORKSPACE, relative_cwd).as_posix()
         docker_args = self._docker_args(
             container_name=container_name,
             container_cwd=container_cwd,
-            command=str(command),
+            argv=argv,
             env=env or {},
+            profile=profile,
+        )
+        command_deadline = time.monotonic() + effective_timeout
+        budget = ExecutionBudget(
+            deadline=min(command_deadline, context.deadline),
+            max_output_bytes=self.config.max_output_bytes,
+            max_processes=self.config.pids_limit,
+            memory=self.config.memory,
         )
         try:
             process = subprocess.Popen(
                 docker_args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
             )
         except OSError as exc:
             raise SandboxUnavailableError(f"Could not start Docker sandbox: {exc}") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=int(timeout))
-            return SandboxResult(
-                returncode=int(process.returncode or 0),
-                stdout=stdout,
-                stderr=stderr,
+        context.transition("running")
+        return self._capture_process(
+            process,
+            container_name=container_name,
+            context=context,
+            budget=budget,
+        )
+
+    @staticmethod
+    def container_name_for_execution(execution_id):
+        normalized = "".join(
+            character for character in str(execution_id or "").lower()
+            if character.isalnum()
+        )
+        if not normalized:
+            normalized = uuid.uuid4().hex
+        return "pico-" + normalized[-24:]
+
+    def cleanup_execution(self, execution_id):
+        """Remove a deterministic orphan container before recovery continues."""
+        container_name = self.container_name_for_execution(execution_id)
+        cleanup_state, killed = self._stop_container(container_name)
+        return {
+            "container_name": container_name,
+            "cleanup_state": cleanup_state,
+            "killed": bool(killed),
+        }
+
+    def _capture_process(self, process, *, container_name, context, budget):
+        # Pipe readers must never be able to outrun the Runtime and accumulate
+        # an unbounded host-memory backlog. The retained result has its own
+        # byte budget; this small bounded transport queue applies backpressure
+        # before the main loop has classified and stopped an output bomb.
+        chunks = queue.Queue(maxsize=SANDBOX_OUTPUT_QUEUE_CHUNKS)
+        streams = {"stdout": process.stdout, "stderr": process.stderr}
+        stop_readers = threading.Event()
+
+        def drain(name, stream):
+            try:
+                while not stop_readers.is_set():
+                    chunk = stream.read(SANDBOX_OUTPUT_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    item = (name, bytes(chunk))
+                    while not stop_readers.is_set():
+                        try:
+                            chunks.put(item, timeout=0.05)
+                            break
+                        except queue.Full:
+                            continue
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        threads = [
+            threading.Thread(target=drain, args=item, daemon=True)
+            for item in streams.items()
+        ]
+        for thread in threads:
+            thread.start()
+
+        retained = {"stdout": bytearray(), "stderr": bytearray()}
+        observed = 0
+        stop_reason = ""
+        cleanup_state = "not_required"
+        killed = False
+        cancelled = False
+        timed_out = False
+        output_limited = False
+
+        def stop_process(reason):
+            nonlocal cleanup_state, killed
+            if cleanup_state != "not_required":
+                return
+            context.transition(
+                "stop_requested", cleanup_state="pending", stop_reason=reason
             )
-        except subprocess.TimeoutExpired:
-            subprocess.run(
-                [self.docker_binary, "rm", "--force", container_name],
+            cleanup_state, killed = self._stop_container(container_name)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                killed = True
+
+        try:
+            while (
+                process.poll() is None
+                or any(thread.is_alive() for thread in threads)
+                or not chunks.empty()
+            ):
+                try:
+                    name, chunk = chunks.get(timeout=0.05)
+                except queue.Empty:
+                    name = chunk = None
+                if name is not None and chunk is not None:
+                    observed += len(chunk)
+                    remaining = max(
+                        0,
+                        budget.max_output_bytes
+                        - sum(len(value) for value in retained.values()),
+                    )
+                    if remaining:
+                        retained[name].extend(chunk[:remaining])
+                    if observed > budget.max_output_bytes and not stop_reason:
+                        output_limited = True
+                        stop_reason = "output_limit_exceeded"
+
+                if not stop_reason and context.token.requested:
+                    cancelled = True
+                    stop_reason = context.token.reason or "user_cancelled"
+                if not stop_reason and time.monotonic() >= budget.deadline:
+                    timed_out = True
+                    stop_reason = "deadline_exceeded"
+                if stop_reason:
+                    stop_readers.set()
+                    stop_process(stop_reason)
+        except BaseException:
+            interrupted_reason = context.token.reason or "host_interrupted"
+            stop_readers.set()
+            stop_process(interrupted_reason)
+            context.transition(
+                "killed" if killed or not context.token.requested else "cancelled",
+                cleanup_state=cleanup_state,
+                stop_reason=interrupted_reason,
+            )
+            for thread in threads:
+                thread.join(timeout=1)
+            raise
+
+        stop_readers.set()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        stdout = retained["stdout"].decode("utf-8", errors="replace")
+        stderr = retained["stderr"].decode("utf-8", errors="replace")
+        if stop_reason:
+            terminal_state = "killed" if killed or output_limited else (
+                "cancelled" if cancelled else "timed_out"
+            )
+            context.transition(
+                terminal_state,
+                cleanup_state=cleanup_state,
+                stop_reason=stop_reason,
+            )
+            message = (
+                f"sandbox command {terminal_state}: {stop_reason}; "
+                f"cleanup={cleanup_state}"
+            )
+            stderr = "\n".join(part for part in (stderr.strip(), message) if part)
+        return SandboxResult(
+            returncode=None if stop_reason else int(process.returncode or 0),
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=timed_out,
+            cancelled=cancelled,
+            killed=bool(killed or output_limited),
+            cleanup_state=cleanup_state,
+            stop_reason=stop_reason,
+            output_limited=output_limited,
+            output_truncated=observed > budget.max_output_bytes,
+            observed_output_bytes=observed,
+            max_output_bytes=budget.max_output_bytes,
+            retained_output_bytes=sum(len(value) for value in retained.values()),
+        )
+
+    def _stop_container(self, container_name):
+        try:
+            stopped = subprocess.run(
+                [self.docker_binary, "stop", "--time", "2", container_name],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=4,
+                check=False,
             )
-            stdout, stderr = process.communicate(timeout=5)
-            timeout_message = f"sandbox command timed out after {int(timeout)} seconds"
-            stderr = "\n".join(part for part in (stderr.strip(), timeout_message) if part)
-            return SandboxResult(
-                returncode=124,
-                stdout=stdout,
-                stderr=stderr,
-                timed_out=True,
-            )
+        except (OSError, subprocess.TimeoutExpired):
+            stopped = None
+        killed = stopped is None or stopped.returncode != 0
+        if killed:
+            try:
+                removed = subprocess.run(
+                    [self.docker_binary, "rm", "--force", container_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return "failed", True
+            if removed.returncode != 0 and "No such container" not in removed.stderr:
+                return "failed", True
+        return "completed", killed
 
-    def _docker_args(self, *, container_name, container_cwd, command, env):
+    def _docker_args(self, *, container_name, container_cwd, argv, env, profile):
         args = [
             self.docker_binary,
             "run",
@@ -218,14 +468,20 @@ class DockerSandbox:
             "--workdir",
             container_cwd,
             "--mount",
-            f"type=bind,source={self.workspace_root},target={CONTAINER_WORKSPACE}",
+            (
+                f"type=bind,source={self.workspace_root},target={CONTAINER_WORKSPACE}"
+                + (",readonly" if profile.workspace_read_only else "")
+            ),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=128m",
-            "--tmpfs",
-            "/workspace/.pico:rw,noexec,nosuid,size=32m",
-            "--tmpfs",
-            "/workspace/.venv:rw,nosuid,size=256m",
         ]
+        transient_directories = {
+            ".pico": "rw,noexec,nosuid,size=32m,mode=1777",
+            ".venv": "rw,nosuid,size=256m,mode=1777",
+        }
+        for relative, options in transient_directories.items():
+            if (self.workspace_root / relative).is_dir():
+                args.extend(["--tmpfs", f"{CONTAINER_WORKSPACE}/{relative}:{options}"])
         git_path = self.workspace_root / ".git"
         if git_path.exists():
             args.extend(
@@ -246,7 +502,8 @@ class DockerSandbox:
         container_env = self._container_env(env)
         for name, value in sorted(container_env.items()):
             args.extend(["--env", f"{name}={value}"])
-        args.extend([self.config.image, "/bin/sh", "-lc", command])
+        args.append(self.config.image)
+        args.extend(argv)
         return args
 
     @staticmethod
@@ -263,6 +520,9 @@ class DockerSandbox:
                 "PWD": CONTAINER_WORKSPACE,
                 "TIKTOKEN_CACHE_DIR": CONTAINER_TIKTOKEN_CACHE_DIR,
                 "TMPDIR": "/tmp",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTEST_ADDOPTS": "-p no:cacheprovider",
+                "RUFF_CACHE_DIR": "/tmp/ruff-cache",
             }
         )
         return filtered

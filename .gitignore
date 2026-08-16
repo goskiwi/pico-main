@@ -7,6 +7,7 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+uv.lock
 
 # Packaging
 *.egg-info/
@@ -29,20 +30,23 @@ htmlcov/
 # Local scratch space
 tmp/
 .worktrees/
-.pico/*
-!.pico/skills/
-!.pico/skills/**/
-!.pico/skills/**/SKILL.md
-output/
-.env
-.env.local
-# Provider-backed local outputs may contain environment metadata. Reviewed
-# evidence belongs under benchmarks/results; this directory is disposable.
+.pico/
+.mini-pico/
 artifacts/
+release/
 readme_intro_locked/
-.idea/
-.claude/settings.local.json
-.serena/
+
+# Local secrets and provider configuration
+.env
+.env.*
+!.env.example
+
+# Local docs not intended for publication
+docs/*
+!docs/review-pack/
+!docs/review-pack/README.md
+!docs/architecture/
+!docs/architecture/agent-harness-v1-overview.md
 
 # OS files
 .DS_Store

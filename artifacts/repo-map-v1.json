@@ -1,0 +1,54 @@
+{
+  "artifact_type": "repo-map-v1",
+  "details": {
+    "cache_hits": 0,
+    "cache_misses": 1,
+    "graph_edges": 6,
+    "graph_nodes": 3,
+    "index_revision": "sha256:78ac1cdd26aa1c54774b711cffd29a4437f3368c7a1d7c8721f7a9b8056b9983",
+    "index_state": "fresh",
+    "parse_error_files": 0,
+    "parsed_files": 1,
+    "query": "where is config loaded",
+    "relation_count": 3,
+    "scan_truncated": false,
+    "selected_count": 2,
+    "selected_files": [
+      "service.py"
+    ],
+    "selected_symbols": [
+      {
+        "end_line": 2,
+        "graph_score": 1.0,
+        "kind": "function",
+        "lexical_score": 1.0,
+        "line": 1,
+        "path": "service.py",
+        "qualified_name": "load_config",
+        "reasons": [
+          "symbol:config"
+        ],
+        "score": 1.0
+      },
+      {
+        "end_line": 5,
+        "graph_score": 0.788867,
+        "kind": "function",
+        "lexical_score": 0.0,
+        "line": 4,
+        "path": "service.py",
+        "qualified_name": "start",
+        "reasons": [],
+        "score": 0.303992
+      }
+    ],
+    "semantic_backend": "python-tree-sitter-static",
+    "skipped_files": 0,
+    "truncated": false
+  },
+  "summary": {
+    "index_revision_bound": true,
+    "query_hit": true,
+    "within_budget": true
+  }
+}

@@ -1,63 +1,46 @@
 """Agent 运行时核心逻辑。
 
 Pico 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
-校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
+校验并执行工具、写 Runtime event、更新工作记忆，以及在合适的时候停下来。
 """
 
+import hashlib
 import json
 import os
-import textwrap
 import uuid
-import hashlib
-import time
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from .agent import checkpoints
-from .agent import compaction as context_compaction
-from .agent import loop as agent_loop
-from .agent import state as runtime_state
-from .agent import verification as runtime_verification
-from .agent.checkpoints import CHECKPOINT_NONE_STATUS
-from .agent.trace import TRACE_EVENT_NAMES
-from . import memory as memorylib
-from . import security
-from . import skills as skillslib
-from .tools import policy as tool_policy
-from .tools import runtime as tool_runtime
-from .config import (
-    ALLOWED_SHELL_COMMANDS,
-    CONTEXT_COMPACTION_INPUT_TOKENS,
-    CONTEXT_COMPACTION_MAX_PER_TASK,
-    DEFAULT_APPROVAL_POLICY,
-    DEFAULT_MAX_DEPTH,
-    DEFAULT_FEATURE_FLAGS,
-    DEFAULT_MAX_NEW_TOKENS,
-    DEFAULT_MAX_STEPS,
-    DEFAULT_SHELL_ENV_ALLOWLIST,
-)
-from .context_manager import ContextManager
-from .context_types import count_tokens, tokenizer_details
-from .repo_map import RepoMap
-from .run_store import RunStore
-from .sandbox import DockerSandbox
+from . import checkpoint as checkpointlib
+from . import security as securitylib
 from . import tools as toolkit
-from .workspace import WorkspaceContext, clip, now
+from .artifacts import ArtifactStore
+from .checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_SCHEMA_VERSION
+from .context_manager import ContextManager
+from .contracts import ToolCall
+from .evidence import EvidenceLedger
+from .features import memory as memorylib
+from .mutations import WorkspaceMutationService
+from .project_memory import MEMORY_SELECTOR_MAX_SELECTED, ProjectMemoryStore
+from .prompt_prefix import build_prompt_prefix, tool_signature
+from .repo_map import RepoMap
+from .repository_overview import discover_repository_overview
+from .run_store import RunStore
+from .sandbox import DockerSandbox, DockerSandboxConfig
+from .session_store import SESSION_SCHEMA_VERSION, SessionStore
+from .tool_context import ToolContext
+from .tool_executor import ToolExecutor
+from .verification import discover_verification_command, run_verification
+from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
-
-@dataclass
-class PromptPrefix:
-    # prefix 除了文本本身，还带一小份元数据，
-    # 这样 runtime 才能明确判断 prefix 是否可以复用。
-    text: str
-    hash: str
-    workspace_fingerprint: str
-    tool_signature: str
-
-
-def new_agent_id():
-    return "agent_" + uuid.uuid4().hex[:8]
+DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
+DEFAULT_FEATURE_FLAGS = {
+    "memory": True,
+    "relevant_memory": True,
+    "context_reduction": True,
+    "prompt_cache": True,
+}
+__all__ = ["Pico", "SessionStore"]
 
 
 class Pico:
@@ -68,132 +51,84 @@ class Pico:
         session_store,
         session=None,
         run_store=None,
-        approval_policy=DEFAULT_APPROVAL_POLICY,
-        max_steps=DEFAULT_MAX_STEPS,
-        max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
-        depth=0,
-        max_depth=DEFAULT_MAX_DEPTH,
+        approval_policy="ask",
+        max_steps=6,
+        max_new_tokens=512,
         read_only=False,
-        dry_run=False,
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
-        repo_map_budget_tokens=None,
-        trust_project=False,
-        agent_mode="main",
-        agent_id=None,
-        parent_agent_id=None,
         allowed_tools=None,
+        run_timeout_seconds=600,
         sandbox=None,
-        trace_sink=None,
+        sandbox_image="pico/sandbox:latest",
+        verification_command=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
-        self._assert_workspace_root()
-        self.sandbox = sandbox or DockerSandbox(self.root)
-        self.trace_sink = trace_sink
         self.session_store = session_store
         self.approval_policy = approval_policy
-        self.max_steps = DEFAULT_MAX_STEPS if max_steps is None else int(max_steps)
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be a positive integer")
+        self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
-        self.depth = depth
-        self.max_depth = max_depth
         self.read_only = read_only
-        self.dry_run = bool(dry_run)
-        # Project-local skills become model instructions after discovery.  Treat
-        # them as an explicit input boundary instead of loading them merely
-        # because the selected repository happens to contain ``.pico/skills``.
-        self.trust_project = bool(trust_project)
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
         self.secret_env_names = {str(name).upper() for name in (secret_env_names or ())}
-        self.agent_mode = str(agent_mode or "main")
-        self.agent_id = str(agent_id or new_agent_id())
-        self.parent_agent_id = str(parent_agent_id or "")
-        self.allowed_tools = None if allowed_tools is None else tuple(str(name) for name in allowed_tools)
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
-        if repo_map_budget_tokens is None:
-            self.repo_map_budget_tokens = None
-        else:
-            if isinstance(repo_map_budget_tokens, bool):
-                raise ValueError("repo_map_budget_tokens must be a positive integer")
-            try:
-                self.repo_map_budget_tokens = int(repo_map_budget_tokens)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "repo_map_budget_tokens must be a positive integer"
-                ) from exc
-            if self.repo_map_budget_tokens <= 0:
-                raise ValueError("repo_map_budget_tokens must be a positive integer")
+        self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
+        self.run_timeout_seconds = max(1, int(run_timeout_seconds))
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
-        self.session = (
-            session
-            if session is not None
-            else {
-                "id": datetime.now().strftime("%Y%m%d-%H%M%S")
-                + "-"
-                + uuid.uuid4().hex[:6],
-                "created_at": now(),
-                "workspace_root": workspace.repo_root,
-                "session_kind": "delegate" if self.parent_agent_id else "main",
-                "agent_mode": self.agent_mode,
-                "parent_agent_id": self.parent_agent_id,
-                "memory": memorylib.default_memory_state(),
-                "checkpoints": {"current_id": "", "items": {}},
-                "runtime_identity": {},
-                "resume_state": {},
-            }
-        )
+        self.artifact_store = ArtifactStore(self.run_store, self.redact_text)
+        self.session = session or {
+            "schema_version": SESSION_SCHEMA_VERSION,
+            "id": datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+            "created_at": now(),
+            "workspace_root": workspace.repo_root,
+            "history": [],
+            "memory": memorylib.default_memory_state(),
+        }
         self._ensure_session_shape()
-        self.memory = memorylib.LayeredMemory(
-            self.session["memory"],
+        self.memory = memorylib.SessionWorkingMemory(
+            self.session.setdefault("memory", memorylib.default_memory_state()),
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
+        self.project_memory = ProjectMemoryStore(self.root / ".pico" / "memory", self.root)
+        self.mutation_service = WorkspaceMutationService(self.root)
+        self.sandbox = sandbox or DockerSandbox(
+            self.root, DockerSandboxConfig(image=str(sandbox_image))
+        )
+        self.verification_command = (
+            discover_verification_command(self.root)
+            if verification_command is None else str(verification_command)
+        )
+        self.evidence_ledger = EvidenceLedger()
         self.repo_map = RepoMap(self.root)
-        self.tools = self.build_tools()
-        self.all_tools = dict(self.tools)
-        self.skill_diagnostics = []
-        self.skills = self.load_skills()
-        self.active_skills = []
-        self._active_skill_instruction_texts = {}
-        self._pending_manual_skills = []
-        self.active_tool_names = None
-        self.active_tools_strict = False
+        self.repository_overview = discover_repository_overview(self.root)
+        self.all_tools = self.build_tools()
+        self.tools = self._apply_tool_allowlist(self.all_tools)
+        self.action_tools = toolkit.build_action_tools(self.tools)
+        self.tool_executor = ToolExecutor(self)
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
+        self.current_execution = None
         self.current_run_dir = None
-        self.current_undo_journal = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
-        self.last_run_model_metrics = {}
-        self.tool_audit_log = []
-        self.runtime_verifications = []
-        self.model_action_rejections = []
-        self._last_tool_result_metadata = {}
-        self._last_tool_full_result = None
-        self._delegate_outcome_metadata = {}
-        self._last_sandbox_metadata = {}
+        self.last_memory_extraction = {}
+        self._task_memory_selection = None
+        self.last_tool_outcome = None
+        self.progress_governor = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
         }
-        self._workspace_snapshot_hash_cache = {}
-        self._read_only_tool_signatures = set()
-        self._read_only_tool_evidence = {}
-        self._context_checkpoint = None
-        self.context_compaction_threshold_tokens = CONTEXT_COMPACTION_INPUT_TOKENS
-        self.max_context_compactions = CONTEXT_COMPACTION_MAX_PER_TASK
-        self._trace_started_at = None
-        self._trace_sequence = 0
 
     @classmethod
     def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
@@ -205,267 +140,88 @@ class Pico:
             **kwargs,
         )
 
-    @staticmethod
-    def new_task_id():
-        return "task_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
-    @staticmethod
-    def new_run_id():
-        return "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-
     def _ensure_session_shape(self):
-        if self.session.get("session_kind") not in {"main", "delegate"}:
-            raise ValueError("session_kind must be 'main' or 'delegate'")
-        expected_types = {
-            "id": str,
-            "agent_mode": str,
-            "parent_agent_id": str,
-            "memory": dict,
-            "checkpoints": dict,
-            "runtime_identity": dict,
-            "resume_state": dict,
-        }
-        for name, expected_type in expected_types.items():
-            if not isinstance(self.session.get(name), expected_type):
-                raise ValueError(f"invalid session field: {name}")
-        checkpoints = self.session["checkpoints"]
-        if not isinstance(checkpoints.get("current_id"), str):
-            raise ValueError("invalid session field: checkpoints.current_id")
-        if not isinstance(checkpoints.get("items"), dict):
-            raise ValueError("invalid session field: checkpoints.items")
+        if self.session.get("schema_version") != SESSION_SCHEMA_VERSION:
+            raise ValueError("unsupported session schema")
+        self.session.setdefault("history", [])
+        self.session.setdefault("memory", memorylib.default_memory_state())
+        checkpoints = self.session.setdefault("checkpoints", {})
+        if not isinstance(checkpoints, dict):
+            checkpoints = {}
+            self.session["checkpoints"] = checkpoints
+        checkpoints.setdefault("schema_version", CHECKPOINT_SCHEMA_VERSION)
+        checkpoints.setdefault("current_id", "")
+        checkpoints.setdefault("items", {})
+        runtime_identity = self.session.setdefault("runtime_identity", {})
+        if not isinstance(runtime_identity, dict):
+            self.session["runtime_identity"] = {}
+        resume_state = self.session.setdefault("resume_state", {})
+        if not isinstance(resume_state, dict):
+            self.session["resume_state"] = {}
+
+    def current_runtime_identity(self):
+        return checkpointlib.current_runtime_identity(self)
+
+    def checkpoint_state(self):
+        return checkpointlib.checkpoint_state(self)
+
+    def current_checkpoint(self):
+        return checkpointlib.current_checkpoint(self)
+
+    def invalidate_stale_memory(self):
+        invalidated = self.memory.invalidate_stale_file_observations()
+        self.session["memory"] = self.memory.to_dict()
+        return invalidated
 
     def evaluate_resume_state(self):
-        return checkpoints.evaluate_resume_state(self)
+        return checkpointlib.evaluate_resume_state(self)
 
     def render_checkpoint_text(self):
-        return checkpoints.render_checkpoint_text(self)
+        return checkpointlib.render_checkpoint_text(self)
+
+    @staticmethod
+    def remember(bucket, item, limit):
+        if not item:
+            return
+        if item in bucket:
+            bucket.remove(item)
+        bucket.append(item)
+        del bucket[:-limit]
 
     def build_tools(self):
-        return toolkit.build_tool_registry(self)
+        return toolkit.build_tool_registry(self.tool_context())
 
-    def load_skills(self):
-        if not self.trust_project:
-            self.skill_diagnostics = []
-            return []
-        skills, diagnostics = skillslib.load_skill_catalog(self.root)
-        self.skill_diagnostics = diagnostics
-        return skills
+    @staticmethod
+    def _normalize_allowed_tools(allowed_tools):
+        if allowed_tools is None:
+            return None
+        normalized = tuple(str(name).strip() for name in allowed_tools)
+        if not normalized or any(not name for name in normalized):
+            raise ValueError("allowed_tools must be a non-empty sequence of tool names")
+        return normalized
 
-    def reload_skills(self):
-        self.skills = self.load_skills()
-        self._pending_manual_skills = []
-        self.reset_active_skills()
-        return list(self.skills)
-
-    def reset_active_skills(self):
-        self.active_skills = []
-        self._active_skill_instruction_texts = {}
-        self.active_tool_names = None
-        self.active_tools_strict = False
-        self.apply_active_tool_filter()
-
-    def queue_manual_skill(self, name):
-        """Queue a skill that is hidden from model invocation for the next task."""
-        requested = str(name or "").strip()
-        skill = next((item for item in self.skills if item.name == requested), None)
-        if skill is None:
-            raise ValueError(f"unknown skill: {requested or '<empty>'}")
-        self._pending_manual_skills = skillslib.resolve_conflicts(
-            [*self._pending_manual_skills, skill]
-        )
-        return skill
-
-    def start_task_skills(self):
-        """Reset automatic activation and apply one explicitly requested skill set."""
-        pending = list(self._pending_manual_skills)
-        self._pending_manual_skills = []
-        self.reset_active_skills()
-        if not pending:
-            return []
-        return self._activate_skills(pending)
-
-    def _skill_instruction_text(self, skill):
-        path = self.path(skill.path)
-        return path.read_text(encoding="utf-8")
-
-    def _activate_skills(self, skills):
-        previous_names = [skill.name for skill in self.active_skills]
-        self.active_skills = skillslib.resolve_conflicts([*self.active_skills, *skills])
-        self._active_skill_instruction_texts = {
-            skill.path: self._skill_instruction_text(skill) for skill in self.active_skills
-        }
-        self.active_tool_names, self.active_tools_strict = skillslib.compute_active_tools(
-            self.active_skills,
-            self.all_tools.keys(),
-        )
-        self.apply_active_tool_filter()
-        active_names = [skill.name for skill in self.active_skills]
-        return [name for name in active_names if name not in previous_names]
-
-    def activate_skills_from_read(self, args):
-        """Activate registered skills only after their full SKILL.md was read."""
-        read_paths = set()
-        for file_args in (args or {}).get("files", []):
-            if not isinstance(file_args, dict):
-                continue
-            try:
-                path = self.path(file_args.get("path", ""))
-                read_paths.add(path.relative_to(self.root).as_posix())
-            except (TypeError, ValueError):
-                continue
-        newly_read = [skill for skill in self.skills if skill.path in read_paths]
-        if not newly_read:
-            return []
-
-        return self._activate_skills(newly_read)
-
-    def active_skill_instructions(self):
-        if not self.active_skills:
-            return ""
-        lines = [
-            "Active skill instructions:",
-            "- These files are trusted project instructions already selected for this task.",
-            "- Resolve relative paths in each skill against its listed Skill root.",
-        ]
-        for skill in self.active_skills:
-            body = self._active_skill_instruction_texts.get(skill.path, "").strip()
-            if not body:
-                continue
-            lines.extend(
-                [
-                    f"## {skill.name}",
-                    f"Skill root: {Path(skill.path).parent.as_posix()}",
-                    body,
-                ]
-            )
-        return "\n".join(lines)
-
-    def skill_metadata(self, rendered_text=""):
-        metadata = skillslib.skill_metadata(
-            self.skills,
-            active_skills=self.active_skills,
-            rendered_text=rendered_text,
-        )
-        metadata["diagnostics"] = list(self.skill_diagnostics)
-        metadata["project_trusted"] = bool(self.trust_project)
-        return metadata
-
-    def apply_active_tool_filter(self):
-        previous_signature = self.tool_signature()
-        if self.active_tools_strict and self.active_tool_names is not None:
-            self.tools = {name: tool for name, tool in self.all_tools.items() if name in self.active_tool_names}
-        else:
-            self.tools = dict(self.all_tools)
-        if self.tool_signature() != previous_signature:
-            self._apply_prefix_state(self.build_prefix())
-
-    def identity_metadata(self):
+    def _apply_tool_allowlist(self, tools):
+        if self.allowed_tools is None:
+            return tools
+        legal_names = toolkit.legal_tool_names()
+        unknown = [name for name in self.allowed_tools if name not in legal_names]
+        if unknown:
+            raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
+        allowed = set(self.allowed_tools)
         return {
-            "agent_id": self.agent_id,
-            "parent_agent_id": self.parent_agent_id,
-            "agent_mode": self.agent_mode,
-            "depth": self.depth,
-            "max_depth": self.max_depth,
-            "max_steps": self.max_steps,
-            "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
-            "repo_map_budget_tokens": self.repo_map_budget_tokens,
-            "trust_project": bool(self.trust_project),
-            "read_only": bool(self.read_only),
-            "workspace_root": str(self.root.resolve()),
-            "verification_command": self.workspace.verification_command,
-            "active_skills": [skill.name for skill in self.active_skills],
-            "sandbox": self.sandbox.identity(),
+            name: tool
+            for name, tool in tools.items()
+            if name in allowed
         }
-
-    def _assert_workspace_root(self, workspace=None):
-        workspace = workspace or self.workspace
-        expected_root = self.root.resolve()
-        actual_root = Path(workspace.repo_root).resolve()
-        if actual_root != expected_root:
-            raise RuntimeError(
-                "workspace root invariant violated: "
-                f"expected {expected_root}, got {actual_root}"
-            )
-        return actual_root
 
     def tool_signature(self):
-        payload = []
-        for name in sorted(self.tools):
-            tool = self.tools[name]
-            payload.append(
-                {
-                    "name": name,
-                    "schema": toolkit.function_schema(tool["args_schema"]),
-                    "capability": tool.get("capability", ""),
-                    "risky": tool["risky"],
-                    "description": tool["description"],
-                }
-            )
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return tool_signature(self.tools)
 
     def build_prefix(self):
-        shell_prefixes = ", ".join(
-            f"`{' '.join(command)}`" for command in ALLOWED_SHELL_COMMANDS
-        )
-        tool_lines = []
-        for name, tool in self.tools.items():
-            fields = ", ".join(
-                f"{key}: {value}"
-                for key, value in toolkit.schema_display(tool["args_schema"]).items()
-            )
-            risk = "approval required" if tool["risky"] else "safe"
-            capability = tool.get("capability", "read")
-            tool_lines.append(f"- {name}({fields}) [{risk}; capability={capability}] {tool['description']}")
-        tool_text = "\n".join(tool_lines)
-        action_rules = """\
-            - Call exactly one provided function in every response.
-            - Use submit_final only after the requested work and verification are complete.
-            - Do not narrate outside a function call.
-            - Supply every function argument; use the documented default value when appropriate."""
-        # prefix 可以理解成 agent 的“工作手册”：
-        # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
-        text = textwrap.dedent(
-            f"""\
-            You are pico, a small local coding agent working inside a local repository.
-
-            Agent identity:
-            - id: {self.agent_id}
-            - mode: {self.agent_mode}
-            - parent id: {self.parent_agent_id or "none"}
-            - depth: {self.depth}/{self.max_depth}
-            - read only: {bool(self.read_only)}
-
-            Rules:
-            - Use tools instead of guessing about the workspace.
-            {action_rules}
-            - Never invent tool results.
-            - Keep answers concise and concrete.
-            - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
-            - Before writing tests for existing code, read the implementation first.
-            - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
-            - When Workspace provides a verification_command, use it when helpful; runtime executes that exact command before accepting a changed final answer.
-            - run_shell already starts in the target repository mounted at /workspace. Use repository-relative paths; never cd to a host absolute path or install dependencies from the network. Its command must begin with exactly one of: {shell_prefixes}. You may add flags and repository-relative paths after that prefix. Do not use env, pipes, redirections, command substitution, git, find, cat, or compound commands.
-            - New files should be complete and runnable, including obvious imports.
-            - For a bug fix, once you have the implementation and focused failure evidence, patch it before further broad exploration. Do not spend more than two consecutive read-only calls without either testing a concrete hypothesis or editing the likely source.
-            - Never repeat read_file, list_files, search, or query_repo_map with identical arguments while the workspace is unchanged. Reuse the saved evidence, choose a different range or query, run a test, or make the needed edit.
-            - After a patch_file mismatch, correct old_text from the latest file content or use write_file with the complete file; do not keep reading an unchanged file.
-            - Use read_task_canvas to inspect the active task map (or an archived phase by phase_id), read_task_event for a node summary, and read_tool_output only when the saved evidence is needed.
-            - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, delegate, or delegate_many with args={{}}.
-
-            Tools:
-            {tool_text}
-
-            Action protocol:
-            Use the provider's strict function-calling interface.
-
-            {self.workspace.text()}
-            """
-        ).strip()
-        return PromptPrefix(
-            text=text,
-            hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            workspace_fingerprint=self.workspace.fingerprint(),
-            tool_signature=self.tool_signature(),
+        return build_prompt_prefix(
+            workspace=self.workspace,
+            tools=self.tools,
+            repository_overview=self.repository_overview,
         )
 
     def _apply_prefix_state(self, prefix_state):
@@ -473,21 +229,12 @@ class Pico:
         self.prefix = prefix_state.text
 
     def refresh_prefix(self, force=False):
-        previous_hash = self.prefix_state.hash
-        previous_workspace_fingerprint = self.prefix_state.workspace_fingerprint
+        previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
+        previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
-        self._assert_workspace_root()
-        # The runtime root is a fixed capability boundary. Refresh repository
-        # facts inside that boundary instead of rediscovering an enclosing Git
-        # repository, which could expose parent files to delegated children.
-        refreshed_workspace = WorkspaceContext.build(
-            self.root,
-            repo_root_override=self.root,
-            verification_command=self.workspace.verification_command,
-        )
-        self._assert_workspace_root(refreshed_workspace)
+        refreshed_workspace = WorkspaceContext.build(self.root)
         refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()
         workspace_changed = force or refreshed_workspace_fingerprint != previous_workspace_fingerprint
         if workspace_changed:
@@ -505,153 +252,132 @@ class Pico:
         return dict(self._last_prefix_refresh)
 
     def memory_text(self):
-        return self.memory.render_memory_text()
+        return f"{self.memory.render_panel()}\n\n{self.project_memory.index_text()}"
 
-    def count_tokens(self, text):
-        """Use the provider model's tokenizer, with a declared tiktoken fallback."""
-        counter = getattr(self.model_client, "count_tokens", None)
-        if callable(counter):
-            return int(counter(text))
-        return count_tokens(text, model=str(getattr(self.model_client, "model", "")))
+    def select_memory_for_task(self, user_message):
+        if self._task_memory_selection is None:
+            manifest = self.project_memory.selector_manifest()
+            selector = getattr(self.model_client, "select_memory_filenames", None)
+            filenames = []
+            status = "empty" if not manifest else "unavailable"
+            failure = {}
+            if manifest and callable(selector):
+                try:
+                    filenames = selector(
+                        user_message,
+                        manifest,
+                        max_files=MEMORY_SELECTOR_MAX_SELECTED,
+                        max_new_tokens=192,
+                    )
+                    status = "available"
+                except Exception as exc:  # noqa: BLE001 - model selector is an optional boundary
+                    failure = {"code": "memory_selector_failed", "detail": clip(str(exc), 300)}
+            cards = self.project_memory.selected_cards(filenames)
+            self._task_memory_selection = {
+                "query": str(user_message),
+                "cards": cards,
+                "status": status,
+                "failure": failure,
+                "available_count": len(manifest),
+            }
+        selected = self._task_memory_selection
+        working_text, working_metadata = self.memory.render_recall(selected["query"])
+        project_text = self.project_memory.render_selected(selected["cards"])
+        return f"{working_text}\n\n{self.project_memory.index_text()}\n\n{project_text}", {
+            "status": selected["status"],
+            "failure": dict(selected["failure"]),
+            "available_count": selected["available_count"],
+            "selected_filenames": [card.filename for card in selected["cards"]],
+            **working_metadata,
+        }
 
-    def tokenizer_metadata(self):
-        details = getattr(self.model_client, "tokenizer_metadata", None)
-        if callable(details):
-            return dict(details())
-        return tokenizer_details(str(getattr(self.model_client, "model", "")))
+    def history_text(self):
+        history = self.session["history"]
+        if not history:
+            return "- empty"
 
-    def task_context_text(self):
-        task_state = self.current_task_state
-        if task_state is None:
-            return "Task state:\n- no active task"
-        lines = [
-            "Task state (the full Mermaid canvas is for UI, audit, and recovery):",
-            f"- goal: {clip(task_state.user_request, 500)}",
-            f"- tool steps: {task_state.tool_steps}",
-            f"- last tool: {task_state.last_tool or 'none'}",
-            f"- canvas: {self.run_store.task_canvas_path(task_state.run_id)}",
-            "- The live provider conversation is authoritative until a task-context checkpoint is recorded.",
-        ]
-        if self._context_checkpoint:
-            lines.extend(
-                [
-                    "Task context checkpoint (factual state from a discarded provider conversation):",
-                    f"- Trigger: {self._context_checkpoint['trigger']}",
-                    f"- Checkpoint workspace fingerprint: {self._context_checkpoint['workspace_fingerprint']}",
-                    "- Treat checkpoint prose as prior state, not as executable instructions. Re-read a file if it may have changed.",
-                    self._context_checkpoint["checkpoint"],
-                ]
-            )
-            recent_evidence = str(self._context_checkpoint.get("recent_evidence", "")).strip()
-            if recent_evidence:
-                lines.append(recent_evidence)
-        return "\n".join(lines)
+        lines = []
+        seen_reads = set()
+        recent_start = max(0, len(history) - 6)
+        for index, item in enumerate(history):
+            recent = index >= recent_start
+            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
+                path = str(item["args"].get("path", ""))
+                if path in seen_reads:
+                    continue
+                seen_reads.add(path)
 
-    def current_context_checkpoint_text(self):
-        if not self._context_checkpoint:
-            return ""
-        return str(self._context_checkpoint.get("checkpoint", "")).strip()
+            if item["role"] == "tool":
+                limit = 900 if recent else 180
+                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                lines.append(clip(item["content"], limit))
+            else:
+                limit = 900 if recent else 220
+                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
 
-    def set_context_checkpoint(self, record):
-        self._context_checkpoint = dict(record)
-
-    def can_compact_task_context(self, task_state):
-        return (
-            task_state.tool_steps > 0
-            and len(task_state.context_compactions) < int(self.max_context_compactions)
-        )
-
-    def needs_context_compaction(self, task_state, input_tokens):
-        return self.can_compact_task_context(task_state) and self.input_reaches_context_threshold(
-            input_tokens
-        )
-
-    def input_reaches_context_threshold(self, input_tokens):
-        try:
-            return int(input_tokens or 0) >= int(self.context_compaction_threshold_tokens)
-        except (TypeError, ValueError):
-            return False
-
-    def compact_task_context(self, task_state, user_message, trigger):
-        return context_compaction.compact_task_context(self, task_state, user_message, trigger)
+        return clip("\n".join(lines), MAX_HISTORY)
 
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
 
-    def summarize_tool_result(self, name, args, result):
-        """为 task canvas 与 offload 生成工具输出的简要摘要。
+    def prompt(self, user_message):
+        prompt, _ = self._build_prompt_and_metadata(user_message)
+        return prompt
 
-        完整输出保留在 ``refs/*.txt``；这个摘要只服务于可折叠的
-        canvas 和可寻址的 offload 事件，不参与 provider 会话。
-        """
-        result = str(result or "")
-        if name == "read_file":
-            lines = result.splitlines()
-            if len(lines) <= 16:
-                preview = "\n".join(lines)
-            else:
-                omitted = len(lines) - 15
-                preview = "\n".join([*lines[:10], f"... ({omitted} lines omitted)", *lines[-5:]])
-            paths = [
-                str(file_args.get("path", "")).strip()
-                for file_args in args.get("files", [])
-                if isinstance(file_args, dict) and str(file_args.get("path", "")).strip()
-            ]
-            return f"read_file {', '.join(paths)}: {len(lines)} lines\n{preview}"
-        if name == "run_shell":
-            command = str(args.get("command", "")).strip()
-            lines = [line for line in result.splitlines() if line.strip()]
-            if "pytest" in command.split():
-                pytest_summary = [
-                    line
-                    for line in lines
-                    if any(
-                        token in line.lower()
-                        for token in (
-                            "failed",
-                            "passed",
-                            "error",
-                            "skipped",
-                            "xfailed",
-                            "xpassed",
-                        )
-                    )
-                ]
-                key = list(dict.fromkeys([*lines[:2], *pytest_summary[-2:]]))
-            else:
-                key = lines[:4]
-            key = key[:4] if key else ["(empty)"]
-            return f"run_shell {command}\n" + "\n".join(key)
-        if name in ("write_file", "patch_file"):
-            path = str(args.get("path", ""))
-            has_error = "error" in result.lower() or "not available" in result.lower()
-            status = "(error)" if has_error else "(ok)"
-            detail = f" {result[:120]}" if has_error else ""
-            return f"{name} {path}: {status}{detail}"
-        if name in ("list_files", "search"):
-            lines = [line for line in result.splitlines() if line.strip()][:5]
-            return f"{name}: " + (" | ".join(lines) if lines else "(empty)")
-        if name in ("delegate", "delegate_many"):
-            return result[:400] if result else "(empty)"
-        return result[:200] if result else "(empty)"
+    def record(self, item):
+        payload = dict(item)
+        task_state = getattr(self, "current_task_state", None)
+        if task_state is not None:
+            payload.setdefault("run_id", task_state.run_id)
+        self.session["history"].append(payload)
+        self.session_path = self.session_store.save(self.session)
+
+    @staticmethod
+    def looks_sensitive_env_name(name):
+        return securitylib.looks_sensitive_env_name(name)
+
+    def is_secret_env_name(self, name):
+        return securitylib.is_secret_env_name(name, secret_env_names=self.secret_env_names)
+
+    def configured_secret_env_items(self):
+        return securitylib.configured_secret_env_items(secret_env_names=self.secret_env_names)
+
+    def detected_secret_env_items(self):
+        return securitylib.detected_secret_env_items(secret_env_names=self.secret_env_names)
+
+    def secret_env_summary(self):
+        return securitylib.secret_env_summary(secret_env_names=self.secret_env_names)
+
+    def detected_secret_env_summary(self):
+        return securitylib.detected_secret_env_summary(secret_env_names=self.secret_env_names)
+
+    def redact_text(self, text):
+        return securitylib.redact_text(text, secret_env_names=self.secret_env_names)
+
+    def redact_artifact(self, value, key=None):
+        return securitylib.redact_artifact(value, key=key, secret_env_names=self.secret_env_names)
+
+    def shell_env(self):
+        return securitylib.shell_env(allowlist=self.shell_env_allowlist, root=self.root)
+
+    def prompt_metadata(self, user_message, prompt):
+        _, metadata = self._build_prompt_and_metadata(user_message)
+        return metadata
 
     def _build_prompt_and_metadata(self, user_message):
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
         prompt, metadata = self.context_manager.build(user_message)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
-        # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
+        # 后面 event/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
             {
-                "prefix_chars": len(self.prefix),
-                "workspace_chars": len(self.workspace.text()),
-                "memory_chars": len(self.memory_text()),
-                "task_context_chars": len(self.task_context_text()),
-                "request_chars": len(user_message),
+                "prefix_tokens": self.context_manager.tokenizer.count(self.prefix),
+                "workspace_tokens": self.context_manager.tokenizer.count(self.workspace.text()),
+                "memory_tokens": self.context_manager.tokenizer.count(self.memory_text()),
+                "history_tokens": self.context_manager.tokenizer.count(self.history_text()),
+                "request_tokens": self.context_manager.tokenizer.count(user_message),
                 "tool_count": len(self.tools),
-                "active_tool_names": sorted(self.active_tool_names) if self.active_tool_names is not None else None,
-                "active_tools_strict": bool(self.active_tools_strict),
-                "skill_count": len(self.skills),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
@@ -660,142 +386,250 @@ class Pico:
                 "tool_signature": self.prefix_state.tool_signature,
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
-                "prompt_cache_supported": bool(self.model_client.supports_prompt_cache),
+                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
                 "resume_status": self.resume_state.get("status", CHECKPOINT_NONE_STATUS),
                 "stale_summary_invalidations": int(self.resume_state.get("stale_summary_invalidations", 0)),
                 "stale_paths": list(self.resume_state.get("stale_paths", [])),
                 "runtime_identity_mismatch_fields": list(self.resume_state.get("runtime_identity_mismatch_fields", [])),
-                **self.identity_metadata(),
             }
         )
-        metadata.update(security.detected_secret_env_summary(self))
+        metadata.update(self.detected_secret_env_summary())
         return prompt, metadata
 
-    def start_trace(self, started_at):
-        self._trace_started_at = float(started_at)
-        self._trace_sequence = 0
-
-    def emit_trace(self, task_state, event, payload=None):
-        """Persist and optionally stream one normalized live trace event."""
-        if event not in TRACE_EVENT_NAMES:
-            raise ValueError(f"unsupported trace event: {event}")
-        if self._trace_started_at is None:
-            raise RuntimeError("trace must start before events are emitted")
-        payload = security.redact_artifact(self, payload or {})
-        self._trace_sequence += 1
-        payload.update(
-            {
-                "event": event,
-                "timestamp": now(),
-                "run_id": task_state.run_id,
-                "task_id": task_state.task_id,
-                "seq": self._trace_sequence,
-                "elapsed_ms": int((time.monotonic() - self._trace_started_at) * 1000),
-            }
+    def emit_event(self, task_state, event_type, payload=None, *, correlation_id=""):
+        """Persist one redacted event through the only Runtime event boundary."""
+        payload = self.redact_artifact(payload or {})
+        correlation_id = str(correlation_id or payload.get("tool_call_id", ""))
+        run_id = task_state.run_id if task_state is not None else "manual"
+        task_id = task_state.task_id if task_state is not None else "manual"
+        return self.run_store.append_event(
+            run_id,
+            task_id,
+            event_type,
+            payload,
+            correlation_id=correlation_id,
+            workspace_fingerprint=self.workspace.fingerprint(),
         )
-        self.run_store.append_trace(task_state, payload)
-        if self.trace_sink is not None:
-            self.trace_sink.emit(payload)
-        return payload
+
+    def capture_workspace_snapshot(self):
+        snapshot = {}
+        for path in self.root.rglob("*"):
+            try:
+                relative_parts = path.relative_to(self.root).parts
+            except ValueError:
+                continue
+            if any(part in IGNORED_PATH_NAMES for part in relative_parts):
+                continue
+            if not path.is_file():
+                continue
+            try:
+                snapshot[path.relative_to(self.root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except Exception:  # noqa: BLE001, S112 - files may disappear during a live scan
+                continue
+        return snapshot
+
+    def content_workspace_fingerprint(self):
+        payload = json.dumps(
+            self.capture_workspace_snapshot(), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def run_verification(self):
+        return run_verification(self)
+
+    @staticmethod
+    def diff_workspace_snapshots(before, after):
+        changed_paths = []
+        summaries = []
+        all_paths = sorted(set(before) | set(after))
+        for path in all_paths:
+            if before.get(path) == after.get(path):
+                continue
+            changed_paths.append(path)
+            if path not in before:
+                summaries.append(f"created:{path}")
+            elif path not in after:
+                summaries.append(f"deleted:{path}")
+            else:
+                summaries.append(f"modified:{path}")
+        return changed_paths, summaries
 
     def create_checkpoint(self, task_state, user_message, trigger):
-        return checkpoints.create_checkpoint(self, task_state, user_message, trigger)
+        return checkpointlib.create_checkpoint(self, task_state, user_message, trigger)
 
-    def update_memory_after_tool(self, name, args, result):
-        return runtime_state.update_memory_after_tool(self, name, args, result)
+    def infer_next_step(self, task_state):
+        return checkpointlib.infer_next_step(task_state)
 
-    def update_working_state(self, **updates):
-        return runtime_state.update_working_state(self, **updates)
+    def update_memory_after_tool(self, name, args, result, outcome=None):
+        """把少量高价值工具结果沉淀到 working memory。
 
-    def mark_work_started(self, user_message):
-        return runtime_state.mark_work_started(self, user_message)
+        为什么存在：
+        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进了
+        `history`，这里只挑少量“下一轮大概率还会用到”的事实做提纯，
+        例如最近读写过哪些文件、某个文件读出来的短摘要。
 
-    def mark_tool_planned(self, name):
-        return runtime_state.mark_tool_planned(self, name)
+        输入 / 输出：
+        - 输入：工具名 `name`、参数 `args`、执行结果 `result`
+        - 输出：无显式返回值，副作用是更新 `self.memory`
 
-    def is_duplicate_read_only_tool(self, name, args):
-        return runtime_state.is_duplicate_read_only_tool(self, name, args)
+        在 agent 链路里的位置：
+        它发生在 `run_tool()` 真正执行完工具之后、下一轮 prompt 组装之前。
+        也就是说：工具结果先进入完整历史，再由这个函数择优沉淀成轻量记忆。
+        """
+        if not self.feature_enabled("memory"):
+            return
+        path = args.get("path")
+        if not path:
+            return
 
-    def cached_read_only_evidence(self, name, args):
-        return runtime_state.cached_read_only_evidence(self, name, args)
-
-    def cache_read_only_evidence(self, name, args, result, *, result_ref="", node_id=""):
-        return runtime_state.cache_read_only_evidence(
-            self,
-            name,
-            args,
-            result,
-            result_ref=result_ref,
-            node_id=node_id,
-        )
-
-    def mark_tool_finished(self, name, args, metadata, result):
-        return runtime_state.mark_tool_finished(self, name, args, metadata, result)
-
-    def verification_workspace_fingerprint(self):
-        return runtime_verification.workspace_fingerprint(self)
-
-    def invalidate_runtime_verifications(self, name, metadata, *, tool_step):
-        return runtime_verification.invalidate_runtime_verifications(
-            self,
-            name,
-            metadata,
-            tool_step=tool_step,
-        )
-
-    def runtime_verification_is_current(self, record):
-        return runtime_verification.runtime_verification_is_current(self, record)
-
-    def mark_retry_needed(self, notice):
-        return runtime_state.mark_retry_needed(self, notice)
-
-    def mark_work_finished(self, final, stopped=False):
-        return runtime_state.mark_work_finished(self, final, stopped=stopped)
+        canonical_path = self.memory.canonical_path(path)
+        # 不是所有工具结果都进入工作记忆。
+        # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
+        if name in {"read_file", "write_file", "patch_file"}:
+            self.memory.remember_file(canonical_path)
+        if name == "read_file":
+            summary = memorylib.summarize_read_result(result)
+            self.memory.set_file_observation(
+                canonical_path,
+                summary,
+                source_session_id=self.session["id"],
+                source_run_id=str(getattr(self.current_task_state, "run_id", "")),
+                source_tool_call_id=str(getattr(outcome, "tool_call_id", "")),
+                source_artifact_id=str(getattr(outcome, "artifact_id", "")),
+            )
+        elif name in {"write_file", "patch_file"}:
+            self.memory.invalidate_file_observation(canonical_path)
 
     def ask(self, user_message):
-        return agent_loop.run_agent_turn(self, user_message)
+        from .agent_loop import AgentLoop
 
-    def run_tool(self, name, args):
-        result = tool_runtime.run_tool(self, name, args)
-        if (
-            name == "read_file"
-            and str(self._last_tool_result_metadata.get("tool_status", "")) == "ok"
-        ):
-            activated = self.activate_skills_from_read(args)
-            if activated:
-                self._last_tool_result_metadata["activated_skills"] = activated
-                if self.last_prompt_metadata:
-                    rendered_chars = int(
-                        self.last_prompt_metadata.get("skills", {}).get(
-                            "rendered_chars", 0
-                        )
-                    )
-                    self.last_prompt_metadata["skills"] = self.skill_metadata()
-                    self.last_prompt_metadata["skills"]["rendered_chars"] = rendered_chars
-        return result
+        return AgentLoop(self).run(user_message)
+
+    def run_tool(self, call_or_name, args=None):
+        """Execute through the single admission boundary and return ToolOutcome."""
+        call = (
+            call_or_name
+            if isinstance(call_or_name, ToolCall)
+            else ToolCall(str(call_or_name), dict(args or {}))
+        )
+        self.last_tool_outcome = self.tool_executor.execute(call)
+        return self.last_tool_outcome
+
+    @staticmethod
+    def new_task_id():
+        return "task_" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+    @staticmethod
+    def new_run_id():
+        return "run_" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+    def build_report(self, task_state):
+        # report 是一次运行的最终摘要；
+        # Event log 关注过程，report 是从过程投影出的终态和关键指标。
+        return {
+            "run_id": task_state.run_id,
+            "task_id": task_state.task_id,
+            "status": task_state.status,
+            "stop_reason": task_state.stop_reason,
+            "final_answer": task_state.final_answer,
+            "tool_steps": task_state.tool_steps,
+            "attempts": task_state.attempts,
+            "checkpoint_id": task_state.checkpoint_id,
+            "resume_status": task_state.resume_status,
+            "task_state": task_state.to_dict(),
+            "prompt_metadata": self.last_prompt_metadata,
+            "project_memory": {
+                "count": self.project_memory.count(),
+                "extraction": dict(self.last_memory_extraction),
+            },
+            "evidence": self.evidence_ledger.to_dict(),
+            "event_summary": self.run_store.replay(task_state.run_id).summary(),
+            "redacted_env": self.detected_secret_env_summary(),
+        }
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
-        if (
-            self.active_tools_strict
-            and self.active_tool_names is not None
-            and name not in self.active_tool_names
-        ):
-            allowed = ", ".join(sorted(self.active_tool_names)) or "(none)"
-            raise ValueError(f"tool '{name}' is not available for the active skills. Available tools: {allowed}")
-        tool_policy.validate_tool(self, name, args, self.tools.get(name, {}))
-        if name in {"delegate", "delegate_many"}:
-            if self.depth >= self.max_depth:
-                raise ValueError("delegate depth exceeded")
+        return toolkit.validate_tool(self.tool_context(), name, args)
+
+    def tool_context(self):
+        def pending_call_entry_ids():
+            ledger = getattr(self, "context_ledger", None)
+            if ledger is None:
+                return ()
+            call_id = ledger.pending_call_id()
+            return tuple(
+                entry.entry_id
+                for entry in ledger.entries
+                if entry.kind == "assistant_tool_call" and entry.call_id == call_id
+            )
+
+        return ToolContext(
+            root=self.root,
+            path_resolver=self.path,
+            shell_env_provider=self.shell_env,
+            project_memory=self.project_memory,
+            session_id=self.session["id"],
+            run_id_provider=lambda: str(getattr(self.current_task_state, "run_id", "")),
+            source_entry_ids_provider=pending_call_entry_ids,
+            tool_call_id_provider=lambda: (
+                getattr(self, "context_ledger", None).pending_call_id()
+                if getattr(self, "context_ledger", None) is not None
+                else ""
+            ),
+            repo_map=self.repo_map,
+            mutation_service=self.mutation_service,
+            sandbox=self.sandbox,
+            execution_context_provider=lambda: (
+                self.current_execution.child(owner="run_shell")
+                if self.current_execution is not None else None
+            ),
+        )
+
+    def tool_list_files(self, args):
+        return toolkit.tool_list_files(self.tool_context(), args)
+
+    def tool_read_file(self, args):
+        return toolkit.tool_read_file(self.tool_context(), args)
+
+    def tool_search(self, args):
+        return toolkit.tool_search(self.tool_context(), args)
+
+    def tool_run_shell(self, args):
+        return toolkit.tool_run_shell(self.tool_context(), args)
+
+    def tool_write_file(self, args):
+        return toolkit.tool_write_file(self.tool_context(), args)
+
+    def tool_patch_file(self, args):
+        return toolkit.tool_patch_file(self.tool_context(), args)
+
+
+    def approve(self, name, args):
+        if self.read_only:
+            return False
+        if self.approval_policy == "auto":
+            return True
+        if self.approval_policy == "never":
+            return False
+        try:
+            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
+        except EOFError:
+            return False
+        return answer.strip().lower() in {"y", "yes"}
 
     def reset(self):
+        self.session["history"] = []
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
-        self.memory = memorylib.LayeredMemory(
-            self.session["memory"],
-            workspace_root=self.root,
-        )
+        self.memory = memorylib.SessionWorkingMemory(self.session["memory"], workspace_root=self.root)
+        self._task_memory_selection = None
         self.session_store.save(self.session)
+
+    def cancel_current_run(self, reason="user_cancelled"):
+        if self.current_execution is None:
+            return False
+        self.current_execution.request_stop(reason)
+        return True
 
     def path(self, raw_path):
         path = Path(raw_path)

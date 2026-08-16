@@ -1,0 +1,9 @@
+{
+  "artifact_type": "project-memory-v1",
+  "summary": {
+    "explicit_precedence": true,
+    "index_generated": true,
+    "markdown_source_of_truth": true,
+    "provenance_complete": true
+  }
+}

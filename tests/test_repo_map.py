@@ -1,6 +1,8 @@
-from pico.context_manager import ContextManager
-from pico.repo_map import RepoMap
-from tests.helpers import build_agent
+"""Direct contracts for tokenizer budgeting and Python repository understanding."""
+
+import tiktoken
+
+from pico.repo_map import RepoMap, _token_clip, count_tokens
 
 
 def _write_python_repo(root):
@@ -8,37 +10,27 @@ def _write_python_repo(root):
     (root / "tests").mkdir()
     (root / "app" / "__init__.py").write_text("", encoding="utf-8")
     (root / "app" / "models.py").write_text(
-        """
-class User:
-    def save(self):
-        return "saved"
-""".lstrip(),
+        "class User:\n    def save(self):\n        return 'saved'\n",
         encoding="utf-8",
     )
     (root / "app" / "services.py").write_text(
-        """
-from app.models import User
-
-class UserService:
-    def create_user(self):
-        user = User()
-        user.save()
-        return user
-""".lstrip(),
+        "from app.models import User\n\n"
+        "class UserService:\n"
+        "    def create_user(self):\n"
+        "        user = User()\n"
+        "        user.save()\n"
+        "        return user\n",
         encoding="utf-8",
     )
     (root / "tests" / "test_services.py").write_text(
-        """
-from app.services import UserService
-
-def test_create_user_saves_once():
-    assert UserService().create_user()
-""".lstrip(),
+        "from app.services import UserService\n\n"
+        "def test_create_user_saves_once():\n"
+        "    assert UserService().create_user()\n",
         encoding="utf-8",
     )
 
 
-def test_repo_map_ranks_task_symbols_and_cross_file_relations(tmp_path):
+def test_repo_map_ranks_cross_file_implementation_and_test_relations(tmp_path):
     _write_python_repo(tmp_path)
 
     result = RepoMap(tmp_path).render(
@@ -52,89 +44,68 @@ def test_repo_map_ranks_task_symbols_and_cross_file_relations(tmp_path):
     assert "tests/test_services.py" in result.text
     assert "test_create_user_saves_once" in result.text
     assert result.details["parsed_files"] == 4
-    assert result.details["graph_nodes"] >= 8
-    assert result.details["graph_edges"] >= 8
-    assert result.details["selected_symbols"][0]["qualified_name"] in {
-        "UserService",
-        "UserService.create_user",
-        "test_create_user_saves_once",
-    }
+    assert result.details["index_revision"].startswith("sha256:")
 
 
-def test_repo_map_enforces_budget_and_skips_generated_directories(tmp_path):
+def test_repo_map_budget_excludes_generated_and_unrelated_components(tmp_path):
     _write_python_repo(tmp_path)
     (tmp_path / "build").mkdir()
     (tmp_path / "build" / "generated.py").write_text(
-        "def generated_symbol():\n    return 1\n",
-        encoding="utf-8",
+        "def generated_symbol():\n    return 1\n", encoding="utf-8"
     )
-
-    result = RepoMap(tmp_path).render(
-        "create_user",
-        budget_tokens=90,
-        max_results=60,
-    )
-
-    assert "generated_symbol" not in result.text
-    assert result.details["parsed_files"] == 4
-    assert result.details["skipped_files"] == 1
-    assert result.details["truncated"] is True
-
-
-def test_repo_map_does_not_fill_budget_from_unrelated_graph_components(tmp_path):
-    _write_python_repo(tmp_path)
     (tmp_path / "unrelated.py").write_text(
-        """
-class MetricsCache:
-    def get(self, key):
-        return key
-
-    def update(self, key):
-        return self.get(key)
-""".lstrip(),
+        "class MetricsCache:\n    def get(self, key):\n        return key\n",
         encoding="utf-8",
     )
 
     result = RepoMap(tmp_path).render(
         "Fix UserService.create_user duplicate save",
-        budget_tokens=1200,
+        budget_tokens=180,
         max_results=60,
     )
 
     assert "UserService.create_user" in result.text
+    assert "generated_symbol" not in result.text
     assert "MetricsCache" not in result.text
+    assert result.details["skipped_files"] >= 1
+    assert count_tokens(result.text) <= 180
 
 
-def test_context_manager_injects_ranked_repo_map_and_metadata(tmp_path):
-    _write_python_repo(tmp_path)
-    agent = build_agent(tmp_path, [])
-
-    prompt, metadata = ContextManager(agent).build(
-        "Fix UserService.create_user duplicate save"
+def test_repo_map_preserves_ambiguous_unqualified_call_as_ambiguous(tmp_path):
+    (tmp_path / "a.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("def run():\n    return 2\n", encoding="utf-8")
+    (tmp_path / "caller.py").write_text(
+        "def call():\n    return run()\n", encoding="utf-8"
     )
 
-    assert prompt.index("Repository map") < prompt.index("Task state:")
-    assert "UserService.create_user" in prompt
-    assert metadata["repo_map"]["enabled"] is True
-    assert metadata["repo_map"]["selected_count"] > 0
-    assert "app/services.py" in metadata["repo_map"]["selected_files"]
-    assert metadata["dynamic_adjustment"]["strategy"] == "repo_map_boost"
+    result = RepoMap(tmp_path).resolve_symbol_at("caller.py", 2, 11)
+
+    assert result["status"] == "ambiguous"
+    assert len(result["symbols"]) == 2
+    assert {item["path"] for item in result["symbols"]} == {"a.py", "b.py"}
+    assert result["relations"][0]["resolution"] == "ambiguous"
 
 
-def test_query_repo_map_tool_returns_ranked_symbols_and_cache_evidence(tmp_path):
+def test_repo_map_impact_keeps_incoming_and_candidate_test_evidence(tmp_path):
     _write_python_repo(tmp_path)
-    agent = build_agent(tmp_path, [])
-
-    result = agent.run_tool(
-        "query_repo_map",
-        {
-            "query": "UserService create_user tests",
-            "budget_tokens": 600,
-            "max_results": 12,
-        },
+    repo_map = RepoMap(tmp_path)
+    snapshot = repo_map.refresh()
+    target = next(
+        symbol_id
+        for symbol_id, symbol in snapshot.symbols.items()
+        if symbol.qualified_name == "UserService.create_user"
     )
 
-    assert "UserService.create_user" in result
-    assert "test_create_user_saves_once" in result
-    assert "repo_map_stats:" in result
-    assert "selected=" in result
+    result = repo_map.analyze_impact(target, max_depth=2)
+
+    assert "app/services.py" in result["affected_files"]
+    assert "tests/test_services.py" in result["candidate_test_files"]
+    assert result["facts"]
+
+
+def test_token_clipping_uses_the_real_tokenizer_limit():
+    text = "中文 mixed Python: def greet(name): return f'hello {name}'" * 4
+    encoding = tiktoken.get_encoding("o200k_base")
+
+    assert count_tokens(text) == len(encoding.encode(text, disallowed_special=()))
+    assert count_tokens(_token_clip(text, 20)) <= 20

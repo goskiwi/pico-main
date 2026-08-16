@@ -1,161 +1,72 @@
-"""集中配置：所有模块共享的常量和默认值。
+"""Project-local configuration helpers."""
 
-以前这些数字散落在各个模块里，改一个默认值要翻好几个文件。
-现在统一收到这里，方便调参和测试覆盖。
-"""
+import os
+import re
+from pathlib import Path
 
-from __future__ import annotations
+ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+WORKING_FILE_LIMIT = 8
+FILE_SUMMARY_LIMIT = 6
+REPO_MAP_MAX_FILES = 2000
+REPO_MAP_MAX_FILE_BYTES = 512_000
+REPO_MAP_SCAN_MAX_ENTRIES = 20_000
+REPO_MAP_SCAN_TIMEOUT_SECONDS = 2.0
+REPO_MAP_PAGE_RANK_ITERATIONS = 32
+REPO_MAP_DAMPING = 0.85
 
-from typing import Tuple
+
+def _strip_quotes(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
-# ---------------------------------------------------------------------------
-# 运行时默认值
-# ---------------------------------------------------------------------------
+def _parse_env_line(line):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].strip()
+    if "=" not in line:
+        raise ValueError(f"invalid .env line: {line}")
+    name, value = line.split("=", 1)
+    name = name.strip()
+    if not ENV_KEY_PATTERN.match(name):
+        raise ValueError(f"invalid .env variable name: {name}")
+    return name, _strip_quotes(value)
 
-DEFAULT_MAX_STEPS: int = 32
-DEFAULT_MAX_NEW_TOKENS: int = 512
-DEFAULT_MAX_DEPTH: int = 1
-DEFAULT_APPROVAL_POLICY: str = "ask"
-DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_SECONDS: int = 90
-MAX_CONSECUTIVE_INVALID_ACTIONS: int = 8
 
-# 委派调度护栏。一个父 agent 最多同时运行三个只读子 agent，所有子 agent
-# 预留的步骤总数不能超过 12；超过预算的任务会得到明确结果而不是静默丢失。
-DELEGATE_MAX_CONCURRENCY: int = 3
-DELEGATE_TOTAL_STEP_BUDGET: int = 12
-DELEGATE_BATCH_TIMEOUT_SECONDS: float = 180.0
+def find_project_env(start):
+    current = Path(start).resolve()
+    if current.is_file():
+        current = current.parent
+    for path in (current, *current.parents):
+        env_path = path / ".env"
+        if env_path.exists():
+            return env_path
+    return None
 
-DEFAULT_FEATURE_FLAGS: dict = {
-    "memory": True,
-    # Kept separate from memory: this guard replays cached read evidence and
-    # can be disabled for an explicit, deterministic evaluation control.
-    "read_only_dedup": True,
-    "repo_map": True,
-    "context_reduction": True,
-    "prompt_cache": True,
-    "dynamic_budget": True,
-}
 
-DEFAULT_SHELL_ENV_ALLOWLIST: Tuple[str, ...] = (
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "PATH",
-    "PWD",
-    "SHELL",
-    "TERM",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "USER",
-)
+def load_project_env(start, override=True):
+    env_path = find_project_env(start)
+    if env_path is None:
+        return {}
+    loaded = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_env_line(line)
+        if parsed is None:
+            continue
+        name, value = parsed
+        loaded[name] = value
+        if override or name not in os.environ:
+            os.environ[name] = value
+    return loaded
 
-SENSITIVE_ENV_NAME_MARKERS: Tuple[str, ...] = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
-REDACTED_VALUE: str = "<redacted>"
 
-# ---------------------------------------------------------------------------
-# 上下文预算（真实 tokenizer token 数）
-# ---------------------------------------------------------------------------
-
-DEFAULT_TOTAL_BUDGET: int = 12000
-DEFAULT_SECTION_BUDGETS: dict = {
-    "prefix": 3000,
-    "memory": 1200,
-    "skills": 900,
-    "repo_map": 1800,
-    "task_context": 4200,
-}
-DEFAULT_REDUCTION_ORDER: Tuple[str, ...] = (
-    "skills",
-    "task_context",
-    "repo_map",
-    "memory",
-    "prefix",
-)
-
-# The Mermaid canvas is an audit/recovery control plane, not the live tool
-# conversation.  Fold older completed steps into a drill-down phase artifact
-# before the UI view becomes hard to navigate.
-TASK_CANVAS_MAX_ACTIVE_NODES: int = 12
-TASK_CANVAS_RETAIN_NODES: int = 8
-TASK_CANVAS_MAX_TOKENS: int = 2800
-
-# Provider-side action conversations retain exact tool results until their
-# measured input reaches this threshold. Pico then compiles a task checkpoint,
-# resets the provider conversation, and continues from that checkpoint plus a
-# small tail of original evidence. An explicit provider overflow follows the
-# same path immediately.
-CONTEXT_COMPACTION_INPUT_TOKENS: int = 24_000
-CONTEXT_COMPACTION_MAX_PER_TASK: int = 3
-CONTEXT_COMPACTION_SOURCE_TOKENS: int = 6_000
-CONTEXT_COMPACTION_CHECKPOINT_TOKENS: int = 1_600
-CONTEXT_COMPACTION_RECENT_EVIDENCE_TOKENS: int = 1_800
-CONTEXT_COMPACTION_SUMMARY_MAX_NEW_TOKENS: int = 1_200
-
-# ---------------------------------------------------------------------------
-# Task-aware Python repository map
-# ---------------------------------------------------------------------------
-
-REPO_MAP_MAX_FILES: int = 2000
-REPO_MAP_MAX_FILE_BYTES: int = 512_000
-REPO_MAP_PAGE_RANK_ITERATIONS: int = 32
-REPO_MAP_DAMPING: float = 0.85
-
-# ---------------------------------------------------------------------------
-# 工作记忆
-# ---------------------------------------------------------------------------
-
-WORKING_FILE_LIMIT: int = 8
-EPISODIC_NOTE_LIMIT: int = 12
-FILE_SUMMARY_LIMIT: int = 6
-
-# ---------------------------------------------------------------------------
-# 工作区 / 工具
-# ---------------------------------------------------------------------------
-
-MAX_TOOL_OUTPUT: int = 4000
-DOC_NAMES: Tuple[str, ...] = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-IGNORED_PATH_NAMES: frozenset = frozenset(
-    {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
-)
-
-PROTECTED_WRITE_PATH_PARTS: frozenset = frozenset(
-    {".git", ".pico", ".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
-)
-PROTECTED_WRITE_FILENAMES: frozenset = frozenset({".env", ".env.local"})
-
-ALLOWED_SHELL_COMMANDS: Tuple[Tuple[str, ...], ...] = (
-    ("python", "-m", "pytest"),
-    ("PYTHONPATH=.", "python", "-m", "pytest"),
-    ("PYTHONPATH=src", "python", "-m", "pytest"),
-    ("python", "-m", "compileall"),
-    ("pytest",),
-    ("PYTHONPATH=.", "pytest"),
-    ("PYTHONPATH=src", "pytest"),
-    ("ruff", "check"),
-    ("uv", "run", "pytest"),
-    ("uv", "run", "ruff", "check"),
-    ("uv", "run", "python", "-m", "pytest"),
-    ("uv", "run", "python", "-m", "compileall"),
-)
-
-# DANGEROUS_SHELL_PATTERNS 在这里定义但 re.compile 在 tools.py 里执行，
-# 因为 config.py 不应该有重的 import 依赖。
-_DANGEROUS_SHELL_PATTERNS_RAW: Tuple[Tuple[str, str], ...] = (
-    ("recursive forced delete", r"(?i)(^|[;&|]\s*)rm\s+[^;&|]*-[^\s;&|]*r[^\s;&|]*f|(^|[;&|]\s*)rm\s+[^;&|]*-[^\s;&|]*f[^\s;&|]*r"),
-    ("filesystem wipe target", r"(?i)\brm\s+[^;&|]*(/|~|\.\.)\s*(?:[;&|]|$)"),
-    ("hard git reset", r"(?i)\bgit\s+reset\s+--hard\b"),
-    ("forced git clean", r"(?i)\bgit\s+clean\b[^;&|]*\s-[^\s;&|]*f"),
-    ("curl pipe shell", r"(?i)\b(curl|wget)\b[^;&|]*(\||>\s*/tmp/)[^;&|]*\b(sh|bash|zsh|python|perl|ruby)\b"),
-    ("world-writable chmod", r"(?i)\bchmod\s+[^;&|]*(777|a\+w|ugo\+w)\b"),
-    ("disk overwrite", r"(?i)\bdd\s+[^;&|]*\bof=/dev/"),
-)
-
-# ---------------------------------------------------------------------------
-# 模型调用重试
-# ---------------------------------------------------------------------------
-
-DEFAULT_MODEL_MAX_RETRIES: int = 2
+def provider_env(name, legacy_names=(), default=""):
+    for env_name in (name, *legacy_names):
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    return default

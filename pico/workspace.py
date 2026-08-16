@@ -4,14 +4,19 @@
 这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
 """
 
-import subprocess
-import textwrap
 import hashlib
 import json
+import subprocess
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import DOC_NAMES, MAX_TOOL_OUTPUT
+MAX_TOOL_OUTPUT = 4000
+MAX_HISTORY = 12000
+# 这些文件最可能直接影响 agent 的行动方式。
+# 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
+DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
+IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
 
 def now():
@@ -37,17 +42,7 @@ def middle(text, limit):
 
 
 class WorkspaceContext:
-    def __init__(
-        self,
-        cwd,
-        repo_root,
-        branch,
-        default_branch,
-        status,
-        recent_commits,
-        project_docs,
-        verification_command,
-    ):
+    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
@@ -55,40 +50,28 @@ class WorkspaceContext:
         self.status = status
         self.recent_commits = recent_commits
         self.project_docs = project_docs
-        self.verification_command = verification_command
 
     @classmethod
-    def build(cls, cwd, repo_root_override=None, *, verification_command=""):
+    def build(cls, cwd, repo_root_override=None):
         cwd = Path(cwd).resolve()
-        overridden_repo_root = (
-            Path(repo_root_override).resolve()
-            if repo_root_override is not None
-            else None
-        )
-        git_cwd = overridden_repo_root or cwd
-        git_metadata_enabled = (
-            overridden_repo_root is None or (overridden_repo_root / ".git").exists()
-        )
 
         def git(args, fallback=""):
-            if not git_metadata_enabled:
-                return fallback
             try:
                 result = subprocess.run(
                     ["git", *args],
-                    cwd=git_cwd,
+                    cwd=cwd,
                     capture_output=True,
                     text=True,
                     check=True,
                     timeout=5,
                 )
                 return result.stdout.strip() or fallback
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 return fallback
 
         repo_root = (
-            overridden_repo_root
-            if overridden_repo_root is not None
+            Path(repo_root_override).resolve()
+            if repo_root_override is not None
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
         docs = {}
@@ -104,17 +87,17 @@ class WorkspaceContext:
                     continue
                 docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
 
+        default_branch = git(
+            ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main"
+        ).removeprefix("origin/") or "main"
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=(
-                lambda branch: branch[len("origin/") :] if branch.startswith("origin/") else branch
-            )(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main"),
+            default_branch=default_branch,
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
-            verification_command=str(verification_command or "").strip(),
         )
 
     def text(self):
@@ -134,7 +117,6 @@ class WorkspaceContext:
             {commits}
             - project_docs:
             {docs}
-            - verification_command: {self.verification_command or "- none"}
             """
         ).strip()
 
@@ -149,6 +131,5 @@ class WorkspaceContext:
             "status": self.status,
             "recent_commits": list(self.recent_commits),
             "project_docs": dict(self.project_docs),
-            "verification_command": self.verification_command,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()

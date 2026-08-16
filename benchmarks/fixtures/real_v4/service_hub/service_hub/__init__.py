@@ -1,1 +1,0 @@
-"""Multi-package service fixture."""

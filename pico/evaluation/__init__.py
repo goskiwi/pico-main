@@ -1,1 +1,1 @@
-"""Live-LLM repository benchmark for pico."""
+"""Evaluation and benchmark helpers."""
