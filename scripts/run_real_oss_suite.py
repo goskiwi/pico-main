@@ -39,19 +39,6 @@ def retryable_infrastructure_error(error):
     )
 
 
-def reusable_pass(path, runtime):
-    path = Path(path)
-    if not path.is_file():
-        return None
-    artifact = json.loads(path.read_text(encoding="utf-8"))
-    if (
-        artifact.get("runtime", {}).get("commit_sha") == runtime["commit_sha"]
-        and artifact.get("result", {}).get("passed") is True
-    ):
-        return artifact
-    return None
-
-
 def infrastructure_failure(task_id, runtime, model, error, attempts):
     return {
         "schema_version": "real-oss-validation-v2",
@@ -122,11 +109,6 @@ def main(argv=None):
     for task_id in load_task_ids(args.manifest):
         print(f"{task_id}: running", flush=True)
         task_artifact = task_root / f"{task_id}.json"
-        reused = reusable_pass(task_artifact, runtime)
-        if reused is not None:
-            results.append(reused)
-            print(f"{task_id}: REUSED-PASS", flush=True)
-            continue
         task_args = SimpleNamespace(
             manifest=args.manifest,
             task=task_id,

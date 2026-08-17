@@ -73,13 +73,3 @@ def test_suite_retries_only_provider_infrastructure_errors():
         RuntimeError("hidden verifier failed")
     )
 
-
-def test_suite_reuses_only_same_commit_passes(tmp_path):
-    path = tmp_path / "task.json"
-    path.write_text(json.dumps({
-        "runtime": {"commit_sha": "abc"},
-        "result": {"passed": True},
-    }))
-
-    assert SUITE_MODULE.reusable_pass(path, {"commit_sha": "abc"}) is not None
-    assert SUITE_MODULE.reusable_pass(path, {"commit_sha": "other"}) is None
