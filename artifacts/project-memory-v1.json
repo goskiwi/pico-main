@@ -1,5 +1,7 @@
 {
   "artifact_type": "project-memory-v1",
+  "evaluation_snapshot_id": "sha256:e0007db735c0b68d123e75a172d97ffa497a52db90611e295db232bbc5054df5",
+  "runtime_snapshot_id": "sha256:45cd5e7ebdf778aa12b67fd2d250d9cda4d182509931786501bc91f4a317a48b",
   "summary": {
     "explicit_precedence": true,
     "index_generated": true,

@@ -1,3 +1,5 @@
+import json
+
 from pico.evaluation.metrics import (
     run_context_governance_ablation,
     run_project_memory_evaluation,
@@ -13,6 +15,7 @@ def test_context_governance_ablation_is_budgeted(tmp_path):
     assert artifact["summary"]["within_budget_rate"] == 1.0
     assert artifact["summary"]["current_request_preserved_rate"] == 1.0
     assert artifact["summary"]["mean_token_reduction"] > 0
+    assert artifact["runtime_snapshot_id"].startswith("sha256:")
 
 
 def test_working_memory_ablation_rejects_stale_revision(tmp_path):
@@ -38,12 +41,21 @@ def test_runtime_report_uses_replayable_artifacts(tmp_path):
     working = tmp_path / "working.json"
     project = tmp_path / "project.json"
     repo = tmp_path / "repo.json"
+    harness = tmp_path / "harness.json"
+    harness.write_text(json.dumps({"summary": {
+        "passed": 5,
+        "total_tasks": 5,
+        "verifier_pass_rate": 1.0,
+        "within_budget_rate": 1.0,
+    }}))
     run_context_governance_ablation(context, repetitions=1)
     run_working_memory_ablation(working, repetitions=1)
     run_project_memory_evaluation(project)
     run_repo_map_evaluation(repo)
     report_path = tmp_path / "report.md"
-    text = write_runtime_report(report_path, context, working, project, repo)
+    text = write_runtime_report(
+        report_path, context, working, project, repo, harness_path=harness
+    )
     assert report_path.exists()
     assert "Runtime mechanisms, not model intelligence" in text
 

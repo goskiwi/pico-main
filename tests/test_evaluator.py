@@ -4,10 +4,17 @@ from pathlib import Path
 import pytest
 
 from pico.evaluation.evaluator import (
+    _portable_path,
     load_benchmark,
     run_harness_regression_v3,
     summarize_rows,
 )
+
+
+def test_portable_path_removes_local_checkout_prefix():
+    path = Path.cwd() / ".pico" / "evaluation" / "fixture"
+
+    assert _portable_path(path) == ".pico/evaluation/fixture"
 
 
 def test_native_benchmark_schema_and_no_legacy_protocol():
@@ -36,6 +43,10 @@ def test_native_harness_runs_fresh_fixtures_and_recovery(tmp_path):
     assert artifact["summary"]["pass_rate"] == 1.0
     assert artifact["summary"]["verifier_pass_rate"] == 1.0
     assert all(Path(row["run_dir"]).is_dir() for row in artifact["rows"])
+    assert all(
+        Path(row["run_dir"]).is_relative_to(Path(row["fixture_copy"]))
+        for row in artifact["rows"]
+    )
     assert {row["category"] for row in artifact["rows"]} >= {"edit", "recovery", "safety", "governance"}
 
 

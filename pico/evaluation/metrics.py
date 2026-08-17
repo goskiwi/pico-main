@@ -14,6 +14,7 @@ from ..project_memory import ProjectMemoryStore
 from ..repo_map import RepoMap
 from ..run_store import RunStore
 from ..verification import parse_verification_output
+from .provenance import evaluation_snapshot_id, runtime_snapshot_id
 
 
 def _write(path, payload):
@@ -38,7 +39,10 @@ def run_context_governance_ablation(path=Path("artifacts/context-governance-v3.j
                 "request_preserved": request in governed,
             })
     return _write(path, {
-        "artifact_type": "context-governance-v3", "rows": rows,
+        "artifact_type": "context-governance-v3",
+        "runtime_snapshot_id": runtime_snapshot_id(),
+        "evaluation_snapshot_id": evaluation_snapshot_id(),
+        "rows": rows,
         "summary": {
             "within_budget_rate": sum(row["within_budget"] for row in rows) / len(rows),
             "current_request_preserved_rate": sum(row["request_preserved"] for row in rows) / len(rows),
@@ -74,7 +78,13 @@ def run_working_memory_ablation(path=Path("artifacts/working-memory-v3.json"), r
             "hit_rate": sum(row["hit"] for row in selected) / len(selected),
             "mean_repeated_reads": sum(row["repeated_reads"] for row in selected) / len(selected),
         }
-    return _write(path, {"artifact_type": "working-memory-v3", "rows": rows, "variants": variants})
+    return _write(path, {
+        "artifact_type": "working-memory-v3",
+        "runtime_snapshot_id": runtime_snapshot_id(),
+        "evaluation_snapshot_id": evaluation_snapshot_id(),
+        "rows": rows,
+        "variants": variants,
+    })
 
 
 def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json")):
@@ -96,6 +106,8 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json"))
         )
         payload = {
             "artifact_type": "project-memory-v1",
+            "runtime_snapshot_id": runtime_snapshot_id(),
+            "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
                 "markdown_source_of_truth": (store.cards_root / card.filename).is_file(),
                 "index_generated": card.filename in store.index_text(),
@@ -115,6 +127,8 @@ def run_repo_map_evaluation(path=Path("artifacts/repo-map-v1.json")):
         result = RepoMap(root).render("where is config loaded", budget_tokens=300, max_results=10)
         payload = {
             "artifact_type": "repo-map-v1",
+            "runtime_snapshot_id": runtime_snapshot_id(),
+            "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
                 "query_hit": "load_config" in result.text,
                 "within_budget": Tokenizer().count(result.text) <= 300,
@@ -146,6 +160,8 @@ def run_runtime_governance_evaluation(path=Path("artifacts/runtime-governance-v1
         )
         payload = {
             "artifact_type": "runtime-governance-v1",
+            "runtime_snapshot_id": runtime_snapshot_id(),
+            "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
                 "hash_chain_valid": len(events) == 3,
                 "replayable_progress": store.replay("run_eval").summary()["progress_counts"].get("replan") == 1,
@@ -163,7 +179,9 @@ def write_runtime_report(
     project_memory_path=Path("artifacts/project-memory-v1.json"),
     repo_map_path=Path("artifacts/repo-map-v1.json"),
     runtime_governance_path=Path("artifacts/runtime-governance-v1.json"),
+    harness_path=Path("artifacts/harness-regression-v3.json"),
 ):
+    harness = json.loads(Path(harness_path).read_text())
     context = json.loads(Path(context_path).read_text())
     working = json.loads(Path(working_memory_path).read_text())
     project = json.loads(Path(project_memory_path).read_text())
@@ -173,6 +191,10 @@ def write_runtime_report(
     text = "\n".join([
         "# Pico Runtime Evaluation", "",
         "These deterministic artifacts measure Runtime mechanisms, not model intelligence.", "",
+        "## Native Harness regression", "",
+        f"- Passed: {harness['summary']['passed']}/{harness['summary']['total_tasks']}",
+        f"- Verifier pass rate: {harness['summary']['verifier_pass_rate']:.1%}",
+        f"- Within-budget rate: {harness['summary']['within_budget_rate']:.1%}", "",
         "## Context governance", "",
         f"- Within-budget rate: {context['summary']['within_budget_rate']:.1%}",
         f"- Current-request preservation: {context['summary']['current_request_preserved_rate']:.1%}", "",

@@ -18,6 +18,7 @@ from ..contracts import ModelAction
 from ..runtime import Pico
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext
+from .provenance import evaluation_snapshot_id, runtime_snapshot_id
 
 REQUIRED_TASK_FIELDS = {
     "id", "prompt", "fixture_repo", "allowed_tools", "step_budget",
@@ -27,6 +28,7 @@ REQUIRED_TASK_FIELDS = {
 
 class BenchmarkModel:
     model = "scripted-native-functions"
+    conversation_mode = "responses-manual-replay-v1"
     supports_prompt_cache = False
 
     def __init__(self, task):
@@ -34,9 +36,19 @@ class BenchmarkModel:
         self.step = 0
         self.patch_requested = False
         self.last_completion_metadata = {}
+        self.reset_action_session()
+
+    def reset_action_session(self):
+        self.recorded_action_results = []
+
+    def record_action_result(self, action, result):
+        self.recorded_action_results.append((action.kind, str(result)))
 
     def complete_action(self, prompt, max_new_tokens, **kwargs):
         self.step += 1
+        prompt = "\n\n".join(
+            [str(prompt), *(result for _kind, result in self.recorded_action_results)]
+        )
         behavior = self.task.get("behavior", "")
         if behavior == "path_escape" and self.step == 1:
             return ModelAction.tool("read_file", {"path": "../outside.txt", "start": 1, "end": 20})
@@ -93,6 +105,14 @@ def _fixture_digest(tasks):
     return "sha256:" + digest.hexdigest()
 
 
+def _portable_path(path):
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
 def summarize_rows(rows):
     total = len(rows)
     passed = sum(bool(row["passed"]) for row in rows)
@@ -124,7 +144,10 @@ class BenchmarkEvaluator:
         shutil.copytree(Path(task["fixture_repo"]), fixture, dirs_exist_ok=True)
         agent = Pico(
             model_client=BenchmarkModel(task),
-            workspace=WorkspaceContext.build(fixture),
+            # Benchmark fixtures deliberately live under a parent workspace by
+            # default.  Treat the fresh copy as the repository root so Git
+            # discovery cannot redirect tool mutations to the outer checkout.
+            workspace=WorkspaceContext.build(fixture, repo_root_override=fixture),
             session_store=SessionStore(fixture / ".pico" / "sessions"),
             approval_policy="auto",
             max_steps=int(task["step_budget"]),
@@ -145,7 +168,7 @@ class BenchmarkEvaluator:
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,
             "tool_steps": state.tool_steps, "stop_reason": state.stop_reason, "answer": answer,
-            "fixture_copy": str(fixture), "run_dir": str(run_dir),
+            "fixture_copy": _portable_path(fixture), "run_dir": _portable_path(run_dir),
             "failure_category": "" if passed else ("verifier_failed" if not verified else "runtime_failed"),
         }
 
@@ -156,6 +179,8 @@ class BenchmarkEvaluator:
             "schema_version": 3,
             "artifact_type": "harness-regression-v3",
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "runtime_snapshot_id": runtime_snapshot_id(),
+            "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": summarize_rows(rows),
             "rows": rows,
             "reproducibility": {

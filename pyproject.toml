@@ -28,3 +28,6 @@ include = ["pico*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "docker: requires the built Pico Docker sandbox image and a running daemon",
+]

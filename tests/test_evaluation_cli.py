@@ -1,0 +1,37 @@
+from scripts.run_evaluations import evaluation_failures
+
+
+def passing_results():
+    return {
+        "harness": {"summary": {"passed": 5, "total_tasks": 5}},
+        "context": {
+            "summary": {
+                "within_budget_rate": 1.0,
+                "current_request_preserved_rate": 1.0,
+            }
+        },
+        "working_memory": {
+            "variants": {
+                "memory_on": {"hit_rate": 1.0},
+                "stale_revision": {"hit_rate": 0.0},
+            }
+        },
+        "project_memory": {"summary": {"explicit_precedence": True}},
+        "repo_map": {"summary": {"query_hit": True}},
+        "runtime_governance": {"summary": {"hash_chain_valid": True}},
+    }
+
+
+def test_evaluation_failures_accepts_all_passing_contracts():
+    assert evaluation_failures(passing_results()) == []
+
+
+def test_evaluation_failures_reports_harness_and_mechanism_regressions():
+    results = passing_results()
+    results["harness"]["summary"]["passed"] = 4
+    results["repo_map"]["summary"]["query_hit"] = False
+
+    assert evaluation_failures(results) == [
+        "native Harness passed 4/5",
+        "repo_map failed checks: query_hit",
+    ]

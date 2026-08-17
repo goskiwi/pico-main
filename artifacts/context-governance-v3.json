@@ -1,5 +1,6 @@
 {
   "artifact_type": "context-governance-v3",
+  "evaluation_snapshot_id": "sha256:e0007db735c0b68d123e75a172d97ffa497a52db90611e295db232bbc5054df5",
   "rows": [
     {
       "governed_tokens": 1110,
@@ -65,6 +66,7 @@
       "within_budget": true
     }
   ],
+  "runtime_snapshot_id": "sha256:45cd5e7ebdf778aa12b67fd2d250d9cda4d182509931786501bc91f4a317a48b",
   "summary": {
     "current_request_preserved_rate": 1.0,
     "mean_token_reduction": 12224.333333333334,
