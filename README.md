@@ -103,6 +103,7 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Real Docker containment | 1/1 | 实际验证 workspace 只读、`.env.local` 隐藏和禁网 |
+| Frozen Click OSS task | 1/1 | clean commit；hidden verifier、mutation scope、event chain、provider continuation 全通过 |
 
 冻结 Click 任务可以从精确上游 commit 重新物化并运行：
 
@@ -112,7 +113,7 @@ docker build -f docker/sandbox.Dockerfile -t pico/sandbox:latest .
 uv run python scripts/run_real_oss_validation.py --model gpt-5.6-luna
 ```
 
-Real OSS runner 强制要求 clean worktree；只有提交后的运行结果才可作为公开证据。确定性工件分别通过 `runtime_snapshot_id` 与 `evaluation_snapshot_id` 绑定 Runtime 和评测实现。
+Real OSS runner 强制要求 clean worktree；当前结果见 `artifacts/real-oss-validation.{json,md}`，绑定 commit `c41d251`。确定性工件分别通过 `runtime_snapshot_id` 与 `evaluation_snapshot_id` 绑定 Runtime 和评测实现。
 
 面试展示顺序见 [`docs/review-pack/interview-demo.md`](docs/review-pack/interview-demo.md)。
 

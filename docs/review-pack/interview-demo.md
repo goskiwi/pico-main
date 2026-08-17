@@ -5,7 +5,7 @@
 1. Open `pico/agent_loop.py` and describe the loop as model proposal → staged admission → evidence → progress decision → checkpoint → completion gate.
 2. Run `uv run python scripts/demo_runtime.py` to show a deterministic native-function read/patch flow and its persisted report.
 3. Run `uv run python scripts/run_evaluations.py`; point out that the command fails closed and the Native Harness covers edit, recovery, safety, and governance.
-4. After committing the Runtime, run the frozen Click validation from a clean worktree; only then retain and show its JSON/Markdown evidence.
+4. Open `artifacts/real-oss-validation.md`: the clean-commit Click run passed its hidden verifier, mutation scope, event chain, and provider-continuation checks.
 
 ## Five-minute deep dive
 

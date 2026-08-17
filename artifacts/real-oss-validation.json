@@ -1,0 +1,55 @@
+{
+  "artifact_type": "real-oss-validation",
+  "captured_at": "2026-08-17T11:10:35.278186+00:00",
+  "model": "gpt-5.6-luna",
+  "result": {
+    "changed_files": [
+      "src/click/utils.py"
+    ],
+    "checks": {
+      "event_chain": {
+        "errors": [],
+        "event_count": 76,
+        "ok": true
+      },
+      "hidden_verifier": {
+        "exit_code": 0,
+        "ok": true,
+        "stderr": "",
+        "stdout": ".                                                                        [100%]\n1 passed in 0.00s\n",
+        "stop_reason": ""
+      },
+      "mutation_scope": {
+        "forbidden_changes": [],
+        "missing_required_globs": [],
+        "ok": true,
+        "out_of_scope_changes": []
+      },
+      "provider_continuation": {
+        "ok": true,
+        "prompt_builds": 11,
+        "provider_session_resets": 0,
+        "reused_turns": 10
+      }
+    },
+    "duration_ms": 90824,
+    "final_answer": "Fixed `click.echo` in `src/click/utils.py` so `None` becomes text output while empty `bytes` and `bytearray` remain binary when appending a newline. Binary files now receive `b\"\\n\"` without a `TypeError`.\n\nVerification: `PYTHONPATH=src pytest -q tests/test_utils.py::test_echo` passed (`1 passed`). The broader `-k echo` run had unrelated sandbox I/O errors; no tests were modified.",
+    "passed": true,
+    "run_id": "run_20260817-110903-dd5b2b",
+    "status": "completed",
+    "stop_reason": "final_answer_returned",
+    "tool_steps": 10
+  },
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "c41d2515e9fad303212abf1efac9f117edbc64c9",
+    "working_tree_dirty": false
+  },
+  "runtime_snapshot_id": "sha256:980cb7c3785d7a929d87b8206ab177ede82d5c9267e607aeaee62c4dbe708e44",
+  "schema_version": "real-oss-validation-v2",
+  "task": {
+    "id": "click_empty_bytes_echo",
+    "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
+    "source_repository": "https://github.com/pallets/click.git"
+  }
+}
