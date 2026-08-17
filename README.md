@@ -105,6 +105,7 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 | Real Docker containment | 1/1 | 实际验证 workspace 只读、`.env.local` 隐藏和禁网 |
 | Frozen Click OSS task | 1/1 | clean commit；hidden verifier、mutation scope、event chain、provider continuation 全通过 |
 | Five-repository fixture preflight | 5/5 | 每个 hidden verifier 均在对应 pre-fix commit 上失败，具备区分力 |
+| Five-repository Real OSS suite | 4/5 | clean commit `08c3283`；urllib3 在 14 步预算内仅完成定位、未修改代码 |
 
 五仓库冻结任务集可以从精确上游 commit 重新物化并运行：
 
@@ -116,6 +117,7 @@ uv run python scripts/run_real_oss_suite.py --model gpt-5.6-luna
 
 Real OSS runner 强制要求 clean worktree；当前结果见 `artifacts/real-oss-validation.{json,md}`，绑定 commit `c41d251`。确定性工件分别通过 `runtime_snapshot_id` 与 `evaluation_snapshot_id` 绑定 Runtime 和评测实现。
 五题物化 provenance 与 preflight 分别见 `artifacts/real-oss-fixtures/.real_oss_suite.materialization.json` 和 `artifacts/real-oss-preflight.json`。完整五题模型运行只在所有任务获得真实终态后发布；provider 基础设施失败不会计入任务通过率。
+五题真实模型结果见 `artifacts/real-oss-suite-v1.{json,md}`。该次固定运行没有选择性重跑失败题；4/5 是可复核的回归结果，不解释为通用成功率。
 
 面试展示顺序见 [`docs/review-pack/interview-demo.md`](docs/review-pack/interview-demo.md)。
 
