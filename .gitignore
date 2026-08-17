@@ -35,6 +35,11 @@ tmp/
 artifacts/
 release/
 readme_intro_locked/
+output/
+
+# Local editor and agent metadata
+.idea/
+.serena/
 
 # Local secrets and provider configuration
 .env
