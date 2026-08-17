@@ -13,7 +13,17 @@ from .contracts import (
     canonical_fingerprint,
 )
 from .recovery import RecoveryPolicy
-from .workspace import clip
+from .workspace import MAX_TOOL_OUTPUT
+
+
+def bounded_tool_output(content, limit=MAX_TOOL_OUTPUT):
+    content = str(content)
+    if len(content) <= limit:
+        return content
+    marker = f"\n...[bounded preview; omitted {len(content) - limit} chars]...\n"
+    available = max(0, limit - len(marker))
+    head = available * 3 // 5
+    return content[:head] + marker + content[-(available - head) :]
 
 
 class ToolExecutor:
@@ -139,7 +149,8 @@ class ToolExecutor:
             correlation_id=call.call_id,
         )
         try:
-            content = clip(tool["run"](args))
+            artifact_content = str(tool["run"](args))
+            content = bounded_tool_output(artifact_content)
             after = agent.capture_workspace_snapshot() if tool["risky"] else before
             paths, diff = agent.diff_workspace_snapshots(before, after)
             memory_after = (
@@ -164,6 +175,7 @@ class ToolExecutor:
                 "completed" if status in {"ok", "partial_success"} else "failed",
                 side_effect, content, started, failure=failure, affected_paths=paths,
                 diff_summary=diff, risky=tool["risky"], effect_scope=effect_scope,
+                artifact_content=artifact_content,
             )
             agent.update_memory_after_tool(name, args, content, outcome)
         except Exception as exc:  # noqa: BLE001 - tool boundary must capture arbitrary runner failures
@@ -242,11 +254,14 @@ class ToolExecutor:
     def _outcome(
         self, call, fingerprint, admission, status, execution_state, side_effect_state,
         content, started, *, failure=None, affected_paths=(), diff_summary=(), risky=False,
-        security_event_type="", effect_scope="workspace",
+        security_event_type="", effect_scope="workspace", artifact_content=None,
     ):
         run_id = self.agent.current_task_state.run_id if self.agent.current_task_state else "manual"
         descriptor = self.agent.artifact_store.write_tool_output(
-            run_id, call.call_id, call.name, content,
+            run_id,
+            call.call_id,
+            call.name,
+            content if artifact_content is None else artifact_content,
         )
         duration_ms = int((time.monotonic() - started) * 1000)
         recovery = (

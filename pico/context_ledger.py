@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from .contracts import FailureInfo, ToolOutcome, canonical_fingerprint
 
 CONTEXT_LEDGER_SCHEMA = "context-ledger-v3"
-INLINE_TOOL_OUTPUT_BYTES = 1200
+INLINE_TOOL_OUTPUT_BYTES = 4500
 VISIBLE_KINDS = frozenset(
     {"user", "assistant_tool_call", "tool_result", "guidance", "final", "compaction_summary"}
 )
@@ -216,13 +216,23 @@ class ContextLedger:
     @staticmethod
     def _tool_projection(outcome):
         content = str(outcome.content)
-        size = len(content.encode("utf-8"))
-        if size <= INLINE_TOOL_OUTPUT_BYTES:
-            return content, "inline", size
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        preview = _clip(" | ".join(lines[:4]), 520)
-        reference = f"Full output: artifact={outcome.artifact_id}" if outcome.artifact_id else "Full output stored outside prompt"
-        return f"{preview}\n[{reference}; bytes={size}]", "artifact_reference", size
+        visible_size = len(content.encode("utf-8"))
+        original_size = int((outcome.artifact or {}).get("size_bytes", visible_size))
+        if visible_size <= INLINE_TOOL_OUTPUT_BYTES:
+            return content, "inline", original_size
+        head = content[:320].rstrip()
+        tail = content[-1100:].lstrip()
+        preview = f"{head}\n... [bounded preview] ...\n{tail}"
+        reference = (
+            f"Full audit output: artifact={outcome.artifact_id}"
+            if outcome.artifact_id
+            else "Full output stored outside prompt"
+        )
+        return (
+            f"{preview}\n[{reference}; bytes={original_size}]",
+            "artifact_reference",
+            original_size,
+        )
 
     def append_tool_result(self, outcome):
         pending = self.pending_call_id()

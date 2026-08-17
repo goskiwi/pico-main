@@ -12,12 +12,21 @@ OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
 
 
 class FakeModelClient:
+    conversation_mode = "responses-manual-replay-v1"
+
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []
         self.action_tool_surfaces = []
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
+        self.reset_action_session()
+
+    def reset_action_session(self):
+        self.recorded_action_results = []
+
+    def record_action_result(self, action, result):
+        self.recorded_action_results.append((action.kind, str(result)))
 
     def complete(self, prompt, max_new_tokens, **kwargs):
         self.prompts.append(prompt)
@@ -231,6 +240,8 @@ def _action_from_response(data, action_tools):
 
 
 class OpenAICompatibleModelClient:
+    conversation_mode = "responses-manual-replay-v1"
+
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
@@ -243,10 +254,36 @@ class OpenAICompatibleModelClient:
             host in self.base_url for host in ("openai.com", "right.codes")
         )
         self.last_completion_metadata = {}
+        self._last_response_data = {}
+        self.reset_action_session()
+
+    def reset_action_session(self):
+        self._action_input = []
+        self._pending_call_ids = []
+
+    def record_action_result(self, action, result):
+        result = str(result)
+        if self._pending_call_ids:
+            self._action_input.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result,
+                }
+                for call_id in self._pending_call_ids
+            )
+            self._pending_call_ids = []
+            return
+        self._action_input.append(
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": result}],
+            }
+        )
 
     def complete(
         self, prompt, max_new_tokens, prompt_cache_key=None,
-        prompt_cache_retention=None, action_tools=None,
+        prompt_cache_retention=None, action_tools=None, input_items=None,
     ):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
@@ -265,9 +302,10 @@ class OpenAICompatibleModelClient:
         落到 provider API 的地方。
         """
         self.last_completion_metadata = {}
+        self._last_response_data = {}
         payload = {
             "model": self.model,
-            "input": [
+            "input": list(input_items) if input_items is not None else [
                 {
                     "role": "user",
                     "content": [
@@ -280,6 +318,8 @@ class OpenAICompatibleModelClient:
             ],
             "max_output_tokens": max_new_tokens,
             "stream": False,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
         }
         if action_tools is not None:
             payload["tools"] = list(action_tools)
@@ -341,6 +381,7 @@ class OpenAICompatibleModelClient:
         ) or body_text.lstrip().startswith("data:"):
             text, response_data = _extract_openai_response_from_sse(body_text)
             if isinstance(response_data, dict) and response_data:
+                self._last_response_data = response_data
                 # 这些元数据会一路传回 Runtime，进入 event 和 report，
                 # 用来观察 prompt cache 是否真的命中。
                 self.last_completion_metadata = {
@@ -371,6 +412,7 @@ class OpenAICompatibleModelClient:
             )
         if data.get("error"):
             raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
+        self._last_response_data = data
         self.last_completion_metadata = {
             "prompt_cache_supported": self.supports_prompt_cache,
             "prompt_cache_key": prompt_cache_key,
@@ -385,13 +427,33 @@ class OpenAICompatibleModelClient:
         self, prompt, max_new_tokens, *, action_tools,
         prompt_cache_key=None, prompt_cache_retention=None,
     ):
-        return self.complete(
+        if not self._action_input:
+            self._action_input.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": str(prompt)}],
+                }
+            )
+        if self._pending_call_ids:
+            raise RuntimeError("pending Responses function call has no recorded output")
+        action = self.complete(
             prompt,
             max_new_tokens,
             prompt_cache_key=prompt_cache_key,
             prompt_cache_retention=prompt_cache_retention,
             action_tools=action_tools,
+            input_items=self._action_input,
         )
+        output = self._last_response_data.get("output", [])
+        if isinstance(output, list):
+            self._action_input.extend(item for item in output if isinstance(item, dict))
+            self._pending_call_ids = [
+                str(item.get("call_id") or item.get("id") or "")
+                for item in output
+                if item.get("type") == "function_call"
+                and str(item.get("call_id") or item.get("id") or "")
+            ]
+        return action
 
     def select_memory_filenames(self, query, memories, *, max_files, max_new_tokens):
         prompt = (

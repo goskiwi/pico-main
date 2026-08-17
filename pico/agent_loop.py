@@ -112,13 +112,16 @@ class AgentLoop:
         if ledger.reconciled_outcomes:
             agent.run_store.write_task_state(task_state)
 
+        agent.model_client.reset_action_session()
+        prompt_snapshot = None
+
         tool_steps = task_state.tool_steps
         attempts = task_state.attempts
         max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
         execution_stop = ""
 
         # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
-        # 1. 感知：重新组 prompt，把当前状态整理给模型看
+        # 1. 感知：首次或 provider session 重置后组装 prompt
         # 2. 决策：让模型返回一个工具调用，或一个最终答案
         # 3. 行动：如果是工具调用，就执行工具
         # 4. 记录：把结果写回 history / task_state / event log / memory
@@ -139,15 +142,27 @@ class AgentLoop:
             task_state.record_attempt()
             agent.run_store.write_task_state(task_state)
             prompt_started_at = time.monotonic()
-            prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
-            if progress.observe_context(prompt_metadata.get("ledger_generation", ledger.generation)):
+            prompt_reused = prompt_snapshot is not None
+            if prompt_snapshot is None:
+                prompt, prompt_metadata = agent._build_prompt_and_metadata(user_message)
+                prompt_snapshot = (prompt, dict(prompt_metadata))
+            else:
+                prompt, original_metadata = prompt_snapshot
+                prompt_metadata = dict(original_metadata)
+            prompt_metadata["prompt_reused"] = prompt_reused
+            prompt_metadata["provider_session_active"] = prompt_reused
+            if not prompt_reused and progress.observe_context(
+                prompt_metadata.get("ledger_generation", ledger.generation)
+            ):
                 agent.emit_event(
                     task_state,
                     "context_folded",
                     {"generation": progress.context_generation},
                 )
             memory_audit = dict(prompt_metadata.get("memory_retrieval", {}) or {})
-            if memory_audit.get("available_count") or memory_audit.get("selected_filenames"):
+            if not prompt_reused and (
+                memory_audit.get("available_count") or memory_audit.get("selected_filenames")
+            ):
                 agent.emit_event(task_state, "memory_selection", memory_audit)
             agent.emit_event(
                 task_state,
@@ -157,7 +172,7 @@ class AgentLoop:
                     "duration_ms": int((time.monotonic() - prompt_started_at) * 1000),
                 },
             )
-            if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
+            if not prompt_reused and prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
                 checkpoint = agent.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
                 agent.run_store.write_task_state(task_state)
                 agent.emit_event(
@@ -168,7 +183,7 @@ class AgentLoop:
                         "trigger": "freshness_mismatch",
                     },
                 )
-            elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
+            elif not prompt_reused and prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
                 agent.emit_event(
                     task_state,
                     "runtime_identity_mismatch",
@@ -186,7 +201,7 @@ class AgentLoop:
                         "trigger": "workspace_mismatch",
                     },
                 )
-            if prompt_metadata.get("budget_reductions"):
+            if not prompt_reused and prompt_metadata.get("budget_reductions"):
                 checkpoint = agent.create_checkpoint(task_state, user_message, trigger="context_reduction")
                 agent.run_store.write_task_state(task_state)
                 agent.emit_event(
@@ -242,6 +257,37 @@ class AgentLoop:
                     "duration_ms": int((time.monotonic() - model_started_at) * 1000),
                 },
             )
+            provider_input_tokens = completion_metadata.get("input_tokens")
+            reset_provider_session = (
+                isinstance(provider_input_tokens, int)
+                and provider_input_tokens + agent.max_new_tokens
+                >= agent.context_manager.total_budget
+            )
+
+            def continue_provider(
+                feedback,
+                *,
+                tool_call_id="",
+                should_reset=reset_provider_session,
+                input_tokens=provider_input_tokens,
+                current_action=action,
+            ):
+                nonlocal prompt_snapshot
+                if should_reset:
+                    agent.model_client.reset_action_session()
+                    prompt_snapshot = None
+                    agent.emit_event(
+                        task_state,
+                        "provider_session_reset",
+                        {
+                            "reason": "input_threshold",
+                            "input_tokens": input_tokens,
+                            "tool_call_id": tool_call_id,
+                        },
+                        correlation_id=tool_call_id,
+                    )
+                    return
+                agent.model_client.record_action_result(current_action, feedback)
 
             if action.kind == "tool":
                 if tool_steps >= agent.max_steps:
@@ -279,6 +325,18 @@ class AgentLoop:
                 if guidance:
                     ledger.append_guidance(guidance)
                     agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                if tool_steps >= agent.max_steps:
+                    budget_guidance = (
+                        "Runtime tool budget exhausted. Do not call another tool; "
+                        "use submit_final now with the available evidence."
+                    )
+                    ledger.append_guidance(budget_guidance)
+                    agent.record({"role": "assistant", "content": budget_guidance, "created_at": now()})
+                    guidance = "\n".join(part for part in (guidance, budget_guidance) if part)
+                provider_result = outcome.content
+                if guidance:
+                    provider_result += "\n\nRuntime guidance: " + guidance
+                continue_provider(provider_result, tool_call_id=call.call_id)
                 checkpoint = agent.create_checkpoint(task_state, user_message, trigger="tool_executed")
                 agent.run_store.write_task_state(task_state)
                 agent.emit_event(
@@ -292,13 +350,6 @@ class AgentLoop:
                 if progress_decision.decision == "stop":
                     execution_stop = "progress_stalled"
                     break
-                if tool_steps >= agent.max_steps:
-                    guidance = (
-                        "Runtime tool budget exhausted. Do not call another tool; "
-                        "use submit_final now with the available evidence."
-                    )
-                    ledger.append_guidance(guidance)
-                    agent.record({"role": "assistant", "content": guidance, "created_at": now()})
                 continue
 
             if action.kind == "retry":
@@ -310,6 +361,10 @@ class AgentLoop:
                 if guidance:
                     ledger.append_guidance(guidance)
                     agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                retry_notice = action.content
+                if guidance:
+                    retry_notice += "\n\nRuntime guidance: " + guidance
+                continue_provider(retry_notice)
                 agent.run_store.write_task_state(task_state)
                 if progress_decision.decision == "stop":
                     execution_stop = "progress_stalled"
@@ -323,6 +378,7 @@ class AgentLoop:
                 ledger.append_guidance(guidance)
                 agent.record({"role": "assistant", "content": guidance, "created_at": now()})
                 agent.emit_event(task_state, "completion_blocked", {"status": "syntax_invalid", "reason": guidance})
+                continue_provider(guidance)
                 continue
             preliminary = completion_gate.assess()
             if (agent.evidence_ledger.changed_paths or not preliminary.allowed) and agent.verification_command:
@@ -343,6 +399,7 @@ class AgentLoop:
                     ledger.append_guidance(guidance)
                     agent.record({"role": "assistant", "content": guidance, "created_at": now()})
                     agent.emit_event(task_state, "completion_blocked", {"status": "verification_failed", "reason": guidance})
+                    continue_provider(guidance)
                     continue
                 completion_gate.observe_verification(True)
             decision = completion_gate.assess()
@@ -351,6 +408,7 @@ class AgentLoop:
                 ledger.append_guidance(guidance)
                 agent.record({"role": "assistant", "content": guidance, "created_at": now()})
                 agent.emit_event(task_state, "completion_blocked", {"status": decision.status, "reason": decision.reason})
+                continue_provider(guidance)
                 continue
             ledger.append_final(final)
             agent.record({"role": "assistant", "content": final, "created_at": now()})

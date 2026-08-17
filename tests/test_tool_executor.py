@@ -57,6 +57,27 @@ def test_artifact_integrity_verification_detects_tampering(tmp_path):
         raise AssertionError("tampered artifact was accepted")
 
 
+def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
+    target = tmp_path / "large.txt"
+    target.write_text(
+        "prefix\n" + "x" * 4500 + "middle-only-marker" + "x" * 4500
+        + "\nfull-artifact-tail\n"
+    )
+    agent = build_agent(tmp_path)
+
+    outcome = agent.run_tool(
+        ToolCall("read_file", {"path": "large.txt", "start": 1, "end": 20}, "call_large")
+    )
+
+    artifact = (
+        tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
+    )
+    assert len(outcome.content) < len(artifact.read_text(encoding="utf-8"))
+    assert "middle-only-marker" not in outcome.content
+    assert "full-artifact-tail" in outcome.content
+    assert "full-artifact-tail" in artifact.read_text(encoding="utf-8")
+    assert agent.artifact_store.verify("manual", outcome.artifact_id)["size_bytes"] > 8000
+
 def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
     agent = build_agent(tmp_path)
     ledger = ContextLedger("run_memory", agent.run_store)

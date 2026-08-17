@@ -42,31 +42,34 @@ def find_project_env(start):
     if current.is_file():
         current = current.parent
     for path in (current, *current.parents):
-        env_path = path / ".env"
-        if env_path.exists():
-            return env_path
+        for name in (".env.local", ".env"):
+            env_path = path / name
+            if env_path.is_file():
+                return env_path
     return None
 
 
 def load_project_env(start, override=True):
-    env_path = find_project_env(start)
-    if env_path is None:
+    selected = find_project_env(start)
+    if selected is None:
         return {}
+    env_paths = [selected]
+    sibling = selected.with_name(".env")
+    local = selected.with_name(".env.local")
+    if sibling.is_file() and local.is_file():
+        env_paths = [sibling, local]
     loaded = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        parsed = _parse_env_line(line)
-        if parsed is None:
-            continue
-        name, value = parsed
-        loaded[name] = value
-        if override or name not in os.environ:
-            os.environ[name] = value
+    for env_path in env_paths:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            parsed = _parse_env_line(line)
+            if parsed is None:
+                continue
+            name, value = parsed
+            loaded[name] = value
+            if override or name not in os.environ:
+                os.environ[name] = value
     return loaded
 
 
-def provider_env(name, legacy_names=(), default=""):
-    for env_name in (name, *legacy_names):
-        value = os.environ.get(env_name)
-        if value:
-            return value
-    return default
+def provider_env(name, default=""):
+    return os.environ.get(name) or default

@@ -49,6 +49,56 @@ def final_response(answer="done", *, usage=None):
     return Response(json.dumps(data))
 
 
+def tool_response(call_id="call_read"):
+    return Response(json.dumps({
+        "output": [{
+            "type": "function_call",
+            "name": "read_file",
+            "call_id": call_id,
+            "arguments": json.dumps({"path": "README.md"}),
+        }]
+    }))
+
+
+def test_action_session_replays_native_output_and_exact_tool_result():
+    instance = client()
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(json.loads(request.data))
+        return tool_response() if len(requests) == 1 else final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        action = instance.complete_action("initial prompt", 32, action_tools=TOOLS)
+        instance.record_action_result(action, "exact bounded tool result")
+        final = instance.complete_action("replacement prompt", 32, action_tools=TOOLS)
+
+    assert final == ModelAction.final("done")
+    assert requests[0]["input"][0]["content"][0]["text"] == "initial prompt"
+    assert requests[0]["store"] is False
+    assert requests[0]["include"] == ["reasoning.encrypted_content"]
+    assert requests[1]["input"][0]["content"][0]["text"] == "initial prompt"
+    assert requests[1]["input"][1]["type"] == "function_call"
+    assert requests[1]["input"][2] == {
+        "type": "function_call_output",
+        "call_id": "call_read",
+        "output": "exact bounded tool result",
+    }
+    assert "replacement prompt" not in json.dumps(requests[1]["input"])
+
+
+def test_action_session_requires_output_or_explicit_reset():
+    instance = client()
+    with patch("urllib.request.urlopen", return_value=tool_response()):
+        instance.complete_action("initial", 32, action_tools=TOOLS)
+    with pytest.raises(RuntimeError, match="no recorded output"):
+        instance.complete_action("ignored", 32, action_tools=TOOLS)
+
+    instance.reset_action_session()
+    with patch("urllib.request.urlopen", return_value=final_response()):
+        assert instance.complete_action("fresh", 32, action_tools=TOOLS).kind == "final"
+
+
 @pytest.mark.parametrize("status", [408, 429, 500, 503])
 def test_transient_http_status_is_retried(status):
     error = urllib.error.HTTPError(

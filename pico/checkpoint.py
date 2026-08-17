@@ -5,7 +5,7 @@ import uuid
 from .features import memory as memorylib
 from .workspace import clip, now
 
-CHECKPOINT_SCHEMA_VERSION = "checkpoint-v4"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint-v5"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 CHECKPOINT_FULL_VALID_STATUS = "full-valid"
 CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"
@@ -16,6 +16,7 @@ RUNTIME_IDENTITY_KEYS = (
     "cwd",
     "model",
     "model_client",
+    "provider_conversation_mode",
     "approval_policy",
     "read_only",
     "max_steps",
@@ -36,6 +37,7 @@ def current_runtime_identity(agent):
         "cwd": str(agent.root),
         "model": str(getattr(agent.model_client, "model", "")),
         "model_client": agent.model_client.__class__.__name__,
+        "provider_conversation_mode": str(agent.model_client.conversation_mode),
         "approval_policy": agent.approval_policy,
         "read_only": bool(agent.read_only),
         "max_steps": int(agent.max_steps),

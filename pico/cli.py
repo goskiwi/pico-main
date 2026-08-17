@@ -60,7 +60,7 @@ def _effective_model(args):
     explicit_model = getattr(args, "model", None)
     if explicit_model:
         return explicit_model
-    return provider_env("PICO_OPENAI_MODEL", ("OPENAI_MODEL",), DEFAULT_OPENAI_MODEL)
+    return provider_env("PICO_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
 
 
 def _configured_secret_names(args):
@@ -78,12 +78,9 @@ def _build_model_client(args):
     """Build the single supported Responses transport."""
     model = _effective_model(args)
     base_url = getattr(args, "base_url", None) or provider_env(
-        "PICO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL
+        "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
-    api_key = provider_env(
-        "PICO_OPENAI_API_KEY",
-        ("OPENAI_API_KEY", "PICO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY"),
-    )
+    api_key = provider_env("PICO_OPENAI_API_KEY")
     return OpenAICompatibleModelClient(
         model=model,
         base_url=base_url,

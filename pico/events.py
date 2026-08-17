@@ -21,6 +21,7 @@ EVENT_TYPES = frozenset(
         "operation_started",
         "progress_decided",
         "prompt_built",
+        "provider_session_reset",
         "run_finished",
         "run_resumed",
         "run_started",

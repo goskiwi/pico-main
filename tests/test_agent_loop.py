@@ -49,6 +49,59 @@ def test_pico_ask_delegates_to_agent_loop(tmp_path):
     assert agent.ask("Use facade") == "Facade works."
 
 
+def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.final("Done."),
+        ],
+    )
+
+    assert agent.ask("Inspect hello") == "Done."
+    assert len(agent.model_client.prompts) == 2
+    assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
+    assert agent.model_client.recorded_action_results[0][0] == "tool"
+    assert "alpha" in agent.model_client.recorded_action_results[0][1]
+    prompt_events = [
+        event for event in agent.run_store.read_events(agent.current_task_state)
+        if event["event_type"] == "prompt_built"
+    ]
+    assert prompt_events[0]["payload"]["prompt_metadata"]["prompt_reused"] is False
+    assert prompt_events[1]["payload"]["prompt_metadata"]["prompt_reused"] is True
+
+
+def test_provider_session_resets_at_input_threshold_and_persists_decision(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+
+    class ThresholdClient(FakeModelClient):
+        def complete_action(self, *args, **kwargs):
+            action = super().complete_action(*args, **kwargs)
+            self.last_completion_metadata = {"input_tokens": 7900}
+            return action
+
+    client = ThresholdClient([
+        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.final("Done after reset."),
+    ])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        approval_policy="auto",
+        verification_command="",
+    )
+
+    assert agent.ask("Inspect hello") == "Done after reset."
+    assert client.prompts[0] != client.prompts[1]
+    assert "alpha" in client.prompts[1]
+    events = agent.run_store.read_events(agent.current_task_state)
+    reset = next(event for event in events if event["event_type"] == "provider_session_reset")
+    assert reset["payload"]["reason"] == "input_threshold"
+    assert reset["payload"]["input_tokens"] == 7900
+
+
 def test_last_tool_step_gets_one_final_only_model_turn(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
