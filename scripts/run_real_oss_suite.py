@@ -39,6 +39,42 @@ def retryable_infrastructure_error(error):
     )
 
 
+def reusable_pass(path, runtime):
+    path = Path(path)
+    if not path.is_file():
+        return None
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        artifact.get("runtime", {}).get("commit_sha") == runtime["commit_sha"]
+        and artifact.get("result", {}).get("passed") is True
+    ):
+        return artifact
+    return None
+
+
+def infrastructure_failure(task_id, runtime, model, error, attempts):
+    return {
+        "schema_version": "real-oss-validation-v2",
+        "artifact_type": "real-oss-validation",
+        "runtime": runtime,
+        "model": model,
+        "task": {"id": task_id},
+        "suite_attempt": attempts,
+        "result": {
+            "passed": False,
+            "status": "infrastructure_error",
+            "stop_reason": "provider_unavailable",
+            "tool_steps": 0,
+            "duration_ms": 0,
+            "changed_files": [],
+            "final_answer": "",
+            "run_id": "",
+            "error": str(error),
+            "checks": {},
+        },
+    }
+
+
 def write_suite_report(path, artifact):
     rows = [
         "# Pico five-repository Real OSS suite",
@@ -85,10 +121,16 @@ def main(argv=None):
     task_root = ROOT / "artifacts" / "real-oss-suite-v1"
     for task_id in load_task_ids(args.manifest):
         print(f"{task_id}: running", flush=True)
+        task_artifact = task_root / f"{task_id}.json"
+        reused = reusable_pass(task_artifact, runtime)
+        if reused is not None:
+            results.append(reused)
+            print(f"{task_id}: REUSED-PASS", flush=True)
+            continue
         task_args = SimpleNamespace(
             manifest=args.manifest,
             task=task_id,
-            artifact=task_root / f"{task_id}.json",
+            artifact=task_artifact,
             report=task_root / f"{task_id}.md",
             model=args.model,
             base_url=args.base_url,
@@ -98,6 +140,7 @@ def main(argv=None):
             sandbox_image=args.sandbox_image,
         )
         result = None
+        final_error = None
         for suite_attempt in range(1, max(1, args.task_attempts) + 1):
             try:
                 result = run_validation(task_args)
@@ -105,12 +148,18 @@ def main(argv=None):
                 break
             except RuntimeError as exc:
                 if not retryable_infrastructure_error(exc) or suite_attempt >= args.task_attempts:
-                    raise
+                    final_error = exc
+                    break
                 print(
                     f"{task_id}: infrastructure retry {suite_attempt + 1}/{args.task_attempts}",
                     flush=True,
                 )
-        assert result is not None
+        if result is None:
+            result = infrastructure_failure(
+                task_id, runtime, args.model, final_error, max(1, args.task_attempts)
+            )
+            task_artifact.parent.mkdir(parents=True, exist_ok=True)
+            task_artifact.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         results.append(result)
         print(f"{task_id}: {'PASS' if result['result']['passed'] else 'FAIL'}", flush=True)
 
