@@ -172,6 +172,7 @@ def build_agent(args):
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
             run_timeout_seconds=args.run_timeout,
+            provider_context_limit_tokens=args.provider_context_limit,
             sandbox_image=args.sandbox_image,
             verification_command=args.verify_command,
         )
@@ -184,6 +185,7 @@ def build_agent(args):
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
         run_timeout_seconds=args.run_timeout,
+        provider_context_limit_tokens=args.provider_context_limit,
         sandbox_image=args.sandbox_image,
         verification_command=args.verify_command,
     )
@@ -245,6 +247,12 @@ def build_arg_parser():
         help="Maximum model output tokens per step.",
     )
     parser.add_argument("--run-timeout", type=int, default=600, help="Whole-run deadline in seconds.")
+    parser.add_argument(
+        "--provider-context-limit",
+        type=int,
+        default=64000,
+        help="Reset and rebuild the task-local Responses conversation at this input-token limit.",
+    )
     parser.add_argument("--sandbox-image", default="pico/sandbox:latest", help="Docker image for run_shell.")
     parser.add_argument("--verify-command", default=None, help="Runtime verifier; auto-detected when omitted, empty disables it.")
     parser.add_argument(

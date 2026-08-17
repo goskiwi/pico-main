@@ -58,6 +58,7 @@ PICO_OPENAI_MODEL="gpt-5.4"
 ```bash
 uv run pico --approval ask
 uv run pico --run-timeout 600
+uv run pico --provider-context-limit 64000
 uv run pico --verify-command "python -m pytest -q"
 uv run pico --resume latest
 uv run pico events stats <run_id> --cwd /path/to/repo

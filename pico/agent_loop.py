@@ -261,7 +261,7 @@ class AgentLoop:
             reset_provider_session = (
                 isinstance(provider_input_tokens, int)
                 and provider_input_tokens + agent.max_new_tokens
-                >= agent.context_manager.total_budget
+                >= agent.provider_context_limit_tokens
             )
 
             def continue_provider(

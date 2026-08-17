@@ -60,6 +60,7 @@ class Pico:
         feature_flags=None,
         allowed_tools=None,
         run_timeout_seconds=600,
+        provider_context_limit_tokens=64000,
         sandbox=None,
         sandbox_image="pico/sandbox:latest",
         verification_command=None,
@@ -79,6 +80,10 @@ class Pico:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
         self.run_timeout_seconds = max(1, int(run_timeout_seconds))
+        self.provider_context_limit_tokens = max(
+            int(max_new_tokens) + 1,
+            int(provider_context_limit_tokens),
+        )
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".pico" / "runs")
         self.artifact_store = ArtifactStore(self.run_store, self.redact_text)
         self.session = session or {

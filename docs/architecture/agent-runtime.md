@@ -5,7 +5,9 @@ function action; the Runtime owns authority and state.
 
 Within a task, the provider conversation replays every Responses output item and its matching
 function output. The Context Ledger is the durable reset/resume boundary, not a lossy replacement
-for the active provider conversation.
+for the active provider conversation. Initial prompt projection and provider-conversation growth
+use separate budgets; reaching the provider limit emits an audited reset before rebuilding from
+the Ledger.
 
 ```mermaid
 flowchart LR

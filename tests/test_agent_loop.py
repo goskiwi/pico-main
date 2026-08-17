@@ -91,6 +91,7 @@ def test_provider_session_resets_at_input_threshold_and_persists_decision(tmp_pa
         SessionStore(tmp_path / ".pico/sessions"),
         approval_policy="auto",
         verification_command="",
+        provider_context_limit_tokens=8000,
     )
 
     assert agent.ask("Inspect hello") == "Done after reset."
