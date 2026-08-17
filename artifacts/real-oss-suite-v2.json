@@ -1,0 +1,353 @@
+{
+  "artifact_type": "real-oss-suite",
+  "captured_at": "2026-08-17T16:23:24.420933+00:00",
+  "model": "gpt-5.6-luna",
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+    "working_tree_dirty": false
+  },
+  "schema_version": "real-oss-suite-evidence-v2",
+  "summary": {
+    "failed": 0,
+    "passed": 5,
+    "total": 5
+  },
+  "tasks": [
+    {
+      "artifact_type": "real-oss-validation",
+      "captured_at": "2026-08-17T16:10:30.578936+00:00",
+      "model": "gpt-5.6-luna",
+      "provenance": {
+        "fixture_tree_digest": "sha256:1deab48d56e54d5bf49d922899b4a988d4dd53a288257abdafce37a97012d55b",
+        "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+        "reference_fix_commit": "4d3db84",
+        "reference_patch_sha256": "sha256:7abdb45561b9bfed0da76af012c8609e7981554dc3eaf83c862ac6b4a1dc285e",
+        "sandbox_image": "pico/real-oss-suite:latest",
+        "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+        "tool_budget": 40,
+        "verifier_sha256": "sha256:38de1b14059007561d82be2584c5e47c567319f1e7c33ddc8ad0b531bfab7cfa"
+      },
+      "result": {
+        "changed_files": [
+          "src/click/utils.py"
+        ],
+        "checks": {
+          "event_chain": {
+            "errors": [],
+            "event_count": 48,
+            "ok": true
+          },
+          "hidden_verifier": {
+            "exit_code": 0,
+            "ok": true,
+            "stderr": "",
+            "stdout": ".                                                                        [100%]\n1 passed in 0.03s\n",
+            "stop_reason": ""
+          },
+          "mutation_scope": {
+            "forbidden_changes": [],
+            "missing_required_globs": [],
+            "ok": true,
+            "out_of_scope_changes": []
+          },
+          "provider_continuation": {
+            "ok": true,
+            "prompt_builds": 8,
+            "provider_session_resets": 0,
+            "reused_turns": 7
+          }
+        },
+        "duration_ms": 56784,
+        "final_answer": "Fixed `click.echo` in `src/click/utils.py` so `None` gets a text newline while empty `bytes` and `bytearray` remain binary and receive `b\"\\n\"`.\n\nVerified:\n- `python -m pytest tests/test_utils.py::test_echo` passed\n- Direct empty `bytes` and `bytearray` binary-stream check passed",
+        "passed": true,
+        "run_id": "run_20260817-160933-f491f6",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "tool_steps": 7
+      },
+      "runtime": {
+        "branch": "luna",
+        "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+        "working_tree_dirty": false
+      },
+      "runtime_snapshot_id": "sha256:d312997936704b7e27cb2a409cd4bb80410c46307a2111c93f3180dd181033f8",
+      "schema_version": "real-oss-validation-v3",
+      "suite_attempt": 1,
+      "task": {
+        "id": "click_empty_bytes_echo",
+        "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
+        "source_repository": "https://github.com/pallets/click.git"
+      }
+    },
+    {
+      "artifact_type": "real-oss-validation",
+      "captured_at": "2026-08-17T16:14:07.911958+00:00",
+      "model": "gpt-5.6-luna",
+      "provenance": {
+        "fixture_tree_digest": "sha256:8133ee39a152318379272ff5d79fd32a58d3f7f71a38dd32e18dc10f7fb70fe2",
+        "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+        "reference_fix_commit": "d3e7f5d",
+        "reference_patch_sha256": "sha256:9aefc8e42a9617e4f53c7b12b79171ebb41e1576cfd83418338649f63240b3f7",
+        "sandbox_image": "pico/real-oss-suite:latest",
+        "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+        "tool_budget": 40,
+        "verifier_sha256": "sha256:ac898b6a4e042d3fe66d5c6ff9e81b437978ffb225d37d4c1cd2742432f7d64a"
+      },
+      "result": {
+        "changed_files": [
+          "src/packaging/_ranges.py",
+          "src/packaging/specifiers.py",
+          "src/packaging/version.py"
+        ],
+        "checks": {
+          "event_chain": {
+            "errors": [],
+            "event_count": 108,
+            "ok": true
+          },
+          "hidden_verifier": {
+            "exit_code": 0,
+            "ok": true,
+            "stderr": "",
+            "stdout": "......                                                                   [100%]\n6 passed in 0.03s\n",
+            "stop_reason": ""
+          },
+          "mutation_scope": {
+            "forbidden_changes": [],
+            "missing_required_globs": [],
+            "ok": true,
+            "out_of_scope_changes": []
+          },
+          "provider_continuation": {
+            "ok": true,
+            "prompt_builds": 18,
+            "provider_session_resets": 0,
+            "reused_turns": 17
+          }
+        },
+        "duration_ms": 216678,
+        "final_answer": "Implemented the production fixes:\n\n- `Version` now raises `InvalidVersion` for every non-string input before parsing.\n- `SpecifierSet.filter(..., key=...)` skips items whose key returns `None`, including ordinary range filtering, `===`, and prerelease handling.\n- Valid version parsing remains unchanged.\n\nVerification:\n- Direct runtime checks passed for invalid inputs, valid parsing, normal filtering, and `===` filtering.\n- Focused pytest collection was blocked because the environment is missing the existing `pretend` dependency (`ModuleNotFoundError`).",
+        "passed": true,
+        "run_id": "run_20260817-161030-c37616",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "tool_steps": 17
+      },
+      "runtime": {
+        "branch": "luna",
+        "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+        "working_tree_dirty": false
+      },
+      "runtime_snapshot_id": "sha256:d312997936704b7e27cb2a409cd4bb80410c46307a2111c93f3180dd181033f8",
+      "schema_version": "real-oss-validation-v3",
+      "suite_attempt": 1,
+      "task": {
+        "id": "packaging_non_string_version",
+        "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
+        "source_repository": "https://github.com/pypa/packaging.git"
+      }
+    },
+    {
+      "artifact_type": "real-oss-validation",
+      "captured_at": "2026-08-17T16:18:55.143980+00:00",
+      "model": "gpt-5.6-luna",
+      "provenance": {
+        "fixture_tree_digest": "sha256:f275f91e252eb865ee8505e8fba7abe6b28e2fdd7bda67ae65a469c8cb2c01b7",
+        "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+        "reference_fix_commit": "f88164a2",
+        "reference_patch_sha256": "sha256:8f12868cf1dc214ac08681589d40afa40872cd352e81530da8ee137398c8556b",
+        "sandbox_image": "pico/real-oss-suite:latest",
+        "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+        "tool_budget": 40,
+        "verifier_sha256": "sha256:612ee769cbe16883b0e667b1de9dd7745d65c745b767248983c412fe9b13be1b"
+      },
+      "result": {
+        "changed_files": [
+          "src/werkzeug/routing/converters.py"
+        ],
+        "checks": {
+          "event_chain": {
+            "errors": [],
+            "event_count": 60,
+            "ok": true
+          },
+          "hidden_verifier": {
+            "exit_code": 0,
+            "ok": true,
+            "stderr": "",
+            "stdout": ".                                                                        [100%]\n1 passed in 0.07s\n",
+            "stop_reason": ""
+          },
+          "mutation_scope": {
+            "forbidden_changes": [],
+            "missing_required_globs": [],
+            "ok": true,
+            "out_of_scope_changes": []
+          },
+          "provider_continuation": {
+            "ok": true,
+            "prompt_builds": 10,
+            "provider_session_resets": 0,
+            "reused_turns": 9
+          }
+        },
+        "duration_ms": 114728,
+        "final_answer": "Updated `src/werkzeug/routing/converters.py` so finite float values that would use scientific notation are serialized as ordinary decimal strings, while preserving normal float formatting, non-finite values, and `fixed_digits` behavior.\n\nVerification: direct converter checks passed for `1e-7`, `1.25`, and `inf`. The focused pytest run could not collect because `ephemeral_port_reserve` is not installed. Git status/diff could not be inspected because the shell environment reported `/workspace` is not a Git repository.",
+        "passed": true,
+        "run_id": "run_20260817-161659-b3789a",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "tool_steps": 9
+      },
+      "runtime": {
+        "branch": "luna",
+        "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+        "working_tree_dirty": false
+      },
+      "runtime_snapshot_id": "sha256:d312997936704b7e27cb2a409cd4bb80410c46307a2111c93f3180dd181033f8",
+      "schema_version": "real-oss-validation-v3",
+      "suite_attempt": 2,
+      "task": {
+        "id": "werkzeug_float_url_notation",
+        "source_commit": "b97e13cc74d8a45dca260d4037edd7d1f5094042",
+        "source_repository": "https://github.com/pallets/werkzeug.git"
+      }
+    },
+    {
+      "artifact_type": "real-oss-validation",
+      "captured_at": "2026-08-17T16:20:18.425338+00:00",
+      "model": "gpt-5.6-luna",
+      "provenance": {
+        "fixture_tree_digest": "sha256:b8418596097cd5c99be8e2be5da1c578ad106e8d4fb97900a8bc3890dcaf1e55",
+        "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+        "reference_fix_commit": "e45bc74",
+        "reference_patch_sha256": "sha256:de954a5375cbebf1911693ec2f97b04faed1db15555a0a47c27cc02c923ca6b5",
+        "sandbox_image": "pico/real-oss-suite:latest",
+        "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+        "tool_budget": 40,
+        "verifier_sha256": "sha256:77fb1cbd69a0d7a22e54ca49b83da0b91df1a89944ad6471ebab78f2fe0697a9"
+      },
+      "result": {
+        "changed_files": [
+          "src/jinja2/environment.py"
+        ],
+        "checks": {
+          "event_chain": {
+            "errors": [],
+            "event_count": 48,
+            "ok": true
+          },
+          "hidden_verifier": {
+            "exit_code": 0,
+            "ok": true,
+            "stderr": "",
+            "stdout": ".                                                                        [100%]\n1 passed in 0.05s\n",
+            "stop_reason": ""
+          },
+          "mutation_scope": {
+            "forbidden_changes": [],
+            "missing_required_globs": [],
+            "ok": true,
+            "out_of_scope_changes": []
+          },
+          "provider_continuation": {
+            "ok": true,
+            "prompt_builds": 8,
+            "provider_session_resets": 0,
+            "reused_turns": 7
+          }
+        },
+        "duration_ms": 82569,
+        "final_answer": "Updated `Environment.overlay` so omitted `enable_async` preserves the parent environment setting, while explicit `True` and `False` overrides remain effective.\n\nFocused behavioral checks passed for inheritance and both override values. Only `src/jinja2/environment.py` was modified.",
+        "passed": true,
+        "run_id": "run_20260817-161855-f113cd",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "tool_steps": 7
+      },
+      "runtime": {
+        "branch": "luna",
+        "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+        "working_tree_dirty": false
+      },
+      "runtime_snapshot_id": "sha256:d312997936704b7e27cb2a409cd4bb80410c46307a2111c93f3180dd181033f8",
+      "schema_version": "real-oss-validation-v3",
+      "suite_attempt": 1,
+      "task": {
+        "id": "jinja_overlay_async_default",
+        "source_commit": "767b23617628419ae3709ccfb02f9602ae9fe51f",
+        "source_repository": "https://github.com/pallets/jinja.git"
+      }
+    },
+    {
+      "artifact_type": "real-oss-validation",
+      "captured_at": "2026-08-17T16:23:24.408608+00:00",
+      "model": "gpt-5.6-luna",
+      "provenance": {
+        "fixture_tree_digest": "sha256:24982a55d412e8a5e39e4c20bd62277a16c5c93facd4c9d5b6303c731eaa6a09",
+        "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+        "reference_fix_commit": "f5cf1223",
+        "reference_patch_sha256": "sha256:0bafa2bf83b3aa2a67b42c440943569821d09f7d856633b235de95bec355c6c9",
+        "sandbox_image": "pico/real-oss-suite:latest",
+        "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+        "tool_budget": 40,
+        "verifier_sha256": "sha256:92fb3a0650ff64a61b75dd665c99414ae8faa0163a775c4825951cc2771f75b8"
+      },
+      "result": {
+        "changed_files": [
+          "src/urllib3/connectionpool.py",
+          "src/urllib3/poolmanager.py",
+          "src/urllib3/util/url.py"
+        ],
+        "checks": {
+          "event_chain": {
+            "errors": [],
+            "event_count": 132,
+            "ok": true
+          },
+          "hidden_verifier": {
+            "exit_code": 0,
+            "ok": true,
+            "stderr": "",
+            "stdout": ".                                                                        [100%]\n1 passed in 0.04s\n",
+            "stop_reason": ""
+          },
+          "mutation_scope": {
+            "forbidden_changes": [],
+            "missing_required_globs": [],
+            "ok": true,
+            "out_of_scope_changes": []
+          },
+          "provider_continuation": {
+            "ok": true,
+            "prompt_builds": 22,
+            "provider_session_resets": 0,
+            "reused_turns": 21
+          }
+        },
+        "duration_ms": 185328,
+        "final_answer": "Implemented the port-0 fix in production code only:\n\n- `Url.netloc` now renders `host:0`.\n- `PoolManager` preserves explicit port `0` when selecting pools.\n- `ProxyManager` preserves proxy port `0`.\n- `ConnectionPool.is_same_host` distinguishes port `0` from an omitted port.\n- `connection_from_url` preserves port `0` while retaining scheme defaults for `None`.\n\nDependency-free smoke checks passed across URL rendering, pool selection, host comparison, standalone pool creation, and proxy configuration.\n\nThe focused pytest command could not start because `trustme` is not installed (`ModuleNotFoundError`). Git diff validation was also unavailable because `/workspace` is not recognized as a Git worktree.",
+        "passed": true,
+        "run_id": "run_20260817-162018-abafd2",
+        "status": "completed",
+        "stop_reason": "final_answer_returned",
+        "tool_steps": 21
+      },
+      "runtime": {
+        "branch": "luna",
+        "commit_sha": "6ef7463e30da3d68d414c9c2ba029100af3c8e45",
+        "working_tree_dirty": false
+      },
+      "runtime_snapshot_id": "sha256:d312997936704b7e27cb2a409cd4bb80410c46307a2111c93f3180dd181033f8",
+      "schema_version": "real-oss-validation-v3",
+      "suite_attempt": 1,
+      "task": {
+        "id": "urllib3_port_zero",
+        "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
+        "source_repository": "https://github.com/urllib3/urllib3.git"
+      }
+    }
+  ],
+  "tool_budget": 40
+}

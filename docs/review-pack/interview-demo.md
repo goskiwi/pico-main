@@ -6,6 +6,7 @@
 2. Run `uv run python scripts/demo_runtime.py`; point out `[false, true, true]` provider prompt reuse, Checkpoint v6, the changed-file evidence, and the empty pending-operation set.
 3. Run `uv run python scripts/run_evaluations.py`; point out that the command fails closed and the Native Harness covers edit, recovery, safety, and governance.
 4. Open `artifacts/runtime-policy-v1.json`: recovery advice, hook boundaries, structured verification, and the hash chain are replayable deterministic evidence.
+5. Open `artifacts/real-oss-suite-v2.md`: five frozen tasks passed with one uniform 40-tool budget; the Context Ledgers were separately audited for host-path leakage.
 
 ## Five-minute deep dive
 
@@ -17,5 +18,5 @@
 
 ## Claims and boundaries
 
-- Claim the deterministic 5/5 Harness and the 5/5 fail-before/pass-after preflight separately. Only claim a live suite result when its artifact matches the current Runtime snapshot.
+- Claim the deterministic 5/5 Harness, the 5/5 fail-before/pass-after preflight, and the fixed five-task live suite separately. Note that Werkzeug used one provider-infrastructure retry; no task failure was selectively rerun.
 - State that Pico is local and single-user; Docker daemon trust, remote multi-tenant isolation, distributed queues, and secret management are outside its boundary.

@@ -79,14 +79,15 @@ def write_suite_report(path, artifact):
         f"- Model: `{artifact['model']}`",
         f"- Runtime commit: `{artifact['runtime']['commit_sha']}`",
         "",
-        "| Task | Result | Tool steps | Duration (s) | Changed files |",
-        "|---|---:|---:|---:|---|",
+        "| Task | Result | Suite attempt | Tool steps | Duration (s) | Changed files |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     for item in artifact["tasks"]:
         result = item["result"]
         rows.append(
             f"| `{item['task']['id']}` | {'PASS' if result['passed'] else 'FAIL'} | "
-            f"{result['tool_steps']} | {result['duration_ms'] / 1000:.1f} | "
+            f"{item.get('suite_attempt', 1)} | {result['tool_steps']} | "
+            f"{result['duration_ms'] / 1000:.1f} | "
             f"{', '.join(result['changed_files']) or 'none'} |"
         )
     rows.extend([
