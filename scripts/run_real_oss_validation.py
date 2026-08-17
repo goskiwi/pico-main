@@ -101,6 +101,25 @@ def require_clean_runtime(metadata):
         )
 
 
+def provider_continuation_check(events):
+    prompt_events = [
+        event for event in events if event.get("event_type") == "prompt_built"
+    ]
+    reused_turns = sum(
+        bool(event.get("payload", {}).get("prompt_metadata", {}).get("prompt_reused"))
+        for event in prompt_events
+    )
+    reset_count = sum(
+        event.get("event_type") == "provider_session_reset" for event in events
+    )
+    return {
+        "ok": len(prompt_events) >= 2 and reused_turns >= 1,
+        "prompt_builds": len(prompt_events),
+        "reused_turns": reused_turns,
+        "provider_session_resets": reset_count,
+    }
+
+
 def write_report(path, artifact):
     result = artifact["result"]
     checks = result["checks"]
@@ -113,6 +132,7 @@ def write_report(path, artifact):
         f"- Hidden verifier: `{'pass' if checks['hidden_verifier']['ok'] else 'fail'}`",
         f"- Mutation scope: `{'pass' if checks['mutation_scope']['ok'] else 'fail'}`",
         f"- Event chain: `{'pass' if checks['event_chain']['ok'] else 'fail'}`",
+        f"- Provider continuation: `{'pass' if checks['provider_continuation']['ok'] else 'fail'}`",
         f"- Changed files: {', '.join(result['changed_files']) or 'none'}", "",
         "This is one end-to-end validation run, not a general success-rate claim.", "",
     ])
@@ -186,11 +206,14 @@ def run_validation(args):
         event_chain = {"ok": True, "event_count": len(events), "errors": []}
     except Exception as exc:  # noqa: BLE001 - audit failures are evidence
         event_chain = {"ok": False, "event_count": 0, "errors": [str(exc)]}
+        events = []
+    provider_continuation = provider_continuation_check(events)
     passed = (
         agent.current_task_state.status == "completed"
         and mutation_scope["ok"]
         and verifier["ok"]
         and event_chain["ok"]
+        and provider_continuation["ok"]
     )
     artifact = {
         "schema_version": "real-oss-validation-v2",
@@ -217,6 +240,7 @@ def run_validation(args):
                 "hidden_verifier": verifier,
                 "mutation_scope": mutation_scope,
                 "event_chain": event_chain,
+                "provider_continuation": provider_continuation,
             },
         },
     }

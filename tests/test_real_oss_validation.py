@@ -35,3 +35,18 @@ def test_file_snapshot_and_scope_ignore_runtime_artifacts(tmp_path):
 def test_real_oss_publication_rejects_dirty_runtime():
     with pytest.raises(RuntimeError, match="requires a clean worktree"):
         MODULE.require_clean_runtime({"working_tree_dirty": True})
+
+
+def test_provider_continuation_requires_a_reused_prompt_turn():
+    events = [
+        {"event_type": "prompt_built", "payload": {"prompt_metadata": {"prompt_reused": False}}},
+        {"event_type": "prompt_built", "payload": {"prompt_metadata": {"prompt_reused": True}}},
+    ]
+
+    assert MODULE.provider_continuation_check(events) == {
+        "ok": True,
+        "prompt_builds": 2,
+        "reused_turns": 1,
+        "provider_session_resets": 0,
+    }
+    assert MODULE.provider_continuation_check(events[:1])["ok"] is False
