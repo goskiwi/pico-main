@@ -80,7 +80,11 @@ def changed_paths(before, after):
 
 
 def matches(path, patterns):
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+    return any(
+        fnmatch.fnmatch(path, pattern)
+        or ("/**/" in pattern and fnmatch.fnmatch(path, pattern.replace("/**/", "/")))
+        for pattern in patterns
+    )
 
 
 def run_verifier(root, task, sandbox_image):
@@ -217,7 +221,7 @@ def run_validation(args):
     missing_required = [
         pattern
         for pattern in task["required_change_globs"]
-        if not any(fnmatch.fnmatch(path, pattern) for path in changed)
+        if not any(matches(path, (pattern,)) for path in changed)
     ]
     mutation_scope = {
         "ok": not forbidden and not out_of_scope and not missing_required,

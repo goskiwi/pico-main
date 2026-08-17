@@ -33,6 +33,7 @@ def test_file_snapshot_and_scope_ignore_runtime_artifacts(tmp_path):
 
     assert MODULE.changed_paths(before, after) == ["src/package/code.py"]
     assert MODULE.matches("src/package/code.py", ["src/**/*.py"])
+    assert MODULE.matches("src/code.py", ["src/**/*.py"])
 
 
 def test_real_oss_publication_rejects_dirty_runtime():
