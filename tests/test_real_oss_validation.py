@@ -31,6 +31,13 @@ def test_real_oss_manifest_is_strict_and_points_to_frozen_upstream():
     assert all("step_budget" not in item for item in payload["tasks"])
     assert task["tool_budget"] == 40
     assert "tests/**" in MODULE.FORBIDDEN_CHANGE_GLOBS
+    materialization = json.loads(
+        Path("artifacts/real-oss-fixtures/.real_oss_suite.materialization.json").read_text()
+    )
+    expected = {
+        item["task_id"]: item["tree_digest"] for item in materialization["tasks"]
+    }
+    assert MODULE.tree_digest(task["fixture_repo"]) == expected[task["id"]]
 
 
 def test_file_snapshot_and_scope_ignore_runtime_artifacts(tmp_path):

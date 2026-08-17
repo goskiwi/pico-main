@@ -84,11 +84,12 @@ def file_digest(path):
 
 
 def tree_digest(root):
+    root = Path(root)
     digest = hashlib.sha256()
-    for path, content_digest in file_snapshot(root).items():
-        digest.update(path.encode("utf-8"))
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(content_digest.encode("ascii"))
+        digest.update(path.read_bytes())
         digest.update(b"\0")
     return "sha256:" + digest.hexdigest()
 
