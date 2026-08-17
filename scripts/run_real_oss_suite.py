@@ -29,6 +29,16 @@ def load_task_ids(path):
     return [task["id"] for task in payload["tasks"]]
 
 
+def retryable_infrastructure_error(error):
+    text = str(error)
+    return (
+        "Could not reach the OpenAI-compatible backend" in text
+        or "HTTP 408:" in text
+        or "HTTP 429:" in text
+        or any(f"HTTP {status}:" in text for status in range(500, 600))
+    )
+
+
 def write_suite_report(path, artifact):
     rows = [
         "# Pico five-repository Real OSS suite",
@@ -64,6 +74,7 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
+    parser.add_argument("--task-attempts", type=int, default=2)
     parser.add_argument("--artifact", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.json")
     parser.add_argument("--report", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.md")
     args = parser.parse_args(argv)
@@ -86,7 +97,20 @@ def main(argv=None):
             timeout=args.timeout,
             sandbox_image=args.sandbox_image,
         )
-        result = run_validation(task_args)
+        result = None
+        for suite_attempt in range(1, max(1, args.task_attempts) + 1):
+            try:
+                result = run_validation(task_args)
+                result["suite_attempt"] = suite_attempt
+                break
+            except RuntimeError as exc:
+                if not retryable_infrastructure_error(exc) or suite_attempt >= args.task_attempts:
+                    raise
+                print(
+                    f"{task_id}: infrastructure retry {suite_attempt + 1}/{args.task_attempts}",
+                    flush=True,
+                )
+        assert result is not None
         results.append(result)
         print(f"{task_id}: {'PASS' if result['result']['passed'] else 'FAIL'}", flush=True)
 
