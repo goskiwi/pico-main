@@ -18,9 +18,12 @@ if str(ROOT) not in sys.path:
 
 from scripts.materialize_real_oss import DEFAULT_MANIFEST, load_manifest
 from scripts.run_real_oss_validation import (
+    docker_image_id,
+    file_digest,
     git_metadata,
     require_clean_runtime,
     run_verifier,
+    tree_digest,
 )
 
 
@@ -66,6 +69,9 @@ def main(argv=None):
             "post_fix_exit_code": after["exit_code"],
             "reference_fix_commit": task["reference_fix_commit"],
             "reference_patch": task["reference_patch"],
+            "reference_patch_sha256": file_digest(patch_path),
+            "fixture_tree_digest": tree_digest(fixture),
+            "verifier_sha256": file_digest(ROOT / task["verifier_file"]),
             "output_tail": output[-1000:],
         })
         print(
@@ -78,7 +84,9 @@ def main(argv=None):
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime": runtime,
         "sandbox_image": args.sandbox_image,
+        "sandbox_image_id": docker_image_id(args.sandbox_image),
         "manifest": str(args.manifest.relative_to(ROOT)),
+        "manifest_sha256": file_digest(args.manifest),
         "summary": {
             "total": len(rows),
             "discriminative": sum(row["pre_fix_failed"] for row in rows),
