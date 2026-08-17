@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,14 @@ def retryable_infrastructure_error(error):
         or "HTTP 429:" in text
         or any(f"HTTP {status}:" in text for status in range(500, 600))
     )
+
+
+def prepare_task_root(path):
+    path = Path(path)
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def infrastructure_failure(task_id, runtime, model, error, attempts):
@@ -107,6 +116,7 @@ def main(argv=None):
     require_clean_runtime(runtime)
     results = []
     task_root = ROOT / "artifacts" / "real-oss-suite-v2"
+    prepare_task_root(task_root)
     for task_id in load_task_ids(args.manifest):
         print(f"{task_id}: running", flush=True)
         task_artifact = task_root / f"{task_id}.json"

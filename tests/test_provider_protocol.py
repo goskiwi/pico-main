@@ -1,6 +1,7 @@
 import io
 import json
 import urllib.error
+from http.client import IncompleteRead
 from unittest.mock import patch
 
 import pytest
@@ -135,6 +136,21 @@ def test_timeout_is_retried_then_normalized_without_leaking_api_key():
     assert request.call_count == 3
     assert "Could not reach" in str(raised.value)
     assert "secret" not in str(raised.value)
+
+
+def test_incomplete_chunked_response_is_retried():
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=[IncompleteRead(b"partial response"), final_response()],
+        ) as request,
+        patch("time.sleep") as sleep,
+    ):
+        action = client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert action == ModelAction.final("done")
+    assert request.call_count == 2
+    sleep.assert_called_once_with(0.5)
 
 
 @pytest.mark.parametrize("body", ["not-json", "[]", "null"])

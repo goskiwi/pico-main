@@ -89,6 +89,17 @@ def test_suite_retries_only_provider_infrastructure_errors():
     )
 
 
+def test_suite_clears_stale_per_task_artifacts_before_run(tmp_path):
+    task_root = tmp_path / "suite"
+    task_root.mkdir()
+    (task_root / "stale.json").write_text("old\n", encoding="utf-8")
+
+    prepared = SUITE_MODULE.prepare_task_root(task_root)
+
+    assert prepared == task_root
+    assert list(task_root.iterdir()) == []
+
+
 def test_reference_patches_apply_to_frozen_fixtures(tmp_path):
     payload = json.loads(Path("validation/real_oss_suite.json").read_text())
     for task in payload["tasks"]:

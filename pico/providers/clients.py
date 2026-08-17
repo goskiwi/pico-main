@@ -4,7 +4,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from http.client import RemoteDisconnected
+from http.client import IncompleteRead, RemoteDisconnected
 
 from ..contracts import ModelAction
 
@@ -365,7 +365,12 @@ class OpenAICompatibleModelClient:
                 raise RuntimeError(
                     f"OpenAI-compatible request failed with HTTP {exc.code}: {body}"
                 ) from exc
-            except (urllib.error.URLError, RemoteDisconnected, TimeoutError) as exc:
+            except (
+                urllib.error.URLError,
+                IncompleteRead,
+                RemoteDisconnected,
+                TimeoutError,
+            ) as exc:
                 if attempt < attempts - 1:
                     time.sleep(0.5 * (attempt + 1))
                     continue
