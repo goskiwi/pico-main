@@ -16,22 +16,44 @@ from pathlib import Path
 from pico import OpenAICompatibleModelClient, Pico, SessionStore, WorkspaceContext
 from pico.config import load_project_env, provider_env
 from pico.evaluation.provenance import runtime_snapshot_id
-from pico.sandbox import DockerSandbox, SandboxProfile, parse_command_invocation
+from pico.sandbox import (
+    DockerSandbox,
+    DockerSandboxConfig,
+    SandboxProfile,
+    parse_command_invocation,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = ROOT / "validation" / "click_real_oss.json"
+DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
+ALLOWED_TOOLS = (
+    "query_repo_map",
+    "list_files",
+    "read_file",
+    "search",
+    "run_shell",
+    "write_file",
+    "patch_file",
+)
+FORBIDDEN_CHANGE_GLOBS = (
+    "tests/**",
+    "test/**",
+    "testing/**",
+    ".pico_hidden_verifier/**",
+)
 
 
-def load_task(path):
+def load_task(path, task_id):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "click-real-oss-validation-v1":
-        raise ValueError("unsupported Real OSS validation schema")
-    task = payload.get("task")
+    if payload.get("schema_version") != "real-oss-suite-v1":
+        raise ValueError("unsupported Real OSS suite schema")
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list):
+        raise TypeError("Real OSS suite requires tasks")
+    task = next((item for item in tasks if item.get("id") == task_id), None)
     required = {
-        "id", "prompt", "fixture_repo", "allowed_tools", "step_budget",
-        "max_run_seconds", "required_change_globs", "allowed_change_globs",
-        "forbidden_change_globs", "verifier_files", "verifier_command",
-        "source_repository", "source_commit",
+        "id", "prompt", "fixture_repo", "step_budget", "required_change_globs",
+        "allowed_change_globs", "verifier_file", "verifier_command",
+        "source_repository", "source_commit", "expected_files",
     }
     if not isinstance(task, dict) or required - set(task):
         raise ValueError(f"Real OSS task missing fields: {sorted(required - set(task or {}))}")
@@ -61,15 +83,17 @@ def matches(path, patterns):
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
-def run_verifier(root, task):
-    for item in task["verifier_files"]:
-        source = (ROOT / item["source"]).resolve()
-        target = (Path(root) / item["target"]).resolve()
-        target.relative_to(Path(root).resolve())
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+def run_verifier(root, task, sandbox_image):
+    source = (ROOT / task["verifier_file"]).resolve()
+    target = (Path(root) / ".pico_hidden_verifier" / "test_hidden.py").resolve()
+    target.relative_to(Path(root).resolve())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
     argv, env = parse_command_invocation(task["verifier_command"])
-    result = DockerSandbox(root).run(
+    result = DockerSandbox(
+        root,
+        DockerSandboxConfig(image=sandbox_image),
+    ).run(
         argv, cwd=root, timeout=90, env=env, profile=SandboxProfile.VERIFY
     )
     return {
@@ -140,7 +164,7 @@ def write_report(path, artifact):
 
 
 def run_validation(args):
-    task = load_task(args.manifest)
+    task = load_task(args.manifest, args.task)
     fixture = (ROOT / task["fixture_repo"]).resolve()
     if not fixture.is_dir():
         raise FileNotFoundError(
@@ -174,8 +198,9 @@ def run_validation(args):
         approval_policy="auto",
         max_steps=int(task["step_budget"]),
         max_new_tokens=args.max_new_tokens,
-        run_timeout_seconds=int(task["max_run_seconds"]),
-        allowed_tools=task["allowed_tools"],
+        run_timeout_seconds=360,
+        allowed_tools=ALLOWED_TOOLS,
+        sandbox_image=args.sandbox_image,
         verification_command="",
     )
     started = time.monotonic()
@@ -184,7 +209,7 @@ def run_validation(args):
     after = file_snapshot(workspace)
     changed = changed_paths(before, after)
     forbidden = [
-        path for path in changed if matches(path, task["forbidden_change_globs"])
+        path for path in changed if matches(path, FORBIDDEN_CHANGE_GLOBS)
     ]
     out_of_scope = [
         path for path in changed if not matches(path, task["allowed_change_globs"])
@@ -200,7 +225,7 @@ def run_validation(args):
         "out_of_scope_changes": out_of_scope,
         "missing_required_globs": missing_required,
     }
-    verifier = run_verifier(workspace, task)
+    verifier = run_verifier(workspace, task, args.sandbox_image)
     try:
         events = agent.run_store.read_events(agent.current_task_state.run_id)
         event_chain = {"ok": True, "event_count": len(events), "errors": []}
@@ -244,6 +269,8 @@ def run_validation(args):
             },
         },
     }
+    Path(args.artifact).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.artifact).write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     write_report(args.report, artifact)
     return artifact
@@ -252,6 +279,7 @@ def run_validation(args):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--task", default="click_empty_bytes_echo")
     parser.add_argument("--artifact", type=Path, default=ROOT / "artifacts/real-oss-validation.json")
     parser.add_argument("--report", type=Path, default=ROOT / "artifacts/real-oss-validation.md")
     parser.add_argument("--model")
@@ -259,6 +287,7 @@ def main(argv=None):
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
     args = parser.parse_args(argv)
     artifact = run_validation(args)
     print(f"{artifact['task']['id']}: {'PASS' if artifact['result']['passed'] else 'FAIL'}")

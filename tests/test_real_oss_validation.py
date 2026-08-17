@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,14 @@ SPEC.loader.exec_module(MODULE)
 
 
 def test_real_oss_manifest_is_strict_and_points_to_frozen_upstream():
-    task = MODULE.load_task(Path("validation/click_real_oss.json"))
+    manifest = Path("validation/real_oss_suite.json")
+    task = MODULE.load_task(manifest, "click_empty_bytes_echo")
 
     assert task["id"] == "click_empty_bytes_echo"
     assert task["source_repository"] == "https://github.com/pallets/click.git"
     assert len(task["source_commit"]) == 40
-    assert task["forbidden_change_globs"] == ["tests/**", ".pico_hidden_verifier/**"]
+    assert len(json.loads(manifest.read_text())["tasks"]) == 5
+    assert "tests/**" in MODULE.FORBIDDEN_CHANGE_GLOBS
 
 
 def test_file_snapshot_and_scope_ignore_runtime_artifacts(tmp_path):

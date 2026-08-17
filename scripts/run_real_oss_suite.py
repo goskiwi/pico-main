@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Run the five-repository frozen Real OSS suite sequentially."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+from scripts.run_real_oss_validation import (
+    DEFAULT_MANIFEST,
+    git_metadata,
+    require_clean_runtime,
+    run_validation,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_task_ids(path):
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("schema_version") != "real-oss-suite-v1":
+        raise ValueError("unsupported Real OSS suite schema")
+    return [task["id"] for task in payload["tasks"]]
+
+
+def write_suite_report(path, artifact):
+    rows = [
+        "# Pico five-repository Real OSS suite",
+        "",
+        f"- Overall: **{artifact['summary']['passed']}/{artifact['summary']['total']}**",
+        f"- Model: `{artifact['model']}`",
+        f"- Runtime commit: `{artifact['runtime']['commit_sha']}`",
+        "",
+        "| Task | Result | Tool steps | Duration (s) | Changed files |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for item in artifact["tasks"]:
+        result = item["result"]
+        rows.append(
+            f"| `{item['task']['id']}` | {'PASS' if result['passed'] else 'FAIL'} | "
+            f"{result['tool_steps']} | {result['duration_ms'] / 1000:.1f} | "
+            f"{', '.join(result['changed_files']) or 'none'} |"
+        )
+    rows.extend([
+        "",
+        "Each task starts from an exact pre-fix upstream commit. Hidden verifiers are injected only after the Agent stops. This fixed five-task run is reproducibility evidence, not a general coding-success estimate.",
+        "",
+    ])
+    Path(path).write_text("\n".join(rows), encoding="utf-8")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--model", default="gpt-5.6-luna")
+    parser.add_argument("--base-url")
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
+    parser.add_argument("--artifact", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.json")
+    parser.add_argument("--report", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.md")
+    args = parser.parse_args(argv)
+
+    runtime = git_metadata()
+    require_clean_runtime(runtime)
+    results = []
+    task_root = ROOT / "artifacts" / "real-oss-suite-v1"
+    for task_id in load_task_ids(args.manifest):
+        print(f"{task_id}: running", flush=True)
+        task_args = SimpleNamespace(
+            manifest=args.manifest,
+            task=task_id,
+            artifact=task_root / f"{task_id}.json",
+            report=task_root / f"{task_id}.md",
+            model=args.model,
+            base_url=args.base_url,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            timeout=args.timeout,
+            sandbox_image=args.sandbox_image,
+        )
+        result = run_validation(task_args)
+        results.append(result)
+        print(f"{task_id}: {'PASS' if result['result']['passed'] else 'FAIL'}", flush=True)
+
+    passed = sum(item["result"]["passed"] for item in results)
+    artifact = {
+        "schema_version": "real-oss-suite-evidence-v1",
+        "artifact_type": "real-oss-suite",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": runtime,
+        "model": args.model,
+        "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed},
+        "tasks": results,
+    }
+    args.artifact.parent.mkdir(parents=True, exist_ok=True)
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.artifact.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    write_suite_report(args.report, artifact)
+    print(f"suite: {passed}/{len(results)}")
+    return 0 if passed == len(results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

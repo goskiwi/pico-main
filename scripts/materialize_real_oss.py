@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize the exact pre-fix Click checkout used by Real OSS validation."""
+"""Materialize exact pre-fix checkouts for the frozen Real OSS suite."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MANIFEST = ROOT / "validation" / "click_real_oss.json"
+DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
+FIXTURE_ROOT = (ROOT / "artifacts" / "real-oss-fixtures").resolve()
 
 
 def run_git(args, cwd=None):
@@ -35,18 +36,33 @@ def tree_digest(root):
     return "sha256:" + digest.hexdigest()
 
 
-def load_task(path):
+def load_manifest(path=DEFAULT_MANIFEST):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "click-real-oss-validation-v1":
-        raise ValueError("unsupported Real OSS validation schema")
-    return payload["task"]
+    if payload.get("schema_version") != "real-oss-suite-v1":
+        raise ValueError("unsupported Real OSS suite schema")
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError("Real OSS suite requires a non-empty task list")
+    ids = [str(task.get("id", "")) for task in tasks]
+    if any(not task_id for task_id in ids) or len(ids) != len(set(ids)):
+        raise ValueError("Real OSS task ids must be unique and non-empty")
+    return payload
 
 
-def materialize(manifest_path=DEFAULT_MANIFEST, *, replace=False):
-    task = load_task(manifest_path)
+def select_tasks(manifest, task_ids=()):
+    selected_ids = set(task_ids)
+    tasks = list(manifest["tasks"])
+    if not selected_ids:
+        return tasks
+    unknown = selected_ids - {task["id"] for task in tasks}
+    if unknown:
+        raise ValueError(f"unknown Real OSS task: {', '.join(sorted(unknown))}")
+    return [task for task in tasks if task["id"] in selected_ids]
+
+
+def materialize_task(task, *, replace=False):
     target = (ROOT / task["fixture_repo"]).resolve()
-    fixture_root = (ROOT / "artifacts" / "real-oss-fixtures").resolve()
-    target.relative_to(fixture_root)
+    target.relative_to(FIXTURE_ROOT)
     if target.exists():
         if not replace:
             raise FileExistsError(f"fixture exists: {target}; use --replace")
@@ -65,23 +81,46 @@ def materialize(manifest_path=DEFAULT_MANIFEST, *, replace=False):
         if not (target / relative).is_file():
             raise RuntimeError(f"fixture missing expected file: {relative}")
     shutil.rmtree(target / ".git")
-    record = {
+    for relative, content in dict(task.get("generated_files") or {}).items():
+        generated = (target / relative).resolve()
+        generated.relative_to(target)
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_text(str(content), encoding="utf-8")
+    return {
         "task_id": task["id"],
         "source_repository": task["source_repository"],
         "source_commit": actual_commit,
         "tree_digest": tree_digest(target),
     }
-    sidecar = target.parent / ".click_real_oss.materialization.json"
-    sidecar.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-    return record
+
+
+def materialize(manifest_path=DEFAULT_MANIFEST, *, task_ids=(), replace=False):
+    manifest = load_manifest(manifest_path)
+    records = [
+        materialize_task(task, replace=replace)
+        for task in select_tasks(manifest, task_ids)
+    ]
+    sidecar = FIXTURE_ROOT / ".real_oss_suite.materialization.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(
+        json.dumps(
+            {"schema_version": "real-oss-materialization-v1", "tasks": records},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return records
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--task", action="append", default=[])
     parser.add_argument("--replace", action="store_true")
     args = parser.parse_args(argv)
-    print(json.dumps(materialize(args.manifest, replace=args.replace), indent=2))
+    print(json.dumps(materialize(args.manifest, task_ids=args.task, replace=args.replace), indent=2))
     return 0
 
 
