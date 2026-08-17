@@ -5,7 +5,7 @@ import uuid
 from .features import memory as memorylib
 from .workspace import clip, now
 
-CHECKPOINT_SCHEMA_VERSION = "checkpoint-v5"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint-v6"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 CHECKPOINT_FULL_VALID_STATUS = "full-valid"
 CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"
@@ -29,6 +29,7 @@ RUNTIME_IDENTITY_KEYS = (
     "run_timeout_seconds",
     "verification_command",
     "sandbox_identity",
+    "hooks",
 )
 
 
@@ -41,7 +42,7 @@ def current_runtime_identity(agent):
         "provider_conversation_mode": str(agent.model_client.conversation_mode),
         "approval_policy": agent.approval_policy,
         "read_only": bool(agent.read_only),
-        "max_steps": int(agent.max_steps),
+        "max_steps": agent.max_steps,
         "max_new_tokens": int(agent.max_new_tokens),
         "provider_context_limit_tokens": int(agent.provider_context_limit_tokens),
         "feature_flags": dict(agent.feature_flags),
@@ -51,6 +52,7 @@ def current_runtime_identity(agent):
         "run_timeout_seconds": int(agent.run_timeout_seconds),
         "verification_command": str(agent.verification_command),
         "sandbox_identity": agent.sandbox.identity(),
+        "hooks": agent.hooks.identity(),
     }
 
 

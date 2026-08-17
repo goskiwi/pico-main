@@ -196,7 +196,6 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
     assert instance.last_completion_metadata == {
         "prompt_cache_supported": False,
         "prompt_cache_key": None,
-        "prompt_cache_retention": None,
         "input_tokens": 11,
         "output_tokens": 4,
         "total_tokens": 15,
@@ -209,3 +208,26 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
         assert instance.complete_action("prompt", 32, action_tools=TOOLS).kind == "final"
     assert instance.last_completion_metadata["input_tokens"] is None
     assert instance.last_completion_metadata["cached_tokens"] == 0
+
+
+def test_official_prompt_cache_uses_key_without_model_specific_retention_parameter():
+    instance = OpenAICompatibleModelClient(
+        "gpt-5.6", "https://api.openai.com/v1", "secret", None, 3
+    )
+    captured = {}
+
+    def urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        return final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        instance.complete_action(
+            "prompt",
+            32,
+            action_tools=TOOLS,
+            prompt_cache_key="stable-prefix",
+        )
+
+    assert captured["prompt_cache_key"] == "stable-prefix"
+    assert "prompt_cache_retention" not in captured
+    assert "prompt_cache_options" not in captured

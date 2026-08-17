@@ -5,7 +5,7 @@ import re
 import tempfile
 from pathlib import Path
 
-SESSION_SCHEMA_VERSION = "session-v4"
+SESSION_SCHEMA_VERSION = "session-v5"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 

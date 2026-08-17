@@ -67,6 +67,7 @@ def test_approval_denial_prevents_sandbox_start(tmp_path):
 
 
 def test_docker_profiles_mount_workspace_read_only(tmp_path):
+    (tmp_path / "src").mkdir()
     sandbox = DockerSandbox(tmp_path, docker_binary="docker")
     args = sandbox._docker_args(
         container_name="pico-test",
@@ -79,3 +80,19 @@ def test_docker_profiles_mount_workspace_read_only(tmp_path):
     assert "target=/workspace,readonly" in mount
     assert "--read-only" in args
     assert not any("/workspace/.venv:" in item for item in args)
+    assert "PYTHONPATH=/workspace/src" in args
+    assert "PYTHONNOUSERSITE=1" in args
+
+
+def test_explicit_pythonpath_is_not_overwritten(tmp_path):
+    sandbox = DockerSandbox(tmp_path, docker_binary="docker")
+    args = sandbox._docker_args(
+        container_name="pico-test",
+        container_cwd="/workspace",
+        argv=("python", "-c", "pass"),
+        env={"PYTHONPATH": "/workspace/custom"},
+        profile=SandboxProfile.INSPECT,
+    )
+
+    assert "PYTHONPATH=/workspace/custom" in args
+    assert args.count("PYTHONPATH=/workspace/custom") == 1

@@ -20,6 +20,7 @@ from .context_manager import ContextManager
 from .contracts import ToolCall
 from .evidence import EvidenceLedger
 from .features import memory as memorylib
+from .hooks import HookRunner
 from .mutations import WorkspaceMutationService
 from .project_memory import MEMORY_SELECTOR_MAX_SELECTED, ProjectMemoryStore
 from .prompt_prefix import build_prompt_prefix, tool_signature
@@ -52,7 +53,7 @@ class Pico:
         session=None,
         run_store=None,
         approval_policy="ask",
-        max_steps=6,
+        max_steps=None,
         max_new_tokens=512,
         read_only=False,
         shell_env_allowlist=None,
@@ -64,13 +65,17 @@ class Pico:
         sandbox=None,
         sandbox_image="pico/sandbox:latest",
         verification_command=None,
+        hooks=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        self.invocation_cwd = Path(workspace.cwd)
+        self._workspace_snapshot_cache = None
+        self._workspace_content_fingerprint_cache = None
         self.session_store = session_store
         self.approval_policy = approval_policy
-        self.max_steps = max_steps
+        self.max_steps = None if max_steps is None else max(1, int(max_steps))
         self.max_new_tokens = max_new_tokens
         self.read_only = read_only
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
@@ -109,6 +114,7 @@ class Pico:
             discover_verification_command(self.root)
             if verification_command is None else str(verification_command)
         )
+        self.hooks = HookRunner(hooks)
         self.evidence_ledger = EvidenceLedger()
         self.repo_map = RepoMap(self.root)
         self.repository_overview = discover_repository_overview(self.root)
@@ -129,7 +135,6 @@ class Pico:
         self.last_memory_extraction = {}
         self._task_memory_selection = None
         self.last_tool_outcome = None
-        self.progress_governor = None
         self._last_prefix_refresh = {
             "workspace_changed": False,
             "prefix_changed": False,
@@ -239,9 +244,18 @@ class Pico:
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
-        refreshed_workspace = WorkspaceContext.build(self.root)
+        refreshed_workspace = WorkspaceContext.build(
+            self.invocation_cwd,
+            repo_root_override=self.root,
+        )
         refreshed_workspace_fingerprint = refreshed_workspace.fingerprint()
-        workspace_changed = force or refreshed_workspace_fingerprint != previous_workspace_fingerprint
+        detected_workspace_change = (
+            refreshed_workspace_fingerprint != previous_workspace_fingerprint
+        )
+        workspace_changed = force or detected_workspace_change
+        if detected_workspace_change and not force:
+            self._workspace_snapshot_cache = None
+            self._workspace_content_fingerprint_cache = None
         if workspace_changed:
             self.workspace = refreshed_workspace
 
@@ -416,7 +430,7 @@ class Pico:
             workspace_fingerprint=self.workspace.fingerprint(),
         )
 
-    def capture_workspace_snapshot(self):
+    def _scan_workspace_snapshot(self):
         snapshot = {}
         for path in self.root.rglob("*"):
             try:
@@ -433,11 +447,19 @@ class Pico:
                 continue
         return snapshot
 
+    def capture_workspace_snapshot(self, *, force=False):
+        if force or self._workspace_snapshot_cache is None:
+            self._workspace_snapshot_cache = self._scan_workspace_snapshot()
+            self._workspace_content_fingerprint_cache = None
+        return self._workspace_snapshot_cache
+
     def content_workspace_fingerprint(self):
-        payload = json.dumps(
-            self.capture_workspace_snapshot(), sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        if self._workspace_content_fingerprint_cache is None:
+            payload = json.dumps(
+                self.capture_workspace_snapshot(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            self._workspace_content_fingerprint_cache = hashlib.sha256(payload).hexdigest()
+        return self._workspace_content_fingerprint_cache
 
     def run_verification(self):
         return run_verification(self)
@@ -573,8 +595,9 @@ class Pico:
             path_resolver=self.path,
             shell_env_provider=self.shell_env,
             project_memory=self.project_memory,
+            artifact_store=self.artifact_store,
             session_id=self.session["id"],
-            run_id_provider=lambda: str(getattr(self.current_task_state, "run_id", "")),
+            run_id_provider=lambda: str(getattr(self.current_task_state, "run_id", "") or "manual"),
             source_entry_ids_provider=pending_call_entry_ids,
             tool_call_id_provider=lambda: (
                 getattr(self, "context_ledger", None).pending_call_id()

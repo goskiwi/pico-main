@@ -9,8 +9,8 @@ from pathlib import Path
 from ..context_manager import Tokenizer
 from ..contracts import FailureInfo, ToolOutcome
 from ..features.memory import SessionWorkingMemory
-from ..progress import ProgressGovernor
 from ..project_memory import ProjectMemoryStore
+from ..recovery import RecoveryPolicy
 from ..repo_map import RepoMap
 from ..run_store import RunStore
 from ..verification import parse_verification_output
@@ -139,33 +139,52 @@ def run_repo_map_evaluation(path=Path("artifacts/repo-map-v1.json")):
     return _write(path, payload)
 
 
-def run_runtime_governance_evaluation(path=Path("artifacts/runtime-governance-v1.json")):
+def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json")):
     with tempfile.TemporaryDirectory(prefix="pico-runtime-eval-") as directory:
         store = RunStore(Path(directory) / "runs")
         store.append_event("run_eval", "task_eval", "run_started", {"user_request": "repair"})
-        governor = ProgressGovernor()
+        policy = RecoveryPolicy()
         outcome = ToolOutcome(
             "call_eval", "run_shell", "error", "failed", "none", "exit_code: 1",
             "same-call", {"status": "admitted", "stages": []},
             failure=FailureInfo("tool_failed", "command", "same failure", True),
             workspace_fingerprint="workspace-eval",
         )
-        first = governor.observe_tool(outcome)
-        second = governor.observe_tool(outcome)
+        first = policy.assess(
+            outcome.failure,
+            status=outcome.status,
+            fingerprint=outcome.call_fingerprint,
+            scope="run_eval",
+        )
+        second = policy.assess(
+            outcome.failure,
+            status=outcome.status,
+            fingerprint=outcome.call_fingerprint,
+            scope="run_eval",
+        )
         for decision in (first, second):
-            store.append_event("run_eval", "task_eval", "progress_decided", decision.to_dict())
+            store.append_event(
+                "run_eval",
+                "task_eval",
+                "policy_decided",
+                {
+                    "stop": decision.action == "stop",
+                    "reason": decision.reason,
+                    "guidance": "\n".join(decision.guidance),
+                },
+            )
         events = store.read_events("run_eval")
         verification = parse_verification_output(
             "python -m pytest -q", "FAILED tests/test_x.py::test_x\n1 failed, 2 passed", 1
         )
         payload = {
-            "artifact_type": "runtime-governance-v1",
+            "artifact_type": "runtime-policy-v1",
             "runtime_snapshot_id": runtime_snapshot_id(),
             "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
                 "hash_chain_valid": len(events) == 3,
-                "replayable_progress": store.replay("run_eval").summary()["progress_counts"].get("replan") == 1,
-                "repeated_failure_replanned": second.decision == "replan",
+                "replayable_policy": store.replay("run_eval").summary()["policy_counts"].get("continue") == 2,
+                "repeated_failure_replanned": second.action == "replan",
                 "verification_structured": verification["failed_tests"] == ["tests/test_x.py::test_x"],
             },
         }
@@ -178,7 +197,7 @@ def write_runtime_report(
     working_memory_path=Path("artifacts/working-memory-v3.json"),
     project_memory_path=Path("artifacts/project-memory-v1.json"),
     repo_map_path=Path("artifacts/repo-map-v1.json"),
-    runtime_governance_path=Path("artifacts/runtime-governance-v1.json"),
+    runtime_policy_path=Path("artifacts/runtime-policy-v1.json"),
     harness_path=Path("artifacts/harness-regression-v3.json"),
 ):
     harness = json.loads(Path(harness_path).read_text())
@@ -186,8 +205,8 @@ def write_runtime_report(
     working = json.loads(Path(working_memory_path).read_text())
     project = json.loads(Path(project_memory_path).read_text())
     repo = json.loads(Path(repo_map_path).read_text())
-    governance_path = Path(runtime_governance_path)
-    governance = json.loads(governance_path.read_text()) if governance_path.exists() else None
+    policy_path = Path(runtime_policy_path)
+    policy = json.loads(policy_path.read_text()) if policy_path.exists() else None
     text = "\n".join([
         "# Pico Runtime Evaluation", "",
         "These deterministic artifacts measure Runtime mechanisms, not model intelligence.", "",
@@ -207,12 +226,12 @@ def write_runtime_report(
         f"- Query hit: {repo['summary']['query_hit']}",
         f"- Within budget: {repo['summary']['within_budget']}", "",
     ])
-    if governance:
+    if policy:
         text += "\n" + "\n".join([
-            "## Runtime governance", "",
-            f"- Hash chain valid: {governance['summary']['hash_chain_valid']}",
-            f"- Repeated failure replanned: {governance['summary']['repeated_failure_replanned']}",
-            f"- Structured verification: {governance['summary']['verification_structured']}", "",
+            "## Runtime policy", "",
+            f"- Hash chain valid: {policy['summary']['hash_chain_valid']}",
+            f"- Repeated failure replanned: {policy['summary']['repeated_failure_replanned']}",
+            f"- Structured verification: {policy['summary']['verification_structured']}", "",
         ])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

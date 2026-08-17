@@ -122,6 +122,25 @@ def test_last_tool_step_gets_one_final_only_model_turn(tmp_path):
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
 
 
+def test_default_loop_has_no_tool_step_limit(tmp_path):
+    (tmp_path / "many.txt").write_text(
+        "".join(f"line-{index}\n" for index in range(1, 9)),
+        encoding="utf-8",
+    )
+    outputs = [
+        ModelAction.tool("read_file", {"path": "many.txt", "start": index, "end": index})
+        for index in range(1, 8)
+    ]
+    outputs.append(ModelAction.final("Completed seven reads."))
+    agent = build_agent(tmp_path, outputs)
+
+    answer = agent.ask("Read seven distinct lines")
+
+    assert answer == "Completed seven reads."
+    assert agent.max_steps is None
+    assert agent.current_task_state.tool_steps == 7
+
+
 def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(

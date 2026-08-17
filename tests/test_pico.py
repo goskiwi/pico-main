@@ -121,3 +121,22 @@ def test_session_schema_is_strict_not_migrated(tmp_path):
     with pytest.raises(ValueError, match="unsupported session schema"):
         Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
              agent.session_store, session=agent.session, verification_command="")
+
+
+def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp_path):
+    workspace_root = tmp_path / "fixture"
+    invocation_cwd = workspace_root / "src"
+    invocation_cwd.mkdir(parents=True)
+    (workspace_root / "README.md").write_text("fixture\n", encoding="utf-8")
+    workspace = WorkspaceContext.build(invocation_cwd, repo_root_override=workspace_root)
+    agent = Pico(
+        FakeModelClient([]),
+        workspace,
+        SessionStore(workspace_root / ".pico" / "sessions"),
+        verification_command="",
+    )
+
+    agent.refresh_prefix(force=True)
+
+    assert agent.workspace.repo_root == str(workspace_root.resolve())
+    assert agent.workspace.cwd == str(invocation_cwd.resolve())

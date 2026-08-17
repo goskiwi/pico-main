@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-EVENT_SCHEMA_VERSION = "runtime-event-v1"
+EVENT_SCHEMA_VERSION = "runtime-event-v2"
 EVENT_TYPES = frozenset(
     {
         "checkpoint_created",
@@ -19,7 +19,7 @@ EVENT_TYPES = frozenset(
         "model_requested",
         "operation_finished",
         "operation_started",
-        "progress_decided",
+        "policy_decided",
         "prompt_built",
         "provider_session_reset",
         "run_finished",
@@ -122,7 +122,7 @@ class RunProjection:
     event_counts: dict[str, int] = field(default_factory=dict)
     tool_counts: dict[str, int] = field(default_factory=dict)
     outcome_counts: dict[str, int] = field(default_factory=dict)
-    progress_counts: dict[str, int] = field(default_factory=dict)
+    policy_counts: dict[str, int] = field(default_factory=dict)
     verification_counts: dict[str, int] = field(default_factory=dict)
     operations: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_cursor: EventCursor = field(default_factory=EventCursor)
@@ -163,9 +163,9 @@ class RunProjection:
         elif event_type == "verification_finished":
             status = str(payload.get("status", "unknown"))
             self.verification_counts[status] = self.verification_counts.get(status, 0) + 1
-        elif event_type == "progress_decided":
-            decision = str(payload.get("decision", "unknown"))
-            self.progress_counts[decision] = self.progress_counts.get(decision, 0) + 1
+        elif event_type == "policy_decided":
+            decision = "stop" if payload.get("stop") else "continue"
+            self.policy_counts[decision] = self.policy_counts.get(decision, 0) + 1
         elif event_type == "checkpoint_created":
             self.checkpoint_id = str(payload.get("checkpoint_id", self.checkpoint_id))
         elif event_type == "run_finished":
@@ -207,7 +207,7 @@ class RunProjection:
             "event_counts": dict(sorted(self.event_counts.items())),
             "tool_counts": dict(sorted(self.tool_counts.items())),
             "outcome_counts": dict(sorted(self.outcome_counts.items())),
-            "progress_counts": dict(sorted(self.progress_counts.items())),
+            "policy_counts": dict(sorted(self.policy_counts.items())),
             "verification_counts": dict(sorted(self.verification_counts.items())),
             "pending_operations": sorted(
                 call_id for call_id, item in self.operations.items() if item.get("state") != "finished"

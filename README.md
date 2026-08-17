@@ -10,14 +10,14 @@ OpenAI-compatible Responses 原生 function calling 提出下一步动作；上�
 
 ```text
 User request
-  -> Context Ledger v3
+  -> Context Ledger v4
   -> RepoMap + Working/Project Memory
   -> Token-budgeted prompt projection
   -> Responses function_call -> ModelAction
   -> Registry / Surface / Schema / Policy / Approval
   -> Docker tool execution or revision-bound atomic mutation
-  -> ToolOutcome + Evidence + Progress decision
-  -> hash-chained Runtime Event / transactional compaction / Checkpoint v5
+  -> ToolOutcome + Evidence + optional Policy Hook
+  -> hash-chained Runtime Event v2 / transactional compaction / Checkpoint v6
   -> structured runtime verification -> Completion Gate
 ```
 
@@ -28,10 +28,11 @@ User request
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层记忆：Session Working Memory 保存目标、最近文件和 revision-bound 文件观察；Project Memory 以 Markdown card 为唯一事实源，生成 `MEMORY.md` 索引并保留 provenance、版本、过期时间及显式记忆优先级。
 - 安全工具：路径锚定 Workspace；重复调用检测；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
+- 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
 - 隔离执行：`run_shell` 强制进入临时 Docker 容器；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
-- 事件溯源：运行事件以 strict schema、连续 sequence、因果/关联 ID 和 SHA-256 hash chain 写入单一 `events.jsonl`，每条 flush + fsync；Task/Evidence/Progress/Report 均可由事件投影。
-- 进度治理：ProgressGovernor 根据 Evidence 增量、重复失败、无进展步数、Workspace effect、Context generation 和 verifier signature 决定 continue、repair、verify、replan 或 stop。
-- 恢复：Checkpoint v5 校验 schema、Runtime 配置、provider conversation mode、内容级 Workspace 指纹、Context Ledger 及事件 cursor/digest；中断操作只核对 receipt，绝不重放潜在副作用。
+- 事件溯源：运行事件以 strict schema、连续 sequence、因果/关联 ID 和 SHA-256 hash chain 写入单一 `events.jsonl`，首次打开完整校验，之后在锁内增量验证尾部并 flush + fsync；Task/Evidence/Policy/Report 均可由事件投影。
+- 策略扩展：核心循环默认持续到模型提交最终答案、deadline、取消或错误；不内置“若干步未编辑”等任务猜测。宿主可显式传入 `before_tool_call`、`after_tool_result` 和 `should_stop_after_turn` hook，hook 只能进一步限制或提供指导，不能改写工具事实或绕过安全校验。
+- 恢复：Checkpoint v6 校验 schema、Runtime 配置、hook 身份、provider conversation mode、内容级 Workspace 指纹、Context Ledger 及事件 cursor/digest；中断操作只核对 receipt，绝不重放潜在副作用。
 - 完成证据：观察、修改和结构化 verifier 结果写入 Evidence Ledger；变更 Python 先做 AST 校验，Workspace 变更需通过绑定当前内容指纹的 Runtime verifier，未解决 partial/unknown 状态禁止成功结束。
 
 ## 安装与运行
@@ -58,6 +59,7 @@ PICO_OPENAI_MODEL="gpt-5.4"
 ```bash
 uv run pico --approval ask
 uv run pico --run-timeout 600
+uv run pico --max-steps 40
 uv run pico --provider-context-limit 64000
 uv run pico --verify-command "python -m pytest -q"
 uv run pico --resume latest
@@ -102,10 +104,9 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 |---|---:|---|
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
-| Real Docker containment | 1/1 | 实际验证 workspace 只读、`.env.local` 隐藏和禁网 |
-| Frozen Click OSS task | 1/1 | clean commit；hidden verifier、mutation scope、event chain、provider continuation 全通过 |
-| Five-repository fixture preflight | 5/5 | 每个 hidden verifier 均在对应 pre-fix commit 上失败，具备区分力 |
-| Five-repository Real OSS suite | 4/5 | clean commit `08c3283`；urllib3 在 14 步预算内仅完成定位、未修改代码 |
+| Runtime policy | 全部通过 | 单一恢复建议、hook 边界、结构化 verifier 与事件重放 |
+
+旧的 10/12/14 步差异化五题结果已删除。Real OSS v2 使用统一 40 工具步预算；只有在 clean commit 上完成 fail-before/pass-after preflight 和完整五题运行后才发布新结果。
 
 五仓库冻结任务集可以从精确上游 commit 重新物化并运行：
 
@@ -115,9 +116,7 @@ docker build -f docker/real-oss-suite.Dockerfile -t pico/real-oss-suite:latest .
 uv run python scripts/run_real_oss_suite.py --model gpt-5.6-luna
 ```
 
-Real OSS runner 强制要求 clean worktree；当前结果见 `artifacts/real-oss-validation.{json,md}`，绑定 commit `c41d251`。确定性工件分别通过 `runtime_snapshot_id` 与 `evaluation_snapshot_id` 绑定 Runtime 和评测实现。
-五题物化 provenance 与 preflight 分别见 `artifacts/real-oss-fixtures/.real_oss_suite.materialization.json` 和 `artifacts/real-oss-preflight.json`。完整五题模型运行只在所有任务获得真实终态后发布；provider 基础设施失败不会计入任务通过率。
-五题真实模型结果见 `artifacts/real-oss-suite-v1.{json,md}`。该次固定运行没有选择性重跑失败题；4/5 是可复核的回归结果，不解释为通用成功率。
+Real OSS runner 强制要求 clean worktree，并把 Runtime snapshot、manifest/verifier/reference-patch digest、fixture tree digest、Docker image ID 和统一工具预算写入证据。Preflight 必须证明每个 hidden verifier 在 pre-fix fixture 上失败，并在应用绑定上游修复提交的 reference patch 后通过。完整五题模型运行不复用旧结果，也不选择性重跑任务失败。
 
 面试展示顺序见 [`docs/review-pack/interview-demo.md`](docs/review-pack/interview-demo.md)。
 

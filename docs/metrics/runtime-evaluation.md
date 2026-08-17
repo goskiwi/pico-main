@@ -27,7 +27,7 @@ These deterministic artifacts measure Runtime mechanisms, not model intelligence
 - Query hit: True
 - Within budget: True
 
-## Runtime governance
+## Runtime policy
 
 - Hash chain valid: True
 - Repeated failure replanned: True

@@ -237,8 +237,8 @@ def build_arg_parser():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=6,
-        help="Maximum tool/model iterations per request.",
+        default=None,
+        help="Optional maximum executed tool calls per request; unset means no step limit.",
     )
     parser.add_argument(
         "--max-new-tokens",

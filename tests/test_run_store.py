@@ -33,6 +33,50 @@ def test_run_store_appends_hash_chained_events(tmp_path):
     assert store.event_cursor(state.run_id).event_hash == events[-1]["event_hash"]
 
 
+def test_run_store_validates_once_then_appends_incrementally(tmp_path, monkeypatch):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    decode_calls = 0
+    original = store._decode_events
+
+    def counted(run_id, text):
+        nonlocal decode_calls
+        decode_calls += 1
+        return original(run_id, text)
+
+    monkeypatch.setattr(store, "_decode_events", counted)
+    for index in range(100):
+        store.append_event("run_linear", "task_linear", "model_requested", {"attempts": index})
+
+    assert decode_calls == 1
+    assert store.event_cursor("run_linear").sequence == 100
+
+
+def test_run_store_accepts_valid_tail_from_another_writer(tmp_path):
+    root = tmp_path / ".pico" / "runs"
+    first = RunStore(root)
+    second = RunStore(root)
+    first.append_event("run_shared", "task_shared", "run_started")
+    second.append_event("run_shared", "task_shared", "model_requested", {"attempts": 1})
+    first.append_event("run_shared", "task_shared", "run_finished", {"status": "completed"})
+
+    events = first.read_events("run_shared")
+    assert [event["sequence"] for event in events] == [1, 2, 3]
+
+
+def test_run_store_fails_closed_when_event_file_is_truncated(tmp_path):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    store.append_event("run_tampered", "task_tampered", "run_started")
+    path = store.events_path("run_tampered")
+    path.write_bytes(path.read_bytes()[:-5])
+
+    try:
+        store.append_event("run_tampered", "task_tampered", "run_finished")
+    except ValueError as exc:
+        assert "truncated" in str(exc)
+    else:
+        raise AssertionError("truncated event log was accepted")
+
+
 def test_run_store_writes_report_json(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
     state = TaskState.create(run_id="run_003", task_id="task_003", user_request="Report the run.")

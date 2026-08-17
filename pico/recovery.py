@@ -18,9 +18,8 @@ class RecoveryPolicy:
                 ("Ask the user for authority or choose a read-only action.",),
             )
         if failure.code == "repeated_identical_call":
-            action = "stop" if occurrence > 1 else "replan"
             return RecoveryAssessment(
-                action, "the call made no progress", "retry_after_change", occurrence,
+                "replan", "the call made no progress", "retry_after_change", occurrence,
                 ("Change the arguments, gather new evidence, or finish the task.",),
             )
         if status == "partial_success":

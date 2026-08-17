@@ -283,7 +283,7 @@ class OpenAICompatibleModelClient:
 
     def complete(
         self, prompt, max_new_tokens, prompt_cache_key=None,
-        prompt_cache_retention=None, action_tools=None, input_items=None,
+        action_tools=None, input_items=None, request_timeout=None,
     ):
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
@@ -331,8 +331,6 @@ class OpenAICompatibleModelClient:
         # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
-        if self.supports_prompt_cache and prompt_cache_retention:
-            payload["prompt_cache_retention"] = prompt_cache_retention
 
         headers = {
             "Content-Type": "application/json",
@@ -349,9 +347,12 @@ class OpenAICompatibleModelClient:
             method="POST",
         )
         attempts = 3
+        effective_timeout = self.timeout if request_timeout is None else min(
+            float(self.timeout), float(request_timeout)
+        )
         for attempt in range(attempts):
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                with urllib.request.urlopen(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
                     headers = getattr(response, "headers", {}) or {}
                     content_type = headers.get("Content-Type", "")
@@ -387,7 +388,6 @@ class OpenAICompatibleModelClient:
                 self.last_completion_metadata = {
                     "prompt_cache_supported": self.supports_prompt_cache,
                     "prompt_cache_key": prompt_cache_key,
-                    "prompt_cache_retention": prompt_cache_retention,
                     **_extract_usage_cache_details(response_data),
                 }
             if action_tools is not None:
@@ -416,7 +416,6 @@ class OpenAICompatibleModelClient:
         self.last_completion_metadata = {
             "prompt_cache_supported": self.supports_prompt_cache,
             "prompt_cache_key": prompt_cache_key,
-            "prompt_cache_retention": prompt_cache_retention,
             **_extract_usage_cache_details(data),
         }
         if action_tools is not None:
@@ -425,7 +424,7 @@ class OpenAICompatibleModelClient:
 
     def complete_action(
         self, prompt, max_new_tokens, *, action_tools,
-        prompt_cache_key=None, prompt_cache_retention=None,
+        prompt_cache_key=None, request_timeout=None,
     ):
         if not self._action_input:
             self._action_input.append(
@@ -440,9 +439,9 @@ class OpenAICompatibleModelClient:
             prompt,
             max_new_tokens,
             prompt_cache_key=prompt_cache_key,
-            prompt_cache_retention=prompt_cache_retention,
             action_tools=action_tools,
             input_items=self._action_input,
+            request_timeout=request_timeout,
         )
         output = self._last_response_data.get("output", [])
         if isinstance(output, list):

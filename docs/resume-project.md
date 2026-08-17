@@ -4,7 +4,7 @@
 
 设计并实现本地 Coding Agent Runtime，基于 OpenAI-compatible Responses 原生 function
 calling 统一模型决策、工具准入、执行结果回写、会话状态、Checkpoint 恢复和运行工件
-落盘；以 Context、Tool、Memory、State、Evidence、Progress、Event 组成完整控制面。
+落盘；以 Context、Tool、Memory、State、Evidence、Policy、Event 组成完整控制面。
 
 ## 长上下文治理
 
@@ -23,7 +23,7 @@ Python symbol/reference graph，以 lexical + personalized PageRank 生成 Token
 
 ## Checkpoint / Crash Resume
 
-设计 Checkpoint v5 与 hash-chained Runtime Event Log：恢复时严格校验
+设计 Checkpoint v6 与 hash-chained Runtime Event Log：恢复时严格校验
 Session/Checkpoint/Context schema、Runtime 配置、内容级 Workspace 指纹和 event
 cursor/digest；进程若中断在工具执行期间，依据事件 receipt 回填结果，没有 terminal
 receipt 时标记 unknown/partial，禁止盲目重放潜在副作用。
@@ -38,11 +38,12 @@ Profile，并共享整轮 deadline / cancellation token；统一识别重复调�
 
 ## 评测与审计闭环
 
-以 Evidence Ledger 记录观察、Workspace effect 和结构化 verifier 证据；ProgressGovernor
-根据新证据、重复失败、Context generation 和测试 failure signature 决定 repair、verify、
-replan 或 stop。Workspace 变更必须通过绑定当前内容指纹的 Runtime verifier，Completion
-Gate 阻止失败验证或未知副作用被报告为成功。通过事件 replay/stats、report 和 digest
-artifact 审计运行过程。
+以 Evidence Ledger 记录观察、Workspace effect 和结构化 verifier 证据；核心循环不猜测
+任务是否“应当已经修改”，恢复建议由单一 RecoveryPolicy 生成，可选宿主策略通过三个受限
+hook 注入且不能改写 ToolOutcome 或绕过安全边界。Workspace 变更必须通过绑定当前内容
+指纹的 Runtime verifier，Completion Gate 阻止失败验证或未知副作用被报告为成功。通过
+事件 replay/stats、report 和 digest artifact 审计运行过程；大输出保留 12/16 KiB 模型
+预览，完整 artifact 可在当前 run 内按 8 KiB 字节页校验读取。
 
 简历中不要宣称 Skills/MCP/子 Agent、多 Provider 或未经真实实验得到的 GAIA/HLE 指标；
 这些不在当前实现范围内。

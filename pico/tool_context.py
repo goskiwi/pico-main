@@ -11,6 +11,7 @@ class ToolContext:
     path_resolver: Callable[[str], Path]
     shell_env_provider: Callable[[], dict]
     project_memory: object | None = None
+    artifact_store: object | None = None
     session_id: str = ""
     run_id_provider: Callable[[], str] | None = None
     source_entry_ids_provider: Callable[[], tuple[str, ...]] | None = None

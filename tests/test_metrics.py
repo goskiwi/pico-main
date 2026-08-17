@@ -4,7 +4,7 @@ from pico.evaluation.metrics import (
     run_context_governance_ablation,
     run_project_memory_evaluation,
     run_repo_map_evaluation,
-    run_runtime_governance_evaluation,
+    run_runtime_policy_evaluation,
     run_working_memory_ablation,
     write_runtime_report,
 )
@@ -60,6 +60,6 @@ def test_runtime_report_uses_replayable_artifacts(tmp_path):
     assert "Runtime mechanisms, not model intelligence" in text
 
 
-def test_runtime_governance_evaluation_is_replayable(tmp_path):
-    artifact = run_runtime_governance_evaluation(tmp_path / "runtime.json")
+def test_runtime_policy_evaluation_is_replayable(tmp_path):
+    artifact = run_runtime_policy_evaluation(tmp_path / "runtime.json")
     assert all(artifact["summary"].values())

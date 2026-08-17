@@ -11,7 +11,7 @@ from .checkpoint import (
 from .completion import CompletionGate
 from .context_ledger import ContextLedger
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
-from .progress import ProgressGovernor
+from .hooks import AfterToolContext, TurnContext
 from .task_state import TaskState
 from .verification import changed_python_syntax_issues
 from .workspace import clip, now
@@ -60,13 +60,7 @@ class AgentLoop:
             ledger = ContextLedger(task_state.run_id, agent.run_store)
             ledger.append_user(user_message)
         agent.context_ledger = ledger
-        progress = (
-            ProgressGovernor.from_events(prior_events)
-            if can_resume
-            else ProgressGovernor()
-        )
-        progress.context_generation = ledger.generation
-        agent.progress_governor = progress
+        context_generation = ledger.generation
         agent.record({"role": "user", "content": user_message, "created_at": now()})
         completion_gate = CompletionGate()
         completion_gate.restore_partial_paths((checkpoint or {}).get("pending_partial_paths", []) if can_resume else [])
@@ -102,13 +96,6 @@ class AgentLoop:
                 },
                 correlation_id=outcome.tool_call_id,
             )
-            recovery_decision = progress.observe_tool(outcome)
-            agent.emit_event(
-                task_state,
-                "progress_decided",
-                recovery_decision.to_dict(),
-                correlation_id=outcome.tool_call_id,
-            )
         if ledger.reconciled_outcomes:
             agent.run_store.write_task_state(task_state)
 
@@ -117,7 +104,7 @@ class AgentLoop:
 
         tool_steps = task_state.tool_steps
         attempts = task_state.attempts
-        max_attempts = max(agent.max_steps * 3, agent.max_steps + 4)
+        malformed_retries = 0
         execution_stop = ""
 
         # 这是 agent 的主循环，可以按“感知 -> 决策 -> 行动 -> 记录”来理解：
@@ -129,7 +116,7 @@ class AgentLoop:
         # A tool budget of N permits at most N executions plus one final-only
         # model turn. Without that grace turn, a successful Nth tool result can
         # never be converted into a final answer.
-        while tool_steps <= agent.max_steps and attempts < max_attempts:
+        while True:
             try:
                 agent.current_execution.check_active()
             except ExecutionDeadlineExceeded:
@@ -151,13 +138,13 @@ class AgentLoop:
                 prompt_metadata = dict(original_metadata)
             prompt_metadata["prompt_reused"] = prompt_reused
             prompt_metadata["provider_session_active"] = prompt_reused
-            if not prompt_reused and progress.observe_context(
-                prompt_metadata.get("ledger_generation", ledger.generation)
-            ):
+            next_generation = int(prompt_metadata.get("ledger_generation", ledger.generation))
+            if not prompt_reused and next_generation > context_generation:
+                context_generation = next_generation
                 agent.emit_event(
                     task_state,
                     "context_folded",
-                    {"generation": progress.context_generation},
+                    {"generation": context_generation},
                 )
             memory_audit = dict(prompt_metadata.get("memory_retrieval", {}) or {})
             if not prompt_reused and (
@@ -222,15 +209,13 @@ class AgentLoop:
                 },
             )
             prompt_cache_key = None
-            prompt_cache_retention = None
             if getattr(agent.model_client, "supports_prompt_cache", False):
                 # 只有后端明确支持时，才把稳定前缀的 hash 作为 cache key 发出去。
                 prompt_cache_key = prompt_metadata.get("prompt_cache_key")
-                prompt_cache_retention = "in_memory"
             model_started_at = time.monotonic()
             action_tools = (
                 [tool for tool in agent.action_tools if tool["name"] == "submit_final"]
-                if tool_steps >= agent.max_steps
+                if agent.max_steps is not None and tool_steps >= agent.max_steps
                 else agent.action_tools
             )
             action = agent.model_client.complete_action(
@@ -238,7 +223,7 @@ class AgentLoop:
                 agent.max_new_tokens,
                 action_tools=action_tools,
                 prompt_cache_key=prompt_cache_key,
-                prompt_cache_retention=prompt_cache_retention,
+                request_timeout=agent.current_execution.bounded_timeout(),
             )
             completion_metadata = dict(getattr(agent.model_client, "last_completion_metadata", {}) or {})
             if completion_metadata:
@@ -290,8 +275,9 @@ class AgentLoop:
                 agent.model_client.record_action_result(current_action, feedback)
 
             if action.kind == "tool":
-                if tool_steps >= agent.max_steps:
+                if agent.max_steps is not None and tool_steps >= agent.max_steps:
                     break
+                malformed_retries = 0
                 call = action.tool_call
                 name, args = call.name, call.args
                 ledger.append_tool_call(call)
@@ -300,13 +286,6 @@ class AgentLoop:
                     tool_steps += 1
                     task_state.record_tool(name)
                 completion_gate.observe(outcome)
-                progress_decision = progress.observe_tool(outcome)
-                agent.emit_event(
-                    task_state,
-                    "progress_decided",
-                    progress_decision.to_dict(),
-                    correlation_id=call.call_id,
-                )
                 context_result = ledger.append_tool_result(outcome)
                 agent.record(
                     {
@@ -321,11 +300,30 @@ class AgentLoop:
                     }
                 )
                 agent.run_store.write_task_state(task_state)
-                guidance = progress_decision.guidance()
+                hook_decision = agent.hooks.after_tool_result(
+                    AfterToolContext(
+                        outcome=outcome,
+                        tool_steps=tool_steps,
+                        run_id=task_state.run_id,
+                        task_id=task_state.task_id,
+                    )
+                )
+                turn_decision = agent.hooks.should_stop_after_turn(
+                    TurnContext(
+                        action_kind="tool",
+                        tool_steps=tool_steps,
+                        attempts=attempts,
+                        run_id=task_state.run_id,
+                        task_id=task_state.task_id,
+                    )
+                )
+                guidance = "\n".join(
+                    part for part in (hook_decision.guidance, turn_decision.guidance) if part
+                )
                 if guidance:
                     ledger.append_guidance(guidance)
                     agent.record({"role": "assistant", "content": guidance, "created_at": now()})
-                if tool_steps >= agent.max_steps:
+                if agent.max_steps is not None and tool_steps >= agent.max_steps:
                     budget_guidance = (
                         "Runtime tool budget exhausted. Do not call another tool; "
                         "use submit_final now with the available evidence."
@@ -337,6 +335,32 @@ class AgentLoop:
                 if guidance:
                     provider_result += "\n\nRuntime guidance: " + guidance
                 continue_provider(provider_result, tool_call_id=call.call_id)
+                policy_stop = (
+                    hook_decision.stop
+                    or turn_decision.stop
+                    or bool(outcome.metadata.get("policy_stop_requested"))
+                )
+                if hook_decision.active or turn_decision.active or policy_stop:
+                    reason = " | ".join(
+                        part for part in (
+                            hook_decision.reason,
+                            turn_decision.reason,
+                            outcome.failure.detail
+                            if outcome.metadata.get("policy_stop_requested") and outcome.failure
+                            else "",
+                        ) if part
+                    )
+                    agent.emit_event(
+                        task_state,
+                        "policy_decided",
+                        {
+                            "stop": bool(policy_stop),
+                            "reason": reason,
+                            "guidance": guidance,
+                            "tool_call_id": call.call_id,
+                        },
+                        correlation_id=call.call_id,
+                    )
                 checkpoint = agent.create_checkpoint(task_state, user_message, trigger="tool_executed")
                 agent.run_store.write_task_state(task_state)
                 agent.emit_event(
@@ -347,27 +371,20 @@ class AgentLoop:
                         "trigger": "tool_executed",
                     },
                 )
-                if progress_decision.decision == "stop":
-                    execution_stop = "progress_stalled"
+                if policy_stop:
+                    execution_stop = "policy:" + (reason or "runtime policy requested stop")
                     break
                 continue
 
             if action.kind == "retry":
-                progress_decision = progress.observe_model_retry(action.error)
-                agent.emit_event(task_state, "progress_decided", progress_decision.to_dict())
+                malformed_retries += 1
                 ledger.append_guidance(action.content)
                 agent.record({"role": "assistant", "content": action.content, "created_at": now()})
-                guidance = progress_decision.guidance()
-                if guidance:
-                    ledger.append_guidance(guidance)
-                    agent.record({"role": "assistant", "content": guidance, "created_at": now()})
                 retry_notice = action.content
-                if guidance:
-                    retry_notice += "\n\nRuntime guidance: " + guidance
                 continue_provider(retry_notice)
                 agent.run_store.write_task_state(task_state)
-                if progress_decision.decision == "stop":
-                    execution_stop = "progress_stalled"
+                if malformed_retries >= 8:
+                    execution_stop = "malformed_model_retry_limit"
                     break
                 continue
 
@@ -388,9 +405,6 @@ class AgentLoop:
                     agent.emit_event(task_state, "verification_started", {"command": agent.verification_command})
                     verification = agent.run_verification()
                     agent.emit_event(task_state, "verification_finished", verification or {"status": "skipped"})
-                    if verification:
-                        progress_decision = progress.observe_verification(verification)
-                        agent.emit_event(task_state, "progress_decided", progress_decision.to_dict())
                 if not verification or verification.get("status") != "passed":
                     guidance = (
                         "Runtime verification failed; inspect and repair before submit_final.\n"
@@ -438,12 +452,16 @@ class AgentLoop:
             agent.current_execution = None
             return final
 
-        if execution_stop:
-            final = f"Stopped because execution was interrupted: {execution_stop}."
-            task_state.stop(execution_stop, final_answer=final)
-        elif attempts >= max_attempts and tool_steps < agent.max_steps:
+        if execution_stop.startswith("policy:"):
+            reason = execution_stop.removeprefix("policy:")
+            final = f"Stopped by runtime policy: {reason}."
+            task_state.stop("policy_stop", final_answer=final)
+        elif execution_stop == "malformed_model_retry_limit":
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
             task_state.stop_retry_limit(final)
+        elif execution_stop:
+            final = f"Stopped because execution was interrupted: {execution_stop}."
+            task_state.stop(execution_stop, final_answer=final)
         else:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)

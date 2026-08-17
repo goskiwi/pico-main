@@ -60,7 +60,7 @@ def test_artifact_integrity_verification_detects_tampering(tmp_path):
 def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     target = tmp_path / "large.txt"
     target.write_text(
-        "prefix\n" + "x" * 4500 + "middle-only-marker" + "x" * 4500
+        "prefix\n" + "x" * 9000 + "middle-only-marker" + "x" * 9000
         + "\nfull-artifact-tail\n"
     )
     agent = build_agent(tmp_path)
@@ -72,11 +72,33 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     artifact = (
         tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
     )
+    assert len(outcome.content.encode("utf-8")) <= 13 * 1024
     assert len(outcome.content) < len(artifact.read_text(encoding="utf-8"))
     assert "middle-only-marker" not in outcome.content
-    assert "full-artifact-tail" in outcome.content
+    assert "full-artifact-tail" not in outcome.content
+    assert "read_artifact" in outcome.content
+    assert outcome.artifact_id in outcome.content
     assert "full-artifact-tail" in artifact.read_text(encoding="utf-8")
-    assert agent.artifact_store.verify("manual", outcome.artifact_id)["size_bytes"] > 8000
+    assert agent.artifact_store.verify("manual", outcome.artifact_id)["size_bytes"] > 16000
+
+
+def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
+    agent = build_agent(tmp_path)
+    output = "head-marker\n" + "noise\n" * 5000 + "tail-marker\n"
+    agent.all_tools["run_shell"]["run"] = lambda _args: "exit_code: 0\n" + output
+
+    outcome = agent.run_tool(
+        ToolCall("run_shell", {"command": "true", "timeout": 20}, "call_shell_large")
+    )
+
+    assert "head-marker" not in outcome.content
+    assert "tail-marker" in outcome.content
+    assert "read_artifact" in outcome.content
+    artifact = (
+        tmp_path / ".pico" / "runs" / "manual" / "artifacts"
+        / f"{outcome.artifact_id}.txt"
+    )
+    assert "head-marker" in artifact.read_text(encoding="utf-8")
 
 def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
     agent = build_agent(tmp_path)
@@ -153,6 +175,46 @@ def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
     assert second.recovery.action == "replan"
     assert third.status == "rejected"
     assert len(executions) == 2
+
+
+def test_read_only_tools_reuse_workspace_snapshot(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    scans = 0
+    original = agent._scan_workspace_snapshot
+
+    def counted():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(agent, "_scan_workspace_snapshot", counted)
+    agent.run_tool(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "read_1"))
+    agent.run_tool(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 2}, "read_2"))
+
+    assert scans == 1
+
+
+def test_workspace_mutation_reconciles_snapshot_once(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    scans = 0
+    original = agent._scan_workspace_snapshot
+
+    def counted():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(agent, "_scan_workspace_snapshot", counted)
+    agent.run_tool(
+        ToolCall(
+            "write_file",
+            {"path": "created.txt", "content": "created\n", "expected_revision": "absent"},
+            "write_1",
+        )
+    )
+
+    assert scans == 2
+    assert "created.txt" in agent.capture_workspace_snapshot()
 
 
 def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):

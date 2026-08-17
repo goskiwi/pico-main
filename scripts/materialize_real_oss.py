@@ -38,8 +38,10 @@ def tree_digest(root):
 
 def load_manifest(path=DEFAULT_MANIFEST):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v1":
+    if payload.get("schema_version") != "real-oss-suite-v2":
         raise ValueError("unsupported Real OSS suite schema")
+    if int(payload.get("tool_budget", 0)) < 1:
+        raise ValueError("Real OSS suite requires one positive uniform tool_budget")
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("Real OSS suite requires a non-empty task list")

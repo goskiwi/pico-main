@@ -56,3 +56,26 @@ def test_real_docker_sandbox_enforces_runtime_boundaries(tmp_path):
         profile=SandboxProfile.INSPECT,
     )
     assert network_attempt.returncode != 0
+
+
+@pytest.mark.skipif(not docker_tests_enabled(), reason="set PICO_RUN_DOCKER_TESTS=1")
+def test_real_docker_prefers_workspace_src_over_installed_packages(tmp_path):
+    package = tmp_path / "src" / "urllib3"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("SOURCE = 'workspace'\n", encoding="utf-8")
+    sandbox = DockerSandbox(tmp_path)
+
+    result = sandbox.run(
+        (
+            "python",
+            "-c",
+            "import urllib3; print(urllib3.SOURCE); print(urllib3.__file__)",
+        ),
+        cwd=tmp_path,
+        timeout=20,
+        profile=SandboxProfile.INSPECT,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[0] == "workspace"
+    assert result.stdout.splitlines()[1] == "/workspace/src/urllib3/__init__.py"

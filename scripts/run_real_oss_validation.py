@@ -29,6 +29,7 @@ ALLOWED_TOOLS = (
     "query_repo_map",
     "list_files",
     "read_file",
+    "read_artifact",
     "search",
     "run_shell",
     "write_file",
@@ -44,19 +45,24 @@ FORBIDDEN_CHANGE_GLOBS = (
 
 def load_task(path, task_id):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v1":
+    if payload.get("schema_version") != "real-oss-suite-v2":
         raise ValueError("unsupported Real OSS suite schema")
     tasks = payload.get("tasks")
     if not isinstance(tasks, list):
         raise TypeError("Real OSS suite requires tasks")
     task = next((item for item in tasks if item.get("id") == task_id), None)
     required = {
-        "id", "prompt", "fixture_repo", "step_budget", "required_change_globs",
+        "id", "prompt", "fixture_repo", "required_change_globs",
         "allowed_change_globs", "verifier_file", "verifier_command",
-        "source_repository", "source_commit", "expected_files",
+        "source_repository", "source_commit", "reference_fix_commit",
+        "reference_patch", "expected_files",
     }
     if not isinstance(task, dict) or required - set(task):
         raise ValueError(f"Real OSS task missing fields: {sorted(required - set(task or {}))}")
+    task = dict(task)
+    task["tool_budget"] = int(payload.get("tool_budget", 0))
+    if task["tool_budget"] < 1:
+        raise ValueError("Real OSS suite requires one positive uniform tool_budget")
     return task
 
 
@@ -71,6 +77,35 @@ def file_snapshot(root):
             continue
         snapshot[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return snapshot
+
+
+def file_digest(path):
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def tree_digest(root):
+    digest = hashlib.sha256()
+    for path, content_digest in file_snapshot(root).items():
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content_digest.encode("ascii"))
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def docker_image_id(image):
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", str(image)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError(
+            f"could not resolve Docker image id for {image}: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    return result.stdout.strip()
 
 
 def changed_paths(before, after):
@@ -193,6 +228,16 @@ def run_validation(args):
     workspace.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(fixture, workspace)
     before = file_snapshot(workspace)
+    provenance = {
+        "manifest_sha256": file_digest(args.manifest),
+        "fixture_tree_digest": tree_digest(fixture),
+        "verifier_sha256": file_digest(ROOT / task["verifier_file"]),
+        "reference_patch_sha256": file_digest(ROOT / task["reference_patch"]),
+        "reference_fix_commit": task["reference_fix_commit"],
+        "sandbox_image": args.sandbox_image,
+        "sandbox_image_id": docker_image_id(args.sandbox_image),
+        "tool_budget": int(args.max_steps or task["tool_budget"]),
+    }
 
     client = OpenAICompatibleModelClient(model, base_url, api_key, args.temperature, args.timeout)
     agent = Pico(
@@ -200,7 +245,7 @@ def run_validation(args):
         WorkspaceContext.build(workspace, repo_root_override=workspace),
         SessionStore(workspace / ".pico" / "sessions"),
         approval_policy="auto",
-        max_steps=int(task["step_budget"]),
+        max_steps=int(args.max_steps or task["tool_budget"]),
         max_new_tokens=args.max_new_tokens,
         run_timeout_seconds=360,
         allowed_tools=ALLOWED_TOOLS,
@@ -245,7 +290,7 @@ def run_validation(args):
         and provider_continuation["ok"]
     )
     artifact = {
-        "schema_version": "real-oss-validation-v2",
+        "schema_version": "real-oss-validation-v3",
         "artifact_type": "real-oss-validation",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime_snapshot_id": runtime_snapshot_id(),
@@ -256,6 +301,7 @@ def run_validation(args):
             "source_repository": task["source_repository"],
             "source_commit": task["source_commit"],
         },
+        "provenance": provenance,
         "result": {
             "passed": passed,
             "status": agent.current_task_state.status,
@@ -289,6 +335,7 @@ def main(argv=None):
     parser.add_argument("--model")
     parser.add_argument("--base-url")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")

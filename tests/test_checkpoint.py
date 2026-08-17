@@ -38,6 +38,7 @@ def test_current_runtime_identity_captures_execution_contract(tmp_path):
     assert identity["tool_signature"] == agent.tool_signature()
     assert identity["sandbox_identity"]["backend"] == "docker"
     assert identity["verification_command"] == ""
+    assert identity["hooks"] == []
 
 
 def test_evaluate_resume_state_distinguishes_no_checkpoint_full_valid_and_schema_mismatch(tmp_path):

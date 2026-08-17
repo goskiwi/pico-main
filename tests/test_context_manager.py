@@ -143,46 +143,7 @@ def test_shared_budget_lends_unused_tokens_to_history(tmp_path):
     assert allocation["borrowed_tokens"]["history"] > 0
 
 
-def test_large_tool_output_becomes_artifact_reference(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_large", "inspect", run_id="run_large")
-    agent.run_store.start_run(state)
-    ledger = ContextLedger(state.run_id, agent.run_store)
-    ledger.append_user("inspect")
-    call = ToolCall("read_file", {"path": "large.log"}, "call_large")
-    ledger.append_tool_call(call)
-    content = "\n".join(
-        [
-            *(f"head-{index}" for index in range(4)),
-            "noise" * 500,
-            "critical-middle-marker",
-            "noise" * 500,
-            "tail-marker",
-        ]
-    )
-    entry = ledger.append_tool_result(
-        ToolOutcome(
-            call.call_id,
-            call.name,
-            "ok",
-            "completed",
-            "none",
-            content,
-            "fp_large",
-            {"status": "admitted", "stages": []},
-            artifact_id="tool_call_large_deadbeef",
-        )
-    )
-
-    assert entry.content_tier == "artifact_reference"
-    assert entry.original_size_bytes > 4500
-    assert "tool_call_large_deadbeef" in entry.content
-    assert "critical-middle-marker" not in entry.content
-    assert "tail-marker" in entry.content
-    assert ledger.render_projection("large.log")[1]["artifact_references"] == 1
-
-
-def test_bounded_tool_result_stays_inline_while_full_artifact_is_audit_only(tmp_path):
+def test_bounded_tool_result_uses_executor_projection_without_second_truncation(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_bounded", "inspect", run_id="run_bounded")
     agent.run_store.start_run(state)
@@ -190,7 +151,10 @@ def test_bounded_tool_result_stays_inline_while_full_artifact_is_audit_only(tmp_
     ledger.append_user("inspect")
     call = ToolCall("read_file", {"path": "large.log"}, "call_bounded")
     ledger.append_tool_call(call)
-    bounded = "head\n" + "x" * 3900 + "\ntail"
+    bounded = (
+        "head\n" + "x" * 3900 + "\ntail\n"
+        "[Output truncated; use read_artifact artifact_id=tool_call_bounded_deadbeef]"
+    )
     entry = ledger.append_tool_result(
         ToolOutcome(
             call.call_id,
@@ -203,10 +167,11 @@ def test_bounded_tool_result_stays_inline_while_full_artifact_is_audit_only(tmp_
             {"status": "admitted", "stages": []},
             artifact_id="tool_call_bounded_deadbeef",
             artifact={"size_bytes": 12000},
+            metadata={"output_truncated": True},
         )
     )
 
-    assert entry.content_tier == "inline"
+    assert entry.content_tier == "artifact_reference"
     assert entry.content == bounded
     assert entry.original_size_bytes == 12000
     assert entry.artifact_id == "tool_call_bounded_deadbeef"

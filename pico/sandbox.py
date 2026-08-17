@@ -506,8 +506,7 @@ class DockerSandbox:
         args.extend(argv)
         return args
 
-    @staticmethod
-    def _container_env(env):
+    def _container_env(self, env):
         filtered = {
             str(name): str(value)
             for name, value in dict(env).items()
@@ -521,8 +520,15 @@ class DockerSandbox:
                 "TIKTOKEN_CACHE_DIR": CONTAINER_TIKTOKEN_CACHE_DIR,
                 "TMPDIR": "/tmp",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
                 "PYTEST_ADDOPTS": "-p no:cacheprovider",
                 "RUFF_CACHE_DIR": "/tmp/ruff-cache",
             }
         )
+        if "PYTHONPATH" not in filtered:
+            filtered["PYTHONPATH"] = (
+                f"{CONTAINER_WORKSPACE}/src"
+                if (self.workspace_root / "src").is_dir()
+                else CONTAINER_WORKSPACE
+            )
         return filtered

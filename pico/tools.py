@@ -31,6 +31,12 @@ class ReadFileArgs(ToolArgs):
     end: int = Field(default=200, ge=1)
 
 
+class ReadArtifactArgs(ToolArgs):
+    artifact_id: str = Field(min_length=1, max_length=240)
+    offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=8192, ge=1, le=8192)
+
+
 class SearchArgs(ToolArgs):
     pattern: str = Field(min_length=1)
     path: str = "."
@@ -97,6 +103,13 @@ BASE_TOOL_SPECS = {
         "risky": False,
         "description": "Read a UTF-8 file by line range.",
     },
+    "read_artifact": {
+        "args_schema": ReadArtifactArgs,
+        "risky": False,
+        "description": (
+            "Read up to 8 KiB from a truncated tool-output artifact in the current run."
+        ),
+    },
     "search": {
         "args_schema": SearchArgs,
         "risky": False,
@@ -115,11 +128,13 @@ BASE_TOOL_SPECS = {
     "write_file": {
         "args_schema": WriteFileArgs,
         "risky": True,
+        "workspace_mutating": True,
         "description": "Write a text file.",
     },
     "patch_file": {
         "args_schema": PatchFileArgs,
         "risky": True,
+        "workspace_mutating": True,
         "description": (
             "Replace one exact text block in a file. old_text must contain only actual file "
             "content: exclude read_file's file/revision headers and line-number prefixes."
@@ -208,6 +223,11 @@ def validate_tool(context, name, args):
             raise ValueError("invalid line range")
         return args
 
+    if name == "read_artifact":
+        if context.artifact_store is None or not context.run_id():
+            raise ValueError("artifact store is unavailable")
+        return args
+
     if name == "search":
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
@@ -287,6 +307,26 @@ def tool_read_file(context, args):
     return f"# {path.relative_to(context.root)}\nrevision: {file_revision(path)}\n{body}"
 
 
+def tool_read_artifact(context, args):
+    page = context.artifact_store.read_slice(
+        context.run_id(),
+        args["artifact_id"],
+        args["offset"],
+        args["max_bytes"],
+    )
+    header = (
+        f"# artifact {args['artifact_id']}\n"
+        f"bytes {page['offset']}-{page['end_offset']} of {page['total_bytes']}\n"
+    )
+    continuation = ""
+    if page["end_offset"] < page["total_bytes"]:
+        continuation = (
+            "\n[More output available; call read_artifact with "
+            f"offset={page['end_offset']}.]"
+        )
+    return header + page["content"] + continuation
+
+
 def tool_search(context, args):
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
@@ -295,14 +335,21 @@ def tool_search(context, args):
 
     if shutil.which("rg"):
         # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
+        relative_path = path.relative_to(context.root).as_posix() or "."
         result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
+            [
+                "rg", "-n", "--with-filename", "--smart-case", "--max-count", "200",
+                "--", pattern, relative_path,
+            ],
             cwd=context.root,
             capture_output=True,
             text=True,
             check=False,
         )
-        return result.stdout.strip() or result.stderr.strip() or "(no matches)"
+        output = result.stdout.strip() or result.stderr.strip()
+        if output:
+            output = output.replace(str(context.root) + "/", "")
+        return output or "(no matches)"
 
     matches = []
     files = [path] if path.is_file() else [
@@ -423,6 +470,7 @@ def tool_memory_forget(context, args):
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
+    "read_artifact": tool_read_artifact,
     "search": tool_search,
     "query_repo_map": tool_query_repo_map,
     "run_shell": tool_run_shell,

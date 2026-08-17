@@ -6,6 +6,8 @@ from pathlib import Path
 
 from .workspace import now
 
+ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
+
 
 class ArtifactStore:
     def __init__(self, run_store, redactor):
@@ -58,6 +60,29 @@ class ArtifactStore:
         if len(content.encode("utf-8")) != int(descriptor.get("size_bytes", -1)):
             raise ValueError("artifact size mismatch")
         return descriptor
+
+    def read_slice(self, run_id, artifact_id, offset, max_bytes):
+        descriptor = self.verify(run_id, artifact_id)
+        root = self.run_store.artifact_dir(run_id).resolve()
+        content_path = (root / descriptor["content_file"]).resolve()
+        data = content_path.read_bytes()
+        offset = int(offset)
+        max_bytes = min(int(max_bytes), ARTIFACT_PAGE_MAX_BYTES)
+        if offset < 0 or offset > len(data):
+            raise ValueError(f"artifact offset {offset} is outside output ({len(data)} bytes)")
+        while offset < len(data) and (data[offset] & 0xC0) == 0x80:
+            offset += 1
+        end = min(len(data), offset + max_bytes)
+        while end > offset and end < len(data) and (data[end] & 0xC0) == 0x80:
+            end -= 1
+        content = data[offset:end].decode("utf-8")
+        return {
+            "descriptor": descriptor,
+            "content": content,
+            "offset": offset,
+            "end_offset": end,
+            "total_bytes": len(data),
+        }
 
     @staticmethod
     def _write_once(path: Path, content: str):

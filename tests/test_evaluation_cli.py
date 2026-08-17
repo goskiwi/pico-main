@@ -1,4 +1,4 @@
-from scripts.run_evaluations import evaluation_failures
+from pico.evaluation.gates import evaluation_failures
 
 
 def passing_results():
@@ -18,7 +18,7 @@ def passing_results():
         },
         "project_memory": {"summary": {"explicit_precedence": True}},
         "repo_map": {"summary": {"query_hit": True}},
-        "runtime_governance": {"summary": {"hash_chain_valid": True}},
+        "runtime_policy": {"summary": {"hash_chain_valid": True}},
     }
 
 

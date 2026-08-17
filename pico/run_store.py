@@ -30,7 +30,7 @@ class RunStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._event_cursors = {}
+        self._event_states = {}
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
@@ -91,16 +91,43 @@ class RunStore:
 
     def event_cursor(self, run_id):
         run_id = _run_id(run_id)
-        if run_id in self._event_cursors:
-            return self._event_cursors[run_id]
+        if run_id in self._event_states:
+            return self._event_states[run_id]["cursor"]
         events = self.read_events(run_id)
         if not events:
             cursor = EventCursor()
         else:
             last = events[-1]
             cursor = EventCursor(last["sequence"], last["event_id"], last["event_hash"])
-        self._event_cursors[run_id] = cursor
+        path = self.events_path(run_id)
+        self._event_states[run_id] = {
+            "cursor": cursor,
+            "offset": path.stat().st_size if path.exists() else 0,
+            "last_event": events[-1] if events else None,
+        }
         return cursor
+
+    @staticmethod
+    def _decode_event_tail(run_id, data, previous):
+        if not data:
+            return [], previous
+        if not data.endswith(b"\n"):
+            raise ValueError("Runtime event log has a truncated tail")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Runtime event log tail is not UTF-8") from exc
+        events = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("run_id") != _run_id(run_id):
+                raise ValueError("Runtime event belongs to another run")
+            validate_event(event, previous)
+            events.append(event)
+            previous = event
+        return events, previous
 
     def append_event(
         self,
@@ -116,15 +143,46 @@ class RunStore:
         run_id = _run_id(run_id)
         path = self.events_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+", encoding="utf-8") as handle:
+        with path.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            handle.seek(0)
-            events = self._decode_events(run_id, handle.read())
-            if events:
-                last = events[-1]
-                cursor = EventCursor(last["sequence"], last["event_id"], last["event_hash"])
+            size = os.fstat(handle.fileno()).st_size
+            state = self._event_states.get(run_id)
+            if state is None:
+                handle.seek(0)
+                data = handle.read()
+                if data and not data.endswith(b"\n"):
+                    raise ValueError("Runtime event log has a truncated tail")
+                events = self._decode_events(run_id, data.decode("utf-8"))
+                last_event = events[-1] if events else None
+                cursor = (
+                    EventCursor(
+                        last_event["sequence"],
+                        last_event["event_id"],
+                        last_event["event_hash"],
+                    )
+                    if last_event
+                    else EventCursor()
+                )
+                state = {"cursor": cursor, "offset": size, "last_event": last_event}
             else:
-                cursor = EventCursor()
+                expected_offset = int(state["offset"])
+                if size < expected_offset:
+                    raise ValueError("Runtime event log was truncated after opening")
+                if size > expected_offset:
+                    handle.seek(expected_offset)
+                    appended, last_event = self._decode_event_tail(
+                        run_id,
+                        handle.read(size - expected_offset),
+                        state["last_event"],
+                    )
+                    if appended:
+                        last = appended[-1]
+                        state["cursor"] = EventCursor(
+                            last["sequence"], last["event_id"], last["event_hash"]
+                        )
+                        state["last_event"] = last_event
+                    state["offset"] = size
+                cursor = state["cursor"]
             sequence = cursor.sequence + 1
             event = {
                 "schema_version": EVENT_SCHEMA_VERSION,
@@ -142,13 +200,17 @@ class RunStore:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             event["event_hash"] = event_digest(event)
-            validate_event(event, events[-1] if events else None)
+            validate_event(event, state["last_event"])
+            encoded = (json.dumps(event, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
             handle.seek(0, os.SEEK_END)
-            handle.write(json.dumps(event, sort_keys=True, ensure_ascii=True) + "\n")
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+            state["cursor"] = EventCursor(sequence, event["event_id"], event["event_hash"])
+            state["last_event"] = event
+            state["offset"] = size + len(encoded)
+            self._event_states[run_id] = state
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        self._event_cursors[run_id] = EventCursor(sequence, event["event_id"], event["event_hash"])
         return event
 
     def replay(self, run_id):

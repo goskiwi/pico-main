@@ -24,7 +24,7 @@ from scripts.run_real_oss_validation import (
 
 def load_task_ids(path):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v1":
+    if payload.get("schema_version") != "real-oss-suite-v2":
         raise ValueError("unsupported Real OSS suite schema")
     return [task["id"] for task in payload["tasks"]]
 
@@ -41,7 +41,7 @@ def retryable_infrastructure_error(error):
 
 def infrastructure_failure(task_id, runtime, model, error, attempts):
     return {
-        "schema_version": "real-oss-validation-v2",
+        "schema_version": "real-oss-validation-v3",
         "artifact_type": "real-oss-validation",
         "runtime": runtime,
         "model": model,
@@ -94,18 +94,19 @@ def main(argv=None):
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--base-url")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
     parser.add_argument("--task-attempts", type=int, default=2)
-    parser.add_argument("--artifact", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.json")
-    parser.add_argument("--report", type=Path, default=ROOT / "artifacts/real-oss-suite-v1.md")
+    parser.add_argument("--artifact", type=Path, default=ROOT / "artifacts/real-oss-suite-v2.json")
+    parser.add_argument("--report", type=Path, default=ROOT / "artifacts/real-oss-suite-v2.md")
     args = parser.parse_args(argv)
 
     runtime = git_metadata()
     require_clean_runtime(runtime)
     results = []
-    task_root = ROOT / "artifacts" / "real-oss-suite-v1"
+    task_root = ROOT / "artifacts" / "real-oss-suite-v2"
     for task_id in load_task_ids(args.manifest):
         print(f"{task_id}: running", flush=True)
         task_artifact = task_root / f"{task_id}.json"
@@ -117,6 +118,7 @@ def main(argv=None):
             model=args.model,
             base_url=args.base_url,
             max_new_tokens=args.max_new_tokens,
+            max_steps=args.max_steps,
             temperature=args.temperature,
             timeout=args.timeout,
             sandbox_image=args.sandbox_image,
@@ -147,11 +149,15 @@ def main(argv=None):
 
     passed = sum(item["result"]["passed"] for item in results)
     artifact = {
-        "schema_version": "real-oss-suite-evidence-v1",
+        "schema_version": "real-oss-suite-evidence-v2",
         "artifact_type": "real-oss-suite",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime": runtime,
         "model": args.model,
+        "tool_budget": (
+            args.max_steps
+            or json.loads(args.manifest.read_text(encoding="utf-8"))["tool_budget"]
+        ),
         "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed},
         "tasks": results,
     }

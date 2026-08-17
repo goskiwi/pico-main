@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,11 @@ def test_real_oss_manifest_is_strict_and_points_to_frozen_upstream():
     assert task["id"] == "click_empty_bytes_echo"
     assert task["source_repository"] == "https://github.com/pallets/click.git"
     assert len(task["source_commit"]) == 40
-    assert len(json.loads(manifest.read_text())["tasks"]) == 5
+    payload = json.loads(manifest.read_text())
+    assert len(payload["tasks"]) == 5
+    assert payload["tool_budget"] == 40
+    assert all("step_budget" not in item for item in payload["tasks"])
+    assert task["tool_budget"] == 40
     assert "tests/**" in MODULE.FORBIDDEN_CHANGE_GLOBS
 
 
@@ -40,6 +46,8 @@ def test_file_snapshot_and_scope_ignore_runtime_artifacts(tmp_path):
     assert MODULE.changed_paths(before, after) == ["src/package/code.py"]
     assert MODULE.matches("src/package/code.py", ["src/**/*.py"])
     assert MODULE.matches("src/code.py", ["src/**/*.py"])
+    assert MODULE.file_digest(target).startswith("sha256:")
+    assert MODULE.tree_digest(tmp_path).startswith("sha256:")
 
 
 def test_real_oss_publication_rejects_dirty_runtime():
@@ -73,3 +81,20 @@ def test_suite_retries_only_provider_infrastructure_errors():
         RuntimeError("hidden verifier failed")
     )
 
+
+def test_reference_patches_apply_to_frozen_fixtures(tmp_path):
+    payload = json.loads(Path("validation/real_oss_suite.json").read_text())
+    for task in payload["tasks"]:
+        workspace = tmp_path / task["id"]
+        shutil.copytree(task["fixture_repo"], workspace)
+        result = subprocess.run(
+            [
+                "git", "apply", "--check", "--unidiff-zero",
+                str(Path(task["reference_patch"]).resolve()),
+            ],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr

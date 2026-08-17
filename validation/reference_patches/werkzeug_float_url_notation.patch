@@ -1,0 +1,13 @@
+diff --git a/src/werkzeug/routing/converters.py b/src/werkzeug/routing/converters.py
+index 6016a975..348f8888 100644
+--- a/src/werkzeug/routing/converters.py
++++ b/src/werkzeug/routing/converters.py
+@@ -212,0 +213,3 @@ class FloatConverter(NumberConverter):
++    .. versionchanged:: 3.2
++        Does not produce scientific notation.
++
+@@ -228,0 +232,4 @@ class FloatConverter(NumberConverter):
++    def to_url(self, value: t.Any) -> str:
++        # f format ensures no scientific notation, but forces trailing zeroes
++        return f"{self.num_convert(value):f}".rstrip("0")
++

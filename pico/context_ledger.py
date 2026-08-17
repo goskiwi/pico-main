@@ -10,8 +10,7 @@ from types import SimpleNamespace
 
 from .contracts import FailureInfo, ToolOutcome, canonical_fingerprint
 
-CONTEXT_LEDGER_SCHEMA = "context-ledger-v3"
-INLINE_TOOL_OUTPUT_BYTES = 4500
+CONTEXT_LEDGER_SCHEMA = "context-ledger-v4"
 VISIBLE_KINDS = frozenset(
     {"user", "assistant_tool_call", "tool_result", "guidance", "final", "compaction_summary"}
 )
@@ -218,21 +217,8 @@ class ContextLedger:
         content = str(outcome.content)
         visible_size = len(content.encode("utf-8"))
         original_size = int((outcome.artifact or {}).get("size_bytes", visible_size))
-        if visible_size <= INLINE_TOOL_OUTPUT_BYTES:
-            return content, "inline", original_size
-        head = content[:320].rstrip()
-        tail = content[-1100:].lstrip()
-        preview = f"{head}\n... [bounded preview] ...\n{tail}"
-        reference = (
-            f"Full audit output: artifact={outcome.artifact_id}"
-            if outcome.artifact_id
-            else "Full output stored outside prompt"
-        )
-        return (
-            f"{preview}\n[{reference}; bytes={original_size}]",
-            "artifact_reference",
-            original_size,
-        )
+        tier = "artifact_reference" if outcome.metadata.get("output_truncated") else "inline"
+        return content, tier, original_size
 
     def append_tool_result(self, outcome):
         pending = self.pending_call_id()
