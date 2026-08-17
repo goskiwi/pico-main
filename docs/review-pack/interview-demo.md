@@ -2,10 +2,11 @@
 
 ## 90-second path
 
-1. Open `pico/agent_loop.py` and describe the loop as model proposal → staged admission → evidence → progress decision → checkpoint → completion gate.
-2. Run `uv run python scripts/demo_runtime.py`; point out `[false, true, true]` provider prompt reuse, Checkpoint v5, the changed-file evidence, and the empty pending-operation set.
+1. Open `pico/agent_loop.py` and describe the loop as model proposal → staged admission → canonical outcome → optional policy hook → checkpoint → completion gate.
+2. Run `uv run python scripts/demo_runtime.py`; point out `[false, true, true]` provider prompt reuse, Checkpoint v6, the changed-file evidence, and the empty pending-operation set.
 3. Run `uv run python scripts/run_evaluations.py`; point out that the command fails closed and the Native Harness covers edit, recovery, safety, and governance.
 4. Open `artifacts/runtime-policy-v1.json`: recovery advice, hook boundaries, structured verification, and the hash chain are replayable deterministic evidence.
+5. Open `artifacts/real-oss-suite-v2.md`: all five frozen tasks passed on one clean commit with a uniform 40-tool budget; urllib3 completed in 23 steps.
 
 ## Five-minute deep dive
 
@@ -17,6 +18,6 @@
 
 ## Claims and boundaries
 
-- Claim the deterministic 5/5 Harness and the one frozen Click end-to-end PASS separately.
-- Do not turn the single live task into a general coding-success percentage.
+- Claim the deterministic 5/5 Harness, the 5/5 fail-before/pass-after preflight, and the fixed five-task live suite separately.
+- Do not turn five frozen tasks into a general coding-success percentage.
 - State that Pico is local and single-user; Docker daemon trust, remote multi-tenant isolation, distributed queues, and secret management are outside its boundary.
