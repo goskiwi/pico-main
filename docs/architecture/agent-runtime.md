@@ -3,6 +3,10 @@
 Pico uses one OpenAI-compatible Responses protocol. The model proposes exactly one native
 function action; the Runtime owns authority and state.
 
+Within a task, the provider conversation replays every Responses output item and its matching
+function output. The Context Ledger is the durable reset/resume boundary, not a lossy replacement
+for the active provider conversation.
+
 ```mermaid
 flowchart LR
   U["User request"] --> L["Context Ledger v3"]
@@ -18,7 +22,7 @@ flowchart LR
   O --> E["Hash-chained Runtime Event"]
   E --> P["Progress projection"]
   P --> L
-  L --> CP["Checkpoint v4 + event cursor"]
+  L --> CP["Checkpoint v5 + event cursor"]
   O --> V["Runtime verifier"]
   V --> F["Completion Gate"]
 ```
@@ -26,6 +30,7 @@ flowchart LR
 ## Invariants
 
 - A tool result must match the single pending call ID.
+- A new provider turn cannot start until every pending function call has a Runtime-recorded output or the provider session is explicitly reset.
 - Compaction covers an exact active prefix and never splits a call/result pair.
 - Compaction commits only when ledger generation, active digest and Workspace snapshot remain unchanged.
 - Current request and output reserve are never clipped to make history fit.

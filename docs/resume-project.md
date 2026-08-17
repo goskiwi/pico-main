@@ -23,7 +23,7 @@ Python symbol/reference graph，以 lexical + personalized PageRank 生成 Token
 
 ## Checkpoint / Crash Resume
 
-设计 Checkpoint v4 与 hash-chained Runtime Event Log：恢复时严格校验
+设计 Checkpoint v5 与 hash-chained Runtime Event Log：恢复时严格校验
 Session/Checkpoint/Context schema、Runtime 配置、内容级 Workspace 指纹和 event
 cursor/digest；进程若中断在工具执行期间，依据事件 receipt 回填结果，没有 terminal
 receipt 时标记 unknown/partial，禁止盲目重放潜在副作用。
