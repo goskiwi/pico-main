@@ -104,11 +104,17 @@ class WorkspaceContext:
         # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
         docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
+        try:
+            logical_cwd = Path(self.cwd).relative_to(Path(self.repo_root)).as_posix()
+        except ValueError:
+            logical_cwd = "."
+        logical_cwd = logical_cwd or "."
         return textwrap.dedent(
             f"""\
             Workspace:
-            - cwd: {self.cwd}
-            - repo_root: {self.repo_root}
+            - cwd: {logical_cwd}
+            - repo_root: .
+            - shell_cwd: /workspace
             - branch: {self.branch}
             - default_branch: {self.default_branch}
             - status:

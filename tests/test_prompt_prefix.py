@@ -41,6 +41,19 @@ def test_build_prompt_prefix_renders_tools_and_workspace_metadata(tmp_path):
     assert prefix.built_at == "2026-06-02T00:00:00+08:00"
 
 
+def test_model_workspace_panel_never_exposes_host_absolute_paths(tmp_path):
+    nested = tmp_path / "src" / "package"
+    nested.mkdir(parents=True)
+    workspace = WorkspaceContext.build(nested, repo_root_override=tmp_path)
+
+    text = workspace.text()
+
+    assert str(tmp_path) not in text
+    assert "- cwd: src/package" in text
+    assert "- repo_root: ." in text
+    assert "- shell_cwd: /workspace" in text
+
+
 def test_native_function_schemas_are_openai_strict(tmp_path):
     definitions = build_action_tools(build_tool_registry(_Agent(tmp_path)))
     for definition in definitions:
