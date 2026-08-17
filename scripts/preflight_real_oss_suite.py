@@ -8,6 +8,7 @@ import json
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,7 +16,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.materialize_real_oss import DEFAULT_MANIFEST, load_manifest
-from scripts.run_real_oss_validation import run_verifier
+from scripts.run_real_oss_validation import (
+    git_metadata,
+    require_clean_runtime,
+    run_verifier,
+)
 
 
 def main(argv=None):
@@ -23,6 +28,8 @@ def main(argv=None):
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
     args = parser.parse_args(argv)
+    runtime = git_metadata()
+    require_clean_runtime(runtime)
     rows = []
     for task in load_manifest(args.manifest)["tasks"]:
         fixture = (ROOT / task["fixture_repo"]).resolve()
@@ -41,6 +48,10 @@ def main(argv=None):
         print(f"{task['id']}: {'EXPECTED-FAIL' if discriminative else 'INVALID'}")
     artifact = {
         "schema_version": "real-oss-preflight-v1",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": runtime,
+        "sandbox_image": args.sandbox_image,
+        "manifest": str(args.manifest.relative_to(ROOT)),
         "summary": {
             "total": len(rows),
             "discriminative": sum(row["pre_fix_failed"] for row in rows),
