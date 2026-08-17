@@ -105,6 +105,7 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Runtime policy | 全部通过 | 单一恢复建议、hook 边界、结构化 verifier 与事件重放 |
+| Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 
 旧的 10/12/14 步差异化五题结果已删除。Real OSS v2 使用统一 40 工具步预算；只有在 clean commit 上完成 fail-before/pass-after preflight 和完整五题运行后才发布新结果。
 

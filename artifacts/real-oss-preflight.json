@@ -1,0 +1,85 @@
+{
+  "captured_at": "2026-08-17T14:16:24.646719+00:00",
+  "manifest": "validation/real_oss_suite.json",
+  "manifest_sha256": "sha256:04341db867ab6dc04f464a9891b12bb08faad96c238a293399f201d461fb440d",
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "04095b4e428ac71b86505676451ac100fdea7a27",
+    "working_tree_dirty": false
+  },
+  "sandbox_image": "pico/real-oss-suite:latest",
+  "sandbox_image_id": "sha256:7c33bfd298ea24ce81d1ceeb8abd9faf379f33ed55997c5b8a3ce15fcb19aae0",
+  "schema_version": "real-oss-preflight-v2",
+  "summary": {
+    "discriminative": 5,
+    "reference_patch_passed": 5,
+    "total": 5
+  },
+  "tasks": [
+    {
+      "fixture_tree_digest": "sha256:1deab48d56e54d5bf49d922899b4a988d4dd53a288257abdafce37a97012d55b",
+      "output_tail": "             file.flush()\n                binary_file.write(out)\n                binary_file.flush()\n                return\n    \n        # ansi style code support. for no message or bytes, nothing happens.\n        # when outputting to a file instead of a terminal, strip codes.\n        else:\n            color = resolve_color_default(color)\n    \n            if should_strip_ansi(file, color):\n                out = strip_ansi(out)\n            elif win:\n                if auto_wrap_for_ansi is not none:\n                    file = auto_wrap_for_ansi(file, color)  # type: ignore\n                elif not color:\n                    out = strip_ansi(out)\n    \n>       file.write(out)  # type: ignore\n        ^^^^^^^^^^^^^^^\ne       typeerror: a bytes-like object is required, not 'str'\n\nsrc/click/utils.py:333: typeerror\n=========================== short test summary info ============================\nfailed ../dev::test_empty_bytes_write_a_binary_newline - typeerror: a bytes-l...\n1 failed in 0.03s\n\n",
+      "post_fix_exit_code": 0,
+      "post_fix_passed": true,
+      "pre_fix_exit_code": 1,
+      "pre_fix_failed": true,
+      "reference_fix_commit": "4d3db84",
+      "reference_patch": "validation/reference_patches/click_empty_bytes_echo.patch",
+      "reference_patch_sha256": "sha256:7abdb45561b9bfed0da76af012c8609e7981554dc3eaf83c862ac6b4a1dc285e",
+      "task_id": "click_empty_bytes_echo",
+      "verifier_sha256": "sha256:38de1b14059007561d82be2584c5e47c567319f1e7c33ddc8ad0b531bfab7cfa"
+    },
+    {
+      "fixture_tree_digest": "sha256:8133ee39a152318379272ff5d79fd32a58d3f7f71a38dd32e18dc10f7fb70fe2",
+      "output_tail": "d and normalized\n            before use.\n        :raises invalidversion:\n            if the ``version`` does not conform to pep 440 in any way then this\n            exception will be raised.\n        \"\"\"\n>       if _simple_version_indicators.issuperset(version):\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ne       typeerror: 'nonetype' object is not iterable\n\nsrc/packaging/version.py:413: typeerror\n=========================== short test summary info ============================\nfailed ../dev::test_non_string_versions_raise_invalid_version[none] - typeerr...\nfailed ../dev::test_non_string_versions_raise_invalid_version[1] - typeerror:...\nfailed ../dev::test_non_string_versions_raise_invalid_version[value2] - attri...\nfailed ../dev::test_non_string_versions_raise_invalid_version[value3] - attri...\nfailed ../dev::test_non_string_versions_raise_invalid_version[1.0] - typeerro...\nfailed ../dev::test_filter_skips_keyed_none_version - typeerror: 'nonetype' o...\n6 failed in 0.06s\n\n",
+      "post_fix_exit_code": 0,
+      "post_fix_passed": true,
+      "pre_fix_exit_code": 1,
+      "pre_fix_failed": true,
+      "reference_fix_commit": "d3e7f5d",
+      "reference_patch": "validation/reference_patches/packaging_non_string_version.patch",
+      "reference_patch_sha256": "sha256:9aefc8e42a9617e4f53c7b12b79171ebb41e1576cfd83418338649f63240b3f7",
+      "task_id": "packaging_non_string_version",
+      "verifier_sha256": "sha256:ac898b6a4e042d3fe66d5c6ff9e81b437978ffb225d37d4c1cd2742432f7d64a"
+    },
+    {
+      "fixture_tree_digest": "sha256:f275f91e252eb865ee8505e8fba7abe6b28e2fdd7bda67ae65a469c8cb2c01b7",
+      "output_tail": "f                                                                        [100%]\n=================================== failures ===================================\n__________ test_float_url_converter_does_not_use_scientific_notation ___________\n\n    def test_float_url_converter_does_not_use_scientific_notation():\n        url_map = map([rule(\"/<float:value>\", endpoint=\"value\")])\n        adapter = url_map.bind(\"example.test\")\n    \n        built = adapter.build(\"value\", {\"value\": 0.00001})\n    \n>       assert \"e\" not in built.lower()\ne       assertionerror: assert 'e' not in '/1e-05'\ne         \ne         'e' is contained here:\ne           /1e-05\ne         ?   +\n\n.pico_hidden_verifier/test_hidden.py:10: assertionerror\n=========================== short test summary info ============================\nfailed ../dev::test_float_url_converter_does_not_use_scientific_notation - as...\n1 failed in 0.07s\n\n",
+      "post_fix_exit_code": 0,
+      "post_fix_passed": true,
+      "pre_fix_exit_code": 1,
+      "pre_fix_failed": true,
+      "reference_fix_commit": "f88164a2",
+      "reference_patch": "validation/reference_patches/werkzeug_float_url_notation.patch",
+      "reference_patch_sha256": "sha256:8f12868cf1dc214ac08681589d40afa40872cd352e81530da8ee137398c8556b",
+      "task_id": "werkzeug_float_url_notation",
+      "verifier_sha256": "sha256:612ee769cbe16883b0e667b1de9dd7745d65c745b767248983c412fe9b13be1b"
+    },
+    {
+      "fixture_tree_digest": "sha256:b8418596097cd5c99be8e2be5da1c578ad106e8d4fb97900a8bc3890dcaf1e55",
+      "output_tail": "f                                                                        [100%]\n=================================== failures ===================================\n_______ test_overlay_preserves_async_parent_unless_explicitly_overridden _______\n\n    def test_overlay_preserves_async_parent_unless_explicitly_overridden():\n        async_environment = environment(enable_async=true)\n    \n>       assert async_environment.overlay().is_async\ne       assert false\ne        +  where false = <jinja2.environment.environment object at 0xffffb6462090>.is_async\ne        +    where <jinja2.environment.environment object at 0xffffb6462090> = overlay()\ne        +      where overlay = <jinja2.environment.environment object at 0xffffb6793020>.overlay\n\n.pico_hidden_verifier/test_hidden.py:7: assertionerror\n=========================== short test summary info ============================\nfailed ../dev::test_overlay_preserves_async_parent_unless_explicitly_overridden\n1 failed in 0.05s\n\n",
+      "post_fix_exit_code": 0,
+      "post_fix_passed": true,
+      "pre_fix_exit_code": 1,
+      "pre_fix_failed": true,
+      "reference_fix_commit": "e45bc74",
+      "reference_patch": "validation/reference_patches/jinja_overlay_async_default.patch",
+      "reference_patch_sha256": "sha256:de954a5375cbebf1911693ec2f97b04faed1db15555a0a47c27cc02c923ca6b5",
+      "task_id": "jinja_overlay_async_default",
+      "verifier_sha256": "sha256:77fb1cbd69a0d7a22e54ca49b83da0b91df1a89944ad6471ebab78f2fe0697a9"
+    },
+    {
+      "fixture_tree_digest": "sha256:24982a55d412e8a5e39e4c20bd62277a16c5c93facd4c9d5b6303c731eaa6a09",
+      "output_tail": "f                                                                        [100%]\n=================================== failures ===================================\n__________ test_explicit_port_zero_stays_distinct_from_an_absent_port __________\n\n    def test_explicit_port_zero_stays_distinct_from_an_absent_port():\n>       assert parse_url(\"http://example.test:0/path\").netloc == \"example.test:0\"\ne       assertionerror: assert 'example.test' == 'example.test:0'\ne         \ne         - example.test:0\ne         ?             --\ne         + example.test\n\n.pico_hidden_verifier/test_hidden.py:7: assertionerror\n=========================== short test summary info ============================\nfailed ../dev::test_explicit_port_zero_stays_distinct_from_an_absent_port - a...\n1 failed in 0.04s\n\n",
+      "post_fix_exit_code": 0,
+      "post_fix_passed": true,
+      "pre_fix_exit_code": 1,
+      "pre_fix_failed": true,
+      "reference_fix_commit": "f5cf1223",
+      "reference_patch": "validation/reference_patches/urllib3_port_zero.patch",
+      "reference_patch_sha256": "sha256:0bafa2bf83b3aa2a67b42c440943569821d09f7d856633b235de95bec355c6c9",
+      "task_id": "urllib3_port_zero",
+      "verifier_sha256": "sha256:92fb3a0650ff64a61b75dd665c99414ae8faa0163a775c4825951cc2771f75b8"
+    }
+  ]
+}
