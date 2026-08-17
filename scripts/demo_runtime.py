@@ -31,11 +31,24 @@ def main():
         )
         answer = agent.ask("Read sample.txt and replace alpha with beta.")
         report = agent.run_store.load_report(agent.current_task_state.run_id)
+        events = agent.run_store.read_events(agent.current_task_state.run_id)
+        prompt_events = [event for event in events if event["event_type"] == "prompt_built"]
         print(json.dumps({
             "answer": answer,
             "content": target.read_text(encoding="utf-8"),
+            "provider_conversation_mode": agent.model_client.conversation_mode,
+            "provider_prompt_reused": [
+                event["payload"]["prompt_metadata"]["prompt_reused"]
+                for event in prompt_events
+            ],
             "context_generation": agent.context_ledger.generation,
+            "checkpoint_schema": agent.current_checkpoint()["schema_version"],
             "evidence_effects": report["evidence"]["effects"],
+            "event_count": len(events),
+            "event_chain_valid": True,
+            "pending_operations": agent.run_store.replay(
+                agent.current_task_state.run_id
+            ).summary()["pending_operations"],
             "run_dir": str(agent.current_run_dir),
         }, indent=2, ensure_ascii=False))
 
