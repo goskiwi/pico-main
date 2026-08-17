@@ -90,6 +90,45 @@ def test_changed_observation_or_workspace_is_new_evidence():
     assert changed_workspace.evidence_delta == 1
 
 
+def test_six_tool_steps_without_workspace_edit_trigger_reflection():
+    governor = ProgressGovernor()
+
+    decisions = [
+        governor.observe_tool(
+            observed_outcome(f"read-{index}", content=f"different evidence {index}")
+        )
+        for index in range(1, 7)
+    ]
+
+    assert all(decision.decision == "continue" for decision in decisions[:5])
+    assert decisions[-1].decision == "replan"
+    assert decisions[-1].reason == "six tool steps without workspace edit"
+    assert decisions[-1].steps_without_edit == 6
+    assert "make the edit now" in decisions[-1].guidance()
+    assert governor.steps_without_edit == 0
+
+    next_decision = governor.observe_tool(
+        observed_outcome("read-7", content="one targeted fact")
+    )
+    assert next_decision.decision == "continue"
+    assert next_decision.steps_without_edit == 1
+
+
+def test_no_edit_reflection_state_replays_as_reset():
+    governor = ProgressGovernor()
+    decision = None
+    for index in range(6):
+        decision = governor.observe_tool(
+            observed_outcome(f"read-{index}", content=f"evidence {index}")
+        )
+
+    restored = ProgressGovernor.from_events([
+        {"event_type": "progress_decided", "payload": decision.to_dict()}
+    ])
+
+    assert restored.steps_without_edit == 0
+
+
 def test_restored_progress_recognizes_equivalent_observation_with_new_arguments():
     first = ProgressGovernor().observe_tool(observed_outcome("original-arguments"))
     restored = ProgressGovernor.from_events([

@@ -17,6 +17,7 @@ class ProgressDecision:
     strategy_revision: int
     failure_signature: str = ""
     evidence_fingerprint: str = ""
+    steps_without_edit: int = 0
 
     def to_dict(self):
         return {
@@ -29,11 +30,18 @@ class ProgressDecision:
             "strategy_revision": self.strategy_revision,
             "failure_signature": self.failure_signature,
             "evidence_fingerprint": self.evidence_fingerprint,
+            "steps_without_edit": self.steps_without_edit,
         }
 
     def guidance(self):
         if self.decision != "replan":
             return ""
+        if self.reason == "six tool steps without workspace edit":
+            return (
+                "Runtime reflection: six tool steps completed without editing the workspace. "
+                "If you have enough context, make the edit now. If not, identify exactly one "
+                "missing fact, obtain it in one targeted step, then edit."
+            )
         return (
             "Runtime progress governor: the current strategy is not producing new evidence "
             f"({self.reason}). State a different hypothesis and choose a materially different next action."
@@ -48,6 +56,7 @@ class ProgressGovernor:
     context_generation: int = 1
     seen_evidence: set[str] = field(default_factory=set)
     failure_counts: dict[str, int] = field(default_factory=dict)
+    steps_without_edit: int = 0
 
     @classmethod
     def from_events(cls, events):
@@ -65,6 +74,11 @@ class ProgressGovernor:
             governor.phase = str(payload.get("phase", governor.phase))
             governor.no_progress_steps = int(payload.get("no_progress_steps", 0))
             governor.strategy_revision = int(payload.get("strategy_revision", 0))
+            governor.steps_without_edit = (
+                0
+                if payload.get("reason") == "six tool steps without workspace edit"
+                else int(payload.get("steps_without_edit", 0))
+            )
             signature = str(payload.get("failure_signature", ""))
             count = int(payload.get("repeated_failure_count", 0))
             if signature:
@@ -115,6 +129,17 @@ class ProgressGovernor:
             outcome.status == "ok"
             and (outcome.side_effect_state == "changed" or evidence_key not in self.seen_evidence)
         )
+        workspace_changed = (
+            outcome.side_effect_state == "changed"
+            and outcome.metadata.get("effect_scope") in {"workspace", "mixed"}
+        )
+        if workspace_changed:
+            self.steps_without_edit = 0
+        elif outcome.execution_state != "not_started":
+            self.steps_without_edit += 1
+        reflected_no_edit_steps = self.steps_without_edit
+        if self.steps_without_edit >= 6:
+            self.steps_without_edit = 0
         if evidence_delta:
             self.seen_evidence.add(evidence_key)
             self.no_progress_steps = 0
@@ -130,6 +155,8 @@ class ProgressGovernor:
             self.phase, decision, reason = "exploring", "continue", "durable project memory changed"
         elif outcome.side_effect_state == "changed":
             self.phase, decision, reason = "editing", "verify", "workspace changed"
+        elif reflected_no_edit_steps >= 6:
+            self.phase, decision, reason = "stalled", "replan", "six tool steps without workspace edit"
         elif repeated >= 2:
             self.phase, decision, reason = "stalled", "replan", "identical failure repeated"
         elif outcome.status == "ok" and not evidence_delta and self.no_progress_steps >= 2:
@@ -156,6 +183,7 @@ class ProgressGovernor:
             self.strategy_revision,
             signature,
             evidence_key,
+            reflected_no_edit_steps,
         )
 
     def observe_verification(self, record):
