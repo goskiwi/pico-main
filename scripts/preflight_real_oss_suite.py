@@ -6,11 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from scripts.materialize_real_oss import DEFAULT_MANIFEST, load_manifest
-from scripts.run_real_oss_validation import ROOT, run_verifier
+from scripts.run_real_oss_validation import run_verifier
 
 
 def main(argv=None):
