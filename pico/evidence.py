@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "search", "query_repo_map"})
+OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "search"})
 
 
 def fact_from_event(event):

@@ -26,7 +26,6 @@ from pico.sandbox import (
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
 ALLOWED_TOOLS = (
-    "query_repo_map",
     "list_files",
     "read_file",
     "read_artifact",

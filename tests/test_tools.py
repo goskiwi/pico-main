@@ -35,7 +35,7 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
 
     assert "read_file" in tools
     assert set(tools) == {
-        "list_files", "read_file", "read_artifact", "search", "query_repo_map", "run_shell",
+        "list_files", "read_file", "read_artifact", "search", "run_shell",
         "write_file", "patch_file", "memory_store", "memory_forget",
     }
 

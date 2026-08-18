@@ -16,7 +16,6 @@ class ToolContext:
     run_id_provider: Callable[[], str] | None = None
     source_entry_ids_provider: Callable[[], tuple[str, ...]] | None = None
     tool_call_id_provider: Callable[[], str] | None = None
-    repo_map: object | None = None
     mutation_service: object | None = None
     sandbox: object | None = None
     execution_context_provider: Callable[[], object] | None = None

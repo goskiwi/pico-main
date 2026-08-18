@@ -290,8 +290,7 @@ class RepoMapQuery:
             )
 
         header = (
-            "Repository map (task-ranked Python signatures; "
-            "use query_repo_map or read_file for details):"
+            "Repository map (task-ranked Python signatures; use read_file for details):"
         )
         if not self.ranked:
             text = _token_clip(

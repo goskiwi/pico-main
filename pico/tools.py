@@ -42,12 +42,6 @@ class SearchArgs(ToolArgs):
     path: str = "."
 
 
-class QueryRepoMapArgs(ToolArgs):
-    query: str = Field(min_length=1)
-    budget_tokens: int = Field(default=1200, ge=64, le=4000)
-    max_results: int = Field(default=24, ge=1, le=60)
-
-
 class RunShellArgs(ToolArgs):
     command: str = Field(min_length=1)
     timeout: int = Field(default=20, ge=1, le=120)
@@ -114,11 +108,6 @@ BASE_TOOL_SPECS = {
         "args_schema": SearchArgs,
         "risky": False,
         "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "query_repo_map": {
-        "args_schema": QueryRepoMapArgs,
-        "risky": False,
-        "description": "Rank Python symbols and static relations for a repository question.",
     },
     "run_shell": {
         "args_schema": RunShellArgs,
@@ -233,11 +222,6 @@ def validate_tool(context, name, args):
         if not pattern:
             raise ValueError("pattern must not be empty")
         context.path(args.get("path", "."))
-        return args
-
-    if name == "query_repo_map":
-        if context.repo_map is None:
-            raise ValueError("repository map is unavailable")
         return args
 
     if name == "run_shell":
@@ -365,15 +349,6 @@ def tool_search(context, args):
     return "\n".join(matches) or "(no matches)"
 
 
-def tool_query_repo_map(context, args):
-    result = context.repo_map.render(
-        args["query"],
-        budget_tokens=args.get("budget_tokens", 1200),
-        max_results=args.get("max_results", 24),
-    )
-    return result.text
-
-
 def tool_run_shell(context, args):
     command = str(args.get("command", "")).strip()
     if not command:
@@ -472,7 +447,6 @@ _TOOL_RUNNERS = {
     "read_file": tool_read_file,
     "read_artifact": tool_read_artifact,
     "search": tool_search,
-    "query_repo_map": tool_query_repo_map,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,

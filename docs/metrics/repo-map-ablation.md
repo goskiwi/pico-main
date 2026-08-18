@@ -62,8 +62,8 @@ was equal quality with at least a 15% reduction in tool steps or tokens; AUTO cl
 both measures.
 
 Keep automatic RepoMap injection. Do not replace it with ON-DEMAND mode. The `query_repo_map` tool
-itself remains unproven because it was never called; its separate value should be tested or the tool
-surface removed without deleting automatic prompt injection.
+was never called and has been removed from the Runtime tool surface; automatic prompt injection
+continues to use the same task-ranked RepoMap implementation.
 
 Limitations: five tasks are not a general coding-success estimate, one paired result is missing due
 to provider infrastructure, and this experiment measures coding-agent efficiency rather than PR

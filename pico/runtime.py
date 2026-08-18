@@ -537,7 +537,6 @@ class Pico:
                 if getattr(self, "context_ledger", None) is not None
                 else ""
             ),
-            repo_map=self.repo_map,
             mutation_service=self.mutation_service,
             sandbox=self.sandbox,
             execution_context_provider=lambda: (
