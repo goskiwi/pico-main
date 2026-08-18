@@ -133,5 +133,4 @@ def run_verification(agent):
     if before != after:
         record["status"] = "stale"
         record["freshness"] = "stale"
-    agent.evidence_ledger.record_verification(record)
     return record

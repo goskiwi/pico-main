@@ -121,7 +121,12 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
     )
     source = ledger.append_tool_call(call)
     agent.context_ledger = ledger
-    agent.evidence_ledger.record_verification({"freshness": "current"})
+    agent.evidence_ledger.apply_event(
+        {
+            "event_type": "verification_finished",
+            "payload": {"verification_id": "verify_current", "freshness": "current"},
+        }
+    )
 
     outcome = agent.run_tool(call)
 

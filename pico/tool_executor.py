@@ -260,8 +260,7 @@ class ToolExecutor:
         content_fingerprint = agent.content_workspace_fingerprint()
         result_key = self._repeat_key(run_id, fingerprint, content_fingerprint, memory_after)
         self._outcomes_by_state.setdefault(result_key, []).append(outcome)
-        agent.evidence_ledger.record_tool(outcome, content_fingerprint)
-        agent.emit_event(
+        event = agent.emit_event(
             agent.current_task_state,
             "operation_finished",
             {
@@ -272,6 +271,7 @@ class ToolExecutor:
             },
             correlation_id=call.call_id,
         )
+        agent.evidence_ledger.apply_event(event)
         return outcome
 
     @staticmethod

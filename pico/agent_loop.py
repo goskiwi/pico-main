@@ -83,8 +83,7 @@ class AgentLoop:
             task_state.record_tool(outcome.tool_name)
             completion_gate.observe(outcome)
             content_fingerprint = agent.content_workspace_fingerprint()
-            agent.evidence_ledger.record_tool(outcome, content_fingerprint)
-            agent.emit_event(
+            event = agent.emit_event(
                 task_state,
                 "operation_finished",
                 {
@@ -96,6 +95,7 @@ class AgentLoop:
                 },
                 correlation_id=outcome.tool_call_id,
             )
+            agent.evidence_ledger.apply_event(event)
         if ledger.reconciled_outcomes:
             agent.run_store.write_task_state(task_state)
 
@@ -416,7 +416,12 @@ class AgentLoop:
                 if verification is None:
                     agent.emit_event(task_state, "verification_started", {"command": agent.verification_command})
                     verification = agent.run_verification()
-                    agent.emit_event(task_state, "verification_finished", verification or {"status": "skipped"})
+                    event = agent.emit_event(
+                        task_state,
+                        "verification_finished",
+                        verification or {"status": "skipped"},
+                    )
+                    agent.evidence_ledger.apply_event(event)
                 if not verification or verification.get("status") != "passed":
                     guidance = (
                         "Runtime verification failed; inspect and repair before submit_final.\n"
