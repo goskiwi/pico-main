@@ -2,8 +2,9 @@
 
 import json
 import re
-import tempfile
 from pathlib import Path
+
+from .persistence import atomic_write_json
 
 SESSION_SCHEMA_VERSION = "session-v5"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -38,13 +39,7 @@ class SessionStore:
     def save(self, session):
         self.validate(session)
         path = self.path(session["id"])
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", delete=False, dir=self.root, prefix=path.name + ".", suffix=".tmp"
-        ) as handle:
-            json.dump(session, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            temporary = Path(handle.name)
-        temporary.replace(path)
+        atomic_write_json(path, session)
         return path
 
     def load(self, session_id):

@@ -7,7 +7,6 @@ session.json 负责保存“可恢复的会话状态”；RunStore 负责保存�
 import fcntl
 import json
 import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from .events import (
     replay_events,
     validate_event,
 )
+from .persistence import atomic_write_json
 
 
 def _run_id(value):
@@ -248,17 +248,4 @@ class RunStore:
         return json.loads(self.report_path(task_id).read_text(encoding="utf-8"))
 
     def _write_json_atomic(self, path, payload):
-        # 原子写：先写临时文件，再 replace。
-        # 这样即使中途异常，也不容易留下半截 JSON。
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(path.parent),
-            prefix=path.name + ".",
-            suffix=".tmp",
-        ) as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            temp_name = handle.name
-        Path(temp_name).replace(path)
+        atomic_write_json(path, payload)
