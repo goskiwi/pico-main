@@ -11,6 +11,7 @@ from ..cli import (
     _build_model_client,
     _configured_secret_names,
 )
+from ..config import load_env_file
 from ..runtime import Pico
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext
@@ -35,7 +36,7 @@ def build_review_parser():
     parser.add_argument("--openai-timeout", type=int, default=300)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--max-new-tokens", type=int, default=4096)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--run-timeout", type=int, default=600)
     parser.add_argument("--provider-context-limit", type=int, default=64000)
     parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
@@ -45,10 +46,17 @@ def build_review_parser():
     parser.add_argument(
         "--secret-env-name", dest="secret_env_names", action="append", default=[]
     )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        help="Explicit trusted provider env file; target-repository env files are not auto-loaded.",
+    )
     return parser
 
 
 def build_review_agent(args, root):
+    if args.env_file:
+        load_env_file(args.env_file)
     workspace = WorkspaceContext.build(root, repo_root_override=root)
     secret_names = set(DEFAULT_SECRET_ENV_NAMES)
     secret_names.update(_configured_secret_names(args))

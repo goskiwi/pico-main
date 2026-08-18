@@ -49,6 +49,22 @@ def find_project_env(start):
     return None
 
 
+def load_env_file(path, override=True):
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    loaded = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parsed = _parse_env_line(line)
+        if parsed is None:
+            continue
+        name, value = parsed
+        loaded[name] = value
+        if override or name not in os.environ:
+            os.environ[name] = value
+    return loaded
+
+
 def load_project_env(start, override=True):
     selected = find_project_env(start)
     if selected is None:
@@ -60,14 +76,7 @@ def load_project_env(start, override=True):
         env_paths = [sibling, local]
     loaded = {}
     for env_path in env_paths:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            parsed = _parse_env_line(line)
-            if parsed is None:
-                continue
-            name, value = parsed
-            loaded[name] = value
-            if override or name not in os.environ:
-                os.environ[name] = value
+        loaded.update(load_env_file(env_path, override=override))
     return loaded
 
 

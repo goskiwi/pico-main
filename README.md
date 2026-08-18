@@ -78,13 +78,15 @@ uv run pico-review \
   --repo /path/to/repo \
   --base <base_sha> \
   --head <head_sha> \
+  --env-file /trusted/path/.env.local \
   --format markdown \
   --output review.md
 ```
 
 Runtime 使用固定 Git argv 读取 unified diff，按文件块限制上下文，并要求每个 Finding
-指向 changed file 中真实新增的行。退出码 `0` 表示 clean，`1` 表示发现问题，`2` 表示
-输入、基础设施或结构化输出错误。
+指向 changed file 中真实新增的行。目标仓库的 `.env` 不会被自动加载；provider 配置只能
+来自当前进程环境或显式可信的 `--env-file`。退出码 `0` 表示 clean，`1` 表示发现问题，
+`2` 表示输入、基础设施或结构化输出错误。
 
 ## 状态与工件
 

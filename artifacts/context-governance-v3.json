@@ -66,7 +66,7 @@
       "within_budget": true
     }
   ],
-  "runtime_snapshot_id": "sha256:05f8bea6a10b18b13abd2c380b862d65af23e2e61e6ac8f6965e0f1523f9350c",
+  "runtime_snapshot_id": "sha256:aca65e7580a6f65d282e8215551a3f0f041a231d4762822e429de28ae076fd53",
   "summary": {
     "current_request_preserved_rate": 1.0,
     "mean_token_reduction": 12224.333333333334,
