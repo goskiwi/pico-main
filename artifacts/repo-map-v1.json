@@ -5,7 +5,7 @@
     "cache_misses": 1,
     "graph_edges": 6,
     "graph_nodes": 3,
-    "index_revision": "sha256:af215886d8f94390610f923b30059556912e5fd039108da2914ec0b90a504d0e",
+    "index_revision": "sha256:dbf4250a1b742306cbd1299aa9b9ec075f4ce0faf4ce7c80d8f273a03bca2e3b",
     "index_state": "fresh",
     "parse_error_files": 0,
     "parsed_files": 1,
@@ -47,7 +47,7 @@
     "truncated": false
   },
   "evaluation_snapshot_id": "sha256:0f9f2386a2a34a8dfb398c14bbf102f06855baa6f2fe753f642c3bd2f5b389e7",
-  "runtime_snapshot_id": "sha256:af2e1e36ad87cc65582340ce0df9b65742a8424f10c0e31421304cb1f1edf8a2",
+  "runtime_snapshot_id": "sha256:2f0343607e2359376c0f7e1aa248d23630b09096b8112c0a123f1f83e341147b",
   "summary": {
     "index_revision_bound": true,
     "query_hit": true,

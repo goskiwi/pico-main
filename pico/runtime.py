@@ -553,7 +553,17 @@ class Pico:
     def build_report(self, task_state):
         # report 是一次运行的最终摘要；
         # Event log 关注过程，report 是从过程投影出的终态和关键指标。
-        event_summary = self.run_store.replay(task_state.run_id).summary()
+        event_projection = self.run_store.replay(task_state.run_id)
+        projected_state = event_projection.task_state(task_state.to_dict())
+        for field in (
+            "status", "tool_steps", "attempts", "last_tool", "stop_reason",
+            "final_answer", "checkpoint_id", "resume_status",
+        ):
+            if task_state.to_dict()[field] != projected_state[field]:
+                raise RuntimeError(
+                    f"task state diverged from Runtime events: {field}"
+                )
+        event_summary = event_projection.summary()
         for field in (
             "run_id", "task_id", "status", "stop_reason", "attempts",
             "tool_steps", "last_tool", "checkpoint_id",

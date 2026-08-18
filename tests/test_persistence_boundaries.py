@@ -1,3 +1,5 @@
+import pytest
+
 from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
 
 
@@ -73,3 +75,7 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
     assert agent.run_store.replay(agent.current_task_state.run_id).summary()[
         "pending_operations"
     ] == []
+
+    agent.current_task_state.tool_steps += 1
+    with pytest.raises(RuntimeError, match="tool_steps"):
+        agent.build_report(agent.current_task_state)
