@@ -1,0 +1,11 @@
+diff --git a/tests/test_routing.py b/tests/test_routing.py
+index ef6af18c..303855c3 100644
+--- a/tests/test_routing.py
++++ b/tests/test_routing.py
+@@ -489,0 +490,6 @@ def test_negative():
++def test_float_no_scientific():
++    map = r.Map([r.Rule("/<float:v>", endpoint="a")])
++    adapter = map.bind("test.example")
++    assert "e" not in adapter.build("a", {"v": 0.00001})
++
++

@@ -1,0 +1,75 @@
+{
+  "schema_version": "official-public-tests-v1",
+  "real_oss_manifest": "validation/real_oss_suite.json",
+  "real_oss_suite_artifact": "artifacts/real-oss-suite-v2.json",
+  "tasks": [
+    {
+      "id": "click_empty_bytes_echo",
+      "source_repository": "https://github.com/pallets/click.git",
+      "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
+      "official_fix_commit": "4d3db84b251518e97299a38a5ca4bab3d01873a2",
+      "fixture_repo": "artifacts/real-oss-fixtures/click_empty_bytes_echo",
+      "agent_workspace": "artifacts/real-oss-workspaces/click_empty_bytes_echo/current",
+      "reference_patch": "validation/reference_patches/click_empty_bytes_echo.patch",
+      "official_test_patch": "validation/official_public_tests/click_empty_bytes_echo.patch",
+      "pre_fix_expected": "fail",
+      "official_test_nodes": ["tests/test_utils.py::test_echo_custom_file"]
+    },
+    {
+      "id": "packaging_non_string_version",
+      "source_repository": "https://github.com/pypa/packaging.git",
+      "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
+      "official_fix_commit": "d3e7f5d96da0c27103324cb9fb349b54e753a877",
+      "fixture_repo": "artifacts/real-oss-fixtures/packaging_non_string_version",
+      "agent_workspace": "artifacts/real-oss-workspaces/packaging_non_string_version/current",
+      "reference_patch": "validation/reference_patches/packaging_non_string_version.patch",
+      "official_test_patch": "validation/official_public_tests/packaging_non_string_version.patch",
+      "pre_fix_expected": "fail",
+      "official_test_nodes": [
+        "tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version",
+        "tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped"
+      ]
+    },
+    {
+      "id": "werkzeug_float_url_notation",
+      "source_repository": "https://github.com/pallets/werkzeug.git",
+      "source_commit": "b97e13cc74d8a45dca260d4037edd7d1f5094042",
+      "official_fix_commit": "f88164a271dd3e86a3241389ddc5c53eca4b9e4a",
+      "fixture_repo": "artifacts/real-oss-fixtures/werkzeug_float_url_notation",
+      "agent_workspace": "artifacts/real-oss-workspaces/werkzeug_float_url_notation/current",
+      "reference_patch": "validation/reference_patches/werkzeug_float_url_notation.patch",
+      "official_test_patch": "validation/official_public_tests/werkzeug_float_url_notation.patch",
+      "pre_fix_expected": "fail",
+      "official_test_nodes": ["tests/test_routing.py::test_float_no_scientific"]
+    },
+    {
+      "id": "jinja_overlay_async_default",
+      "source_repository": "https://github.com/pallets/jinja.git",
+      "source_commit": "767b23617628419ae3709ccfb02f9602ae9fe51f",
+      "official_fix_commit": "e45bc745a76b7aa573e68888bf49ecef70001815",
+      "fixture_repo": "artifacts/real-oss-fixtures/jinja_overlay_async_default",
+      "agent_workspace": "artifacts/real-oss-workspaces/jinja_overlay_async_default/current",
+      "reference_patch": "validation/reference_patches/jinja_overlay_async_default.patch",
+      "official_test_patch": "validation/official_public_tests/jinja_overlay_async_default.patch",
+      "pre_fix_expected": "pass",
+      "official_test_nodes": ["tests/test_api.py::test_overlay_enable_async"]
+    },
+    {
+      "id": "urllib3_port_zero",
+      "source_repository": "https://github.com/urllib3/urllib3.git",
+      "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
+      "official_fix_commit": "f5cf122346141b187cca0db6e6445297d336b610",
+      "fixture_repo": "artifacts/real-oss-fixtures/urllib3_port_zero",
+      "agent_workspace": "artifacts/real-oss-workspaces/urllib3_port_zero/current",
+      "reference_patch": "validation/reference_patches/urllib3_port_zero.patch",
+      "official_test_patch": "validation/official_public_tests/urllib3_port_zero.patch",
+      "pre_fix_expected": "fail",
+      "official_test_nodes": [
+        "test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero",
+        "test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero",
+        "test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero",
+        "test/test_util.py::TestUtil::test_netloc"
+      ]
+    }
+  ]
+}

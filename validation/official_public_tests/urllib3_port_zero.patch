@@ -1,0 +1,41 @@
+diff --git a/test/test_connectionpool.py b/test/test_connectionpool.py
+index d87b29dd..a0ddc067 100644
+--- a/test/test_connectionpool.py
++++ b/test/test_connectionpool.py
+@@ -219,0 +220,8 @@ class TestConnectionPool:
++    def test_same_host_port_zero(self) -> None:
++        with HTTPConnectionPool("example.com", port=0) as c:
++            assert c.is_same_host("http://example.com:0/")
++            assert not c.is_same_host("http://example.com/")
++            assert not c.is_same_host("https://example.com/")
++            assert not c.is_same_host("http://example.com:80/")
++            assert not c.is_same_host("https://example.com:443/")
++
+diff --git a/test/test_poolmanager.py b/test/test_poolmanager.py
+index 3e1badf7..5da98f65 100644
+--- a/test/test_poolmanager.py
++++ b/test/test_poolmanager.py
+@@ -472,0 +473,5 @@ class TestPoolManager:
++    def test_connection_from_host_port_zero(self) -> None:
++        p = PoolManager()
++        pool = p.connection_from_host("example.com", port=0, scheme="http")
++        assert pool.port == 0
++
+diff --git a/test/test_proxymanager.py b/test/test_proxymanager.py
+index 70fa22e2..60b35bec 100644
+--- a/test/test_proxymanager.py
++++ b/test_proxymanager.py
+@@ -52,0 +53,5 @@ class TestProxyManager:
++    def test_proxy_port_zero(self) -> None:
++        with ProxyManager("http://proxy:0") as p:
++            assert p.proxy is not None
++            assert p.proxy.port == 0
++
+diff --git a/test/test_util.py b/test/test_util.py
+index b01a8570..b2e55a13 100644
+--- a/test/test_util.py
++++ b/test/test_util.py
+@@ -395,0 +396 @@ class TestUtil:
++        ("http://google.com:0/mail", "google.com:0"),
+@@ -401,0 +403 @@ class TestUtil:
++        ("http://localhost:0", "localhost:0"),
