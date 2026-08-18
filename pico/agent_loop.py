@@ -299,7 +299,6 @@ class AgentLoop:
                         "created_at": now(),
                     }
                 )
-                agent.run_store.write_task_state(task_state)
                 hook_decision = agent.hooks.after_tool_result(
                     AfterToolContext(
                         outcome=outcome,

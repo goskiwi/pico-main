@@ -48,7 +48,7 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
 
     assert agent.ask("Read sample.txt") == "Done."
 
-    assert counts == {"session": 5, "task_state": 6, "context": 4}
+    assert counts == {"session": 5, "task_state": 5, "context": 4}
     assert event_types == [
         "run_started",
         "prompt_built",

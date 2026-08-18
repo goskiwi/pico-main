@@ -34,6 +34,46 @@ def test_valid_checkpoint_restores_same_run(tmp_path):
     assert resumed.current_task_state.run_id == "run_interrupted"
 
 
+def test_finished_tool_after_old_checkpoint_is_rebuilt_from_events(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n")
+    store = SessionStore(tmp_path / ".pico/sessions")
+    agent = Pico(
+        FakeModelClient([]),
+        WorkspaceContext.build(tmp_path),
+        store,
+        approval_policy="auto",
+        verification_command="",
+    )
+    state = TaskState.create("task_event_tail", "Inspect", run_id="run_event_tail")
+    agent.current_task_state = state
+    agent.run_store.start_run(state)
+    ledger = ContextLedger(state.run_id, agent.run_store)
+    ledger.append_user("Inspect")
+    agent.context_ledger = ledger
+    agent.create_checkpoint(state, "Inspect", "before_tool")
+
+    call = ToolCall("read_file", {"path": "README.md"}, "call_after_checkpoint")
+    ledger.append_tool_call(call)
+    ledger.append_tool_result(agent.run_tool(call))
+    state.record_tool("read_file")
+
+    resumed = Pico.from_session(
+        FakeModelClient([ModelAction.final("Recovered from events.")]),
+        WorkspaceContext.build(tmp_path),
+        store,
+        agent.session["id"],
+        approval_policy="auto",
+        verification_command="",
+    )
+
+    assert resumed.ask("Continue") == "Recovered from events."
+    assert resumed.current_task_state.run_id == state.run_id
+    assert resumed.current_task_state.tool_steps == 1
+    assert resumed.run_store.replay(state.run_id).summary()["tool_counts"] == {
+        "read_file": 1
+    }
+
+
 def test_pending_operation_is_reconciled_not_replayed(tmp_path):
     (tmp_path / "README.md").write_text("demo\n")
     agent = Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
