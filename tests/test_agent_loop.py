@@ -38,6 +38,9 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
         "run_id", "task_id", "status", "stop_reason", "attempts",
         "tool_steps", "last_tool", "checkpoint_id",
     } & set(report["event_summary"])
+    agent.evidence_ledger.observations.append({"tool": "invented"})
+    rebuilt = agent.build_report(agent.current_task_state)
+    assert rebuilt["evidence"] == report["evidence"]
 
     events = agent.run_store.read_events(agent.current_task_state)
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))

@@ -23,6 +23,7 @@ from .features import memory as memorylib
 from .hooks import HookRunner
 from .mutations import WorkspaceMutationService
 from .project_memory import MEMORY_SELECTOR_MAX_SELECTED, ProjectMemoryStore
+from .projections import build_run_report
 from .prompt_prefix import build_prompt_prefix, tool_signature
 from .repo_map import RepoMap
 from .repository_overview import discover_repository_overview
@@ -553,38 +554,13 @@ class Pico:
     def build_report(self, task_state):
         # report 是一次运行的最终摘要；
         # Event log 关注过程，report 是从过程投影出的终态和关键指标。
-        event_projection = self.run_store.replay(task_state.run_id)
-        projected_state = event_projection.task_state(task_state.to_dict())
-        for field in (
-            "status", "tool_steps", "attempts", "last_tool", "stop_reason",
-            "final_answer", "checkpoint_id", "resume_status",
-        ):
-            if task_state.to_dict()[field] != projected_state[field]:
-                raise RuntimeError(
-                    f"task state diverged from Runtime events: {field}"
-                )
-        event_summary = event_projection.summary()
-        for field in (
-            "run_id", "task_id", "status", "stop_reason", "attempts",
-            "tool_steps", "last_tool", "checkpoint_id",
-        ):
-            event_summary.pop(field, None)
-        return {
-            "run_id": task_state.run_id,
-            "task_id": task_state.task_id,
-            "status": task_state.status,
-            "stop_reason": task_state.stop_reason,
-            "final_answer": task_state.final_answer,
-            "tool_steps": task_state.tool_steps,
-            "attempts": task_state.attempts,
-            "checkpoint_id": task_state.checkpoint_id,
-            "resume_status": task_state.resume_status,
-            "prompt_metadata": self.last_prompt_metadata,
-            "project_memory": {"count": self.project_memory.count()},
-            "evidence": self.evidence_ledger.to_dict(),
-            "event_summary": event_summary,
-            "redacted_env": self.detected_secret_env_summary(),
-        }
+        return build_run_report(
+            events=self.run_store.read_events(task_state.run_id),
+            task_snapshot=task_state.to_dict(),
+            prompt_metadata=self.last_prompt_metadata,
+            project_memory_count=self.project_memory.count(),
+            redacted_env=self.detected_secret_env_summary(),
+        )
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
