@@ -106,10 +106,10 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Runtime policy | 全部通过 | 单一恢复建议、hook 边界、结构化 verifier 与事件重放 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
-| Five-repository Real OSS suite v2 | 5/5 | clean commit `6ef7463`；统一 40 步；五题 Context Ledger 均无宿主路径泄露 |
+| Five-repository Real OSS suite v2 | 5/5 | clean commit `61207f4`；统一 40 步；五题均为第 1 次尝试 |
 | Official upstream public tests | 25/25 | 官方 test-only patch；pre-fix 基线、reference patch、Agent patch 三组验证；禁网只读 Docker |
 
-旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑。Werkzeug 使用了预先固定的第 2 次 provider 基础设施尝试，其余四题均为第 1 次尝试。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
+旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 
 五仓库冻结任务集可以从精确上游 commit 重新物化并运行：
 

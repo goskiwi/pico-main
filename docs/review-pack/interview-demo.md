@@ -19,5 +19,5 @@
 
 ## Claims and boundaries
 
-- Claim the deterministic 5/5 Harness, the 5/5 hidden preflight, the fixed five-task live suite, and the 25/25 official public assertions separately. Note that Werkzeug used one provider-infrastructure retry; no task failure was selectively rerun.
+- Claim the deterministic 5/5 Harness, the 5/5 hidden preflight, the fixed five-task live suite, and the 25/25 official public assertions separately. All five live tasks completed on their first attempt; no task failure was selectively rerun.
 - State that Pico is local and single-user; Docker daemon trust, remote multi-tenant isolation, distributed queues, and secret management are outside its boundary.
