@@ -297,7 +297,8 @@ class AgentLoop:
                         "content_tier": context_result.content_tier,
                         "original_size_bytes": context_result.original_size_bytes,
                         "created_at": now(),
-                    }
+                    },
+                    persist=False,
                 )
                 hook_decision = agent.hooks.after_tool_result(
                     AfterToolContext(
@@ -321,14 +322,20 @@ class AgentLoop:
                 )
                 if guidance:
                     ledger.append_guidance(guidance)
-                    agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                    agent.record(
+                        {"role": "assistant", "content": guidance, "created_at": now()},
+                        persist=False,
+                    )
                 if agent.max_steps is not None and tool_steps >= agent.max_steps:
                     budget_guidance = (
                         "Runtime tool budget exhausted. Do not call another tool; "
                         "use submit_final now with the available evidence."
                     )
                     ledger.append_guidance(budget_guidance)
-                    agent.record({"role": "assistant", "content": budget_guidance, "created_at": now()})
+                    agent.record(
+                        {"role": "assistant", "content": budget_guidance, "created_at": now()},
+                        persist=False,
+                    )
                     guidance = "\n".join(part for part in (guidance, budget_guidance) if part)
                 provider_result = outcome.content
                 if guidance:
@@ -378,7 +385,10 @@ class AgentLoop:
             if action.kind == "retry":
                 malformed_retries += 1
                 ledger.append_guidance(action.content)
-                agent.record({"role": "assistant", "content": action.content, "created_at": now()})
+                agent.record(
+                    {"role": "assistant", "content": action.content, "created_at": now()},
+                    persist=False,
+                )
                 retry_notice = action.content
                 continue_provider(retry_notice)
                 agent.run_store.write_task_state(task_state)
@@ -392,7 +402,10 @@ class AgentLoop:
             if syntax_issues:
                 guidance = "Runtime completion gate: changed Python is invalid: " + "; ".join(syntax_issues)
                 ledger.append_guidance(guidance)
-                agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                agent.record(
+                    {"role": "assistant", "content": guidance, "created_at": now()},
+                    persist=False,
+                )
                 agent.emit_event(task_state, "completion_blocked", {"status": "syntax_invalid", "reason": guidance})
                 continue_provider(guidance)
                 continue
@@ -410,7 +423,10 @@ class AgentLoop:
                         + str((verification or {}).get("output", "verification unavailable"))
                     )
                     ledger.append_guidance(guidance)
-                    agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                    agent.record(
+                        {"role": "assistant", "content": guidance, "created_at": now()},
+                        persist=False,
+                    )
                     agent.emit_event(task_state, "completion_blocked", {"status": "verification_failed", "reason": guidance})
                     continue_provider(guidance)
                     continue
@@ -419,12 +435,18 @@ class AgentLoop:
             if not decision.allowed:
                 guidance = f"Runtime completion gate: {decision.reason}. Inspect or repair before returning a final answer."
                 ledger.append_guidance(guidance)
-                agent.record({"role": "assistant", "content": guidance, "created_at": now()})
+                agent.record(
+                    {"role": "assistant", "content": guidance, "created_at": now()},
+                    persist=False,
+                )
                 agent.emit_event(task_state, "completion_blocked", {"status": decision.status, "reason": decision.reason})
                 continue_provider(guidance)
                 continue
             ledger.append_final(final)
-            agent.record({"role": "assistant", "content": final, "created_at": now()})
+            agent.record(
+                {"role": "assistant", "content": final, "created_at": now()},
+                persist=False,
+            )
             task_state.finish_success(final)
             checkpoint = agent.create_checkpoint(task_state, user_message, trigger="run_finished")
             agent.run_store.write_task_state(task_state)
@@ -464,7 +486,10 @@ class AgentLoop:
         else:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
-        agent.record({"role": "assistant", "content": final, "created_at": now()})
+        agent.record(
+            {"role": "assistant", "content": final, "created_at": now()},
+            persist=False,
+        )
         agent.run_store.write_task_state(task_state)
         checkpoint = agent.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
         agent.emit_event(

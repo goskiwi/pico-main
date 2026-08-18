@@ -342,13 +342,14 @@ class Pico:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record(self, item):
+    def record(self, item, *, persist=True):
         payload = dict(item)
         task_state = getattr(self, "current_task_state", None)
         if task_state is not None:
             payload.setdefault("run_id", task_state.run_id)
         self.session["history"].append(payload)
-        self.session_path = self.session_store.save(self.session)
+        if persist:
+            self.session_path = self.session_store.save(self.session)
 
     @staticmethod
     def looks_sensitive_env_name(name):
