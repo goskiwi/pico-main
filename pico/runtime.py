@@ -33,7 +33,7 @@ from .session_store import SESSION_SCHEMA_VERSION, SessionStore
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
 from .verification import discover_verification_command, run_verification
-from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
+from .workspace import IGNORED_PATH_NAMES, WorkspaceContext, clip, now
 
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
 DEFAULT_FEATURE_FLAGS = {
@@ -169,12 +169,6 @@ class Pico:
         if not isinstance(resume_state, dict):
             self.session["resume_state"] = {}
 
-    def current_runtime_identity(self):
-        return checkpointlib.current_runtime_identity(self)
-
-    def checkpoint_state(self):
-        return checkpointlib.checkpoint_state(self)
-
     def current_checkpoint(self):
         return checkpointlib.current_checkpoint(self)
 
@@ -188,15 +182,6 @@ class Pico:
 
     def render_checkpoint_text(self):
         return checkpointlib.render_checkpoint_text(self)
-
-    @staticmethod
-    def remember(bucket, item, limit):
-        if not item:
-            return
-        if item in bucket:
-            bucket.remove(item)
-        bucket.append(item)
-        del bucket[:-limit]
 
     def build_tools(self):
         return toolkit.build_tool_registry(self.tool_context())
@@ -310,20 +295,6 @@ class Pico:
             **working_metadata,
         }
 
-    def history_text(self):
-        history = self.session["history"]
-        if not history:
-            return "- empty"
-
-        lines = []
-        recent_start = max(0, len(history) - 6)
-        for index, item in enumerate(history):
-            recent = index >= recent_start
-            limit = 900 if recent else 220
-            lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
-
-        return clip("\n".join(lines), MAX_HISTORY)
-
     def feature_enabled(self, name):
         return bool(self.feature_flags.get(str(name), False))
 
@@ -360,22 +331,6 @@ class Pico:
             }
         )
 
-    @staticmethod
-    def looks_sensitive_env_name(name):
-        return securitylib.looks_sensitive_env_name(name)
-
-    def is_secret_env_name(self, name):
-        return securitylib.is_secret_env_name(name, secret_env_names=self.secret_env_names)
-
-    def configured_secret_env_items(self):
-        return securitylib.configured_secret_env_items(secret_env_names=self.secret_env_names)
-
-    def detected_secret_env_items(self):
-        return securitylib.detected_secret_env_items(secret_env_names=self.secret_env_names)
-
-    def secret_env_summary(self):
-        return securitylib.secret_env_summary(secret_env_names=self.secret_env_names)
-
     def detected_secret_env_summary(self):
         return securitylib.detected_secret_env_summary(secret_env_names=self.secret_env_names)
 
@@ -388,10 +343,6 @@ class Pico:
     def shell_env(self):
         return securitylib.shell_env(allowlist=self.shell_env_allowlist, root=self.root)
 
-    def prompt_metadata(self, user_message, prompt):
-        _, metadata = self._build_prompt_and_metadata(user_message)
-        return metadata
-
     def _build_prompt_and_metadata(self, user_message):
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
@@ -403,7 +354,6 @@ class Pico:
                 "prefix_tokens": self.context_manager.tokenizer.count(self.prefix),
                 "workspace_tokens": self.context_manager.tokenizer.count(self.workspace.text()),
                 "memory_tokens": self.context_manager.tokenizer.count(self.memory_text()),
-                "history_tokens": self.context_manager.tokenizer.count(self.history_text()),
                 "request_tokens": self.context_manager.tokenizer.count(user_message),
                 "tool_count": len(self.tools),
                 "workspace_docs": len(self.workspace.project_docs),
@@ -493,15 +443,12 @@ class Pico:
     def create_checkpoint(self, task_state, user_message, trigger):
         return checkpointlib.create_checkpoint(self, task_state, user_message, trigger)
 
-    def infer_next_step(self, task_state):
-        return checkpointlib.infer_next_step(task_state)
-
     def update_memory_after_tool(self, name, args, result, outcome=None):
         """把少量高价值工具结果沉淀到 working memory。
 
         为什么存在：
-        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进了
-        `history`，这里只挑少量“下一轮大概率还会用到”的事实做提纯，
+        并不是每个工具结果都值得长期带进下一轮 prompt。完整结果已经进入
+        Context Ledger，这里只挑少量“下一轮大概率还会用到”的事实做提纯，
         例如最近读写过哪些文件、某个文件读出来的短摘要。
 
         输入 / 输出：

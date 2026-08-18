@@ -75,10 +75,6 @@ class EvidenceLedger:
             if path.startswith(".pico/")
         })
 
-    @property
-    def has_uncertain_effects(self):
-        return any(item["side_effect_state"] in {"partial", "unknown"} for item in self.effects)
-
     def current_verification(self, workspace_fingerprint):
         return next((item for item in reversed(self.verifications)
                      if item.get("status") == "passed" and item.get("freshness") == "current"
