@@ -7,7 +7,7 @@ have different trust and lifecycle requirements. Each fact still has one authori
 |---|---|---|
 | Tool execution, verification and terminal facts | `events.jsonl` | `task_state.json`, Evidence, Report |
 | Current-run model-visible causality | `context.jsonl` | Token-budgeted prompt projection |
-| Cross-run conversation and working memory | Session JSON | Relevant-history prompt projection |
+| Cross-run requests, run summaries and working memory | Session JSON | Relevant-history prompt projection |
 | Crash-resumable runtime envelope | Checkpoint | Rendered checkpoint prompt section |
 | Large redacted tool output | Immutable artifacts | Context/Event artifact references |
 | Project knowledge | Markdown Memory Cards | Generated `MEMORY.md` index |
@@ -20,8 +20,8 @@ have different trust and lifecycle requirements. Each fact still has one authori
 - Checkpoint stores only the latest executable recovery envelope and binds an Event cursor, Context
   and Workspace content. TaskState is reconstructed from Events rather than embedded in Checkpoint.
 - Report and Evidence are projections. They may be regenerated from Events and immutable artifacts.
-- Session History is preserved across runs, but records created during a turn are flushed together
-  with the next Checkpoint instead of being written independently.
+- Session stores only user requests and terminal run summaries across runs. Tool transcripts and
+  Runtime guidance remain exclusively in the current Run's Context and Events.
 - `MEMORY.md` and SQLite-style materialized views must never become independent facts.
 
 ## Deliberate Separation
