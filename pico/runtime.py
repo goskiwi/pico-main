@@ -132,7 +132,6 @@ class Pico:
         self.current_run_dir = None
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
-        self.last_memory_extraction = {}
         self._task_memory_selection = None
         self.last_tool_outcome = None
         self._last_prefix_refresh = {
@@ -553,6 +552,12 @@ class Pico:
     def build_report(self, task_state):
         # report 是一次运行的最终摘要；
         # Event log 关注过程，report 是从过程投影出的终态和关键指标。
+        event_summary = self.run_store.replay(task_state.run_id).summary()
+        for field in (
+            "run_id", "task_id", "status", "stop_reason", "attempts",
+            "tool_steps", "last_tool", "checkpoint_id",
+        ):
+            event_summary.pop(field, None)
         return {
             "run_id": task_state.run_id,
             "task_id": task_state.task_id,
@@ -563,14 +568,10 @@ class Pico:
             "attempts": task_state.attempts,
             "checkpoint_id": task_state.checkpoint_id,
             "resume_status": task_state.resume_status,
-            "task_state": task_state.to_dict(),
             "prompt_metadata": self.last_prompt_metadata,
-            "project_memory": {
-                "count": self.project_memory.count(),
-                "extraction": dict(self.last_memory_extraction),
-            },
+            "project_memory": {"count": self.project_memory.count()},
             "evidence": self.evidence_ledger.to_dict(),
-            "event_summary": self.run_store.replay(task_state.run_id).summary(),
+            "event_summary": event_summary,
             "redacted_env": self.detected_secret_env_summary(),
         }
 
@@ -612,25 +613,6 @@ class Pico:
                 if self.current_execution is not None else None
             ),
         )
-
-    def tool_list_files(self, args):
-        return toolkit.tool_list_files(self.tool_context(), args)
-
-    def tool_read_file(self, args):
-        return toolkit.tool_read_file(self.tool_context(), args)
-
-    def tool_search(self, args):
-        return toolkit.tool_search(self.tool_context(), args)
-
-    def tool_run_shell(self, args):
-        return toolkit.tool_run_shell(self.tool_context(), args)
-
-    def tool_write_file(self, args):
-        return toolkit.tool_write_file(self.tool_context(), args)
-
-    def tool_patch_file(self, args):
-        return toolkit.tool_patch_file(self.tool_context(), args)
-
 
     def approve(self, name, args):
         if self.read_only:

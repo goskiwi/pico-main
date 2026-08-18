@@ -11,7 +11,7 @@ the Ledger.
 
 ```mermaid
 flowchart LR
-  U["User request"] --> L["Context Ledger v3"]
+  U["User request"] --> L["Context Ledger v4"]
   RM["RepoMap"] --> C["Context Manager"]
   WM["Session Working Memory"] --> C
   PM["Markdown Project Memory"] --> C
@@ -24,7 +24,7 @@ flowchart LR
   O --> E["Hash-chained Runtime Event"]
   E --> P["Progress projection"]
   P --> L
-  L --> CP["Checkpoint v5 + event cursor"]
+  L --> CP["Checkpoint v6 + event cursor"]
   O --> V["Runtime verifier"]
   V --> F["Completion Gate"]
 ```

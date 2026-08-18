@@ -30,6 +30,15 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert agent.current_task_state.status == "completed"
     assert agent.run_store.report_path(agent.current_task_state.run_id).exists()
 
+    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    assert "task_state" not in report
+    assert report["project_memory"] == {"count": 0}
+    assert report["event_summary"]["event_counts"]["run_finished"] == 1
+    assert not {
+        "run_id", "task_id", "status", "stop_reason", "attempts",
+        "tool_steps", "last_tool", "checkpoint_id",
+    } & set(report["event_summary"])
+
     events = agent.run_store.read_events(agent.current_task_state)
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert events[0]["causation_id"] == ""

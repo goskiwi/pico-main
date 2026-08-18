@@ -16,9 +16,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROJECT_MEMORY_SCHEMA_VERSION = "pico-markdown-project-memory"
 MEMORY_INDEX_SCHEMA_VERSION = "pico-markdown-memory-index"
@@ -108,36 +105,6 @@ def _clean_text(value, *, field, minimum=1, maximum):
     if "\x00" in text:
         raise ValueError(f"memory {field} contains a NUL byte")
     return text
-
-
-class MemoryProposal(BaseModel):
-    """One strict create/update request from the isolated extractor."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: Literal["create", "update"]
-    filename: str = Field(pattern=MEMORY_FILENAME_PATTERN_TEXT)
-    name: str = Field(min_length=1, max_length=80)
-    description: str = Field(min_length=1, max_length=240)
-    type: Literal["user", "feedback", "project", "reference"]
-    content: str = Field(min_length=1, max_length=1000)
-    why: str = Field(default="", max_length=500)
-    how_to_apply: str = Field(default="", max_length=500)
-    evidence_ids: list[str] = Field(min_length=1, max_length=8)
-    expires_at: str = ""
-
-    @model_validator(mode="after")
-    def validate_shape(self):
-        prefix = self.filename.split("_", 1)[0]
-        if prefix != self.type:
-            raise ValueError("memory filename prefix must match type")
-        if self.type in {"feedback", "project"}:
-            if not self.why.strip() or not self.how_to_apply.strip():
-                raise ValueError("feedback and project memory require why/how_to_apply")
-        elif self.why.strip() or self.how_to_apply.strip():
-            raise ValueError("user/reference memory must not contain why/how_to_apply")
-        normalize_expires_at(self.expires_at)
-        return self
 
 
 @dataclass(frozen=True)
