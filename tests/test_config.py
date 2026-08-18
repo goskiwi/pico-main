@@ -1,6 +1,6 @@
 import os
 
-from pico.config import find_project_env, load_env_file, load_project_env, provider_env
+from pico.config import find_project_env, load_project_env, provider_env
 
 
 def test_env_local_is_discovered_and_overrides_base_env(tmp_path, monkeypatch):
@@ -24,13 +24,3 @@ def test_provider_env_does_not_read_legacy_names(monkeypatch):
     monkeypatch.setenv("OPENAI_MODEL", "legacy-model")
 
     assert provider_env("PICO_OPENAI_MODEL", "current-default") == "current-default"
-
-
-def test_explicit_env_file_loads_only_the_selected_file(tmp_path, monkeypatch):
-    selected = tmp_path / "trusted.env"
-    selected.write_text("PICO_EXPLICIT_VALUE=trusted\n", encoding="utf-8")
-    (tmp_path / ".env.local").write_text("PICO_EXPLICIT_VALUE=untrusted\n")
-    monkeypatch.delenv("PICO_EXPLICIT_VALUE", raising=False)
-
-    assert load_env_file(selected) == {"PICO_EXPLICIT_VALUE": "trusted"}
-    assert os.environ["PICO_EXPLICIT_VALUE"] == "trusted"

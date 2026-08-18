@@ -48,7 +48,7 @@
       "variant": "memory_off"
     }
   ],
-  "runtime_snapshot_id": "sha256:aca65e7580a6f65d282e8215551a3f0f041a231d4762822e429de28ae076fd53",
+  "runtime_snapshot_id": "sha256:af2e1e36ad87cc65582340ce0df9b65742a8424f10c0e31421304cb1f1edf8a2",
   "variants": {
     "memory_off": {
       "hit_rate": 0.0,
