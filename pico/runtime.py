@@ -316,23 +316,11 @@ class Pico:
             return "- empty"
 
         lines = []
-        seen_reads = set()
         recent_start = max(0, len(history) - 6)
         for index, item in enumerate(history):
             recent = index >= recent_start
-            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
-                path = str(item["args"].get("path", ""))
-                if path in seen_reads:
-                    continue
-                seen_reads.add(path)
-
-            if item["role"] == "tool":
-                limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
-                lines.append(clip(item["content"], limit))
-            else:
-                limit = 900 if recent else 220
-                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
+            limit = 900 if recent else 220
+            lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
 
         return clip("\n".join(lines), MAX_HISTORY)
 
@@ -343,14 +331,34 @@ class Pico:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record(self, item, *, persist=True):
-        payload = dict(item)
-        task_state = getattr(self, "current_task_state", None)
-        if task_state is not None:
-            payload.setdefault("run_id", task_state.run_id)
-        self.session["history"].append(payload)
-        if persist:
-            self.session_path = self.session_store.save(self.session)
+    def record_user_request(self, content):
+        self.session["history"].append(
+            {
+                "role": "user",
+                "run_id": self.current_task_state.run_id,
+                "content": str(content),
+                "created_at": now(),
+            }
+        )
+        self.session_path = self.session_store.save(self.session)
+
+    def record_run_summary(self, task_state):
+        verifications = self.evidence_ledger.verifications
+        verification_status = (
+            str(verifications[-1].get("status", "unknown"))
+            if verifications else "not_run"
+        )
+        self.session["history"].append(
+            {
+                "role": "run_summary",
+                "run_id": task_state.run_id,
+                "content": task_state.final_answer,
+                "changed_paths": self.evidence_ledger.changed_paths,
+                "verification_status": verification_status,
+                "stop_reason": task_state.stop_reason,
+                "created_at": now(),
+            }
+        )
 
     @staticmethod
     def looks_sensitive_env_name(name):

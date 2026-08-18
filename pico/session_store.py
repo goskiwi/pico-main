@@ -6,8 +6,39 @@ from pathlib import Path
 
 from .persistence import atomic_write_json
 
-SESSION_SCHEMA_VERSION = "session-v5"
+SESSION_SCHEMA_VERSION = "session-v6"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+USER_HISTORY_FIELDS = {"role", "run_id", "content", "created_at"}
+RUN_SUMMARY_FIELDS = {
+    "role",
+    "run_id",
+    "content",
+    "changed_paths",
+    "verification_status",
+    "stop_reason",
+    "created_at",
+}
+
+
+def _validate_history(history):
+    if not isinstance(history, list):
+        raise TypeError("session history must be a list")
+    for item in history:
+        if not isinstance(item, dict):
+            raise TypeError("session history entries must be objects")
+        role = item.get("role")
+        expected = USER_HISTORY_FIELDS if role == "user" else (
+            RUN_SUMMARY_FIELDS if role == "run_summary" else None
+        )
+        if expected is None or set(item) != expected:
+            raise ValueError("unsupported session history entry")
+        if not all(isinstance(item.get(field), str) for field in expected - {"changed_paths"}):
+            raise TypeError("session history text fields must be strings")
+        if role == "run_summary" and (
+            not isinstance(item["changed_paths"], list)
+            or any(not isinstance(path, str) for path in item["changed_paths"])
+        ):
+            raise TypeError("run summary changed_paths must be strings")
 
 
 class SessionStore:
@@ -33,7 +64,8 @@ class SessionStore:
         required = {"id", "created_at", "workspace_root", "history", "memory"}
         if not required.issubset(session):
             raise ValueError("session is missing required fields")
-        if not isinstance(session["history"], list) or not isinstance(session["memory"], dict):
+        _validate_history(session["history"])
+        if not isinstance(session["memory"], dict):
             raise TypeError("invalid session state")
 
     def save(self, session):

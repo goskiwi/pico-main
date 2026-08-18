@@ -67,9 +67,10 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
     ]
     assert [item["role"] for item in agent.session["history"]] == [
         "user",
-        "tool",
-        "assistant",
+        "run_summary",
     ]
+    assert agent.session["history"][-1]["content"] == "Done."
+    assert agent.session["history"][-1]["changed_paths"] == []
     persisted = agent.session_store.load(agent.session["id"])
     assert persisted["history"] == agent.session["history"]
     assert agent.run_store.replay(agent.current_task_state.run_id).summary()[

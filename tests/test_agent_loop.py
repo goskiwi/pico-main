@@ -153,6 +153,32 @@ def test_default_loop_has_no_tool_step_limit(tmp_path):
     assert agent.current_task_state.tool_steps == 7
 
 
+def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
+    (tmp_path / "hello.txt").write_text("unique-tool-output\n", encoding="utf-8")
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.final("First run completed."),
+            ModelAction.final("Second run completed."),
+        ],
+    )
+
+    assert agent.ask("Inspect hello.txt") == "First run completed."
+    assert agent.ask("Summarize the prior run") == "Second run completed."
+
+    second_run_prompt = agent.model_client.prompts[2]
+    assert "[prior/user] Inspect hello.txt" in second_run_prompt
+    assert "[prior/run_summary] First run completed." in second_run_prompt
+    assert "[prior/tool" not in second_run_prompt
+    assert [item["role"] for item in agent.session["history"]] == [
+        "user",
+        "run_summary",
+        "user",
+        "run_summary",
+    ]
+
+
 def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(

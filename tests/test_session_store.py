@@ -11,7 +11,14 @@ def session(session_id, content):
         "id": session_id,
         "created_at": "2026-04-07T10:00:00+00:00",
         "workspace_root": "/workspace",
-        "history": [{"role": "user", "content": content}],
+        "history": [
+            {
+                "role": "user",
+                "run_id": "run_test",
+                "content": content,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ],
         "memory": {},
     }
 

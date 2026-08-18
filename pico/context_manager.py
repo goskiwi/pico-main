@@ -309,20 +309,21 @@ class ContextManager:
         ledger = getattr(self.agent, "context_ledger", None)
         current_run_id = str(getattr(ledger, "run_id", ""))
         all_history = list(getattr(self.agent, "session", {}).get("history", []))
-        duplicate_count = sum(item.get("run_id") == current_run_id for item in all_history if current_run_id)
         prior = [item for item in all_history if not current_run_id or item.get("run_id") != current_run_id]
-        if prior and prior[-1].get("role") == "user" and prior[-1].get("content") == str(current_request):
-            prior = prior[:-1]
         selected_prior = self._rank_prior_history(prior, current_request)
         prior_lines = ["Prior session context:"]
         for item in selected_prior:
-            if item.get("role") == "tool":
-                content = self.tokenizer.clip(item.get("content", ""), 120)
-                prior_lines.append(
-                    f"[prior/tool:{item.get('name', '')}] {json.dumps(item.get('args', {}), sort_keys=True)}\n{content}"
+            content = str(item.get("content", ""))
+            if item.get("role") == "run_summary":
+                changed = ", ".join(item.get("changed_paths", [])) or "none"
+                content += (
+                    f" | changed: {changed}"
+                    f" | verification: {item.get('verification_status', 'unknown')}"
+                    f" | stop: {item.get('stop_reason', '')}"
                 )
-            else:
-                prior_lines.append(f"[prior/{item.get('role', '')}] {self.tokenizer.clip(item.get('content', ''), 140)}")
+            prior_lines.append(
+                f"[prior/{item.get('role', '')}] {self.tokenizer.clip(content, 220)}"
+            )
         if len(prior_lines) == 1:
             prior_lines.append("- empty")
         ledger_metadata = {"active_count": 0, "selected_count": 0, "omitted_count": 0, "artifact_references": 0}
@@ -338,7 +339,6 @@ class ContextManager:
             "source": "ledger_plus_prior_runs" if ledger is not None else "prior_session_only",
             "prior_total_count": len(prior),
             "prior_selected_count": len(selected_prior),
-            "current_run_duplicates_avoided": duplicate_count,
             "ledger": ledger_metadata,
         }
         return "\n".join(lines)

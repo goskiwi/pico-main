@@ -110,14 +110,15 @@ def test_current_run_session_events_are_not_duplicated_with_ledger(tmp_path):
         )
     )
     agent.context_ledger = ledger
-    agent.record({"role": "user", "content": "inspect"})
-    agent.record({"role": "tool", "name": "read_file", "args": call.args, "content": "unique-current-run-result"})
+    agent.record_user_request("inspect")
 
     prompt, metadata = ContextManager(agent, total_budget=900).build("inspect")
 
     assert prompt.count("unique-current-run-result") == 1
     assert prompt.count("Current user request:\ninspect") == 1
-    assert metadata["history_projection"]["current_run_duplicates_avoided"] == 2
+    assert [item["role"] for item in agent.session["history"]] == ["user"]
+    assert metadata["history_projection"]["prior_total_count"] == 0
+    assert "current_run_duplicates_avoided" not in metadata["history_projection"]
     assert metadata["history_projection"]["ledger"]["current_request_duplicate_avoided"] == 1
     assert metadata["history_projection"]["source"] == "ledger_plus_prior_runs"
 
@@ -127,7 +128,17 @@ def test_shared_budget_lends_unused_tokens_to_history(tmp_path):
     agent.prefix = "short rules"
     agent.memory.render_panel = lambda: "Memory:\n- short"
     for index in range(8):
-        agent.record({"role": "assistant", "content": f"history-{index} " + "long-context " * 80})
+        agent.session["history"].append(
+            {
+                "role": "run_summary",
+                "run_id": f"run_{index}",
+                "content": f"history-{index} " + "long-context " * 80,
+                "changed_paths": [],
+                "verification_status": "not_run",
+                "stop_reason": "final_answer_returned",
+                "created_at": f"2026-01-01T00:00:0{index}+00:00",
+            }
+        )
     manager = ContextManager(
         agent,
         total_budget=600,
