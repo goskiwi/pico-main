@@ -7,6 +7,7 @@ from .checkpoint import (
     CHECKPOINT_NONE_STATUS,
     CHECKPOINT_PARTIAL_STALE_STATUS,
     CHECKPOINT_WORKSPACE_MISMATCH_STATUS,
+    task_state_from_checkpoint,
 )
 from .completion import CompletionGate
 from .context_ledger import ContextLedger
@@ -29,17 +30,20 @@ class AgentLoop:
         agent.evidence_ledger = type(agent.evidence_ledger)()
 
         checkpoint = agent.current_checkpoint()
-        saved_task = dict((checkpoint or {}).get("task_state", {}) or {})
+        saved_task = (
+            task_state_from_checkpoint(agent, checkpoint)
+            if checkpoint and agent.resume_state.get("status") == CHECKPOINT_FULL_VALID_STATUS
+            else {}
+        )
         can_resume = (
             agent.resume_state.get("status") == CHECKPOINT_FULL_VALID_STATUS
             and saved_task.get("status") == "running"
+            and not saved_task.get("stop_reason")
             and (checkpoint or {}).get("context_run_id")
         )
         if can_resume:
             prior_events = agent.run_store.read_events(checkpoint["context_run_id"])
-            task_state = TaskState.from_dict(
-                agent.run_store.replay(checkpoint["context_run_id"]).task_state(saved_task)
-            )
+            task_state = TaskState.from_dict(saved_task)
             ledger = ContextLedger.restore(checkpoint["context_run_id"], agent.run_store)
             ledger.append_guidance(f"Resume request: {user_message}")
             agent.evidence_ledger = type(agent.evidence_ledger).from_events(prior_events)
@@ -413,16 +417,6 @@ class AgentLoop:
             ledger.append_final(final)
             task_state.finish_success(final)
             agent.record_run_summary(task_state)
-            checkpoint = agent.create_checkpoint(task_state, user_message, trigger="run_finished")
-            agent.run_store.write_task_state(task_state)
-            agent.emit_event(
-                task_state,
-                "checkpoint_created",
-                {
-                    "checkpoint_id": checkpoint["checkpoint_id"],
-                    "trigger": "run_finished",
-                },
-            )
             agent.emit_event(
                 task_state,
                 "run_finished",
@@ -431,6 +425,16 @@ class AgentLoop:
                     "stop_reason": task_state.stop_reason,
                     "final_answer": final,
                     "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+                },
+            )
+            checkpoint = agent.create_checkpoint(task_state, user_message, trigger="run_finished")
+            agent.run_store.write_task_state(task_state)
+            agent.emit_event(
+                task_state,
+                "checkpoint_created",
+                {
+                    "checkpoint_id": checkpoint["checkpoint_id"],
+                    "trigger": "run_finished",
                 },
             )
             agent.run_store.write_report(task_state, agent.redact_artifact(agent.build_report(task_state)))
@@ -452,16 +456,6 @@ class AgentLoop:
             final = "Stopped after reaching the step limit without a final answer."
             task_state.stop_step_limit(final)
         agent.record_run_summary(task_state)
-        agent.run_store.write_task_state(task_state)
-        checkpoint = agent.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
-        agent.emit_event(
-            task_state,
-            "checkpoint_created",
-            {
-                "checkpoint_id": checkpoint["checkpoint_id"],
-                "trigger": task_state.stop_reason or "run_stopped",
-            },
-        )
         agent.emit_event(
             task_state,
             "run_finished",
@@ -470,6 +464,16 @@ class AgentLoop:
                 "stop_reason": task_state.stop_reason,
                 "final_answer": final,
                 "run_duration_ms": int((time.monotonic() - run_started_at) * 1000),
+            },
+        )
+        checkpoint = agent.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
+        agent.run_store.write_task_state(task_state)
+        agent.emit_event(
+            task_state,
+            "checkpoint_created",
+            {
+                "checkpoint_id": checkpoint["checkpoint_id"],
+                "trigger": task_state.stop_reason or "run_stopped",
             },
         )
         agent.run_store.write_report(task_state, agent.redact_artifact(agent.build_report(task_state)))

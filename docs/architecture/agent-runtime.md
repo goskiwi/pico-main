@@ -24,7 +24,7 @@ flowchart LR
   O --> E["Hash-chained Runtime Event"]
   E --> P["Progress projection"]
   P --> L
-  L --> CP["Checkpoint v6 + event cursor"]
+  L --> CP["Checkpoint v7 + event cursor"]
   O --> V["Runtime verifier"]
   V --> F["Completion Gate"]
 ```

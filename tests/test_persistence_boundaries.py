@@ -62,8 +62,8 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
         "prompt_built",
         "model_requested",
         "model_parsed",
-        "checkpoint_created",
         "run_finished",
+        "checkpoint_created",
     ]
     assert [item["role"] for item in agent.session["history"]] == [
         "user",

@@ -53,15 +53,11 @@ def test_evaluate_resume_state_distinguishes_no_checkpoint_full_valid_and_schema
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "created_at": "2026-04-07T10:00:00+00:00",
         "current_goal": "continue",
-        "completed": [],
-        "excluded": [],
-        "current_blocker": "",
-        "next_step": "continue",
+        "task_id": "task_saved",
         "key_files": [],
         "freshness": {},
         "summary": "saved",
         "runtime_identity": identity,
-        "task_state": {"status": "stopped"},
         "context_run_id": "run_saved",
         "pending_partial_paths": [],
         "event_cursor": 0,
@@ -73,6 +69,7 @@ def test_evaluate_resume_state_distinguishes_no_checkpoint_full_valid_and_schema
         "current_id": "ckpt_valid",
         "items": {"ckpt_valid": checkpoint},
     }
+    assert "task_state" not in checkpoint
     assert evaluate_resume_state(agent)["status"] == CHECKPOINT_FULL_VALID_STATUS
 
     agent.session["checkpoints"]["items"]["ckpt_valid"]["schema_version"] = "old"

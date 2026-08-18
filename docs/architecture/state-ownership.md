@@ -17,8 +17,8 @@ have different trust and lifecycle requirements. Each fact still has one authori
 - Event Log remains append-only, hash-chained and the source for run counters and terminal state.
 - Context Ledger remains the source for current-run call/result pairing and model-visible history.
 - TaskState is an operational cache. At terminal report generation it must match Event replay.
-- Checkpoint stores the latest executable recovery envelope and binds an Event cursor, Context and
-  Workspace content. It is not a second audit history.
+- Checkpoint stores only the latest executable recovery envelope and binds an Event cursor, Context
+  and Workspace content. TaskState is reconstructed from Events rather than embedded in Checkpoint.
 - Report and Evidence are projections. They may be regenerated from Events and immutable artifacts.
 - Session History is preserved across runs, but records created during a turn are flushed together
   with the next Checkpoint instead of being written independently.

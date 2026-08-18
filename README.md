@@ -17,7 +17,7 @@ User request
   -> Registry / Surface / Schema / Policy / Approval
   -> Docker tool execution or revision-bound atomic mutation
   -> ToolOutcome + Evidence + optional Policy Hook
-  -> hash-chained Runtime Event v2 / transactional compaction / Checkpoint v6
+  -> hash-chained Runtime Event v2 / transactional compaction / Checkpoint v7
   -> structured runtime verification -> Completion Gate
 ```
 
@@ -32,7 +32,7 @@ User request
 - 隔离执行：`run_shell` 强制进入临时 Docker 容器；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 事件溯源：运行事件以 strict schema、连续 sequence、因果/关联 ID 和 SHA-256 hash chain 写入单一 `events.jsonl`，首次打开完整校验，之后在锁内增量验证尾部并 flush + fsync；Task/Evidence/Policy/Report 均可由事件投影。
 - 策略扩展：核心循环默认持续到模型提交最终答案、deadline、取消或错误；不内置“若干步未编辑”等任务猜测。宿主可显式传入 `before_tool_call`、`after_tool_result` 和 `should_stop_after_turn` hook，hook 只能进一步限制或提供指导，不能改写工具事实或绕过安全校验。
-- 恢复：Checkpoint v6 校验 schema、Runtime 配置、hook 身份、provider conversation mode、内容级 Workspace 指纹、Context Ledger 及事件 cursor/digest；中断操作只核对 receipt，绝不重放潜在副作用。
+- 恢复：Checkpoint v7 只保存恢复游标与 Runtime/Workspace 身份，TaskState 从 Event 重建；中断操作只核对 receipt，绝不重放潜在副作用。
 - 完成证据：观察、修改和结构化 verifier 结果写入 Evidence Ledger；变更 Python 先做 AST 校验，Workspace 变更需通过绑定当前内容指纹的 Runtime verifier，未解决 partial/unknown 状态禁止成功结束。
 
 ## 安装与运行

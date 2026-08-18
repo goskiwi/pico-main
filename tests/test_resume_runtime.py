@@ -34,6 +34,32 @@ def test_valid_checkpoint_restores_same_run(tmp_path):
     assert resumed.current_task_state.run_id == "run_interrupted"
 
 
+def test_terminal_event_starts_a_new_run_instead_of_resuming(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n")
+    store = SessionStore(tmp_path / ".pico/sessions")
+    agent = Pico(
+        FakeModelClient([ModelAction.final("First complete.")]),
+        WorkspaceContext.build(tmp_path),
+        store,
+        approval_policy="auto",
+        verification_command="",
+    )
+    assert agent.ask("First") == "First complete."
+    completed_run_id = agent.current_task_state.run_id
+
+    resumed = Pico.from_session(
+        FakeModelClient([ModelAction.final("Second complete.")]),
+        WorkspaceContext.build(tmp_path),
+        store,
+        agent.session["id"],
+        approval_policy="auto",
+        verification_command="",
+    )
+
+    assert resumed.ask("Second") == "Second complete."
+    assert resumed.current_task_state.run_id != completed_run_id
+
+
 def test_finished_tool_after_old_checkpoint_is_rebuilt_from_events(tmp_path):
     (tmp_path / "README.md").write_text("demo\n")
     store = SessionStore(tmp_path / ".pico/sessions")

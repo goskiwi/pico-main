@@ -5,7 +5,7 @@ import uuid
 from .features import memory as memorylib
 from .workspace import clip, now
 
-CHECKPOINT_SCHEMA_VERSION = "checkpoint-v6"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint-v7"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 CHECKPOINT_FULL_VALID_STATUS = "full-valid"
 CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"
@@ -69,6 +69,22 @@ def current_checkpoint(agent):
     return state.get("items", {}).get(checkpoint_id)
 
 
+def task_state_from_checkpoint(agent, checkpoint):
+    projection = agent.run_store.replay(checkpoint["context_run_id"])
+    snapshot = projection.task_state(
+        {
+            "run_id": checkpoint["context_run_id"],
+            "task_id": checkpoint["task_id"],
+            "user_request": checkpoint["current_goal"],
+            "checkpoint_id": checkpoint["checkpoint_id"],
+            "resume_status": agent.resume_state.get("status", CHECKPOINT_NONE_STATUS),
+        }
+    )
+    snapshot["checkpoint_id"] = checkpoint["checkpoint_id"]
+    snapshot["user_request"] = checkpoint["current_goal"]
+    return snapshot
+
+
 def evaluate_resume_state(agent):
     previous_resume_state = dict(agent.session.get("resume_state", {}) or {})
     invalidated = agent.invalidate_stale_memory()
@@ -79,8 +95,8 @@ def evaluate_resume_state(agent):
     if checkpoint:
         expected_fields = {
             "checkpoint_id", "parent_checkpoint_id", "schema_version", "created_at",
-            "current_goal", "completed", "excluded", "current_blocker", "next_step",
-            "key_files", "freshness", "summary", "runtime_identity", "task_state", "context_run_id",
+            "current_goal", "task_id", "key_files", "freshness", "summary",
+            "runtime_identity", "context_run_id",
             "pending_partial_paths",
             "event_cursor", "event_hash", "workspace_content_fingerprint",
         }
@@ -137,19 +153,18 @@ def render_checkpoint_text(agent):
     checkpoint = current_checkpoint(agent)
     if not checkpoint:
         return "Task checkpoint:\n- Resume status: no-checkpoint\n- No executable checkpoint."
+    task_state = task_state_from_checkpoint(agent, checkpoint)
     lines = [
         "Task checkpoint:",
         f"- Resume status: {agent.resume_state.get('status', CHECKPOINT_NONE_STATUS)}",
         f"- Current goal: {checkpoint.get('current_goal', '-') or '-'}",
-        f"- Current blocker: {checkpoint.get('current_blocker', '-') or '-'}",
-        f"- Next step: {checkpoint.get('next_step', '-') or '-'}",
+        f"- Current blocker: {task_state.get('stop_reason', '-') or '-'}",
+        f"- Next step: {infer_next_step(task_state)}",
     ]
     key_files = [str(item.get("path", "")).strip() for item in checkpoint.get("key_files", []) if str(item.get("path", "")).strip()]
     lines.append(f"- Key files: {', '.join(key_files) or '-'}")
-    if checkpoint.get("completed"):
-        lines.append("- Completed: " + " | ".join(str(item) for item in checkpoint.get("completed", [])))
-    if checkpoint.get("excluded"):
-        lines.append("- Excluded: " + " | ".join(str(item) for item in checkpoint.get("excluded", [])))
+    if task_state.get("final_answer"):
+        lines.append("- Completed: " + str(task_state["final_answer"]))
     if agent.resume_state.get("stale_paths"):
         lines.append("- Stale paths: " + ", ".join(agent.resume_state["stale_paths"]))
     summary = str(checkpoint.get("summary", "")).strip()
@@ -159,12 +174,18 @@ def render_checkpoint_text(agent):
 
 
 def infer_next_step(task_state):
-    if task_state.status == "completed":
+    status = task_state.get("status", "") if isinstance(task_state, dict) else task_state.status
+    stop_reason = (
+        task_state.get("stop_reason", "")
+        if isinstance(task_state, dict) else task_state.stop_reason
+    )
+    last_tool = task_state.get("last_tool", "") if isinstance(task_state, dict) else task_state.last_tool
+    if status == "completed":
         return "No next step recorded."
-    if task_state.stop_reason == "step_limit_reached":
+    if stop_reason == "step_limit_reached":
         return "Resume from the latest checkpoint and continue the task."
-    if task_state.last_tool:
-        return f"Decide the next action after {task_state.last_tool}."
+    if last_tool:
+        return f"Decide the next action after {last_tool}."
     return "Continue the task from the latest checkpoint."
 
 
@@ -185,15 +206,11 @@ def create_checkpoint(agent, task_state, user_message, trigger):
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "created_at": now(),
         "current_goal": str(user_message),
-        "completed": [task_state.final_answer] if task_state.final_answer else [],
-        "excluded": [],
-        "current_blocker": "" if str(task_state.stop_reason or "") in ("", "final_answer_returned") else str(task_state.stop_reason),
-        "next_step": infer_next_step(task_state),
+        "task_id": task_state.task_id,
         "key_files": key_files,
         "freshness": freshness,
         "summary": f"{trigger}: {clip(str(user_message), 120)}",
         "runtime_identity": current_runtime_identity(agent),
-        "task_state": task_state.to_dict(),
         "context_run_id": task_state.run_id,
         "pending_partial_paths": (
             list(agent.last_tool_outcome.affected_paths)
