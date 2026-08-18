@@ -1,6 +1,6 @@
 import importlib.util
 import json
-import subprocess
+import shutil
 from pathlib import Path
 
 import pytest
@@ -27,21 +27,17 @@ def test_official_public_manifest_is_bound_and_explicit():
     assert all(len(task["official_fix_commit"]) == 40 for task in manifest["tasks"])
 
 
-def test_official_patches_only_change_tests_and_apply_to_fixtures():
+def test_official_patches_only_change_tests_and_apply_to_fixtures(tmp_path):
     manifest = MODULE.load_manifest()
     for task in manifest["tasks"]:
         patch = Path(task["official_test_patch"]).resolve()
         paths = MODULE.test_patch_paths(patch)
         assert paths
         assert all(path.startswith(("test/", "tests/")) for path in paths)
-        result = subprocess.run(
-            ["git", "apply", "--check", "--unidiff-zero", str(patch)],
-            cwd=task["fixture_repo"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stderr
+        workspace = tmp_path / task["id"]
+        shutil.copytree(task["fixture_repo"], workspace)
+        MODULE.apply_patch(workspace, patch)
+        assert all((workspace / path).is_file() for path in paths)
 
 
 def test_official_patch_path_validator_rejects_production_changes(tmp_path):

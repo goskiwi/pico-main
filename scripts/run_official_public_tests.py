@@ -99,7 +99,7 @@ def test_patch_paths(path):
 def apply_patch(workspace, patch_path):
     result = subprocess.run(
         [
-            "git", "apply", "--unidiff-zero", "--whitespace=nowarn",
+            "patch", "-p1", "--batch", "--forward", "-i",
             str(Path(patch_path).resolve()),
         ],
         cwd=workspace,
