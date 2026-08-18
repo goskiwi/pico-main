@@ -7,6 +7,7 @@
 3. Run `uv run python scripts/run_evaluations.py`; point out that the command fails closed and the Native Harness covers edit, recovery, safety, and governance.
 4. Open `artifacts/runtime-policy-v1.json`: recovery advice, hook boundaries, structured verification, and the hash chain are replayable deterministic evidence.
 5. Open `artifacts/real-oss-suite-v2.md`: five frozen tasks passed with one uniform 40-tool budget; the Context Ledgers were separately audited for host-path leakage.
+6. Open `artifacts/official-public-tests-v1.md`: the bound upstream test-only patches pass 25 assertions against Agent code; the report explicitly identifies Jinja's official test as non-discriminative on the pre-fix baseline.
 
 ## Five-minute deep dive
 
@@ -18,5 +19,5 @@
 
 ## Claims and boundaries
 
-- Claim the deterministic 5/5 Harness, the 5/5 fail-before/pass-after preflight, and the fixed five-task live suite separately. Note that Werkzeug used one provider-infrastructure retry; no task failure was selectively rerun.
+- Claim the deterministic 5/5 Harness, the 5/5 hidden preflight, the fixed five-task live suite, and the 25/25 official public assertions separately. Note that Werkzeug used one provider-infrastructure retry; no task failure was selectively rerun.
 - State that Pico is local and single-user; Docker daemon trust, remote multi-tenant isolation, distributed queues, and secret management are outside its boundary.

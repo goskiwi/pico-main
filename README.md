@@ -107,6 +107,7 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 | Runtime policy | 全部通过 | 单一恢复建议、hook 边界、结构化 verifier 与事件重放 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Five-repository Real OSS suite v2 | 5/5 | clean commit `6ef7463`；统一 40 步；五题 Context Ledger 均无宿主路径泄露 |
+| Official upstream public tests | 25/25 | 官方 test-only patch；pre-fix 基线、reference patch、Agent patch 三组验证；禁网只读 Docker |
 
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑。Werkzeug 使用了预先固定的第 2 次 provider 基础设施尝试，其余四题均为第 1 次尝试。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 
@@ -116,9 +117,13 @@ Markdown Project Memory 和 RepoMap。它们衡量 Runtime 机制，不冒充真
 uv run python scripts/materialize_real_oss.py --replace
 docker build -f docker/real-oss-suite.Dockerfile -t pico/real-oss-suite:latest .
 uv run python scripts/run_real_oss_suite.py --model gpt-5.6-luna
+docker build -f docker/official-public-tests.Dockerfile -t pico/official-public-tests:latest .
+uv run python scripts/run_official_public_tests.py
 ```
 
 Real OSS runner 强制要求 clean worktree，并把 Runtime snapshot、manifest/verifier/reference-patch digest、fixture tree digest、Docker image ID 和统一工具预算写入证据。Preflight 必须证明每个 hidden verifier 在 pre-fix fixture 上失败，并在应用绑定上游修复提交的 reference patch 后通过。完整五题模型运行不复用旧结果，也不选择性重跑任务失败。
+
+官方公开测试 runner 使用冻结的上游 test-only patch 和完整 fix SHA：pre-fix、官方 reference patch、Agent patch 使用同一测试节点。四题官方测试在 pre-fix 上失败；Jinja 官方测试在 pre-fix 上也会通过，因此明确标为非区分性，独立 hidden verifier 负责覆盖 async parent 无参数 overlay 的遗漏。结果见 `artifacts/official-public-tests-v1.{json,md}`。
 
 面试展示顺序见 [`docs/review-pack/interview-demo.md`](docs/review-pack/interview-demo.md)。
 
