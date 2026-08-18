@@ -13,7 +13,14 @@ def request_payload():
         "base_sha": "base123",
         "head_sha": "head456",
         "changed_files": ["src/service.py"],
-        "diff": "@@ -1 +1 @@\n-return old\n+return new",
+        "diff": (
+            "diff --git a/src/service.py b/src/service.py\n"
+            "--- a/src/service.py\n"
+            "+++ b/src/service.py\n"
+            "@@ -1 +1 @@\n"
+            "-return old\n"
+            "+return new\n"
+        ),
     }
 
 
@@ -91,7 +98,7 @@ def test_reviewer_returns_versioned_findings_with_runtime_provenance(tmp_path):
 
     assert report.verdict == "findings"
     assert report.review_id.startswith("review_")
-    assert report.run_id == agent.current_task_state.run_id
+    assert report.run_ids == [agent.current_task_state.run_id]
     assert report.policy_version == "pr-review-policy-v1"
     assert report.policy_digest.startswith("sha256:")
     assert report.findings[0].finding_id.startswith("finding_")
@@ -103,4 +110,14 @@ def test_reviewer_rejects_findings_outside_the_diff(tmp_path):
     agent = build_agent(tmp_path, json.dumps(report_payload("src/unrelated.py")))
 
     with pytest.raises(ValueError, match="changed file"):
+        PRReviewer(agent).review(request_payload())
+
+
+def test_reviewer_rejects_findings_outside_added_lines(tmp_path):
+    payload = report_payload()
+    payload["findings"][0]["start_line"] = 2
+    payload["findings"][0]["end_line"] = 2
+    agent = build_agent(tmp_path, json.dumps(payload))
+
+    with pytest.raises(ValueError, match="added diff lines"):
         PRReviewer(agent).review(request_payload())

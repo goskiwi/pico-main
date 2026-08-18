@@ -54,3 +54,4 @@ def test_packaging_discovers_pico_subpackages():
 
     assert "[tool.setuptools.packages.find]" in pyproject_text
     assert 'include = ["pico*"]' in pyproject_text
+    assert 'pico-review = "pico.review.cli:main"' in pyproject_text

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 pico = "pico.cli:main"
+pico-review = "pico.review.cli:main"
 
 [dependency-groups]
 dev = [

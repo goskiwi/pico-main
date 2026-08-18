@@ -6,9 +6,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 REVIEW_SCHEMA_VERSION = "pico-review-v1"
+MAX_INLINE_DIFF_CHARS = 12_000
 
 
-def _repository_path(value):
+def normalize_repository_path(value):
     path = str(value or "").strip()
     parsed = PurePosixPath(path)
     normalized = parsed.as_posix()
@@ -29,12 +30,12 @@ class ReviewRequest(BaseModel):
     base_sha: str = Field(min_length=1, max_length=120)
     head_sha: str = Field(min_length=1, max_length=120)
     changed_files: list[str] = Field(min_length=1, max_length=200)
-    diff: str = Field(min_length=1, max_length=12_000)
+    diff: str = Field(min_length=1, max_length=MAX_INLINE_DIFF_CHARS)
 
     @field_validator("changed_files")
     @classmethod
     def validate_changed_files(cls, values):
-        normalized = [_repository_path(value) for value in values]
+        normalized = [normalize_repository_path(value) for value in values]
         if len(normalized) != len(set(normalized)):
             raise ValueError("changed_files must be unique")
         return normalized
@@ -67,7 +68,7 @@ class Finding(BaseModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value):
-        return _repository_path(value)
+        return normalize_repository_path(value)
 
     @model_validator(mode="after")
     def validate_lines(self):
@@ -81,7 +82,7 @@ class ReviewReport(BaseModel):
 
     schema_version: Literal[REVIEW_SCHEMA_VERSION] = REVIEW_SCHEMA_VERSION
     review_id: str = ""
-    run_id: str = ""
+    run_ids: list[str] = Field(default_factory=list, max_length=100)
     policy_version: str = ""
     policy_digest: str = ""
     verdict: Literal["clean", "findings"]

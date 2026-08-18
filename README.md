@@ -69,6 +69,23 @@ uv run pico events replay <run_id> --cwd /path/to/repo
 
 `--verify-command ""` 可显式关闭自动 verifier。若未提供，Python/Node 项目会按仓库文件自动选择默认命令。
 
+## PR Review
+
+`pico-review` 在一个干净、已检出到 head revision 的本地仓库上执行只读审查：
+
+```bash
+uv run pico-review \
+  --repo /path/to/repo \
+  --base <base_sha> \
+  --head <head_sha> \
+  --format markdown \
+  --output review.md
+```
+
+Runtime 使用固定 Git argv 读取 unified diff，按文件块限制上下文，并要求每个 Finding
+指向 changed file 中真实新增的行。退出码 `0` 表示 clean，`1` 表示发现问题，`2` 表示
+输入、基础设施或结构化输出错误。
+
 ## 状态与工件
 
 ```text
