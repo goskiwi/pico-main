@@ -302,17 +302,6 @@ class Pico:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record_user_request(self, content):
-        self.session["history"].append(
-            {
-                "role": "user",
-                "run_id": self.current_task_state.run_id,
-                "content": str(content),
-                "created_at": now(),
-            }
-        )
-        self.session_path = self.session_store.save(self.session)
-
     def record_run_summary(self, task_state):
         verifications = self.evidence_ledger.verifications
         verification_status = (
@@ -323,6 +312,7 @@ class Pico:
             {
                 "role": "run_summary",
                 "run_id": task_state.run_id,
+                "request": task_state.user_request,
                 "content": task_state.final_answer,
                 "changed_paths": self.evidence_ledger.changed_paths,
                 "verification_status": verification_status,

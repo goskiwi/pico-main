@@ -6,12 +6,12 @@ from pathlib import Path
 
 from .persistence import atomic_write_json
 
-SESSION_SCHEMA_VERSION = "session-v6"
+SESSION_SCHEMA_VERSION = "session-v7"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
-USER_HISTORY_FIELDS = {"role", "run_id", "content", "created_at"}
 RUN_SUMMARY_FIELDS = {
     "role",
     "run_id",
+    "request",
     "content",
     "changed_paths",
     "verification_status",
@@ -27,14 +27,14 @@ def _validate_history(history):
         if not isinstance(item, dict):
             raise TypeError("session history entries must be objects")
         role = item.get("role")
-        expected = USER_HISTORY_FIELDS if role == "user" else (
-            RUN_SUMMARY_FIELDS if role == "run_summary" else None
-        )
-        if expected is None or set(item) != expected:
+        if role != "run_summary" or set(item) != RUN_SUMMARY_FIELDS:
             raise ValueError("unsupported session history entry")
-        if not all(isinstance(item.get(field), str) for field in expected - {"changed_paths"}):
+        if not all(
+            isinstance(item.get(field), str)
+            for field in RUN_SUMMARY_FIELDS - {"changed_paths"}
+        ):
             raise TypeError("session history text fields must be strings")
-        if role == "run_summary" and (
+        if (
             not isinstance(item["changed_paths"], list)
             or any(not isinstance(path, str) for path in item["changed_paths"])
         ):

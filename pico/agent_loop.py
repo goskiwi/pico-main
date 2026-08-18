@@ -65,7 +65,6 @@ class AgentLoop:
             ledger.append_user(user_message)
         agent.context_ledger = ledger
         context_generation = ledger.generation
-        agent.record_user_request(user_message)
         completion_gate = CompletionGate()
         completion_gate.restore_partial_paths((checkpoint or {}).get("pending_partial_paths", []) if can_resume else [])
         completion_gate.restore_partial_paths(

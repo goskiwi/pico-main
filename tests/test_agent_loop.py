@@ -168,13 +168,11 @@ def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
     assert agent.ask("Summarize the prior run") == "Second run completed."
 
     second_run_prompt = agent.model_client.prompts[2]
-    assert "[prior/user] Inspect hello.txt" in second_run_prompt
-    assert "[prior/run_summary] First run completed." in second_run_prompt
+    assert "[prior/run_summary] request: Inspect hello.txt" in second_run_prompt
+    assert "result: First run completed." in second_run_prompt
     assert "[prior/tool" not in second_run_prompt
     assert [item["role"] for item in agent.session["history"]] == [
-        "user",
         "run_summary",
-        "user",
         "run_summary",
     ]
 

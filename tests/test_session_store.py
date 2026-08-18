@@ -13,9 +13,13 @@ def session(session_id, content):
         "workspace_root": "/workspace",
         "history": [
             {
-                "role": "user",
+                "role": "run_summary",
                 "run_id": "run_test",
+                "request": "test request",
                 "content": content,
+                "changed_paths": [],
+                "verification_status": "not_run",
+                "stop_reason": "final_answer_returned",
                 "created_at": "2026-01-01T00:00:00+00:00",
             }
         ],

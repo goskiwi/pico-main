@@ -316,7 +316,9 @@ class ContextManager:
             content = str(item.get("content", ""))
             if item.get("role") == "run_summary":
                 changed = ", ".join(item.get("changed_paths", [])) or "none"
-                content += (
+                content = (
+                    f"request: {item.get('request', '')}"
+                    f" | result: {content}"
                     f" | changed: {changed}"
                     f" | verification: {item.get('verification_status', 'unknown')}"
                     f" | stop: {item.get('stop_reason', '')}"

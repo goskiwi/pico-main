@@ -50,7 +50,7 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
 
     assert agent.ask("Read sample.txt") == "Done."
 
-    assert counts == {"session": 3, "task_state": 5, "context": 4}
+    assert counts == {"session": 2, "task_state": 5, "context": 4}
     assert event_types == [
         "run_started",
         "prompt_built",
@@ -65,10 +65,8 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
         "run_finished",
         "checkpoint_created",
     ]
-    assert [item["role"] for item in agent.session["history"]] == [
-        "user",
-        "run_summary",
-    ]
+    assert [item["role"] for item in agent.session["history"]] == ["run_summary"]
+    assert agent.session["history"][-1]["request"] == "Read sample.txt"
     assert agent.session["history"][-1]["content"] == "Done."
     assert agent.session["history"][-1]["changed_paths"] == []
     persisted = agent.session_store.load(agent.session["id"])
