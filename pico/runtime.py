@@ -67,6 +67,12 @@ class Pico:
         sandbox_image="pico/sandbox:latest",
         verification_command=None,
         hooks=None,
+        allowed_write_paths=None,
+        project_memory_root=None,
+        sandbox_factory=None,
+        subagent_model_client_factory=None,
+        subagent_max_workers=3,
+        parent_cancellation_token=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -85,6 +91,9 @@ class Pico:
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
+        self.allowed_write_paths = self._normalize_allowed_write_paths(
+            allowed_write_paths
+        )
         self.run_timeout_seconds = max(1, int(run_timeout_seconds))
         self.provider_context_limit_tokens = max(
             int(max_new_tokens) + 1,
@@ -106,11 +115,18 @@ class Pico:
             workspace_root=self.root,
         )
         self.session["memory"] = self.memory.to_dict()
-        self.project_memory = ProjectMemoryStore(self.root / ".pico" / "memory", self.root)
-        self.mutation_service = WorkspaceMutationService(self.root)
-        self.sandbox = sandbox or DockerSandbox(
-            self.root, DockerSandboxConfig(image=str(sandbox_image))
+        memory_root = (
+            Path(project_memory_root)
+            if project_memory_root is not None
+            else self.root / ".pico" / "memory"
         )
+        self.project_memory = ProjectMemoryStore(memory_root, self.root)
+        self.mutation_service = WorkspaceMutationService(self.root)
+        if sandbox_factory is None:
+            sandbox_config = DockerSandboxConfig(image=str(sandbox_image))
+            sandbox_factory = lambda root: DockerSandbox(root, sandbox_config)
+        self.sandbox_factory = sandbox_factory
+        self.sandbox = sandbox or self.sandbox_factory(self.root)
         self.verification_command = (
             discover_verification_command(self.root)
             if verification_command is None else str(verification_command)
@@ -119,6 +135,16 @@ class Pico:
         self.evidence_ledger = EvidenceLedger()
         self.repo_map = RepoMap(self.root)
         self.repository_overview = discover_repository_overview(self.root)
+        self.parent_cancellation_token = parent_cancellation_token
+        self.subagent_manager = None
+        if subagent_model_client_factory is not None:
+            from .subagents import SubagentManager
+
+            self.subagent_manager = SubagentManager(
+                self,
+                subagent_model_client_factory,
+                max_workers=subagent_max_workers,
+            )
         self.all_tools = self.build_tools()
         self.tools = self._apply_tool_allowlist(self.all_tools)
         self.action_tools = toolkit.build_action_tools(self.tools)
@@ -184,7 +210,12 @@ class Pico:
         return checkpointlib.render_checkpoint_text(self)
 
     def build_tools(self):
-        return toolkit.build_tool_registry(self.tool_context())
+        tools = toolkit.build_tool_registry(self.tool_context())
+        if self.subagent_manager is not None:
+            from .subagents.tools import build_tool_registry
+
+            tools.update(build_tool_registry(self.subagent_manager))
+        return tools
 
     @staticmethod
     def _normalize_allowed_tools(allowed_tools):
@@ -195,11 +226,23 @@ class Pico:
             raise ValueError("allowed_tools must be a non-empty sequence of tool names")
         return normalized
 
+    @staticmethod
+    def _normalize_allowed_write_paths(allowed_write_paths):
+        if allowed_write_paths is None:
+            return None
+        from .subagents.contracts import normalize_relative_file
+
+        normalized = tuple(
+            normalize_relative_file(path) for path in allowed_write_paths
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("allowed_write_paths must be unique")
+        return normalized
+
     def _apply_tool_allowlist(self, tools):
         if self.allowed_tools is None:
             return tools
-        legal_names = toolkit.legal_tool_names()
-        unknown = [name for name in self.allowed_tools if name not in legal_names]
+        unknown = [name for name in self.allowed_tools if name not in tools]
         if unknown:
             raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
         allowed = set(self.allowed_tools)
@@ -509,7 +552,21 @@ class Pico:
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
-        return toolkit.validate_tool(self.tool_context(), name, args)
+        if name in toolkit.BASE_TOOL_SPECS:
+            validated = toolkit.validate_tool(self.tool_context(), name, args)
+        else:
+            tool = self.all_tools.get(name)
+            if tool is None:
+                raise ValueError(f"unknown tool: {name}")
+            validated = tool["args_schema"].model_validate(args or {}).model_dump()
+        if name in {"write_file", "patch_file"} and self.allowed_write_paths is not None:
+            target = self.path(validated["path"])
+            relative = target.relative_to(self.root).as_posix()
+            if relative not in set(self.allowed_write_paths):
+                raise ValueError(
+                    f"write path outside allowed scope: {relative}"
+                )
+        return validated
 
     def tool_context(self):
         def pending_call_entry_ids():

@@ -80,9 +80,7 @@ def _extract_openai_text(data):
     return ""
 
 
-def _extract_openai_text_from_sse(body_text):
-    last_response = None
-    deltas = []
+def _iter_sse_events(body_text):
     for line in body_text.splitlines():
         line = line.strip()
         if not line.startswith("data:"):
@@ -94,81 +92,49 @@ def _extract_openai_text_from_sse(body_text):
             event = json.loads(payload)
         except json.JSONDecodeError:
             continue
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        if event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text
-        part = event.get("part")
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str) and text:
-                return text
-        item = event.get("item")
-        if isinstance(item, dict):
-            text = _extract_openai_text({"output": [item]})
-            if text:
-                return text
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            text = _extract_openai_text(response)
-            if text:
-                return text
-        text = _extract_openai_text(event)
-        if text:
-            return text
-    if deltas:
-        return "".join(deltas)
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response)
-    return ""
+        if isinstance(event, dict):
+            yield event
+
+
+def _completed_sse_result(event, response):
+    event_type = event.get("type", "")
+    if event_type == "response.output_text.done":
+        text = event.get("text")
+        if isinstance(text, str) and text:
+            return text, response or {}
+    if event_type == "response.completed" and response:
+        text = _extract_openai_text(response)
+        return (text, response) if text else ("", {})
+    text = _extract_openai_text(event)
+    return (text, event) if text else ("", {})
 
 
 def _extract_openai_response_from_sse(body_text):
     last_response = None
     deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:") :].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
+    for event in _iter_sse_events(body_text):
         response = event.get("response")
         if isinstance(response, dict):
             last_response = response
-            if event.get("type") == "response.completed":
-                text = _extract_openai_text(response)
-                if text:
-                    return text, response
         event_type = event.get("type", "")
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
             if isinstance(delta, str):
                 deltas.append(delta)
-        elif event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text, last_response or {}
-        else:
-            text = _extract_openai_text(event)
-            if text:
-                return text, event
+            continue
+        text, response_data = _completed_sse_result(event, response)
+        if text:
+            return text, response_data
     if deltas:
         return "".join(deltas), last_response or {}
     if isinstance(last_response, dict):
         return _extract_openai_text(last_response), last_response
     return "", {}
+
+
+def _extract_openai_text_from_sse(body_text):
+    text, _response = _extract_openai_response_from_sse(body_text)
+    return text
 
 
 def _extract_usage_cache_details(data):
@@ -281,6 +247,126 @@ class OpenAICompatibleModelClient:
             }
         )
 
+    def _build_payload(
+        self,
+        prompt,
+        max_new_tokens,
+        *,
+        prompt_cache_key,
+        action_tools,
+        input_items,
+    ):
+        payload = {
+            "model": self.model,
+            "input": list(input_items) if input_items is not None else [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "max_output_tokens": max_new_tokens,
+            "stream": False,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        if action_tools is not None:
+            payload.update(
+                {
+                    "tools": list(action_tools),
+                    "tool_choice": "required",
+                    "parallel_tool_calls": False,
+                }
+            )
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.supports_prompt_cache and prompt_cache_key:
+            payload["prompt_cache_key"] = prompt_cache_key
+        return payload
+
+    def _request_headers(self):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _request_with_retry(self, payload, request_timeout):
+        request = urllib.request.Request(
+            self.base_url + "/responses",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._request_headers(),
+            method="POST",
+        )
+        attempts = 3
+        effective_timeout = self.timeout if request_timeout is None else min(
+            float(self.timeout), float(request_timeout)
+        )
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+                    body_text = response.read().decode("utf-8")
+                    response_headers = getattr(response, "headers", {}) or {}
+                    return body_text, response_headers.get("Content-Type", "")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                transient = exc.code in {408, 429} or exc.code >= 500
+                if transient and attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    f"OpenAI-compatible request failed with HTTP {exc.code}: {body}"
+                ) from exc
+            except (
+                urllib.error.URLError,
+                IncompleteRead,
+                RemoteDisconnected,
+                TimeoutError,
+            ) as exc:
+                if attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    "Could not reach the OpenAI-compatible backend.\n"
+                    f"Base URL: {self.base_url}\n"
+                    f"Model: {self.model}"
+                ) from exc
+        raise RuntimeError("OpenAI-compatible request exhausted retries")
+
+    @staticmethod
+    def _decode_response(body_text, content_type):
+        if content_type.startswith("text/event-stream") or body_text.lstrip().startswith(
+            "data:"
+        ):
+            text, response_data = _extract_openai_response_from_sse(body_text)
+            return text, response_data, True
+        try:
+            response_data = json.loads(body_text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "OpenAI-compatible error: backend returned non-JSON "
+                "content that could not be parsed"
+            ) from exc
+        if not isinstance(response_data, dict):
+            raise RuntimeError(  # noqa: TRY004 - provider protocol failure
+                "OpenAI-compatible error: backend returned a non-object JSON response"
+            )
+        if response_data.get("error"):
+            raise RuntimeError(f"OpenAI-compatible error: {response_data['error']}")
+        return _extract_openai_text(response_data), response_data, False
+
+    def _record_response(self, response_data, prompt_cache_key):
+        if not response_data:
+            return
+        self._last_response_data = response_data
+        self.last_completion_metadata = {
+            "prompt_cache_supported": self.supports_prompt_cache,
+            "prompt_cache_key": prompt_cache_key,
+            **_extract_usage_cache_details(response_data),
+        }
+
     def complete(
         self, prompt, max_new_tokens, prompt_cache_key=None,
         action_tools=None, input_items=None, request_timeout=None,
@@ -303,129 +389,23 @@ class OpenAICompatibleModelClient:
         """
         self.last_completion_metadata = {}
         self._last_response_data = {}
-        payload = {
-            "model": self.model,
-            "input": list(input_items) if input_items is not None else [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
-            "max_output_tokens": max_new_tokens,
-            "stream": False,
-            "store": False,
-            "include": ["reasoning.encrypted_content"],
-        }
-        if action_tools is not None:
-            payload["tools"] = list(action_tools)
-            payload["tool_choice"] = "required"
-            payload["parallel_tool_calls"] = False
-        if self.temperature is not None:
-            payload["temperature"] = self.temperature
-        # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
-        # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
-        if self.supports_prompt_cache and prompt_cache_key:
-            payload["prompt_cache_key"] = prompt_cache_key
-
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        request = urllib.request.Request(
-            self.base_url + "/responses",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
+        payload = self._build_payload(
+            prompt,
+            max_new_tokens,
+            prompt_cache_key=prompt_cache_key,
+            action_tools=action_tools,
+            input_items=input_items,
         )
-        attempts = 3
-        effective_timeout = self.timeout if request_timeout is None else min(
-            float(self.timeout), float(request_timeout)
-        )
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=effective_timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                    headers = getattr(response, "headers", {}) or {}
-                    content_type = headers.get("Content-Type", "")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if (exc.code in {408, 429} or exc.code >= 500) and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    f"OpenAI-compatible request failed with HTTP {exc.code}: {body}"
-                ) from exc
-            except (
-                urllib.error.URLError,
-                IncompleteRead,
-                RemoteDisconnected,
-                TimeoutError,
-            ) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
-
-        # 有些兼容后端返回普通 JSON，有些返回 SSE。
-        # 这里两种都接住，并尽量统一抽取文本和 usage/cache 元数据。
-        if content_type.startswith(
-            "text/event-stream"
-        ) or body_text.lstrip().startswith("data:"):
-            text, response_data = _extract_openai_response_from_sse(body_text)
-            if isinstance(response_data, dict) and response_data:
-                self._last_response_data = response_data
-                # 这些元数据会一路传回 Runtime，进入 event 和 report，
-                # 用来观察 prompt cache 是否真的命中。
-                self.last_completion_metadata = {
-                    "prompt_cache_supported": self.supports_prompt_cache,
-                    "prompt_cache_key": prompt_cache_key,
-                    **_extract_usage_cache_details(response_data),
-                }
-            if action_tools is not None:
-                return _action_from_response(response_data, action_tools)
-            if text:
-                return text
-            raise RuntimeError(
-                "OpenAI-compatible error: could not extract text from "
-                "event stream response"
-            )
-
-        try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "OpenAI-compatible error: backend returned non-JSON "
-                "content that could not be parsed"
-            ) from exc
-        if not isinstance(data, dict):
-            raise RuntimeError(  # noqa: TRY004 - provider protocol failure, not caller misuse
-                "OpenAI-compatible error: backend returned a non-object JSON response"
-            )
-        if data.get("error"):
-            raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
-        self._last_response_data = data
-        self.last_completion_metadata = {
-            "prompt_cache_supported": self.supports_prompt_cache,
-            "prompt_cache_key": prompt_cache_key,
-            **_extract_usage_cache_details(data),
-        }
+        body_text, content_type = self._request_with_retry(payload, request_timeout)
+        text, data, streamed = self._decode_response(body_text, content_type)
+        self._record_response(data, prompt_cache_key)
         if action_tools is not None:
             return _action_from_response(data, action_tools)
-        return _extract_openai_text(data)
+        if text or not streamed:
+            return text
+        raise RuntimeError(
+            "OpenAI-compatible error: could not extract text from event stream response"
+        )
 
     def complete_action(
         self, prompt, max_new_tokens, *, action_tools,

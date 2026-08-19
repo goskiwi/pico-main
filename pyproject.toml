@@ -31,3 +31,9 @@ testpaths = ["tests"]
 markers = [
   "docker: requires the built Pico Docker sandbox image and a running daemon",
 ]
+
+[tool.ruff.lint]
+extend-select = ["C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15

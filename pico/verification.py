@@ -91,12 +91,22 @@ def discover_verification_command(root):
     return ""
 
 
-def run_verification(agent):
-    command = str(agent.verification_command or "").strip()
+def verify_workspace(
+    *,
+    root,
+    command,
+    sandbox,
+    timeout_seconds,
+    redact_text,
+    fingerprint_provider,
+    execution_context=None,
+):
+    command = str(command or "").strip()
     if not command:
         return None
     started = time.monotonic()
-    before = agent.content_workspace_fingerprint()
+    root = Path(root).resolve()
+    before = fingerprint_provider()
     record = {
         "verification_id": "verify_" + uuid.uuid4().hex[:12],
         "command": command,
@@ -117,20 +127,43 @@ def run_verification(agent):
     }
     try:
         argv, command_env = parse_command_invocation(command)
-        context = agent.current_execution.child(owner="runtime_verifier") if agent.current_execution else None
-        result = agent.sandbox.run(argv, cwd=agent.root, timeout=min(120, agent.run_timeout_seconds),
-                                   env=command_env, execution_context=context,
-                                   profile=SandboxProfile.VERIFY)
+        result = sandbox.run(
+            argv,
+            cwd=root,
+            timeout=min(120, int(timeout_seconds)),
+            env=command_env,
+            execution_context=execution_context,
+            profile=SandboxProfile.VERIFY,
+        )
         record["exit_code"] = result.returncode
-        record["output"] = agent.redact_text("\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()])))[:4000]
+        record["output"] = redact_text(
+            "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
+        )[:4000]
         record["status"] = "passed" if result.returncode == 0 and not result.stop_reason else "failed"
         record.update(parse_verification_output(command, record["output"], result.returncode))
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
-        record["output"] = agent.redact_text(f"{type(exc).__name__}: {exc}")
-    after = agent.content_workspace_fingerprint()
+        record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
+    after = fingerprint_provider()
     record["workspace_fingerprint"] = after
     record["duration_ms"] = int((time.monotonic() - started) * 1000)
     if before != after:
         record["status"] = "stale"
         record["freshness"] = "stale"
     return record
+
+
+def run_verification(agent):
+    execution_context = (
+        agent.current_execution.child(owner="runtime_verifier")
+        if agent.current_execution
+        else None
+    )
+    return verify_workspace(
+        root=agent.root,
+        command=agent.verification_command,
+        sandbox=agent.sandbox,
+        timeout_seconds=agent.run_timeout_seconds,
+        redact_text=agent.redact_text,
+        fingerprint_provider=agent.content_workspace_fingerprint,
+        execution_context=execution_context,
+    )

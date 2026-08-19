@@ -144,8 +144,6 @@ BASE_TOOL_SPECS = {
     },
 }
 
-def legal_tool_names():
-    return set(BASE_TOOL_SPECS)
 
 def build_tool_registry(context):
     # 工具不是动态发现的，而是显式注册的。
@@ -160,10 +158,22 @@ def build_tool_registry(context):
 def function_schema(args_schema: type[BaseModel]) -> dict[str, Any]:
     schema = args_schema.model_json_schema()
     schema.pop("title", None)
-    schema["additionalProperties"] = False
-    # Strict Responses schemas require every declared property. Runtime
-    # defaults still apply to direct/manual calls before runner execution.
-    schema["required"] = list(schema.get("properties", {}))
+
+    def enforce_strict_objects(value):
+        if isinstance(value, dict):
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                value["additionalProperties"] = False
+                # Responses strict mode requires every property at every nested
+                # object level. Runtime defaults still apply to direct calls.
+                value["required"] = list(properties)
+            for item in value.values():
+                enforce_strict_objects(item)
+        elif isinstance(value, list):
+            for item in value:
+                enforce_strict_objects(item)
+
+    enforce_strict_objects(schema)
     return schema
 
 
@@ -191,77 +201,87 @@ def build_action_tools(tools):
     return definitions
 
 
+def _validate_list_files(context, args):
+    if not context.path(args.get("path", ".")).is_dir():
+        raise ValueError("path is not a directory")
+    return args
+
+
+def _validate_read_file(context, args):
+    if not context.path(args["path"]).is_file():
+        raise ValueError("path is not a file")
+    if int(args.get("end", 200)) < int(args.get("start", 1)):
+        raise ValueError("invalid line range")
+    return args
+
+
+def _validate_read_artifact(context, args):
+    if context.artifact_store is None or not context.run_id():
+        raise ValueError("artifact store is unavailable")
+    return args
+
+
+def _validate_search(context, args):
+    if not str(args.get("pattern", "")).strip():
+        raise ValueError("pattern must not be empty")
+    context.path(args.get("path", "."))
+    return args
+
+
+def _validate_run_shell(_context, args):
+    if not str(args.get("command", "")).strip():
+        raise ValueError("command must not be empty")
+    return args
+
+
+def _require_mutation_service(context):
+    if context.mutation_service is None:
+        raise ValueError("workspace mutation service is unavailable")
+
+
+def _validate_write_file(context, args):
+    path = context.path(args["path"])
+    if path.exists() and path.is_dir():
+        raise ValueError("path is a directory")
+    _require_mutation_service(context)
+    return args
+
+
+def _validate_patch_file(context, args):
+    # Patch admission is intentionally strict so the later mutation is
+    # deterministic and revision-bound.
+    if not context.path(args["path"]).is_file():
+        raise ValueError("path is not a file")
+    _require_mutation_service(context)
+    return args
+
+
+def _validate_project_memory(context, args):
+    if context.project_memory is None:
+        raise ValueError("project memory is unavailable")
+    return args
+
+
+_TOOL_VALIDATORS = {
+    "list_files": _validate_list_files,
+    "read_file": _validate_read_file,
+    "read_artifact": _validate_read_artifact,
+    "search": _validate_search,
+    "run_shell": _validate_run_shell,
+    "write_file": _validate_write_file,
+    "patch_file": _validate_patch_file,
+    "memory_store": _validate_project_memory,
+    "memory_forget": _validate_project_memory,
+}
+
+
 def validate_tool(context, name, args):
-    if name not in BASE_TOOL_SPECS:
+    spec = BASE_TOOL_SPECS.get(name)
+    if spec is None:
         raise ValueError(f"unknown tool: {name}")
-    args = BASE_TOOL_SPECS[name]["args_schema"].model_validate(args or {}).model_dump()
+    validated = spec["args_schema"].model_validate(args or {}).model_dump()
+    return _TOOL_VALIDATORS[name](context, validated)
 
-    if name == "list_files":
-        path = context.path(args.get("path", "."))
-        if not path.is_dir():
-            raise ValueError("path is not a directory")
-        return args
-
-    if name == "read_file":
-        path = context.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        start = int(args.get("start", 1))
-        end = int(args.get("end", 200))
-        if start < 1 or end < start:
-            raise ValueError("invalid line range")
-        return args
-
-    if name == "read_artifact":
-        if context.artifact_store is None or not context.run_id():
-            raise ValueError("artifact store is unavailable")
-        return args
-
-    if name == "search":
-        pattern = str(args.get("pattern", "")).strip()
-        if not pattern:
-            raise ValueError("pattern must not be empty")
-        context.path(args.get("path", "."))
-        return args
-
-    if name == "run_shell":
-        command = str(args.get("command", "")).strip()
-        if not command:
-            raise ValueError("command must not be empty")
-        timeout = int(args.get("timeout", 20))
-        if timeout < 1 or timeout > 120:
-            raise ValueError("timeout must be in [1, 120]")
-        return args
-
-    if name == "write_file":
-        path = context.path(args["path"])
-        if path.exists() and path.is_dir():
-            raise ValueError("path is a directory")
-        if "content" not in args:
-            raise ValueError("missing content")
-        if context.mutation_service is None:
-            raise ValueError("workspace mutation service is unavailable")
-        return args
-
-    if name == "patch_file":
-        # patch_file 故意做得很严格：old_text 必须精确命中且只能出现一次，
-        # 这样修改行为才是确定的，失败原因也更容易解释。
-        path = context.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        old_text = str(args.get("old_text", ""))
-        if not old_text:
-            raise ValueError("old_text must not be empty")
-        if "new_text" not in args:
-            raise ValueError("missing new_text")
-        if context.mutation_service is None:
-            raise ValueError("workspace mutation service is unavailable")
-        return args
-
-    if name in {"memory_store", "memory_forget"}:
-        if context.project_memory is None:
-            raise ValueError("project memory is unavailable")
-        return args
 
 def tool_list_files(context, args):
     path = context.path(args.get("path", "."))

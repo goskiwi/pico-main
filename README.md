@@ -1,10 +1,10 @@
 # Pico
 
-Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型只负责通过
+Pico 是一个轻量、本地、单协议的多 Agent Coding Runtime。模型只负责通过
 OpenAI-compatible Responses 原生 function calling 提出下一步动作；上下文、权限、
 工具执行、恢复、验证和持久化均由 Runtime 持有。
 
-项目主动不做多 Provider、XML 工具协议、Skills、MCP、子 Agent 和旧状态兼容。
+项目主动不做多 Provider、XML 工具协议、Skills、MCP、分布式 Worker 和旧状态兼容。
 
 ## Runtime 主链路
 
@@ -17,7 +17,7 @@ User request
   -> Registry / Surface / Schema / Policy / Approval
   -> Docker tool execution or revision-bound atomic mutation
   -> ToolOutcome + Evidence + optional Policy Hook
-  -> hash-chained Runtime Event v2 / transactional compaction / Checkpoint v7
+  -> hash-chained Runtime Event v2 / transactional compaction / Checkpoint v8
   -> structured runtime verification -> Completion Gate
 ```
 
@@ -32,8 +32,26 @@ User request
 - 隔离执行：`run_shell` 强制进入临时 Docker 容器；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 事件溯源：运行事件以 strict schema、连续 sequence、因果/关联 ID 和 SHA-256 hash chain 写入单一 `events.jsonl`，首次打开完整校验，之后在锁内增量验证尾部并 flush + fsync；Task/Evidence/Policy/Report 均可由事件投影。
 - 策略扩展：核心循环默认持续到模型提交最终答案、deadline、取消或错误；不内置“若干步未编辑”等任务猜测。宿主可显式传入 `before_tool_call`、`after_tool_result` 和 `should_stop_after_turn` hook，hook 只能进一步限制或提供指导，不能改写工具事实或绕过安全校验。
-- 恢复：Checkpoint v7 只保存恢复游标与 Runtime/Workspace 身份，TaskState 从 Event 重建；中断操作只核对 receipt，绝不重放潜在副作用。
+- 恢复：Checkpoint v8 只保存恢复游标与 Runtime/Workspace 身份，TaskState 从 Event 重建；中断操作只核对 receipt，绝不重放潜在副作用。
 - 完成证据：观察、修改和结构化 verifier 结果写入 Evidence Ledger；变更 Python 先做 AST 校验，Workspace 变更需通过绑定当前内容指纹的 Runtime verifier，未解决 partial/unknown 状态禁止成功结束。
+
+## 多 Agent 协作
+
+Parent 通过三个原生工具编排独立 Pico Child：
+
+- `delegate_tasks`：提交显式依赖 DAG；无依赖任务最多三个并行执行。
+- `continue_task`：使用原 Child Session、工作记忆和运行摘要继续任务。
+- `apply_task_patches`：在临时 Integration Worktree 中按拓扑顺序检查并应用 Patch，验证通过且 Parent HEAD/工作区未变化后再写回原工作区。
+
+Explore Child 共享同一源码快照但只有只读工具。Implement Child 使用独立 Git
+Worktree、独立 Model Client、Session、Context Ledger、Run Store 和 Artifact namespace；
+写操作在 ToolExecutor 准入阶段受精确文件白名单限制，任务结束后再以实际 Git Diff
+复核一次。无依赖且写文件重叠的实现任务会在规划阶段被拒绝；有依赖的实现任务会把
+上游 Patch 作为临时基线后继续工作。
+
+Parent 只接收 Child 的摘要、Run/Event receipt 和 Patch 引用，不复制 Child 的工具历史。
+相同 Parent Run 中已完成的 Task ID 会复用现有结果；失败任务只阻断依赖它的下游分支。
+当前实现刻意不做后台 Mailbox、跨 CLI 重启恢复 Child、多级递归 Agent 或分布式调度。
 
 ## 安装与运行
 
@@ -83,6 +101,11 @@ uv run pico events replay <run_id> --cwd /path/to/repo
     events.jsonl
     report.json
     artifacts/*
+    subtasks.json
+    subagents/<task_id>/
+      sessions/*
+      runs/*
+      patch-*.diff
 ```
 
 所有 schema 都严格校验；当前版本不会迁移旧 XML、Durable JSONL、旧 Checkpoint 或旧 Session。

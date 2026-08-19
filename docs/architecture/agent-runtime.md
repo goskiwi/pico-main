@@ -24,7 +24,7 @@ flowchart LR
   O --> E["Hash-chained Runtime Event"]
   E --> P["Progress projection"]
   P --> L
-  L --> CP["Checkpoint v7 + event cursor"]
+  L --> CP["Checkpoint v8 + event cursor"]
   O --> V["Runtime verifier"]
   V --> F["Completion Gate"]
 ```
@@ -48,6 +48,10 @@ flowchart LR
 - Project-memory Markdown cards are the source of truth; generated indexes and model selections cannot invent filenames.
 - Verification evidence is valid only for the exact Workspace content fingerprint.
 - Completion is blocked by syntax errors, failed verification or unresolved partial/unknown effects.
+- Parent completion is blocked while a completed implementation Child still has an unapplied Patch.
+- Every Child has an independent Model Client, Session, Context Ledger, Run Store and Artifact namespace.
+- Explore Children are read-only; Implement Children write only exact allowed paths in isolated Git Worktrees.
+- A Parent applies Child Patches only after DAG ordering, receipt/digest checks and integrated verification succeed.
 
 ## State ownership
 

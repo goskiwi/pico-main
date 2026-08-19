@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -118,6 +118,25 @@ class DockerSandboxConfig:
             raise ValueError("sandbox pids_limit must be at least 16")
         if int(self.max_output_bytes) < 1024:
             raise ValueError("sandbox max_output_bytes must be at least 1024")
+
+
+@dataclass
+class _CaptureState:
+    chunks: queue.Queue = field(
+        default_factory=lambda: queue.Queue(maxsize=SANDBOX_OUTPUT_QUEUE_CHUNKS)
+    )
+    stop_readers: threading.Event = field(default_factory=threading.Event)
+    threads: list[threading.Thread] = field(default_factory=list)
+    retained: dict[str, bytearray] = field(
+        default_factory=lambda: {"stdout": bytearray(), "stderr": bytearray()}
+    )
+    observed: int = 0
+    stop_reason: str = ""
+    cleanup_state: str = "not_required"
+    killed: bool = False
+    cancelled: bool = False
+    timed_out: bool = False
+    output_limited: bool = False
 
 
 class DockerSandbox:
@@ -279,139 +298,192 @@ class DockerSandbox:
         # an unbounded host-memory backlog. The retained result has its own
         # byte budget; this small bounded transport queue applies backpressure
         # before the main loop has classified and stopped an output bomb.
-        chunks = queue.Queue(maxsize=SANDBOX_OUTPUT_QUEUE_CHUNKS)
-        streams = {"stdout": process.stdout, "stderr": process.stderr}
-        stop_readers = threading.Event()
-
-        def drain(name, stream):
-            try:
-                while not stop_readers.is_set():
-                    chunk = stream.read(SANDBOX_OUTPUT_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    item = (name, bytes(chunk))
-                    while not stop_readers.is_set():
-                        try:
-                            chunks.put(item, timeout=0.05)
-                            break
-                        except queue.Full:
-                            continue
-            finally:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-
-        threads = [
-            threading.Thread(target=drain, args=item, daemon=True)
-            for item in streams.items()
-        ]
-        for thread in threads:
-            thread.start()
-
-        retained = {"stdout": bytearray(), "stderr": bytearray()}
-        observed = 0
-        stop_reason = ""
-        cleanup_state = "not_required"
-        killed = False
-        cancelled = False
-        timed_out = False
-        output_limited = False
-
-        def stop_process(reason):
-            nonlocal cleanup_state, killed
-            if cleanup_state != "not_required":
-                return
-            context.transition(
-                "stop_requested", cleanup_state="pending", stop_reason=reason
-            )
-            cleanup_state, killed = self._stop_container(container_name)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                killed = True
-
+        state = self._start_capture(process)
         try:
-            while (
-                process.poll() is None
-                or any(thread.is_alive() for thread in threads)
-                or not chunks.empty()
-            ):
-                try:
-                    name, chunk = chunks.get(timeout=0.05)
-                except queue.Empty:
-                    name = chunk = None
-                if name is not None and chunk is not None:
-                    observed += len(chunk)
-                    remaining = max(
-                        0,
-                        budget.max_output_bytes
-                        - sum(len(value) for value in retained.values()),
-                    )
-                    if remaining:
-                        retained[name].extend(chunk[:remaining])
-                    if observed > budget.max_output_bytes and not stop_reason:
-                        output_limited = True
-                        stop_reason = "output_limit_exceeded"
-
-                if not stop_reason and context.token.requested:
-                    cancelled = True
-                    stop_reason = context.token.reason or "user_cancelled"
-                if not stop_reason and time.monotonic() >= budget.deadline:
-                    timed_out = True
-                    stop_reason = "deadline_exceeded"
-                if stop_reason:
-                    stop_readers.set()
-                    stop_process(stop_reason)
-        except BaseException:
-            interrupted_reason = context.token.reason or "host_interrupted"
-            stop_readers.set()
-            stop_process(interrupted_reason)
-            context.transition(
-                "killed" if killed or not context.token.requested else "cancelled",
-                cleanup_state=cleanup_state,
-                stop_reason=interrupted_reason,
+            self._monitor_capture(
+                process,
+                container_name=container_name,
+                context=context,
+                budget=budget,
+                state=state,
             )
-            for thread in threads:
-                thread.join(timeout=1)
+        except BaseException:
+            self._interrupt_capture(
+                process,
+                container_name=container_name,
+                context=context,
+                state=state,
+            )
             raise
+        finally:
+            self._finish_readers(state)
+        return self._capture_result(process, context, budget, state)
 
-        stop_readers.set()
-        for thread in threads:
+    def _start_capture(self, process):
+        state = _CaptureState()
+        streams = {"stdout": process.stdout, "stderr": process.stderr}
+        state.threads = [
+            threading.Thread(
+                target=self._drain_stream,
+                args=(state, name, stream),
+                daemon=True,
+            )
+            for name, stream in streams.items()
+        ]
+        for thread in state.threads:
+            thread.start()
+        return state
+
+    @staticmethod
+    def _drain_stream(state, name, stream):
+        try:
+            while not state.stop_readers.is_set():
+                chunk = stream.read(SANDBOX_OUTPUT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                item = (name, bytes(chunk))
+                while not state.stop_readers.is_set():
+                    try:
+                        state.chunks.put(item, timeout=0.05)
+                        break
+                    except queue.Full:
+                        continue
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    def _monitor_capture(self, process, *, container_name, context, budget, state):
+        while self._capture_active(process, state):
+            self._consume_capture_chunk(state, budget)
+            self._observe_capture_stop(context, budget, state)
+            if state.stop_reason:
+                state.stop_readers.set()
+                self._stop_capture_process(
+                    process,
+                    container_name=container_name,
+                    context=context,
+                    state=state,
+                    reason=state.stop_reason,
+                )
+
+    @staticmethod
+    def _capture_active(process, state):
+        return (
+            process.poll() is None
+            or any(thread.is_alive() for thread in state.threads)
+            or not state.chunks.empty()
+        )
+
+    @staticmethod
+    def _consume_capture_chunk(state, budget):
+        try:
+            name, chunk = state.chunks.get(timeout=0.05)
+        except queue.Empty:
+            return
+        state.observed += len(chunk)
+        retained_bytes = sum(len(value) for value in state.retained.values())
+        remaining = max(0, budget.max_output_bytes - retained_bytes)
+        if remaining:
+            state.retained[name].extend(chunk[:remaining])
+        if state.observed > budget.max_output_bytes and not state.stop_reason:
+            state.output_limited = True
+            state.stop_reason = "output_limit_exceeded"
+
+    @staticmethod
+    def _observe_capture_stop(context, budget, state):
+        if not state.stop_reason and context.token.requested:
+            state.cancelled = True
+            state.stop_reason = context.token.reason or "user_cancelled"
+        if not state.stop_reason and time.monotonic() >= budget.deadline:
+            state.timed_out = True
+            state.stop_reason = "deadline_exceeded"
+
+    def _stop_capture_process(
+        self,
+        process,
+        *,
+        container_name,
+        context,
+        state,
+        reason,
+    ):
+        if state.cleanup_state != "not_required":
+            return
+        context.transition(
+            "stop_requested", cleanup_state="pending", stop_reason=reason
+        )
+        state.cleanup_state, state.killed = self._stop_container(container_name)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            state.killed = True
+
+    def _interrupt_capture(self, process, *, container_name, context, state):
+        interrupted_reason = context.token.reason or "host_interrupted"
+        state.stop_readers.set()
+        self._stop_capture_process(
+            process,
+            container_name=container_name,
+            context=context,
+            state=state,
+            reason=interrupted_reason,
+        )
+        terminal_state = (
+            "killed"
+            if state.killed or not context.token.requested
+            else "cancelled"
+        )
+        context.transition(
+            terminal_state,
+            cleanup_state=state.cleanup_state,
+            stop_reason=interrupted_reason,
+        )
+
+    @staticmethod
+    def _finish_readers(state):
+        state.stop_readers.set()
+        for thread in state.threads:
             thread.join(timeout=1)
 
-        stdout = retained["stdout"].decode("utf-8", errors="replace")
-        stderr = retained["stderr"].decode("utf-8", errors="replace")
-        if stop_reason:
-            terminal_state = "killed" if killed or output_limited else (
-                "cancelled" if cancelled else "timed_out"
+    @staticmethod
+    def _capture_result(process, context, budget, state):
+        stdout = state.retained["stdout"].decode("utf-8", errors="replace")
+        stderr = state.retained["stderr"].decode("utf-8", errors="replace")
+        if state.stop_reason:
+            terminal_state = "killed" if state.killed or state.output_limited else (
+                "cancelled" if state.cancelled else "timed_out"
             )
             context.transition(
                 terminal_state,
-                cleanup_state=cleanup_state,
-                stop_reason=stop_reason,
+                cleanup_state=state.cleanup_state,
+                stop_reason=state.stop_reason,
             )
             message = (
-                f"sandbox command {terminal_state}: {stop_reason}; "
-                f"cleanup={cleanup_state}"
+                f"sandbox command {terminal_state}: {state.stop_reason}; "
+                f"cleanup={state.cleanup_state}"
             )
             stderr = "\n".join(part for part in (stderr.strip(), message) if part)
+
         return SandboxResult(
-            returncode=None if stop_reason else int(process.returncode or 0),
+            returncode=None if state.stop_reason else int(process.returncode or 0),
             stdout=stdout,
             stderr=stderr,
-            timed_out=timed_out,
-            cancelled=cancelled,
-            killed=bool(killed or output_limited),
-            cleanup_state=cleanup_state,
-            stop_reason=stop_reason,
-            output_limited=output_limited,
-            output_truncated=observed > budget.max_output_bytes,
-            observed_output_bytes=observed,
+            timed_out=state.timed_out,
+            cancelled=state.cancelled,
+            killed=bool(state.killed or state.output_limited),
+            cleanup_state=state.cleanup_state,
+            stop_reason=state.stop_reason,
+            output_limited=state.output_limited,
+            output_truncated=state.observed > budget.max_output_bytes,
+            observed_output_bytes=state.observed,
             max_output_bytes=budget.max_output_bytes,
-            retained_output_bytes=sum(len(value) for value in retained.values()),
+            retained_output_bytes=sum(
+                len(value) for value in state.retained.values()
+            ),
         )
 
     def _stop_container(self, container_name):

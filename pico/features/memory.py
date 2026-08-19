@@ -72,9 +72,7 @@ def _entry_id(path):
     return "working_file_" + hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:20]
 
 
-def normalize_memory_state(state, workspace_root=None):
-    if state is None:
-        state = default_memory_state()
+def _validate_memory_envelope(state):
     if not isinstance(state, dict):
         raise TypeError("session working memory must be an object")
     expected = {"schema_version", "working", "file_observations"}
@@ -83,14 +81,14 @@ def normalize_memory_state(state, workspace_root=None):
     if state.get("schema_version") != SESSION_MEMORY_SCHEMA_VERSION:
         raise ValueError("unsupported session working memory schema_version")
 
-    working = state["working"]
+
+def _normalize_working_memory(working, workspace_root):
     expected_working = {"goal", "recent_files"}
     if not isinstance(working, dict) or set(working) != expected_working:
         raise ValueError("invalid session working memory working schema")
-    for field, limit in (("goal", 300),):
-        if not isinstance(working[field], str):
-            raise TypeError(f"memory working.{field} must be a string")
-        working[field] = clip(working[field].strip(), limit)
+    if not isinstance(working["goal"], str):
+        raise TypeError("memory working.goal must be a string")
+    working["goal"] = clip(working["goal"].strip(), 300)
     if not isinstance(working["recent_files"], list) or not all(
         isinstance(path, str) for path in working["recent_files"]
     ):
@@ -100,53 +98,76 @@ def normalize_memory_state(state, workspace_root=None):
         for path in working["recent_files"]
         if path.strip()
     )[-WORKING_FILE_LIMIT:]
+    return working
 
-    observations = state["file_observations"]
-    if not isinstance(observations, dict):
-        raise TypeError("memory file_observations must be an object")
-    normalized = {}
-    expected_observation = {
-        "entry_id",
-        "path",
-        "summary",
+
+_OBSERVATION_FIELDS = {
+    "entry_id",
+    "path",
+    "summary",
+    "created_at",
+    "updated_at",
+    "freshness",
+    "source_session_id",
+    "source_run_id",
+    "source_tool_call_id",
+    "source_artifact_id",
+}
+
+
+def _normalize_observation(raw_path, observation, workspace_root):
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("memory file_observations keys must be non-empty paths")
+    if not isinstance(observation, dict) or set(observation) != _OBSERVATION_FIELDS:
+        raise ValueError(f"invalid file observation schema: {raw_path}")
+    path = canonicalize_path(raw_path, workspace_root)
+    if observation.get("path") != path:
+        raise ValueError(f"file observation path mismatch: {raw_path}")
+    if observation.get("entry_id") != _entry_id(path):
+        raise ValueError(f"file observation entry_id mismatch: {raw_path}")
+    summary = observation.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError(f"file observation summary is invalid: {raw_path}")
+    freshness = observation.get("freshness")
+    if freshness is not None and not isinstance(freshness, str):
+        raise ValueError(f"file observation freshness is invalid: {raw_path}")
+    provenance_fields = (
         "created_at",
         "updated_at",
-        "freshness",
         "source_session_id",
         "source_run_id",
         "source_tool_call_id",
         "source_artifact_id",
+    )
+    for field in provenance_fields:
+        if not isinstance(observation.get(field), str):
+            raise TypeError(f"file observation {field} is invalid: {raw_path}")
+    return path, {
+        **observation,
+        "path": path,
+        "summary": clip(summary.strip(), 500),
+        "freshness": freshness.strip() if freshness else None,
     }
+
+
+def _normalize_observations(observations, workspace_root):
+    if not isinstance(observations, dict):
+        raise TypeError("memory file_observations must be an object")
+    normalized = {}
     for raw_path, observation in observations.items():
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            raise ValueError("memory file_observations keys must be non-empty paths")
-        if not isinstance(observation, dict) or set(observation) != expected_observation:
-            raise ValueError(f"invalid file observation schema: {raw_path}")
-        path = canonicalize_path(raw_path, workspace_root)
-        if observation.get("path") != path:
-            raise ValueError(f"file observation path mismatch: {raw_path}")
-        if observation.get("entry_id") != _entry_id(path):
-            raise ValueError(f"file observation entry_id mismatch: {raw_path}")
-        summary = observation.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ValueError(f"file observation summary is invalid: {raw_path}")
-        freshness = observation.get("freshness")
-        if freshness is not None and not isinstance(freshness, str):
-            raise ValueError(f"file observation freshness is invalid: {raw_path}")
-        for field in (
-            "created_at", "updated_at", "source_session_id", "source_run_id",
-            "source_tool_call_id", "source_artifact_id",
-        ):
-            if not isinstance(observation.get(field), str):
-                raise TypeError(f"file observation {field} is invalid: {raw_path}")
-        normalized[path] = {
-            **observation,
-            "path": path,
-            "summary": clip(summary.strip(), 500),
-            "freshness": freshness.strip() if freshness else None,
-        }
-    state["working"] = working
-    state["file_observations"] = normalized
+        path, value = _normalize_observation(raw_path, observation, workspace_root)
+        normalized[path] = value
+    return normalized
+
+
+def normalize_memory_state(state, workspace_root=None):
+    if state is None:
+        state = default_memory_state()
+    _validate_memory_envelope(state)
+    state["working"] = _normalize_working_memory(state["working"], workspace_root)
+    state["file_observations"] = _normalize_observations(
+        state["file_observations"], workspace_root
+    )
     return state
 
 

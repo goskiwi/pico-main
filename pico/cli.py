@@ -158,6 +158,10 @@ def build_agent(args):
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)
+
+    def child_model_client_factory(_spec):
+        return _build_model_client(args)
+
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
@@ -175,6 +179,7 @@ def build_agent(args):
             provider_context_limit_tokens=args.provider_context_limit,
             sandbox_image=args.sandbox_image,
             verification_command=args.verify_command,
+            subagent_model_client_factory=child_model_client_factory,
         )
     return Pico(
         model_client=model,
@@ -188,6 +193,7 @@ def build_agent(args):
         provider_context_limit_tokens=args.provider_context_limit,
         sandbox_image=args.sandbox_image,
         verification_command=args.verify_command,
+        subagent_model_client_factory=child_model_client_factory,
     )
 
 

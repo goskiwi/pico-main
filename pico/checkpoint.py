@@ -5,7 +5,7 @@ import uuid
 from .features import memory as memorylib
 from .workspace import clip, now
 
-CHECKPOINT_SCHEMA_VERSION = "checkpoint-v7"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint-v8"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"
 CHECKPOINT_FULL_VALID_STATUS = "full-valid"
 CHECKPOINT_PARTIAL_STALE_STATUS = "partial-stale"
@@ -28,6 +28,7 @@ RUNTIME_IDENTITY_KEYS = (
     "tool_signature",
     "run_timeout_seconds",
     "verification_command",
+    "allowed_write_paths",
     "sandbox_identity",
     "hooks",
 )
@@ -51,6 +52,11 @@ def current_runtime_identity(agent):
         "tool_signature": agent.tool_signature(),
         "run_timeout_seconds": int(agent.run_timeout_seconds),
         "verification_command": str(agent.verification_command),
+        "allowed_write_paths": (
+            list(agent.allowed_write_paths)
+            if agent.allowed_write_paths is not None
+            else None
+        ),
         "sandbox_identity": agent.sandbox.identity(),
         "hooks": agent.hooks.identity(),
     }

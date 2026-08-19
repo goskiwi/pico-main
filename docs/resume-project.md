@@ -23,7 +23,7 @@ Python symbol/reference graph，以 lexical + personalized PageRank 生成 Token
 
 ## Checkpoint / Crash Resume
 
-设计 Checkpoint v7 与 hash-chained Runtime Event Log：恢复时严格校验
+设计 Checkpoint v8 与 hash-chained Runtime Event Log：恢复时严格校验
 Session/Checkpoint/Context schema、Runtime 配置、内容级 Workspace 指纹和 event
 cursor/digest；进程若中断在工具执行期间，依据事件 receipt 回填结果，没有 terminal
 receipt 时标记 unknown/partial，禁止盲目重放潜在副作用。
@@ -36,6 +36,15 @@ revision-bound compare-and-swap 与 fsync/atomic replace，防止并发覆盖。
 Profile，并共享整轮 deadline / cancellation token；统一识别重复调用、路径逃逸、敏感
 信息和部分成功。
 
+## 多 Agent 协作
+
+实现主 Agent 驱动的子任务拆分与协作机制，基于显式依赖 DAG 对探索和实现任务进行
+拓扑调度；每个 Child 使用独立 Model Client、Session、Context Ledger、Run State 与
+Artifact namespace，探索任务只读并行，实施任务在独立 Git Worktree 中执行。通过工具
+白名单、精确文件写入范围、执行后 Diff 复核、Child Event receipt 与 Patch digest 校验
+限制权限；多个 Patch 仅在临时 Integration Worktree 中按依赖顺序合并并通过 verifier 后
+才写回 Parent Workspace，避免并发覆盖、状态污染和越权修改。
+
 ## 评测与审计闭环
 
 以 Evidence Ledger 记录观察、Workspace effect 和结构化 verifier 证据；核心循环不猜测
@@ -45,5 +54,5 @@ hook 注入且不能改写 ToolOutcome 或绕过安全边界。Workspace 变更�
 事件 replay/stats、report 和 digest artifact 审计运行过程；大输出保留 12/16 KiB 模型
 预览，完整 artifact 可在当前 run 内按 8 KiB 字节页校验读取。
 
-简历中不要宣称 Skills/MCP/子 Agent、多 Provider 或未经真实实验得到的 GAIA/HLE 指标；
+简历中不要宣称 Skills/MCP、多 Provider、后台 Agent 消息队列、跨进程 Child 恢复或未经真实实验得到的 GAIA/HLE 指标；
 这些不在当前实现范围内。
