@@ -13,7 +13,7 @@ import textwrap
 
 from .config import load_project_env, provider_env
 from .providers.clients import OpenAICompatibleModelClient
-from .runtime import Pico, SessionStore
+from .runtime import Pico, PicoConfig, SessionStore
 from .workspace import WorkspaceContext, middle
 
 DEFAULT_SECRET_ENV_NAMES = (
@@ -126,9 +126,17 @@ def build_welcome(agent, model, host):
             center(WELCOME_STATUS),
             divider("-"),
             row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
+            row(
+                "WORKSPACE  "
+                + middle(agent.workspace.context.cwd, inner - 11)
+            ),
+            pair("MODEL", model, "BRANCH", agent.workspace.context.branch),
+            pair(
+                "APPROVAL",
+                agent.config.approval_policy,
+                "SESSION",
+                agent.session.data["id"],
+            ),
             row(""),
         ]
     )
@@ -142,11 +150,9 @@ def build_agent(args):
     命令行参数只是字符串和开关，runtime 需要的是已经装配好的对象图：
     Responses client、workspace snapshot、session store、secret 配置等。
     这个函数负责把“启动参数”翻译成“agent 运行现场”。
-
     输入 / 输出：
     - 输入：`argparse` 解析后的 `args`
     - 输出：一个新的 `Pico`，或一个从旧 session 恢复出来的 `Pico`
-
     在 agent 链路里的位置：
     它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
     得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
@@ -158,6 +164,18 @@ def build_agent(args):
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)
+    config = PicoConfig(
+        approval_policy=args.approval,
+        max_steps=args.max_steps,
+        max_new_tokens=args.max_new_tokens,
+        secret_env_names=set(configured_secret_names),
+        run_timeout_seconds=args.run_timeout,
+        provider_context_limit_tokens=args.provider_context_limit,
+        compaction_reserve_tokens=args.compaction_reserve_tokens,
+        compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
+        sandbox_image=args.sandbox_image,
+        verification_command=args.verify_command,
+    )
 
     def child_model_client_factory(_spec):
         return _build_model_client(args)
@@ -166,33 +184,19 @@ def build_agent(args):
     if session_id == "latest":
         session_id = store.latest()
     if session_id:
-        return Pico.from_session(
+        return Pico(
             model_client=model,
             workspace=workspace,
             session_store=store,
-            session_id=session_id,
-            approval_policy=args.approval,
-            max_steps=args.max_steps,
-            max_new_tokens=args.max_new_tokens,
-            secret_env_names=configured_secret_names,
-            run_timeout_seconds=args.run_timeout,
-            provider_context_limit_tokens=args.provider_context_limit,
-            sandbox_image=args.sandbox_image,
-            verification_command=args.verify_command,
+            session=store.load(session_id),
+            config=config,
             subagent_model_client_factory=child_model_client_factory,
         )
     return Pico(
         model_client=model,
         workspace=workspace,
         session_store=store,
-        approval_policy=args.approval,
-        max_steps=args.max_steps,
-        max_new_tokens=args.max_new_tokens,
-        secret_env_names=configured_secret_names,
-        run_timeout_seconds=args.run_timeout,
-        provider_context_limit_tokens=args.provider_context_limit,
-        sandbox_image=args.sandbox_image,
-        verification_command=args.verify_command,
+        config=config,
         subagent_model_client_factory=child_model_client_factory,
     )
 
@@ -249,15 +253,30 @@ def build_arg_parser():
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=512,
-        help="Maximum model output tokens per step.",
+        default=1024,
+        help=(
+            "Maximum total model output tokens per action, including reasoning "
+            "tokens, visible text, and function-call arguments."
+        ),
     )
     parser.add_argument("--run-timeout", type=int, default=600, help="Whole-run deadline in seconds.")
     parser.add_argument(
         "--provider-context-limit",
         type=int,
         default=64000,
-        help="Reset and rebuild the task-local Responses conversation at this input-token limit.",
+        help="Model context window used for prompt budgeting, compaction, and Responses rotation.",
+    )
+    parser.add_argument(
+        "--compaction-reserve-tokens",
+        type=int,
+        default=16384,
+        help="Context tokens reserved before automatic Journal compaction.",
+    )
+    parser.add_argument(
+        "--compaction-keep-recent-tokens",
+        type=int,
+        default=20000,
+        help="Approximate recent Journal tokens retained after compaction.",
     )
     parser.add_argument("--sandbox-image", default="pico/sandbox:latest", help="Docker image for run_shell.")
     parser.add_argument("--verify-command", default=None, help="Runtime verifier; auto-detected when omitted, empty disables it.")
@@ -269,10 +288,10 @@ def build_arg_parser():
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if raw_argv[:1] == ["events"]:
-        from .event_cli import event_main
+    if raw_argv[:1] == ["journal"]:
+        from .journal_cli import journal_main
 
-        return event_main(raw_argv[1:])
+        return journal_main(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     agent = build_agent(args)
 
@@ -315,10 +334,10 @@ def main(argv=None):
             print(HELP_DETAILS)
             continue
         if user_input == "/memory":
-            print(agent.memory_text())
+            print(agent.prompt.memory_text())
             continue
         if user_input == "/session":
-            print(agent.session_path)
+            print(agent.session.path)
             continue
         if user_input == "/reset":
             agent.reset()

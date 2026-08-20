@@ -10,15 +10,9 @@ def passing_results():
                 "current_request_preserved_rate": 1.0,
             }
         },
-        "working_memory": {
-            "variants": {
-                "memory_on": {"hit_rate": 1.0},
-                "stale_revision": {"hit_rate": 0.0},
-            }
-        },
-        "project_memory": {"summary": {"explicit_precedence": True}},
+        "project_memory": {"summary": {"catalog_generated": True}},
         "repo_map": {"summary": {"query_hit": True}},
-        "runtime_policy": {"summary": {"hash_chain_valid": True}},
+        "runtime_policy": {"summary": {"journal_valid": True}},
     }
 
 

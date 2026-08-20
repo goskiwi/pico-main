@@ -8,7 +8,6 @@ from pathlib import Path
 
 from ..context_manager import Tokenizer
 from ..contracts import FailureInfo, ToolOutcome
-from ..features.memory import SessionWorkingMemory
 from ..project_memory import ProjectMemoryStore
 from ..recovery import RecoveryPolicy
 from ..repo_map import RepoMap
@@ -24,7 +23,7 @@ def _write(path, payload):
     return payload
 
 
-def run_context_governance_ablation(path=Path("artifacts/context-governance-v3.json"), repetitions=3):
+def run_context_governance_ablation(path=Path("artifacts/context-governance-v4.json"), repetitions=3):
     tokenizer = Tokenizer()
     rows = []
     for repetition in range(int(repetitions)):
@@ -39,7 +38,7 @@ def run_context_governance_ablation(path=Path("artifacts/context-governance-v3.j
                 "request_preserved": request in governed,
             })
     return _write(path, {
-        "artifact_type": "context-governance-v3",
+        "artifact_type": "context-governance-v4",
         "runtime_snapshot_id": runtime_snapshot_id(),
         "evaluation_snapshot_id": evaluation_snapshot_id(),
         "rows": rows,
@@ -51,42 +50,6 @@ def run_context_governance_ablation(path=Path("artifacts/context-governance-v3.j
     })
 
 
-def run_working_memory_ablation(path=Path("artifacts/working-memory-v3.json"), repetitions=3):
-    rows = []
-    for repetition in range(int(repetitions)):
-        with tempfile.TemporaryDirectory(prefix="pico-memory-eval-") as directory:
-            root = Path(directory)
-            target = root / "config.py"
-            target.write_text("COLOR = 'red'\n", encoding="utf-8")
-            memory = SessionWorkingMemory(workspace_root=root)
-            memory.set_goal("find color").remember_file("config.py").set_file_observation(
-                "config.py", "COLOR is red", source_session_id="s",
-                source_run_id=f"r{repetition}", source_tool_call_id="c", source_artifact_id="a",
-            )
-            recalled, metadata = memory.render_recall("what is COLOR")
-            rows.append({"variant": "memory_on", "hit": "COLOR is red" in recalled,
-                         "repeated_reads": 0 if metadata["working_entry_ids"] else 1})
-            target.write_text("COLOR = 'blue'\n", encoding="utf-8")
-            stale, metadata = memory.render_recall("what is COLOR")
-            rows.append({"variant": "stale_revision", "hit": "COLOR is red" in stale,
-                         "repeated_reads": 1})
-            rows.append({"variant": "memory_off", "hit": False, "repeated_reads": 1})
-    variants = {}
-    for variant in ("memory_on", "stale_revision", "memory_off"):
-        selected = [row for row in rows if row["variant"] == variant]
-        variants[variant] = {
-            "hit_rate": sum(row["hit"] for row in selected) / len(selected),
-            "mean_repeated_reads": sum(row["repeated_reads"] for row in selected) / len(selected),
-        }
-    return _write(path, {
-        "artifact_type": "working-memory-v3",
-        "runtime_snapshot_id": runtime_snapshot_id(),
-        "evaluation_snapshot_id": evaluation_snapshot_id(),
-        "rows": rows,
-        "variants": variants,
-    })
-
-
 def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json")):
     with tempfile.TemporaryDirectory(prefix="pico-project-memory-eval-") as directory:
         root = Path(directory)
@@ -95,14 +58,8 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json"))
             action="create", filename="project_test_command.md", name="Test command",
             description="Stable project test workflow", memory_type="project",
             content="Run python -m pytest -q.", why="It is the repository verifier.",
-            how_to_apply="Run after code changes.", origin="explicit",
+            how_to_apply="Run after code changes.",
             source_session_id="s", source_run_id="r", source_entry_ids=("e1",),
-        )
-        kept, automatic_action = store.store(
-            action="update", filename=card.filename, name=card.name,
-            description=card.description, memory_type=card.type, content="unsafe overwrite",
-            why=card.why, how_to_apply=card.how_to_apply, origin="automatic",
-            source_session_id="s2", source_run_id="r2", source_entry_ids=("e2",),
         )
         payload = {
             "artifact_type": "project-memory-v1",
@@ -111,7 +68,7 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json"))
             "summary": {
                 "markdown_source_of_truth": (store.cards_root / card.filename).is_file(),
                 "index_generated": card.filename in store.index_text(),
-                "explicit_precedence": automatic_action == "kept_explicit" and kept.content == card.content,
+                "catalog_generated": card.filename in store.index_text(),
                 "provenance_complete": bool(card.source_entry_ids and card.source_run_id),
             },
         }
@@ -142,7 +99,9 @@ def run_repo_map_evaluation(path=Path("artifacts/repo-map-v1.json")):
 def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json")):
     with tempfile.TemporaryDirectory(prefix="pico-runtime-eval-") as directory:
         store = RunStore(Path(directory) / "runs")
-        store.append_event("run_eval", "task_eval", "run_started", {"user_request": "repair"})
+        store.append_entry(
+            "run_eval", "task_eval", "session_eval", "run_started", {"user_request": "repair"}
+        )
         policy = RecoveryPolicy()
         outcome = ToolOutcome(
             "call_eval", "run_shell", "error", "failed", "none", "exit_code: 1",
@@ -163,9 +122,10 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
             scope="run_eval",
         )
         for decision in (first, second):
-            store.append_event(
+            store.append_entry(
                 "run_eval",
                 "task_eval",
+                "session_eval",
                 "policy_decided",
                 {
                     "stop": decision.action == "stop",
@@ -173,7 +133,7 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
                     "guidance": "\n".join(decision.guidance),
                 },
             )
-        events = store.read_events("run_eval")
+        entries = store.read_entries("run_eval")
         verification = parse_verification_output(
             "python -m pytest -q", "FAILED tests/test_x.py::test_x\n1 failed, 2 passed", 1
         )
@@ -182,7 +142,7 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
             "runtime_snapshot_id": runtime_snapshot_id(),
             "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
-                "hash_chain_valid": len(events) == 3,
+                "journal_valid": len(entries) == 3,
                 "replayable_policy": store.replay("run_eval").summary()["policy_counts"].get("continue") == 2,
                 "repeated_failure_replanned": second.action == "replan",
                 "verification_structured": verification["failed_tests"] == ["tests/test_x.py::test_x"],
@@ -193,8 +153,7 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
 
 def write_runtime_report(
     path=Path("docs/metrics/runtime-evaluation.md"),
-    context_path=Path("artifacts/context-governance-v3.json"),
-    working_memory_path=Path("artifacts/working-memory-v3.json"),
+    context_path=Path("artifacts/context-governance-v4.json"),
     project_memory_path=Path("artifacts/project-memory-v1.json"),
     repo_map_path=Path("artifacts/repo-map-v1.json"),
     runtime_policy_path=Path("artifacts/runtime-policy-v1.json"),
@@ -202,7 +161,6 @@ def write_runtime_report(
 ):
     harness = json.loads(Path(harness_path).read_text())
     context = json.loads(Path(context_path).read_text())
-    working = json.loads(Path(working_memory_path).read_text())
     project = json.loads(Path(project_memory_path).read_text())
     repo = json.loads(Path(repo_map_path).read_text())
     policy_path = Path(runtime_policy_path)
@@ -217,11 +175,8 @@ def write_runtime_report(
         "## Context governance", "",
         f"- Within-budget rate: {context['summary']['within_budget_rate']:.1%}",
         f"- Current-request preservation: {context['summary']['current_request_preserved_rate']:.1%}", "",
-        "## Working memory", "",
-        f"- Fresh recall hit rate: {working['variants']['memory_on']['hit_rate']:.1%}",
-        f"- Stale recall hit rate: {working['variants']['stale_revision']['hit_rate']:.1%}", "",
         "## Project memory", "",
-        f"- Explicit precedence: {project['summary']['explicit_precedence']}", "",
+        f"- Catalog generated: {project['summary']['catalog_generated']}", "",
         "## RepoMap", "",
         f"- Query hit: {repo['summary']['query_hit']}",
         f"- Within budget: {repo['summary']['within_budget']}", "",
@@ -229,7 +184,7 @@ def write_runtime_report(
     if policy:
         text += "\n" + "\n".join([
             "## Runtime policy", "",
-            f"- Hash chain valid: {policy['summary']['hash_chain_valid']}",
+            f"- Run Journal valid: {policy['summary']['journal_valid']}",
             f"- Repeated failure replanned: {policy['summary']['repeated_failure_replanned']}",
             f"- Structured verification: {policy['summary']['verification_structured']}", "",
         ])

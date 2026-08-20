@@ -1,8 +1,9 @@
-from pathlib import Path
+import pytest
 
-import pico
 from pico import (
+    FakeModelClient,
     Pico,
+    PicoConfig,
     SessionStore,
     WorkspaceContext,
     build_agent,
@@ -12,16 +13,15 @@ from pico import (
 )
 
 
-def test_public_api_exports_current_names_only():
+def test_supported_public_api_is_importable():
     assert Pico is not None
+    assert PicoConfig is not None
     assert SessionStore is not None
     assert WorkspaceContext is not None
     assert callable(build_agent)
     assert callable(build_arg_parser)
     assert callable(build_welcome)
     assert callable(main)
-    assert not hasattr(pico, "MiniAgent")
-    assert "MiniAgent" not in pico.__all__
 
 
 def test_build_agent_returns_pico(tmp_path):
@@ -33,7 +33,17 @@ def test_build_agent_returns_pico(tmp_path):
     assert isinstance(agent, Pico)
 
 
-def test_lightweight_package_split_uses_package_paths_without_legacy_shims():
+def test_flat_runtime_configuration_is_rejected(tmp_path):
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        Pico(
+            FakeModelClient([]),
+            WorkspaceContext.build(tmp_path),
+            SessionStore(tmp_path / ".pico" / "sessions"),
+            approval_policy="auto",
+        )
+
+
+def test_feature_modules_are_importable_from_package_paths():
     from pico.evaluation.evaluator import BenchmarkEvaluator
     from pico.evaluation.metrics import run_context_governance_ablation
     from pico.features.memory import SessionWorkingMemory
@@ -45,12 +55,3 @@ def test_lightweight_package_split_uses_package_paths_without_legacy_shims():
     assert ProjectMemoryStore is not None
     assert ProviderFakeModelClient is not None
     assert callable(run_context_governance_ablation)
-    for legacy_module in ("evaluator.py", "metrics.py", "models.py", "memory.py"):
-        assert not (Path("pico") / legacy_module).exists()
-
-
-def test_packaging_discovers_pico_subpackages():
-    pyproject_text = Path("pyproject.toml").read_text(encoding="utf-8")
-
-    assert "[tool.setuptools.packages.find]" in pyproject_text
-    assert 'include = ["pico*"]' in pyproject_text

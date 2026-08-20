@@ -13,6 +13,7 @@ TOOL_STATUSES = frozenset({"ok", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
 RECOVERY_ACTIONS = frozenset({"continue", "retry", "repair", "replan", "stop"})
+EFFECT_SCOPES = frozenset({"none", "workspace", "project_memory", "mixed"})
 
 
 def canonical_fingerprint(name: str, args: dict[str, Any]) -> str:
@@ -38,6 +39,22 @@ class ToolCall:
             raise TypeError("tool call args must be an object")
         if not self.call_id:
             object.__setattr__(self, "call_id", "call_" + uuid.uuid4().hex[:12])
+
+
+@dataclass(frozen=True)
+class ToolExecution:
+    """Exact result returned by a tool runner before Runtime auditing."""
+
+    content: str
+    affected_paths: tuple[str, ...] = ()
+    diff_summary: tuple[str, ...] = ()
+    effect_scope: str = "none"
+
+    def __post_init__(self):
+        if self.effect_scope not in EFFECT_SCOPES:
+            raise ValueError(f"invalid tool effect scope: {self.effect_scope}")
+        if self.affected_paths and self.effect_scope == "none":
+            raise ValueError("affected paths require a non-empty effect scope")
 
 
 @dataclass(frozen=True)

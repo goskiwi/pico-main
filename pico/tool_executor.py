@@ -1,18 +1,19 @@
 """Staged tool admission and canonical outcome construction."""
 
-import hashlib
-import json
 import re
 import time
+from pathlib import Path
 
 from .contracts import (
     FailureInfo,
     ToolAttempt,
     ToolCall,
+    ToolExecution,
     ToolOutcome,
     canonical_fingerprint,
 )
 from .hooks import BeforeToolContext
+from .mutations import file_revision
 from .recovery import RecoveryPolicy
 
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
@@ -68,33 +69,79 @@ class ToolExecutor:
         self.recovery_policy = RecoveryPolicy()
 
     @staticmethod
-    def _memory_snapshot(agent):
-        """Fingerprint durable memory separately from the source workspace."""
-        root = agent.project_memory.root
-        snapshot = {}
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                logical = path.relative_to(agent.root).as_posix()
-                snapshot[logical] = hashlib.sha256(path.read_bytes()).hexdigest()
-            except Exception:  # noqa: BLE001, S112 - files can move during inspection
-                continue
-        return snapshot
+    def _path_state(path):
+        path = Path(path)
+        try:
+            if path.is_file():
+                return file_revision(path)
+            if path.is_dir():
+                stat = path.stat()
+                return f"dir:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+        except OSError:
+            return "unavailable"
+        return "absent"
 
-    @staticmethod
-    def _snapshot_fingerprint(snapshot):
-        payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
-
-    @staticmethod
-    def _repeat_key(run_id, call_fingerprint, workspace_fingerprint, memory_snapshot):
+    @classmethod
+    def _call_state(cls, agent, name, args):
+        paths = []
+        if name in {"read_file", "write_file", "patch_file"}:
+            paths.append(agent.workspace.resolve_path(args["path"]))
+        elif name in {"list_files", "search"}:
+            paths.append(agent.workspace.resolve_path(args.get("path", ".")))
+        elif name in {"memory_store", "memory_forget"}:
+            memory = agent.services.project_memory
+            paths.extend((memory.cards_root / args["filename"], memory.index_path))
         return (
-            str(run_id),
-            str(call_fingerprint),
-            str(workspace_fingerprint),
-            tuple(sorted(memory_snapshot.items())),
+            agent.workspace.revision,
+            tuple((path.as_posix(), cls._path_state(path)) for path in paths),
         )
+
+    @staticmethod
+    def _repeat_key(run_id, call_fingerprint, state):
+        return str(run_id), str(call_fingerprint), state
+
+    @staticmethod
+    def _logical_path(agent, path):
+        path = Path(path).resolve()
+        try:
+            return path.relative_to(agent.workspace.root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    @classmethod
+    def _potential_effects(cls, agent, name, args, workspace_mutating):
+        if name in {"write_file", "patch_file"}:
+            path = agent.workspace.resolve_path(args["path"])
+            return "workspace", ((cls._logical_path(agent, path), path),)
+        if name in {"memory_store", "memory_forget"}:
+            memory = agent.services.project_memory
+            paths = (memory.cards_root / args["filename"], memory.index_path)
+            return "project_memory", tuple(
+                (cls._logical_path(agent, path), path) for path in paths
+            )
+        return ("workspace" if workspace_mutating else "none"), ()
+
+    @classmethod
+    def _effect_snapshot(cls, paths):
+        return {logical: cls._path_state(path) for logical, path in paths}
+
+    @staticmethod
+    def _effect_diff(before, after):
+        paths = []
+        summaries = []
+        for path in sorted(set(before) | set(after)):
+            old = before.get(path, "absent")
+            new = after.get(path, "absent")
+            if old == new:
+                continue
+            paths.append(path)
+            if old == "absent":
+                summaries.append(f"created:{path}")
+            elif new == "absent":
+                summaries.append(f"deleted:{path}")
+            else:
+                summaries.append(f"modified:{path}")
+        return paths, summaries
 
     @staticmethod
     def _repeat_block_reason(previous):
@@ -126,18 +173,21 @@ class ToolExecutor:
         fingerprint = canonical_fingerprint(name, args)
         admission = {"status": "checking", "stages": []}
 
-        tool = agent.all_tools.get(name)
+        tool = agent.tools.registry.get(name)
         if tool is None:
             return self._rejected(call, fingerprint, admission, "unknown_tool", "registry", "unknown tool", started)
         admission["stages"].append({"stage": "registry", "status": "passed"})
         workspace_mutating = bool(tool.get("workspace_mutating", False))
 
-        if agent.allowed_tools is not None and name not in agent.allowed_tools:
+        if (
+            agent.config.allowed_tools is not None
+            and name not in agent.config.allowed_tools
+        ):
             return self._rejected(call, fingerprint, admission, "tool_not_allowed", "surface", "tool outside run surface", started)
         admission["stages"].append({"stage": "surface", "status": "passed"})
 
         try:
-            args = agent.validate_tool(name, args)
+            args = agent.tools.validate(name, args)
         except Exception as exc:  # noqa: BLE001 - admission converts validator failures to outcomes
             detail = str(exc)
             return self._rejected(
@@ -148,23 +198,21 @@ class ToolExecutor:
         fingerprint = canonical_fingerprint(name, args)
         admission["stages"].append({"stage": "schema", "status": "passed"})
 
-        agent.refresh_prefix()
-        workspace_state_before = agent.capture_workspace_snapshot(force=workspace_mutating)
-        workspace_before = agent.content_workspace_fingerprint()
-        memory_before = self._memory_snapshot(agent) if name in {"memory_store", "memory_forget"} else {}
-        run_id = agent.current_task_state.run_id if agent.current_task_state else "manual"
-        repeat_key = self._repeat_key(run_id, fingerprint, workspace_before, memory_before)
+        agent.prompt.refresh()
+        run_id = agent.run.task_state.run_id if agent.run.task_state else "manual"
+        call_state = self._call_state(agent, name, args)
+        repeat_key = self._repeat_key(run_id, fingerprint, call_state)
         repeat_reason = self._repeat_block_reason(self._outcomes_by_state.get(repeat_key, ()))
         if repeat_reason:
             return self._rejected(
                 call, fingerprint, admission, "repeated_identical_call", "policy",
                 repeat_reason, started,
             )
-        hook_decision = agent.hooks.before_tool_call(
+        hook_decision = agent.services.hooks.before_tool_call(
             BeforeToolContext(
                 call=call,
                 run_id=str(run_id),
-                task_id=str(getattr(agent.current_task_state, "task_id", "manual")),
+                task_id=str(getattr(agent.run.task_state, "task_id", "manual")),
             )
         )
         if hook_decision.block or hook_decision.stop:
@@ -180,45 +228,43 @@ class ToolExecutor:
             )
         admission["stages"].append({"stage": "policy", "status": "passed"})
 
-        if tool["risky"] and not agent.approve(name, args):
+        if tool["risky"] and not agent.tools.approve(name, args):
             return self._rejected(
                 call, fingerprint, admission, "approval_denied", "approval", "approval denied", started,
-                security_event_type="read_only_block" if agent.read_only else "approval_denied",
+                security_event_type=(
+                    "read_only_block" if agent.config.read_only else "approval_denied"
+                ),
             )
         admission["stages"].append({"stage": "approval", "status": "passed"})
         admission["status"] = "admitted"
 
-        before = workspace_state_before if workspace_mutating else {}
+        potential_scope, potential_paths = self._potential_effects(
+            agent, name, args, workspace_mutating
+        )
+        effects_before = self._effect_snapshot(potential_paths)
         agent.emit_event(
-            agent.current_task_state,
-            "operation_started",
+            agent.run.task_state,
+            "tool_started",
             {
                 "tool_call_id": call.call_id,
                 "tool_name": name,
                 "call_fingerprint": fingerprint,
                 "risky": bool(tool["risky"]),
+                "effect_scope": potential_scope,
+                "potential_effects": [
+                    {"path": path, "before_state": state}
+                    for path, state in sorted(effects_before.items())
+                ],
             },
-            correlation_id=call.call_id,
         )
         try:
-            artifact_content = str(tool["run"](args))
-            after = agent.capture_workspace_snapshot(force=True) if workspace_mutating else before
-            paths, diff = agent.diff_workspace_snapshots(before, after)
-            memory_after = (
-                self._memory_snapshot(agent)
-                if name in {"memory_store", "memory_forget"}
-                else memory_before
-            )
-            memory_paths, memory_diff = agent.diff_workspace_snapshots(memory_before, memory_after)
-            effect_scope = (
-                "project_memory"
-                if memory_paths and not paths
-                else ("mixed" if memory_paths else "workspace")
-            )
-            paths = [*paths, *memory_paths]
-            diff = [*diff, *memory_diff]
-            if paths and effect_scope in {"workspace", "mixed"}:
-                agent.refresh_prefix(force=True)
+            execution = tool["run"](args)
+            if not isinstance(execution, ToolExecution):
+                raise TypeError("tool runner must return ToolExecution")
+            artifact_content = execution.content
+            paths = list(execution.affected_paths)
+            diff = list(execution.diff_summary)
+            effect_scope = execution.effect_scope
             status, failure = self._classify_result(name, artifact_content, bool(paths))
             side_effect = "partial" if status == "partial_success" else ("changed" if paths else "none")
             outcome = self._outcome(
@@ -228,50 +274,50 @@ class ToolExecutor:
                 diff_summary=diff, risky=tool["risky"], effect_scope=effect_scope,
                 artifact_content=artifact_content,
             )
-            agent.update_memory_after_tool(name, args, outcome.content, outcome)
         except Exception as exc:  # noqa: BLE001 - tool boundary must capture arbitrary runner failures
-            after = agent.capture_workspace_snapshot(force=True) if workspace_mutating else before
-            paths, diff = agent.diff_workspace_snapshots(before, after)
-            memory_after = (
-                self._memory_snapshot(agent)
-                if name in {"memory_store", "memory_forget"}
-                else memory_before
-            )
-            memory_paths, memory_diff = agent.diff_workspace_snapshots(memory_before, memory_after)
-            effect_scope = (
-                "project_memory"
-                if memory_paths and not paths
-                else ("mixed" if memory_paths else "workspace")
-            )
-            paths = [*paths, *memory_paths]
-            diff = [*diff, *memory_diff]
-            if paths and effect_scope in {"workspace", "mixed"}:
-                agent.refresh_prefix(force=True)
-            partial = bool(paths)
+            effects_after = self._effect_snapshot(potential_paths)
+            paths, diff = self._effect_diff(effects_before, effects_after)
+            unknown = bool(workspace_mutating and not potential_paths)
+            uncertain = bool(paths or unknown)
             outcome = self._outcome(
-                call, fingerprint, admission, "partial_success" if partial else "error", "failed",
-                "partial" if partial else "none", f"error: tool {name} failed: {exc}", started,
-                failure=FailureInfo("tool_partial_success" if partial else "tool_failed", "execution", str(exc), True),
+                call, fingerprint, admission, "partial_success" if uncertain else "error", "failed",
+                "partial" if paths else ("unknown" if unknown else "none"),
+                f"error: tool {name} failed: {exc}", started,
+                failure=FailureInfo(
+                    "tool_partial_success" if paths else ("tool_effect_unknown" if unknown else "tool_failed"),
+                    "execution",
+                    str(exc),
+                    not uncertain,
+                ),
                 affected_paths=paths, diff_summary=diff, risky=tool["risky"],
-                effect_scope=effect_scope,
+                effect_scope=potential_scope,
                 security_event_type="path_escape" if "path escapes workspace" in str(exc) else "",
             )
 
-        content_fingerprint = agent.content_workspace_fingerprint()
-        result_key = self._repeat_key(run_id, fingerprint, content_fingerprint, memory_after)
+        workspace_effect = (
+            outcome.side_effect_state != "none"
+            and outcome.metadata.get("effect_scope") in {"workspace", "mixed"}
+        )
+        if workspace_effect:
+            agent.workspace.mark_changed()
+            agent.prompt.refresh(force=True)
+        result_key = self._repeat_key(
+            run_id,
+            fingerprint,
+            self._call_state(agent, name, args),
+        )
         self._outcomes_by_state.setdefault(result_key, []).append(outcome)
         event = agent.emit_event(
-            agent.current_task_state,
-            "operation_finished",
+            agent.run.task_state,
+            "tool_result",
             {
                 "tool_call_id": call.call_id,
                 "tool_name": name,
-                "content_workspace_fingerprint": content_fingerprint,
+                "workspace_revision": agent.workspace.revision,
                 "outcome": outcome.to_dict(),
             },
-            correlation_id=call.call_id,
         )
-        agent.evidence_ledger.apply_event(event)
+        agent.run.evidence.apply_entry(event)
         return outcome
 
     @staticmethod
@@ -299,10 +345,9 @@ class ToolExecutor:
             policy_stop=policy_stop,
         )
         self.agent.emit_event(
-            self.agent.current_task_state,
-            "tool_rejected",
+            self.agent.run.task_state,
+            "tool_result",
             {"tool_call_id": call.call_id, "tool_name": call.name, "outcome": outcome.to_dict()},
-            correlation_id=call.call_id,
         )
         return outcome
 
@@ -312,8 +357,12 @@ class ToolExecutor:
         security_event_type="", effect_scope="workspace", artifact_content=None,
         policy_stop=False,
     ):
-        run_id = self.agent.current_task_state.run_id if self.agent.current_task_state else "manual"
-        descriptor = self.agent.artifact_store.write_tool_output(
+        run_id = (
+            self.agent.run.task_state.run_id
+            if self.agent.run.task_state
+            else "manual"
+        )
+        descriptor = self.agent.services.artifacts.write_tool_output(
             run_id,
             call.call_id,
             call.name,
@@ -361,7 +410,7 @@ class ToolExecutor:
             attempts=attempts,
             affected_paths=tuple(affected_paths),
             diff_summary=tuple(diff_summary),
-            workspace_fingerprint=self.agent.workspace.fingerprint(),
+            workspace_fingerprint=self.agent.workspace.context.fingerprint(),
             duration_ms=duration_ms,
             artifact_id=descriptor["artifact_id"],
             artifact=descriptor,

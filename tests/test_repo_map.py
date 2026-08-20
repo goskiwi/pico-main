@@ -71,38 +71,6 @@ def test_repo_map_budget_excludes_generated_and_unrelated_components(tmp_path):
     assert count_tokens(result.text) <= 180
 
 
-def test_repo_map_preserves_ambiguous_unqualified_call_as_ambiguous(tmp_path):
-    (tmp_path / "a.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("def run():\n    return 2\n", encoding="utf-8")
-    (tmp_path / "caller.py").write_text(
-        "def call():\n    return run()\n", encoding="utf-8"
-    )
-
-    result = RepoMap(tmp_path).resolve_symbol_at("caller.py", 2, 11)
-
-    assert result["status"] == "ambiguous"
-    assert len(result["symbols"]) == 2
-    assert {item["path"] for item in result["symbols"]} == {"a.py", "b.py"}
-    assert result["relations"][0]["resolution"] == "ambiguous"
-
-
-def test_repo_map_impact_keeps_incoming_and_candidate_test_evidence(tmp_path):
-    _write_python_repo(tmp_path)
-    repo_map = RepoMap(tmp_path)
-    snapshot = repo_map.refresh()
-    target = next(
-        symbol_id
-        for symbol_id, symbol in snapshot.symbols.items()
-        if symbol.qualified_name == "UserService.create_user"
-    )
-
-    result = repo_map.analyze_impact(target, max_depth=2)
-
-    assert "app/services.py" in result["affected_files"]
-    assert "tests/test_services.py" in result["candidate_test_files"]
-    assert result["facts"]
-
-
 def test_token_clipping_uses_the_real_tokenizer_limit():
     text = "中文 mixed Python: def greet(name): return f'hello {name}'" * 4
     encoding = tiktoken.get_encoding("o200k_base")

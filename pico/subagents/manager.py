@@ -3,24 +3,21 @@
 from __future__ import annotations
 
 import atexit
-import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from ..execution import ExecutionContext
 from ..persistence import atomic_write_json
 from ..run_store import RunStore
 from ..session_store import SessionStore
-from ..verification import verify_workspace
 from ..workspace import WorkspaceContext, clip
 from .contracts import SubtaskRecord, SubtaskSpec
 from .dag import implementation_order, ready_task_ids, validate_graph
+from .integration import PatchIntegrator
 from .worktree import (
     GitWorktree,
     GitWorktreeError,
-    apply_patch,
     current_head,
     require_clean_repository,
 )
@@ -45,17 +42,26 @@ class SubagentManager:
         self._records_by_run: dict[str, dict[str, SubtaskRecord]] = {}
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
         self._lock = threading.RLock()
+        self.integration = PatchIntegrator(
+            parent=self.parent,
+            parent_run_id=self._parent_run_id,
+            records=self._records,
+            outcome_status=self._outcome_status,
+            child_projection=self._child_projection,
+            release_worktree=self._release_worktree,
+            save_records=self._save,
+        )
         atexit.register(self.cleanup)
 
     def _parent_run_id(self):
-        state = self.parent.current_task_state
+        state = self.parent.run.task_state
         return str(state.run_id if state is not None else "manual")
 
     def _run_root(self, run_id):
-        return self.parent.run_store.run_dir(run_id) / "subagents"
+        return self.parent.services.run_store.run_dir(run_id) / "subagents"
 
     def _state_path(self, run_id):
-        return self.parent.run_store.run_dir(run_id) / "subtasks.json"
+        return self.parent.services.run_store.run_dir(run_id) / "subtasks.json"
 
     def _records(self, run_id):
         if run_id in self._records_by_run:
@@ -64,7 +70,7 @@ class SubagentManager:
         records = {}
         if path.is_file():
             value = json.loads(path.read_text(encoding="utf-8"))
-            if value.get("schema_version") != "pico-subtasks-v2":
+            if value.get("schema_version") != "pico-subtasks-v3":
                 raise ValueError("unsupported subtask state schema")
             records = {
                 task_id: SubtaskRecord.model_validate(record)
@@ -77,7 +83,7 @@ class SubagentManager:
         atomic_write_json(
             self._state_path(run_id),
             {
-                "schema_version": "pico-subtasks-v2",
+                "schema_version": "pico-subtasks-v3",
                 "parent_run_id": run_id,
                 "tasks": {
                     task_id: record.model_dump(mode="json")
@@ -95,7 +101,7 @@ class SubagentManager:
             if existing is None:
                 records[spec.task_id] = SubtaskRecord(spec=spec)
             elif self._outcome_status(run_id, existing) == "completed":
-                self._verify_record_receipt(run_id, existing)
+                self.integration.verify_record_receipt(run_id, existing)
                 reused.add(spec.task_id)
 
         implementations = [
@@ -115,11 +121,11 @@ class SubagentManager:
 
     def _delegation_base_sha(self, requires_clean):
         if requires_clean:
-            return require_clean_repository(self.parent.root)
+            return require_clean_repository(self.parent.workspace.root)
         try:
-            return current_head(self.parent.root)
+            return current_head(self.parent.workspace.root)
         except GitWorktreeError:
-            return self.parent.content_workspace_fingerprint()
+            return self.parent.workspace.context.fingerprint()
 
     def _ready_tasks(self, run_id, records, target_ids):
         completed_ids = {
@@ -211,7 +217,7 @@ class SubagentManager:
         if key in self._worktrees:
             return self._worktrees[key]
         handle = GitWorktree(
-            self.parent.root,
+            self.parent.workspace.root,
             record.base_sha,
             record.spec.task_id,
         )
@@ -238,6 +244,9 @@ class SubagentManager:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def _release_worktree(self, run_id, task_id):
+        return self._worktrees.pop((run_id, task_id), None)
+
     def _child_run_store(self, run_id, record):
         return RunStore(self._task_root(run_id, record.spec.task_id) / "runs")
 
@@ -246,10 +255,10 @@ class SubagentManager:
             raise ValueError(f"subtask has no child run receipt: {record.spec.task_id}")
         run_store = self._child_run_store(run_id, record)
         child_run_id = record.child_run_ids[-1]
-        if not run_store.verify_event_cursor(
-            child_run_id, record.event_cursor, record.event_hash
+        if not run_store.verify_cursor(
+            child_run_id, record.journal_sequence, record.journal_entry_id
         ):
-            raise ValueError(f"subtask event receipt is invalid: {record.spec.task_id}")
+            raise ValueError(f"subtask Journal receipt is invalid: {record.spec.task_id}")
         return run_store.replay(child_run_id)
 
     def _outcome_status(self, run_id, record):
@@ -282,69 +291,77 @@ class SubagentManager:
             "changed_paths": list(record.changed_paths),
             "patch_path": record.patch_path,
             "patch_sha256": record.patch_sha256,
-            "event_cursor": record.event_cursor,
-            "event_hash": record.event_hash,
+            "journal_sequence": record.journal_sequence,
+            "journal_entry_id": record.journal_entry_id,
             "error": error,
             "continuation_count": record.continuation_count,
             "integrated": record.integrated,
         }
 
     def _build_child(self, run_id, record):
-        from ..runtime import Pico
+        from ..runtime import Pico, PicoConfig
 
         task_root = self._task_root(run_id, record.spec.task_id)
         workspace_root = (
             self._worktrees[(run_id, record.spec.task_id)].path
             if record.spec.kind == "implement"
-            else self.parent.root
+            else self.parent.workspace.root
         )
         workspace = WorkspaceContext.build(workspace_root)
         session_store = SessionStore(task_root / "sessions")
-        kwargs = {
-            "model_client": self.model_client_factory(record.spec),
-            "workspace": workspace,
-            "session_store": session_store,
-            "run_store": RunStore(task_root / "runs"),
-            "approval_policy": "auto",
-            "max_steps": record.spec.max_steps,
-            "max_new_tokens": self.parent.max_new_tokens,
-            "read_only": record.spec.kind == "explore",
-            "shell_env_allowlist": self.parent.shell_env_allowlist,
-            "secret_env_names": self.parent.secret_env_names,
-            "feature_flags": {
-                "memory": True,
-                "relevant_memory": False,
+        config = PicoConfig(
+            approval_policy="auto",
+            max_steps=record.spec.max_steps,
+            max_new_tokens=self.parent.config.max_new_tokens,
+            read_only=record.spec.kind == "explore",
+            shell_env_allowlist=self.parent.config.shell_env_allowlist,
+            secret_env_names=self.parent.config.secret_env_names,
+            feature_flags={
+                "working_memory": True,
+                "project_memory": False,
                 "context_reduction": self.parent.feature_enabled(
                     "context_reduction"
                 ),
                 "prompt_cache": self.parent.feature_enabled("prompt_cache"),
             },
-            "allowed_tools": (
+            allowed_tools=(
                 EXPLORE_TOOLS
                 if record.spec.kind == "explore"
                 else IMPLEMENT_TOOLS
             ),
-            "allowed_write_paths": record.spec.allowed_write_paths,
-            "run_timeout_seconds": self.parent.run_timeout_seconds,
-            "provider_context_limit_tokens": self.parent.provider_context_limit_tokens,
-            "sandbox": self.parent.sandbox_factory(workspace_root),
-            "verification_command": (
+            allowed_write_paths=record.spec.allowed_write_paths,
+            run_timeout_seconds=self.parent.config.run_timeout_seconds,
+            provider_context_limit_tokens=(
+                self.parent.config.provider_context_limit_tokens
+            ),
+            compaction_reserve_tokens=(
+                self.parent.config.compaction_reserve_tokens
+            ),
+            compaction_keep_recent_tokens=(
+                self.parent.config.compaction_keep_recent_tokens
+            ),
+            verification_command=(
                 ""
                 if record.spec.kind == "explore"
-                else self.parent.verification_command
+                else self.parent.config.verification_command
             ),
+        )
+        kwargs = {
+            "model_client": self.model_client_factory(record.spec),
+            "workspace": workspace,
+            "session_store": session_store,
+            "run_store": RunStore(task_root / "runs"),
+            "config": config,
+            "sandbox": self.parent.services.sandbox_factory(workspace_root),
             "project_memory_root": task_root / "memory",
             "parent_cancellation_token": (
-                self.parent.current_execution.token
-                if self.parent.current_execution is not None
+                self.parent.run.execution.token
+                if self.parent.run.execution is not None
                 else None
             ),
         }
         if record.child_session_id:
-            return Pico.from_session(
-                session_id=record.child_session_id,
-                **kwargs,
-            )
+            kwargs["session"] = session_store.load(record.child_session_id)
         return Pico(**kwargs)
 
     def _dependency_context(self, run_id, records, record):
@@ -363,40 +380,50 @@ class SubagentManager:
 
     def _run_record(self, run_id, records, record, *, continuation=""):
         child = self._build_child(run_id, record)
-        record.child_session_id = child.session["id"]
+        record.child_session_id = child.session.data["id"]
         prompt = str(continuation or record.spec.prompt).strip()
         if not continuation:
             prompt += self._dependency_context(run_id, records, record)
-        child.ask(prompt)
-        state = child.current_task_state
-        record.child_run_ids = (*record.child_run_ids, state.run_id)
-        cursor = child.run_store.event_cursor(state.run_id)
-        record.event_cursor = cursor.sequence
-        record.event_hash = cursor.event_hash
-        projection = child.run_store.replay(state.run_id)
-        if projection.status != "completed":
+        child_error = None
+        try:
+            child.ask(prompt)
+        except Exception as exc:  # noqa: BLE001 - preserve diff before classifying failure
+            child_error = exc
+        state = child.run.task_state
+        projection = None
+        if state is not None:
+            record.child_run_ids = (*record.child_run_ids, state.run_id)
+            cursor = child.services.run_store.cursor(state.run_id)
+            record.journal_sequence = cursor.sequence
+            record.journal_entry_id = cursor.entry_id
+            projection = child.services.run_store.replay(state.run_id)
+
+        if record.spec.kind == "implement":
+            handle = self._worktrees[(run_id, record.spec.task_id)]
+            changed_paths = handle.changed_paths()
+            record.changed_paths = changed_paths
+            unexpected = sorted(
+                set(changed_paths) - set(record.spec.allowed_write_paths)
+            )
+            if unexpected:
+                record.status = "failed"
+                record.error = (
+                    "write scope violation after execution: " + ", ".join(unexpected)
+                )
+                return record
+        if child_error is not None:
+            raise child_error
+        if projection is None or projection.status != "completed":
             record.status = "finished"
             record.error = ""
             return record
 
         if record.spec.kind == "implement":
             handle = self._worktrees[(run_id, record.spec.task_id)]
-            changed_paths = handle.changed_paths()
-            unexpected = sorted(
-                set(changed_paths) - set(record.spec.allowed_write_paths)
-            )
-            if unexpected:
-                record.status = "failed"
-                record.changed_paths = changed_paths
-                record.error = (
-                    "write scope violation after execution: " + ", ".join(unexpected)
-                )
-                return record
             patch_path = self._task_root(run_id, record.spec.task_id) / (
                 f"patch-{record.continuation_count:03d}.diff"
             )
             digest = handle.write_patch(patch_path)
-            record.changed_paths = changed_paths
             record.patch_path = str(patch_path.resolve())
             record.patch_sha256 = digest
         record.status = "finished"
@@ -429,107 +456,6 @@ class SubagentManager:
             )
         self._save(run_id, records)
         return self._receipt(run_id, records[task_id])
-
-    def _verify_record_receipt(self, run_id, record):
-        projection = self._child_projection(run_id, record)
-        if projection.status != "completed":
-            raise ValueError(f"subtask child run did not complete: {record.spec.task_id}")
-        if record.spec.kind == "implement":
-            path = Path(record.patch_path)
-            if not path.is_file():
-                raise ValueError(f"subtask patch is missing: {record.spec.task_id}")
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != record.patch_sha256:
-                raise ValueError(f"subtask patch digest is invalid: {record.spec.task_id}")
-        return projection
-
-    def _verify_integration(self, worktree):
-        command = str(self.parent.verification_command or "").strip()
-        if not command:
-            raise ValueError("patch integration requires a verification command")
-        execution = ExecutionContext.standalone(
-            owner="subtask_integration_verifier",
-            max_seconds=min(120, self.parent.run_timeout_seconds),
-        )
-        verification = verify_workspace(
-            root=worktree.path,
-            command=command,
-            sandbox=self.parent.sandbox_factory(worktree.path),
-            timeout_seconds=self.parent.run_timeout_seconds,
-            redact_text=self.parent.redact_text,
-            fingerprint_provider=lambda: hashlib.sha256(
-                worktree.patch()
-            ).hexdigest(),
-            execution_context=execution,
-        )
-        if not verification or verification["status"] != "passed":
-            detail = str((verification or {}).get("output", ""))
-            raise RuntimeError(
-                "integrated subtask verification failed"
-                + (f": {clip(detail, 2000)}" if detail else "")
-            )
-        return verification
-
-    def apply_task_patches(self, task_ids):
-        run_id = self._parent_run_id()
-        records = self._records(run_id)
-        for task_id in task_ids:
-            if task_id not in records:
-                raise ValueError(f"unknown subtask: {task_id}")
-            if records[task_id].spec.kind != "implement":
-                raise ValueError(f"subtask is not an implementation: {task_id}")
-        order = implementation_order(records, tuple(task_ids))
-        selected = [records[task_id] for task_id in order]
-        if any(
-            self._outcome_status(run_id, record) != "completed"
-            for record in selected
-        ):
-            raise ValueError("all implementation subtasks must be completed")
-        if any(record.integrated for record in selected):
-            raise ValueError("implementation subtask was already integrated")
-        for record in selected:
-            self._verify_record_receipt(run_id, record)
-        base_shas = {record.base_sha for record in selected}
-        if len(base_shas) != 1:
-            raise ValueError("implementation patches do not share one base revision")
-        base_sha = next(iter(base_shas))
-        if require_clean_repository(self.parent.root) != base_sha:
-            raise ValueError("parent workspace changed after implementation delegation")
-
-        integration = GitWorktree(self.parent.root, base_sha, "integration")
-        try:
-            integration.create()
-            for record in selected:
-                if not record.patch_path:
-                    raise ValueError(
-                        f"implementation subtask has no patch: {record.spec.task_id}"
-                    )
-                integration.apply_patch(Path(record.patch_path).read_bytes())
-            verification = self._verify_integration(integration)
-            aggregate = integration.patch()
-            if not aggregate:
-                raise ValueError("integrated subtasks produced no aggregate patch")
-            if require_clean_repository(self.parent.root) != base_sha:
-                raise ValueError("parent workspace changed during patch verification")
-            apply_patch(self.parent.root, aggregate)
-        finally:
-            integration.cleanup()
-
-        for record in selected:
-            record.integrated = True
-            handle = self._worktrees.pop((run_id, record.spec.task_id), None)
-            if handle is not None:
-                handle.cleanup()
-        self._save(run_id, records)
-        return {
-            "status": "applied",
-            "task_ids": list(order),
-            "base_sha": base_sha,
-            "changed_paths": sorted(
-                {path for record in selected for path in record.changed_paths}
-            ),
-            "verification": verification,
-        }
 
     def completion_issue(self):
         run_id = self._parent_run_id()

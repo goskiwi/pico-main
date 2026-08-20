@@ -69,10 +69,10 @@ def parse_verification_output(command, output, exit_code):
 
 def changed_python_syntax_issues(agent):
     issues = []
-    for relative in agent.evidence_ledger.changed_paths:
+    for relative in agent.run.evidence.changed_paths:
         if not relative.endswith(".py"):
             continue
-        path = agent.path(relative)
+        path = agent.workspace.resolve_path(relative)
         if not path.exists():
             continue
         try:
@@ -99,6 +99,7 @@ def verify_workspace(
     timeout_seconds,
     redact_text,
     fingerprint_provider,
+    workspace_fingerprint,
     execution_context=None,
 ):
     command = str(command or "").strip()
@@ -106,7 +107,7 @@ def verify_workspace(
         return None
     started = time.monotonic()
     root = Path(root).resolve()
-    before = fingerprint_provider()
+    before = str(workspace_fingerprint)
     record = {
         "verification_id": "verify_" + uuid.uuid4().hex[:12],
         "command": command,
@@ -152,18 +153,19 @@ def verify_workspace(
     return record
 
 
-def run_verification(agent):
+def run_verification(agent, workspace_fingerprint):
     execution_context = (
-        agent.current_execution.child(owner="runtime_verifier")
-        if agent.current_execution
+        agent.run.execution.child(owner="runtime_verifier")
+        if agent.run.execution
         else None
     )
     return verify_workspace(
-        root=agent.root,
-        command=agent.verification_command,
-        sandbox=agent.sandbox,
-        timeout_seconds=agent.run_timeout_seconds,
+        root=agent.workspace.root,
+        command=agent.config.verification_command,
+        sandbox=agent.services.sandbox,
+        timeout_seconds=agent.config.run_timeout_seconds,
         redact_text=agent.redact_text,
-        fingerprint_provider=agent.content_workspace_fingerprint,
+        fingerprint_provider=lambda: agent.workspace.content_fingerprint(force=True),
+        workspace_fingerprint=workspace_fingerprint,
         execution_context=execution_context,
     )

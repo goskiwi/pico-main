@@ -6,41 +6,8 @@ from pathlib import Path
 
 from .persistence import atomic_write_json
 
-SESSION_SCHEMA_VERSION = "session-v7"
+SESSION_SCHEMA_VERSION = "session-v9"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
-RUN_SUMMARY_FIELDS = {
-    "role",
-    "run_id",
-    "request",
-    "content",
-    "changed_paths",
-    "verification_status",
-    "stop_reason",
-    "created_at",
-}
-
-
-def _validate_history(history):
-    if not isinstance(history, list):
-        raise TypeError("session history must be a list")
-    for item in history:
-        if not isinstance(item, dict):
-            raise TypeError("session history entries must be objects")
-        role = item.get("role")
-        if role != "run_summary" or set(item) != RUN_SUMMARY_FIELDS:
-            raise ValueError("unsupported session history entry")
-        if not all(
-            isinstance(item.get(field), str)
-            for field in RUN_SUMMARY_FIELDS - {"changed_paths"}
-        ):
-            raise TypeError("session history text fields must be strings")
-        if (
-            not isinstance(item["changed_paths"], list)
-            or any(not isinstance(path, str) for path in item["changed_paths"])
-        ):
-            raise TypeError("run summary changed_paths must be strings")
-
-
 class SessionStore:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -61,10 +28,18 @@ class SessionStore:
             raise TypeError("session must be an object")
         if session.get("schema_version") != SESSION_SCHEMA_VERSION:
             raise ValueError("unsupported session schema")
-        required = {"id", "created_at", "workspace_root", "history", "memory"}
-        if not required.issubset(session):
-            raise ValueError("session is missing required fields")
-        _validate_history(session["history"])
+        required = {
+            "schema_version",
+            "id",
+            "created_at",
+            "workspace_root",
+            "active_run_id",
+            "memory",
+        }
+        if set(session) != required:
+            raise ValueError("invalid session fields")
+        if not isinstance(session["active_run_id"], str):
+            raise TypeError("session active_run_id must be a string")
         if not isinstance(session["memory"], dict):
             raise TypeError("invalid session state")
 

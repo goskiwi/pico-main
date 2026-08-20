@@ -1,6 +1,14 @@
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico.context_ledger import ContextLedger
-from pico.contracts import ToolCall, ToolOutcome
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
+from pico.contracts import ToolCall, ToolExecution, ToolOutcome
+from pico.run_journal import RunJournal
+from pico.task_state import TaskState
 
 
 def build_agent(tmp_path):
@@ -9,14 +17,16 @@ def build_agent(tmp_path):
         model_client=FakeModelClient([]),
         workspace=WorkspaceContext.build(tmp_path),
         session_store=SessionStore(tmp_path / ".pico" / "sessions"),
-        approval_policy="auto",
+        config=PicoConfig(approval_policy="auto"),
     )
 
 
 def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     agent = build_agent(tmp_path)
 
-    outcome = agent.run_tool(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_test"))
+    outcome = agent.tools.run(
+        ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_test")
+    )
 
     assert isinstance(outcome, ToolOutcome)
     assert outcome.status == "ok"
@@ -29,11 +39,13 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     ]
     artifact = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
     assert artifact.read_text(encoding="utf-8") == outcome.content
-    assert agent.artifact_store.verify("manual", outcome.artifact_id)["sha256"]
+    assert agent.services.artifacts.verify("manual", outcome.artifact_id)["sha256"]
 
 
 def test_rejected_call_never_enters_execution(tmp_path):
-    outcome = build_agent(tmp_path).run_tool(ToolCall("missing", {}, "call_missing"))
+    outcome = build_agent(tmp_path).tools.run(
+        ToolCall("missing", {}, "call_missing")
+    )
 
     assert outcome.status == "rejected"
     assert outcome.execution_state == "not_started"
@@ -45,12 +57,12 @@ def test_rejected_call_never_enters_execution(tmp_path):
 
 def test_artifact_integrity_verification_detects_tampering(tmp_path):
     agent = build_agent(tmp_path)
-    outcome = agent.run_tool(ToolCall("list_files", {}, "call_artifact"))
+    outcome = agent.tools.run(ToolCall("list_files", {}, "call_artifact"))
     path = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
     path.write_text("tampered", encoding="utf-8")
 
     try:
-        agent.artifact_store.verify("manual", outcome.artifact_id)
+        agent.services.artifacts.verify("manual", outcome.artifact_id)
     except ValueError as exc:
         assert "digest mismatch" in str(exc)
     else:
@@ -65,7 +77,7 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     )
     agent = build_agent(tmp_path)
 
-    outcome = agent.run_tool(
+    outcome = agent.tools.run(
         ToolCall("read_file", {"path": "large.txt", "start": 1, "end": 20}, "call_large")
     )
 
@@ -79,15 +91,17 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     assert "read_artifact" in outcome.content
     assert outcome.artifact_id in outcome.content
     assert "full-artifact-tail" in artifact.read_text(encoding="utf-8")
-    assert agent.artifact_store.verify("manual", outcome.artifact_id)["size_bytes"] > 16000
+    assert agent.services.artifacts.verify("manual", outcome.artifact_id)["size_bytes"] > 16000
 
 
 def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     agent = build_agent(tmp_path)
     output = "head-marker\n" + "noise\n" * 5000 + "tail-marker\n"
-    agent.all_tools["run_shell"]["run"] = lambda _args: "exit_code: 0\n" + output
+    agent.tools.registry["run_shell"]["run"] = (
+        lambda _args: ToolExecution("exit_code: 0\n" + output)
+    )
 
-    outcome = agent.run_tool(
+    outcome = agent.tools.run(
         ToolCall("run_shell", {"command": "true", "timeout": 20}, "call_shell_large")
     )
 
@@ -100,9 +114,27 @@ def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     )
     assert "head-marker" in artifact.read_text(encoding="utf-8")
 
+
+def test_tool_runner_rejects_legacy_string_result(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.tools.registry["list_files"]["run"] = lambda _args: "legacy result"
+
+    outcome = agent.tools.run(ToolCall("list_files", {}, "call_legacy_runner"))
+
+    assert outcome.status == "error"
+    assert outcome.failure.detail == "tool runner must return ToolExecution"
+
+
 def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
     agent = build_agent(tmp_path)
-    ledger = ContextLedger("run_memory", agent.run_store)
+    state = TaskState.create("task_memory", "Remember", run_id="run_memory")
+    agent.run.task_state = state
+    ledger = RunJournal(
+        state.run_id,
+        state.task_id,
+        agent.session.data["id"],
+        agent.services.run_store,
+    )
     ledger.append_user("Remember the release command")
     call = ToolCall(
         "memory_store",
@@ -120,25 +152,27 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         "call_memory",
     )
     source = ledger.append_tool_call(call)
-    agent.context_ledger = ledger
-    agent.evidence_ledger.apply_event(
-        {
-            "event_type": "verification_finished",
-            "payload": {"verification_id": "verify_current", "freshness": "current"},
-        }
+    agent.run.journal = ledger
+    verification = ledger.append(
+        "verification_result",
+        {"verification_id": "verify_current", "freshness": "current"},
     )
+    agent.run.evidence.apply_entry(verification)
 
-    outcome = agent.run_tool(call)
+    outcome = agent.tools.run(call)
 
-    card = agent.project_memory.recall("project_release_command.md")
+    card = agent.services.project_memory.recall("project_release_command.md")
     assert outcome.status == "ok"
     assert outcome.side_effect_state == "changed"
     assert outcome.metadata["effect_scope"] == "project_memory"
     assert outcome.workspace_changed is False
     assert ".pico/memory/cards/project_release_command.md" in outcome.affected_paths
-    assert agent.evidence_ledger.changed_paths == []
-    assert ".pico/memory/cards/project_release_command.md" in agent.evidence_ledger.control_changed_paths
-    assert agent.evidence_ledger.verifications[0]["freshness"] == "current"
+    assert agent.run.evidence.changed_paths == []
+    assert (
+        ".pico/memory/cards/project_release_command.md"
+        in agent.run.evidence.control_changed_paths
+    )
+    assert agent.run.evidence.verifications[0]["freshness"] == "current"
     assert card.source_entry_ids == (source.entry_id,)
     assert card.source_tool_call_id == call.call_id
 
@@ -147,10 +181,10 @@ def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
     agent = build_agent(tmp_path)
     args = {"path": "README.md", "start": 1, "end": 1}
 
-    first = agent.run_tool(ToolCall("read_file", args, "call_read_1"))
-    repeated = agent.run_tool(ToolCall("read_file", args, "call_read_2"))
+    first = agent.tools.run(ToolCall("read_file", args, "call_read_1"))
+    repeated = agent.tools.run(ToolCall("read_file", args, "call_read_2"))
     (tmp_path / "README.md").write_text("changed\n", encoding="utf-8")
-    after_change = agent.run_tool(ToolCall("read_file", args, "call_read_3"))
+    after_change = agent.tools.run(ToolCall("read_file", args, "call_read_3"))
 
     assert first.status == "ok"
     assert repeated.status == "rejected"
@@ -167,12 +201,12 @@ def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
         executions.append(1)
         raise RuntimeError("transient executor failure")
 
-    agent.all_tools["run_shell"]["run"] = fail
+    agent.tools.registry["run_shell"]["run"] = fail
     args = {"command": "true", "timeout": 20}
 
-    first = agent.run_tool(ToolCall("run_shell", args, "call_shell_1"))
-    second = agent.run_tool(ToolCall("run_shell", args, "call_shell_2"))
-    third = agent.run_tool(ToolCall("run_shell", args, "call_shell_3"))
+    first = agent.tools.run(ToolCall("run_shell", args, "call_shell_1"))
+    second = agent.tools.run(ToolCall("run_shell", args, "call_shell_2"))
+    third = agent.tools.run(ToolCall("run_shell", args, "call_shell_3"))
 
     assert first.status == "error"
     assert first.recovery.action == "retry"
@@ -182,35 +216,67 @@ def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
     assert len(executions) == 2
 
 
-def test_read_only_tools_reuse_workspace_snapshot(tmp_path, monkeypatch):
+def test_read_only_tools_do_not_scan_workspace(tmp_path, monkeypatch):
     agent = build_agent(tmp_path)
     scans = 0
-    original = agent._scan_workspace_snapshot
+    original = agent.workspace._scan_snapshot
 
     def counted():
         nonlocal scans
         scans += 1
         return original()
 
-    monkeypatch.setattr(agent, "_scan_workspace_snapshot", counted)
-    agent.run_tool(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "read_1"))
-    agent.run_tool(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 2}, "read_2"))
+    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
+    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "read_1"))
+    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 2}, "read_2"))
 
-    assert scans == 1
+    assert scans == 0
 
 
-def test_workspace_mutation_reconciles_snapshot_once(tmp_path, monkeypatch):
-    agent = build_agent(tmp_path)
+def test_read_only_agent_turn_and_journal_do_not_scan_workspace(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = Pico(
+        model_client=FakeModelClient(
+            [
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "README.md", "start": 1, "end": 1},
+                ),
+                ModelAction.final("Done."),
+            ]
+        ),
+        workspace=WorkspaceContext.build(tmp_path),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(approval_policy="auto", verification_command=""),
+    )
     scans = 0
-    original = agent._scan_workspace_snapshot
+    original = agent.workspace._scan_snapshot
 
     def counted():
         nonlocal scans
         scans += 1
         return original()
 
-    monkeypatch.setattr(agent, "_scan_workspace_snapshot", counted)
-    agent.run_tool(
+    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
+
+    assert agent.ask("Read README.md") == "Done."
+    assert scans == 0
+
+
+def test_workspace_mutation_records_exact_path_without_scanning(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    scans = 0
+    original = agent.workspace._scan_snapshot
+
+    def counted():
+        nonlocal scans
+        scans += 1
+        return original()
+
+    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
+    outcome = agent.tools.run(
         ToolCall(
             "write_file",
             {"path": "created.txt", "content": "created\n", "expected_revision": "absent"},
@@ -218,8 +284,10 @@ def test_workspace_mutation_reconciles_snapshot_once(tmp_path, monkeypatch):
         )
     )
 
-    assert scans == 2
-    assert "created.txt" in agent.capture_workspace_snapshot()
+    assert scans == 0
+    assert outcome.affected_paths == ("created.txt",)
+    assert outcome.diff_summary == ("created:created.txt",)
+    assert agent.workspace.revision == 1
 
 
 def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
@@ -231,15 +299,15 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
         (tmp_path / args["path"]).write_text(args["content"], encoding="utf-8")
         raise RuntimeError("failed after write")
 
-    agent.all_tools["write_file"]["run"] = write_then_fail
+    agent.tools.registry["write_file"]["run"] = write_then_fail
     args = {
         "path": "partial.txt",
         "content": "partial\n",
         "expected_revision": "absent",
     }
 
-    first = agent.run_tool(ToolCall("write_file", args, "call_write_1"))
-    repeated = agent.run_tool(ToolCall("write_file", args, "call_write_2"))
+    first = agent.tools.run(ToolCall("write_file", args, "call_write_1"))
+    repeated = agent.tools.run(ToolCall("write_file", args, "call_write_2"))
 
     assert first.status == "partial_success"
     assert first.side_effect_state == "partial"

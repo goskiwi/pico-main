@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..contracts import ModelAction
-from ..runtime import Pico
+from ..runtime import Pico, PicoConfig
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext
 from .provenance import evaluation_snapshot_id, runtime_snapshot_id
@@ -149,21 +149,23 @@ class BenchmarkEvaluator:
             # discovery cannot redirect tool mutations to the outer checkout.
             workspace=WorkspaceContext.build(fixture, repo_root_override=fixture),
             session_store=SessionStore(fixture / ".pico" / "sessions"),
-            approval_policy="auto",
-            max_steps=int(task["step_budget"]),
-            max_new_tokens=128,
-            allowed_tools=task["allowed_tools"],
-            verification_command="",
+            config=PicoConfig(
+                approval_policy="auto",
+                max_steps=int(task["step_budget"]),
+                max_new_tokens=128,
+                allowed_tools=task["allowed_tools"],
+                verification_command="",
+            ),
         )
         answer = agent.ask(task["prompt"])
         argv = shlex.split(task["verifier"])
         verified = subprocess.run(
             argv, cwd=fixture, capture_output=True, text=True, timeout=20, check=False
         ).returncode == 0
-        state = agent.current_task_state
+        state = agent.run.task_state
         within_budget = state.tool_steps <= int(task["step_budget"])
         passed = state.status == "completed" and within_budget and verified
-        run_dir = agent.run_store.run_dir(state.run_id)
+        run_dir = agent.services.run_store.run_dir(state.run_id)
         return {
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,

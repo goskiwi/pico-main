@@ -5,32 +5,21 @@ import pytest
 from pico.session_store import SESSION_SCHEMA_VERSION, SessionStore
 
 
-def session(session_id, content):
+def session(session_id, active_run_id=""):
     return {
         "schema_version": SESSION_SCHEMA_VERSION,
         "id": session_id,
         "created_at": "2026-04-07T10:00:00+00:00",
         "workspace_root": "/workspace",
-        "history": [
-            {
-                "role": "run_summary",
-                "run_id": "run_test",
-                "request": "test request",
-                "content": content,
-                "changed_paths": [],
-                "verification_status": "not_run",
-                "stop_reason": "final_answer_returned",
-                "created_at": "2026-01-01T00:00:00+00:00",
-            }
-        ],
+        "active_run_id": active_run_id,
         "memory": {},
     }
 
 
 def test_session_store_saves_loads_and_finds_latest_session(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    first = session("session_001", "first")
-    second = session("session_002", "second")
+    first = session("session_001", "run_first")
+    second = session("session_002", "run_second")
 
     first_path = store.save(first)
     second_path = store.save(second)

@@ -13,7 +13,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pico import OpenAICompatibleModelClient, Pico, SessionStore, WorkspaceContext
+from pico import (
+    OpenAICompatibleModelClient,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 from pico.config import load_project_env, provider_env
 from pico.evaluation.provenance import runtime_snapshot_id
 from pico.sandbox import (
@@ -164,20 +170,19 @@ def require_clean_runtime(metadata):
         )
 
 
-def provider_continuation_check(events):
-    prompt_events = [
-        event for event in events if event.get("event_type") == "prompt_built"
+def provider_continuation_check(entries):
+    turns = [
+        entry for entry in entries if entry.kind == "turn_metrics"
     ]
     reused_turns = sum(
-        bool(event.get("payload", {}).get("prompt_metadata", {}).get("prompt_reused"))
-        for event in prompt_events
+        bool(entry.payload.get("prompt_reused")) for entry in turns
     )
     reset_count = sum(
-        event.get("event_type") == "provider_session_reset" for event in events
+        entry.kind == "provider_session_reset" for entry in entries
     )
     return {
-        "ok": len(prompt_events) >= 2 and reused_turns >= 1,
-        "prompt_builds": len(prompt_events),
+        "ok": len(turns) >= 2 and reused_turns >= 1,
+        "prompt_builds": len(turns),
         "reused_turns": reused_turns,
         "provider_session_resets": reset_count,
     }
@@ -194,7 +199,7 @@ def write_report(path, artifact):
         f"- Runtime status: `{result['status']}`",
         f"- Hidden verifier: `{'pass' if checks['hidden_verifier']['ok'] else 'fail'}`",
         f"- Mutation scope: `{'pass' if checks['mutation_scope']['ok'] else 'fail'}`",
-        f"- Event chain: `{'pass' if checks['event_chain']['ok'] else 'fail'}`",
+        f"- Run Journal: `{'pass' if checks['run_journal']['ok'] else 'fail'}`",
         f"- Provider continuation: `{'pass' if checks['provider_continuation']['ok'] else 'fail'}`",
         f"- Changed files: {', '.join(result['changed_files']) or 'none'}", "",
         "This is one end-to-end validation run, not a general success-rate claim.", "",
@@ -244,13 +249,15 @@ def run_validation(args):
         client,
         WorkspaceContext.build(workspace, repo_root_override=workspace),
         SessionStore(workspace / ".pico" / "sessions"),
-        approval_policy="auto",
-        max_steps=int(args.max_steps or task["tool_budget"]),
-        max_new_tokens=args.max_new_tokens,
-        run_timeout_seconds=360,
-        allowed_tools=ALLOWED_TOOLS,
-        sandbox_image=args.sandbox_image,
-        verification_command="",
+        config=PicoConfig(
+            approval_policy="auto",
+            max_steps=int(args.max_steps or task["tool_budget"]),
+            max_new_tokens=args.max_new_tokens,
+            run_timeout_seconds=360,
+            allowed_tools=ALLOWED_TOOLS,
+            sandbox_image=args.sandbox_image,
+            verification_command="",
+        ),
     )
     started = time.monotonic()
     answer = agent.ask(task["prompt"])
@@ -276,17 +283,17 @@ def run_validation(args):
     }
     verifier = run_verifier(workspace, task, args.sandbox_image)
     try:
-        events = agent.run_store.read_events(agent.current_task_state.run_id)
-        event_chain = {"ok": True, "event_count": len(events), "errors": []}
+        entries = agent.services.run_store.read_entries(agent.run.task_state.run_id)
+        run_journal = {"ok": True, "entry_count": len(entries), "errors": []}
     except Exception as exc:  # noqa: BLE001 - audit failures are evidence
-        event_chain = {"ok": False, "event_count": 0, "errors": [str(exc)]}
-        events = []
-    provider_continuation = provider_continuation_check(events)
+        run_journal = {"ok": False, "entry_count": 0, "errors": [str(exc)]}
+        entries = []
+    provider_continuation = provider_continuation_check(entries)
     passed = (
-        agent.current_task_state.status == "completed"
+        agent.run.task_state.status == "completed"
         and mutation_scope["ok"]
         and verifier["ok"]
-        and event_chain["ok"]
+        and run_journal["ok"]
         and provider_continuation["ok"]
     )
     artifact = {
@@ -304,17 +311,17 @@ def run_validation(args):
         "provenance": provenance,
         "result": {
             "passed": passed,
-            "status": agent.current_task_state.status,
-            "stop_reason": agent.current_task_state.stop_reason,
-            "tool_steps": agent.current_task_state.tool_steps,
+            "status": agent.run.task_state.status,
+            "stop_reason": agent.run.task_state.stop_reason,
+            "tool_steps": agent.run.task_state.tool_steps,
             "duration_ms": duration_ms,
             "changed_files": changed,
             "final_answer": answer,
-            "run_id": agent.current_task_state.run_id,
+            "run_id": agent.run.task_state.run_id,
             "checks": {
                 "hidden_verifier": verifier,
                 "mutation_scope": mutation_scope,
-                "event_chain": event_chain,
+                "run_journal": run_journal,
                 "provider_continuation": provider_continuation,
             },
         },

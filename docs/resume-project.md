@@ -2,57 +2,28 @@
 
 ## Agent Runtime
 
-设计并实现本地 Coding Agent Runtime，基于 OpenAI-compatible Responses 原生 function
-calling 统一模型决策、工具准入、执行结果回写、会话状态、Checkpoint 恢复和运行工件
-落盘；以 Context、Tool、Memory、State、Evidence、Policy、Event 组成完整控制面。
+设计并实现本地 Coding Agent Runtime，基于 OpenAI-compatible Responses 原生 function calling 统一模型决策、工具准入、执行结果回写、恢复、验证和持久化。
+
+## 单一 Run Journal
+
+将 User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 和终态写入同一 strict append-only Journal。Context、TaskState、Evidence、Report 与 CLI stats 均由 Journal 确定性投影，避免多份持久状态之间的同步和事务问题。
+
+## Crash Resume
+
+Session 只保存 `active_run_id`。副作用前 fsync `tool_started`，记录精确潜在影响路径及 before revision；完成后 fsync `tool_result`。恢复时分析 Journal tail，对未完成工具按路径 revision 生成 not-started、error、partial 或 unknown 结果，绝不盲目重放非幂等副作用。
 
 ## 长上下文治理
 
-构建 Task-local append-only Context Ledger、分层上下文组装和 Token 共享预算，对
-RepoMap、工作记忆、项目记忆、历史因果链和当前请求按优先级投影。上下文折叠以完整
-tool call/result 批次为边界，并通过 generation、active digest 与 Workspace 指纹做
-事务式提交，避免并发状态变化导致摘要覆盖新事实。
+以配置的模型 Context Window 组装 RepoMap、工作记忆、项目记忆、完整活动 Journal 和当前请求。只有总上下文越过保留输出空间后的阈值才触发 Compaction；它按 token 保留近期原文，以完整 Tool Call/Result 批次为边界，并保存包含目标与约束的结构化摘要和覆盖 Entry ID。原始 Journal Entry 不删除。
 
-## 结构化记忆与 RepoMap
+## 工具安全
 
-实现 Session Working Memory，将目标、最近文件和文件摘要绑定到精确内容 revision，
-文件漂移后自动失效；实现以 Markdown card 为唯一事实源的 Project Memory，支持
-provenance、版本、过期时间、显式记忆优先和受限文件选择。基于 tree-sitter 构建
-Python symbol/reference graph，以 lexical + personalized PageRank 生成 Token 有界的
-任务相关 RepoMap，减少盲目全仓读取。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；写入采用 revision-bound compare-and-swap 与 fsync/atomic replace。模型命令进入禁网、只读 Workspace 的 Docker Profile，并共享整轮 deadline/cancellation token。
 
-## Checkpoint / Crash Resume
+## 多 Agent
 
-设计 Checkpoint v8 与 hash-chained Runtime Event Log：恢复时严格校验
-Session/Checkpoint/Context schema、Runtime 配置、内容级 Workspace 指纹和 event
-cursor/digest；进程若中断在工具执行期间，依据事件 receipt 回填结果，没有 terminal
-receipt 时标记 unknown/partial，禁止盲目重放潜在副作用。
+Parent 基于显式依赖 DAG 调度 Child；Explore 只读，Implement 在独立 Git Worktree 中按精确路径授权。Child 具有独立 Session、Run Journal 与 Artifact namespace；Patch 在临时 Integration Worktree 验证后写回 Parent。
 
-## 工具安全与执行治理
+## 评测与审计
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；文件写入采用
-revision-bound compare-and-swap 与 fsync/atomic replace，防止并发覆盖。模型请求的命令
-强制进入禁网、只读 rootfs 与 Workspace、cap-drop 和资源限额的 Docker inspect/verify
-Profile，并共享整轮 deadline / cancellation token；统一识别重复调用、路径逃逸、敏感
-信息和部分成功。
-
-## 多 Agent 协作
-
-实现主 Agent 驱动的子任务拆分与协作机制，基于显式依赖 DAG 对探索和实现任务进行
-拓扑调度；每个 Child 使用独立 Model Client、Session、Context Ledger、Run State 与
-Artifact namespace，探索任务只读并行，实施任务在独立 Git Worktree 中执行。通过工具
-白名单、精确文件写入范围、执行后 Diff 复核、Child Event receipt 与 Patch digest 校验
-限制权限；多个 Patch 仅在临时 Integration Worktree 中按依赖顺序合并并通过 verifier 后
-才写回 Parent Workspace，避免并发覆盖、状态污染和越权修改。
-
-## 评测与审计闭环
-
-以 Evidence Ledger 记录观察、Workspace effect 和结构化 verifier 证据；核心循环不猜测
-任务是否“应当已经修改”，恢复建议由单一 RecoveryPolicy 生成，可选宿主策略通过三个受限
-hook 注入且不能改写 ToolOutcome 或绕过安全边界。Workspace 变更必须通过绑定当前内容
-指纹的 Runtime verifier，Completion Gate 阻止失败验证或未知副作用被报告为成功。通过
-事件 replay/stats、report 和 digest artifact 审计运行过程；大输出保留 12/16 KiB 模型
-预览，完整 artifact 可在当前 run 内按 8 KiB 字节页校验读取。
-
-简历中不要宣称 Skills/MCP、多 Provider、后台 Agent 消息队列、跨进程 Child 恢复或未经真实实验得到的 GAIA/HLE 指标；
-这些不在当前实现范围内。
+Journal `turn_metrics` 保留 Provider continuation、Token 和延迟证据；结构化 verifier 绑定完整 Workspace 内容指纹。Completion Gate 阻止失败验证或未知副作用被报告为成功。大输出保存为当前 Run 范围内的 Artifact。

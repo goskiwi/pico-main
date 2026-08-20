@@ -5,8 +5,6 @@ import re
 from pathlib import Path
 
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-WORKING_FILE_LIMIT = 8
-FILE_SUMMARY_LIMIT = 6
 REPO_MAP_MAX_FILES = 2000
 REPO_MAP_MAX_FILE_BYTES = 512_000
 REPO_MAP_SCAN_MAX_ENTRIES = 20_000

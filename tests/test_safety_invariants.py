@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.sandbox import (
     DockerSandbox,
     SandboxProfile,
@@ -24,25 +24,29 @@ class FakeSandbox:
 
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
+    sandbox = kwargs.pop("sandbox", None)
     return Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
-                SessionStore(tmp_path / ".pico/sessions"), approval_policy="auto",
-                verification_command="", **kwargs)
+                SessionStore(tmp_path / ".pico/sessions"),
+                config=PicoConfig(approval_policy="auto", verification_command=""),
+                sandbox=sandbox, **kwargs)
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.write_text("secret")
     agent = build_agent(tmp_path)
-    assert agent.run_tool("read_file", {"path": "../" + outside.name}).status == "rejected"
+    assert agent.tools.run("read_file", {"path": "../" + outside.name}).status == "rejected"
     (tmp_path / "link").symlink_to(outside)
-    assert agent.run_tool("read_file", {"path": "link"}).status == "rejected"
+    assert agent.tools.run("read_file", {"path": "link"}).status == "rejected"
 
 
 def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
     with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LANG": "C"}, clear=True):
-        outcome = agent.run_tool("run_shell", {"command": "python -c 'print(1)'", "timeout": 3})
+        outcome = agent.tools.run(
+            "run_shell", {"command": "python -c 'print(1)'", "timeout": 3}
+        )
     assert outcome.status == "ok"
     argv, options = sandbox.calls[0]
     assert argv == ("python", "-c", "print(1)")
@@ -60,8 +64,8 @@ def test_shell_parser_does_not_invoke_a_host_shell():
 def test_approval_denial_prevents_sandbox_start(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
-    agent.approval_policy = "never"
-    outcome = agent.run_tool("run_shell", {"command": "echo hi"})
+    agent.config = PicoConfig.build(agent.config, approval_policy="never")
+    outcome = agent.tools.run("run_shell", {"command": "echo hi"})
     assert outcome.status == "rejected"
     assert sandbox.calls == []
 

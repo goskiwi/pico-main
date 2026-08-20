@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 from pico.mutations import content_revision
 from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, SandboxResult
@@ -68,8 +75,10 @@ def build_parent(
         model_client=FakeModelClient(list(parent_outputs)),
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
-        approval_policy="auto",
-        verification_command=verification_command,
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command=verification_command,
+        ),
         sandbox_factory=sandbox_factory,
         subagent_model_client_factory=child_factory,
     )
@@ -150,7 +159,7 @@ def test_legacy_subtask_state_is_rejected_without_migration(tmp_path):
         root,
         lambda _spec: FakeModelClient([ModelAction.final("unused")]),
     )
-    state_path = parent.run_store.run_dir("manual") / "subtasks.json"
+    state_path = parent.services.run_store.run_dir("manual") / "subtasks.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
         json.dumps(
@@ -164,7 +173,7 @@ def test_legacy_subtask_state_is_rejected_without_migration(tmp_path):
     )
 
     with pytest.raises(ValueError, match="unsupported subtask state schema"):
-        parent.subagent_manager.delegate(
+        parent.services.subagents.delegate(
             (
                 SubtaskSpec(
                     task_id="explore-new",
@@ -195,7 +204,7 @@ def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):
         root,
         lambda spec: RecordingClient(spec.task_id, spec.task_id == "explore-bad"),
     )
-    result = parent.subagent_manager.delegate(
+    result = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="explore-bad",
@@ -241,7 +250,7 @@ def test_dag_rejects_cycles_unknown_dependencies_and_unordered_write_overlap(
     )
 
     with pytest.raises(ValueError, match="cycle"):
-        parent.subagent_manager.delegate(
+        parent.services.subagents.delegate(
             (
                 SubtaskSpec(
                     task_id="explore-a",
@@ -259,7 +268,7 @@ def test_dag_rejects_cycles_unknown_dependencies_and_unordered_write_overlap(
         )
 
     with pytest.raises(ValueError, match="unknown dependencies"):
-        parent.subagent_manager.delegate(
+        parent.services.subagents.delegate(
             (
                 SubtaskSpec(
                     task_id="explore-c",
@@ -271,7 +280,7 @@ def test_dag_rejects_cycles_unknown_dependencies_and_unordered_write_overlap(
         )
 
     with pytest.raises(ValueError, match="overlapping write paths"):
-        parent.subagent_manager.delegate(
+        parent.services.subagents.delegate(
             (
                 SubtaskSpec(
                     task_id="implement-a",
@@ -309,7 +318,7 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
         )
 
     parent = build_parent(root, child_factory)
-    result = parent.subagent_manager.delegate(
+    result = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-auth",
@@ -330,7 +339,7 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
     assert not (root / "auth.py").exists()
     assert not (root / "cache.py").exists()
     worktrees = [
-        parent.subagent_manager._worktrees[("manual", task_id)].path
+        parent.services.subagents._worktrees[("manual", task_id)].path
         for task_id in ("implement-auth", "implement-cache")
     ]
     assert worktrees[0] != worktrees[1]
@@ -339,7 +348,7 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
     assert (worktrees[1] / "cache.py").exists()
     assert not (worktrees[1] / "auth.py").exists()
 
-    applied = parent.subagent_manager.apply_task_patches(
+    applied = parent.services.subagents.integration.apply(
         ("implement-auth", "implement-cache")
     )
 
@@ -371,7 +380,7 @@ def test_write_scope_is_enforced_before_execution(tmp_path):
         )
 
     parent = build_parent(root, child_factory)
-    result = parent.subagent_manager.delegate(
+    result = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-safe",
@@ -385,16 +394,21 @@ def test_write_scope_is_enforced_before_execution(tmp_path):
 
     assert receipt["status"] == "failed"
     assert not Path(receipt["patch_path"] or root / "missing").exists()
-    record = parent.subagent_manager._records("manual")["implement-safe"]
+    record = parent.services.subagents._records("manual")["implement-safe"]
     run_store = RunStore(
-        parent.run_store.run_dir("manual")
+        parent.services.run_store.run_dir("manual")
         / "subagents"
         / record.spec.task_id
         / "runs"
     )
-    events = run_store.read_events(record.child_run_ids[0])
-    rejection = next(event for event in events if event["event_type"] == "tool_rejected")
-    assert rejection["payload"]["outcome"]["failure"]["detail"].startswith(
+    entries = run_store.read_entries(record.child_run_ids[0])
+    rejection = next(
+        entry
+        for entry in entries
+        if entry.kind == "tool_result"
+        and entry.payload["outcome"]["status"] == "rejected"
+    )
+    assert rejection.payload["outcome"]["failure"]["detail"].startswith(
         "write path outside allowed scope"
     )
 
@@ -427,7 +441,7 @@ def test_post_execution_diff_detects_an_out_of_scope_side_effect(tmp_path):
         )
 
     parent = build_parent(root, child_factory, sandbox_factory=sandbox_factory)
-    receipt = parent.subagent_manager.delegate(
+    receipt = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-escape",
@@ -454,7 +468,7 @@ def test_continue_task_reuses_child_session_and_prior_summary(tmp_path):
         return client
 
     parent = build_parent(root, child_factory)
-    first = parent.subagent_manager.delegate(
+    first = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="explore-session",
@@ -463,7 +477,7 @@ def test_continue_task_reuses_child_session_and_prior_summary(tmp_path):
             ),
         )
     )["tasks"][0]
-    continued = parent.subagent_manager.continue_task(
+    continued = parent.services.subagents.continue_task(
         "explore-session", "follow-up question"
     )
 
@@ -489,12 +503,12 @@ def test_completed_task_id_is_reused_without_another_model_call(tmp_path):
         prompt="inspect once",
     )
 
-    parent.subagent_manager.delegate((spec,))
-    second = parent.subagent_manager.delegate((spec,))
+    parent.services.subagents.delegate((spec,))
+    second = parent.services.subagents.delegate((spec,))
 
     assert calls == 1
     assert second["tasks"][0]["reused"] is True
-    record = parent.subagent_manager._records("manual")["explore-reuse"]
+    record = parent.services.subagents._records("manual")["explore-reuse"]
     assert record.status == "finished"
     assert "result" not in record.model_dump()
     assert "worktree" not in record.model_dump()
@@ -534,7 +548,7 @@ def test_ordered_implement_dependency_receives_prior_patch_and_integrates(tmp_pa
         )
 
     parent = build_parent(root, child_factory)
-    result = parent.subagent_manager.delegate(
+    result = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-base",
@@ -556,12 +570,12 @@ def test_ordered_implement_dependency_receives_prior_patch_and_integrates(tmp_pa
         "completed",
         "completed",
     ]
-    followup = parent.subagent_manager._worktrees[
+    followup = parent.services.subagents._worktrees[
         ("manual", "implement-followup")
     ].path
     assert Path(followup, "shared.py").read_text() == "second\n"
 
-    applied = parent.subagent_manager.apply_task_patches(("implement-followup",))
+    applied = parent.services.subagents.integration.apply(("implement-followup",))
 
     assert applied["task_ids"] == ["implement-base", "implement-followup"]
     assert (root / "shared.py").read_text() == "second\n"
@@ -593,7 +607,7 @@ def test_failed_integrated_verification_does_not_modify_parent(tmp_path):
         ),
         sandbox_factory=lambda child_root: SelectiveSandbox(child_root),
     )
-    parent.subagent_manager.delegate(
+    parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-feature",
@@ -605,7 +619,7 @@ def test_failed_integrated_verification_does_not_modify_parent(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="verification failed"):
-        parent.subagent_manager.apply_task_patches(("implement-feature",))
+        parent.services.subagents.integration.apply(("implement-feature",))
 
     assert not (root / "feature.py").exists()
 
@@ -660,14 +674,14 @@ def test_parent_agent_delegates_implementation_and_applies_verified_patch(tmp_pa
 
     assert answer == "implemented and verified"
     assert (root / "feature.py").read_text() == "value = 1\n"
-    assert parent.evidence_ledger.changed_paths == ["feature.py"]
-    assert parent.evidence_ledger.verifications[-1]["status"] == "passed"
+    assert parent.run.evidence.changed_paths == ["feature.py"]
+    assert parent.run.evidence.verifications[-1]["status"] == "passed"
     assert "delegate_tasks" not in child_clients[0].action_tool_surfaces[0]
     blocked = [
-        event
-        for event in parent.run_store.read_events(parent.current_task_state.run_id)
-        if event["event_type"] == "completion_blocked"
-        and event["payload"]["status"] == "subtasks_incomplete"
+        entry
+        for entry in parent.services.run_store.read_entries(parent.run.task_state.run_id)
+        if entry.kind == "completion_blocked"
+        and entry.payload["status"] == "subtasks_incomplete"
     ]
     assert len(blocked) == 1
 
@@ -690,7 +704,7 @@ def test_tampered_child_patch_is_rejected_before_integration(tmp_path):
             ]
         ),
     )
-    receipt = parent.subagent_manager.delegate(
+    receipt = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-tamper",
@@ -703,7 +717,7 @@ def test_tampered_child_patch_is_rejected_before_integration(tmp_path):
     Path(receipt["patch_path"]).write_bytes(b"tampered")
 
     with pytest.raises(ValueError, match="patch digest is invalid"):
-        parent.subagent_manager.apply_task_patches(("implement-tamper",))
+        parent.services.subagents.integration.apply(("implement-tamper",))
 
     assert not (root / "safe.py").exists()
 
@@ -740,7 +754,7 @@ def test_real_docker_verifies_child_and_integrated_worktrees(tmp_path):
         sandbox_factory=lambda child_root: DockerSandbox(child_root),
         verification_command="python verify.py",
     )
-    receipt = parent.subagent_manager.delegate(
+    receipt = parent.services.subagents.delegate(
         (
             SubtaskSpec(
                 task_id="implement-docker",
@@ -752,5 +766,5 @@ def test_real_docker_verifies_child_and_integrated_worktrees(tmp_path):
     )["tasks"][0]
 
     assert receipt["status"] == "completed"
-    parent.subagent_manager.apply_task_patches(("implement-docker",))
+    parent.services.subagents.integration.apply(("implement-docker",))
     assert (root / "feature.py").read_text() == "ok\n"

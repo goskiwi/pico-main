@@ -1,9 +1,15 @@
-import pytest
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
+from pico.run_journal import RunJournal
 
-from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
 
-
-def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
+def test_one_tool_run_uses_one_recoverable_journal(tmp_path):
     (tmp_path / "sample.txt").write_text("alpha\n", encoding="utf-8")
     agent = Pico(
         FakeModelClient(
@@ -16,65 +22,39 @@ def test_one_tool_run_has_stable_persistence_boundaries(tmp_path, monkeypatch):
         ),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        approval_policy="auto",
-        verification_command="",
+        config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    counts = {"session": 0, "task_state": 0, "context": 0}
-    event_types = []
-
-    original_session_save = agent.session_store.save
-    original_task_state = agent.run_store.write_task_state
-    original_context = agent.run_store.append_context
-    original_event = agent.run_store.append_event
-
-    def save_session(session):
-        counts["session"] += 1
-        return original_session_save(session)
-
-    def write_task_state(task_state):
-        counts["task_state"] += 1
-        return original_task_state(task_state)
-
-    def append_context(run_id, entry):
-        counts["context"] += 1
-        return original_context(run_id, entry)
-
-    def append_event(run_id, task_id, event_type, payload=None, **kwargs):
-        event_types.append(event_type)
-        return original_event(run_id, task_id, event_type, payload, **kwargs)
-
-    monkeypatch.setattr(agent.session_store, "save", save_session)
-    monkeypatch.setattr(agent.run_store, "write_task_state", write_task_state)
-    monkeypatch.setattr(agent.run_store, "append_context", append_context)
-    monkeypatch.setattr(agent.run_store, "append_event", append_event)
 
     assert agent.ask("Read sample.txt") == "Done."
 
-    assert counts == {"session": 2, "task_state": 5, "context": 4}
-    assert event_types == [
-        "run_started",
-        "prompt_built",
-        "model_requested",
-        "model_parsed",
-        "operation_started",
-        "operation_finished",
-        "checkpoint_created",
-        "prompt_built",
-        "model_requested",
-        "model_parsed",
-        "run_finished",
-        "checkpoint_created",
+    run_id = agent.run.task_state.run_id
+    run_dir = agent.services.run_store.run_dir(run_id)
+    assert sorted(path.name for path in run_dir.iterdir()) == [
+        "artifacts",
+        "journal.jsonl",
     ]
-    assert [item["role"] for item in agent.session["history"]] == ["run_summary"]
-    assert agent.session["history"][-1]["request"] == "Read sample.txt"
-    assert agent.session["history"][-1]["content"] == "Done."
-    assert agent.session["history"][-1]["changed_paths"] == []
-    persisted = agent.session_store.load(agent.session["id"])
-    assert persisted["history"] == agent.session["history"]
-    assert agent.run_store.replay(agent.current_task_state.run_id).summary()[
-        "pending_operations"
-    ] == []
+    entries = agent.services.run_store.read_entries(run_id)
+    assert {
+        "user_message",
+        "assistant_tool_call",
+        "tool_started",
+        "tool_result",
+        "assistant_final",
+    } <= {entry.kind for entry in entries}
 
-    agent.current_task_state.tool_steps += 1
-    with pytest.raises(RuntimeError, match="tool_steps"):
-        agent.build_report(agent.current_task_state)
+    projection = agent.services.run_store.replay(run_id)
+    assert projection.status == "completed"
+    assert projection.final_answer == "Done."
+    assert projection.summary()["pending_operations"] == []
+
+    journal = RunJournal.restore(run_id, agent.services.run_store)
+    assert journal.pending_call_id() == ""
+    assert journal.active_entries()[-1].kind == "assistant_final"
+    assert journal.active_entries()[-1].content == "Done."
+
+    persisted = agent.session.store.load(agent.session.data["id"])
+    assert persisted["active_run_id"] == ""
+    report = agent.build_report(agent.run.task_state)
+    assert report["run_id"] == run_id
+    assert report["status"] == "completed"
+    assert report["final_answer"] == "Done."

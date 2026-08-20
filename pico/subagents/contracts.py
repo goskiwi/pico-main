@@ -75,8 +75,8 @@ class SubtaskRecord(StrictModel):
     changed_paths: tuple[str, ...] = ()
     patch_path: str = ""
     patch_sha256: str = ""
-    event_cursor: int = 0
-    event_hash: str = ""
+    journal_sequence: int = 0
+    journal_entry_id: str = ""
     error: str = ""
     continuation_count: int = 0
     integrated: bool = False

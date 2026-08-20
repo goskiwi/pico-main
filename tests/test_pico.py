@@ -3,7 +3,14 @@ from unittest.mock import patch
 
 import pytest
 
-from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 from pico.contracts import ToolCall
 from pico.providers.clients import OpenAICompatibleModelClient, _action_from_response
 
@@ -12,22 +19,24 @@ def build_agent(tmp_path, outputs, **kwargs):
     (tmp_path / "hello.txt").write_text("alpha\nbeta\n")
     return Pico(
         FakeModelClient(outputs), WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"), approval_policy="auto",
-        verification_command="", **kwargs,
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto", verification_command="", **kwargs
+        ),
     )
 
 
-def test_native_tool_loop_records_context_and_memory(tmp_path):
+def test_native_tool_loop_records_context_and_working_goal(tmp_path):
     agent = build_agent(tmp_path, [
         ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 2}),
         ModelAction.final("Read successfully."),
     ])
     assert agent.ask("Read hello") == "Read successfully."
-    assert [entry.kind for entry in agent.context_ledger.entries] == [
-        "user", "assistant_tool_call", "tool_result", "final"
+    assert [entry.kind for entry in agent.run.journal.context_entries()] == [
+        "user_message", "assistant_tool_call", "tool_result", "assistant_final"
     ]
-    assert "hello.txt" in agent.memory.render_panel()
-    assert agent.current_task_state.status == "completed"
+    assert "Read hello" in agent.session.memory.render_panel()
+    assert agent.run.task_state.status == "completed"
 
 
 def test_fake_client_refuses_legacy_text_protocol(tmp_path):
@@ -104,10 +113,10 @@ def test_openai_sse_completed_function_call_is_parsed():
 
 def test_revision_conflict_is_a_tool_error(tmp_path):
     agent = build_agent(tmp_path, [])
-    read = agent.run_tool(ToolCall("read_file", {"path": "hello.txt"}, "read"))
+    read = agent.tools.run(ToolCall("read_file", {"path": "hello.txt"}, "read"))
     revision = read.content.split("revision: ", 1)[1].splitlines()[0]
     (tmp_path / "hello.txt").write_text("external\n")
-    outcome = agent.run_tool(ToolCall("patch_file", {
+    outcome = agent.tools.run(ToolCall("patch_file", {
         "path": "hello.txt", "old_text": "external", "new_text": "lost",
         "expected_revision": revision,
     }, "patch"))
@@ -117,10 +126,11 @@ def test_revision_conflict_is_a_tool_error(tmp_path):
 
 def test_session_schema_is_strict_not_migrated(tmp_path):
     agent = build_agent(tmp_path, [])
-    agent.session["schema_version"] = "old"
+    agent.session.data["schema_version"] = "old"
     with pytest.raises(ValueError, match="unsupported session schema"):
         Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
-             agent.session_store, session=agent.session, verification_command="")
+             agent.session.store, session=agent.session.data,
+             config=PicoConfig(verification_command=""))
 
 
 def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp_path):
@@ -133,10 +143,10 @@ def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp
         FakeModelClient([]),
         workspace,
         SessionStore(workspace_root / ".pico" / "sessions"),
-        verification_command="",
+        config=PicoConfig(verification_command=""),
     )
 
-    agent.refresh_prefix(force=True)
+    agent.prompt.refresh(force=True)
 
-    assert agent.workspace.repo_root == str(workspace_root.resolve())
-    assert agent.workspace.cwd == str(invocation_cwd.resolve())
+    assert agent.workspace.context.repo_root == str(workspace_root.resolve())
+    assert agent.workspace.context.cwd == str(invocation_cwd.resolve())

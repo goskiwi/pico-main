@@ -10,7 +10,6 @@ from pico.evaluation.metrics import (
     run_project_memory_evaluation,
     run_repo_map_evaluation,
     run_runtime_policy_evaluation,
-    run_working_memory_ablation,
     write_runtime_report,
 )
 
@@ -19,7 +18,6 @@ def main():
     results = {
         "harness": run_harness_regression_v3(),
         "context": run_context_governance_ablation(),
-        "working_memory": run_working_memory_ablation(),
         "project_memory": run_project_memory_evaluation(),
         "repo_map": run_repo_map_evaluation(),
         "runtime_policy": run_runtime_policy_evaluation(),

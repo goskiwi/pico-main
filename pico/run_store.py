@@ -1,251 +1,193 @@
-"""运行工件落盘。
+"""Single-writer Run Journal and artifact directory storage."""
 
-session.json 负责保存“可恢复的会话状态”；RunStore 负责保存“单次运行的审计工件”，
-例如 task_state、Runtime events 和 report。两者分开后，恢复现场和复盘证据不会混在一起。
-"""
+from __future__ import annotations
 
-import fcntl
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .events import (
-    EVENT_SCHEMA_VERSION,
-    EventCursor,
-    event_digest,
-    replay_events,
-    validate_event,
-)
-from .persistence import atomic_write_json
+from .run_journal import JournalCursor, JournalEntry, replay_entries
 
 
 def _run_id(value):
-    if hasattr(value, "run_id"):
-        return value.run_id
-    return str(value)
+    return str(value.run_id) if hasattr(value, "run_id") else str(value)
 
 
 class RunStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._event_states = {}
+        self._cursors: dict[str, JournalCursor] = {}
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
 
-    def task_state_path(self, run_id):
-        return self.run_dir(run_id) / "task_state.json"
-
-    def events_path(self, run_id):
-        return self.run_dir(run_id) / "events.jsonl"
-
-    def report_path(self, run_id):
-        return self.run_dir(run_id) / "report.json"
-
-    def context_path(self, run_id):
-        return self.run_dir(run_id) / "context.jsonl"
+    def journal_path(self, run_id):
+        return self.run_dir(run_id) / "journal.jsonl"
 
     def artifact_dir(self, run_id):
         return self.run_dir(run_id) / "artifacts"
 
     def start_run(self, task_state):
-        # 每次 ask() 都会生成一个 run 目录。
-        # 这样一次用户请求对应一组独立工件，后续排查更容易。
-        run_dir = self.run_dir(task_state)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        self.write_task_state(task_state)
-        return run_dir
+        directory = self.run_dir(task_state)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
 
-    def write_task_state(self, task_state):
-        path = self.task_state_path(task_state)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json_atomic(path, task_state.to_dict())
-        return path
+    def has_journal(self, run_id):
+        return self.journal_path(run_id).is_file()
 
-    def read_events(self, run_id):
-        path = self.events_path(run_id)
+    @staticmethod
+    def _repair_incomplete_tail(path):
+        data = path.read_bytes()
+        if not data or data.endswith(b"\n"):
+            return data
+        last_newline = data.rfind(b"\n")
+        repaired = data[: last_newline + 1] if last_newline >= 0 else b""
+        with path.open("r+b") as handle:
+            handle.truncate(len(repaired))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return repaired
+
+    def read_entries(self, run_id):
+        run_id = _run_id(run_id)
+        path = self.journal_path(run_id)
         if not path.exists():
             return []
-        with path.open("r", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            text = handle.read()
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return self._decode_events(run_id, text)
-
-    @staticmethod
-    def _decode_events(run_id, text):
-        events = []
-        previous = None
-        for line in text.splitlines():
-            if not line.strip():
+        data = self._repair_incomplete_tail(path)
+        entries = []
+        for number, raw in enumerate(data.splitlines(), start=1):
+            if not raw.strip():
                 continue
-            event = json.loads(line)
-            if event.get("run_id") != _run_id(run_id):
-                raise ValueError("Runtime event belongs to another run")
-            validate_event(event, previous)
-            events.append(event)
-            previous = event
-        return events
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Run Journal line {number} is not valid JSON"
+                ) from exc
+            entry = JournalEntry.from_dict(value)
+            expected = len(entries) + 1
+            if entry.run_id != run_id:
+                raise ValueError("Run Journal entry belongs to another run")
+            if entry.sequence != expected:
+                raise ValueError("Run Journal sequence is not contiguous")
+            if entry.entry_id != f"{run_id}:entry:{expected:06d}":
+                raise ValueError("Run Journal entry id does not match its sequence")
+            if entries:
+                first = entries[0]
+                if (
+                    entry.task_id != first.task_id
+                    or entry.session_id != first.session_id
+                ):
+                    raise ValueError("Run Journal identity changed within one run")
+            entries.append(entry)
+        self._cursors[run_id] = (
+            JournalCursor(entries[-1].sequence, entries[-1].entry_id)
+            if entries
+            else JournalCursor()
+        )
+        return entries
 
-    def event_cursor(self, run_id):
+    def cursor(self, run_id):
         run_id = _run_id(run_id)
-        if run_id in self._event_states:
-            return self._event_states[run_id]["cursor"]
-        events = self.read_events(run_id)
-        if not events:
-            cursor = EventCursor()
-        else:
-            last = events[-1]
-            cursor = EventCursor(last["sequence"], last["event_id"], last["event_hash"])
-        path = self.events_path(run_id)
-        self._event_states[run_id] = {
-            "cursor": cursor,
-            "offset": path.stat().st_size if path.exists() else 0,
-            "last_event": events[-1] if events else None,
-        }
-        return cursor
+        if run_id not in self._cursors:
+            self.read_entries(run_id)
+        return self._cursors.get(run_id, JournalCursor())
 
-    @staticmethod
-    def _decode_event_tail(run_id, data, previous):
-        if not data:
-            return [], previous
-        if not data.endswith(b"\n"):
-            raise ValueError("Runtime event log has a truncated tail")
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Runtime event log tail is not UTF-8") from exc
-        events = []
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            event = json.loads(line)
-            if event.get("run_id") != _run_id(run_id):
-                raise ValueError("Runtime event belongs to another run")
-            validate_event(event, previous)
-            events.append(event)
-            previous = event
-        return events, previous
-
-    def append_event(
-        self,
-        run_id,
-        task_id,
-        event_type,
-        payload=None,
-        *,
-        correlation_id="",
-        workspace_fingerprint="",
-        causation_id=None,
-    ):
+    def append_entry(self, run_id, task_id, session_id, kind, payload=None):
         run_id = _run_id(run_id)
-        path = self.events_path(run_id)
+        path = self.journal_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            size = os.fstat(handle.fileno()).st_size
-            state = self._event_states.get(run_id)
-            if state is None:
-                handle.seek(0)
-                data = handle.read()
-                if data and not data.endswith(b"\n"):
-                    raise ValueError("Runtime event log has a truncated tail")
-                events = self._decode_events(run_id, data.decode("utf-8"))
-                last_event = events[-1] if events else None
-                cursor = (
-                    EventCursor(
-                        last_event["sequence"],
-                        last_event["event_id"],
-                        last_event["event_hash"],
-                    )
-                    if last_event
-                    else EventCursor()
-                )
-                state = {"cursor": cursor, "offset": size, "last_event": last_event}
-            else:
-                expected_offset = int(state["offset"])
-                if size < expected_offset:
-                    raise ValueError("Runtime event log was truncated after opening")
-                if size > expected_offset:
-                    handle.seek(expected_offset)
-                    appended, last_event = self._decode_event_tail(
-                        run_id,
-                        handle.read(size - expected_offset),
-                        state["last_event"],
-                    )
-                    if appended:
-                        last = appended[-1]
-                        state["cursor"] = EventCursor(
-                            last["sequence"], last["event_id"], last["event_hash"]
-                        )
-                        state["last_event"] = last_event
-                    state["offset"] = size
-                cursor = state["cursor"]
-            sequence = cursor.sequence + 1
-            event = {
-                "schema_version": EVENT_SCHEMA_VERSION,
-                "event_id": f"{run_id}:evt:{sequence:06d}",
-                "sequence": sequence,
-                "run_id": run_id,
-                "task_id": str(task_id),
-                "event_type": str(event_type),
-                "causation_id": cursor.event_id if causation_id is None else str(causation_id),
-                "correlation_id": str(correlation_id),
-                "workspace_fingerprint": str(workspace_fingerprint),
-                "payload": dict(payload or {}),
-                "previous_hash": cursor.event_hash,
-                "event_hash": "",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            event["event_hash"] = event_digest(event)
-            validate_event(event, state["last_event"])
-            encoded = (json.dumps(event, sort_keys=True, ensure_ascii=True) + "\n").encode("utf-8")
-            handle.seek(0, os.SEEK_END)
+        cursor = self.cursor(run_id)
+        sequence = cursor.sequence + 1
+        entry = JournalEntry(
+            entry_id=f"{run_id}:entry:{sequence:06d}",
+            sequence=sequence,
+            run_id=run_id,
+            task_id=str(task_id),
+            session_id=str(session_id),
+            kind=str(kind),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload=dict(payload or {}),
+        )
+        encoded = (
+            json.dumps(entry.to_dict(), sort_keys=True, ensure_ascii=True) + "\n"
+        ).encode("utf-8")
+        with path.open("ab") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-            state["cursor"] = EventCursor(sequence, event["event_id"], event["event_hash"])
-            state["last_event"] = event
-            state["offset"] = size + len(encoded)
-            self._event_states[run_id] = state
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return event
+        self._cursors[run_id] = JournalCursor(sequence, entry.entry_id)
+        return entry
 
-    def replay(self, run_id):
-        return replay_events(self.read_events(run_id))
-
-    def verify_event_cursor(self, run_id, sequence, event_hash):
+    def verify_cursor(self, run_id, sequence, entry_id):
         sequence = int(sequence)
         if sequence == 0:
-            return str(event_hash) == EventCursor().event_hash
-        events = self.read_events(run_id)
-        return len(events) >= sequence and events[sequence - 1]["event_hash"] == str(event_hash)
+            return not entry_id
+        entries = self.read_entries(run_id)
+        return (
+            len(entries) >= sequence
+            and entries[sequence - 1].entry_id == str(entry_id)
+        )
+
+    def replay(self, run_id):
+        return replay_entries(self.read_entries(run_id))
 
     def operation_receipt(self, run_id, call_id):
         return self.replay(run_id).operation_receipt(call_id)
 
-    def append_context(self, run_id, entry):
-        path = self.context_path(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"run_id": _run_id(run_id), "record_type": "context_entry", "payload": entry}
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, ensure_ascii=True))
-            handle.write("\n")
-        return path
+    def find_active_run(self, session_id):
+        if not self.root.exists():
+            return "", (), None
+        for directory in sorted(self.root.iterdir(), key=lambda item: item.name, reverse=True):
+            if not directory.is_dir():
+                continue
+            try:
+                entries = self.read_entries(directory.name)
+            except (OSError, ValueError):
+                continue
+            if not entries or entries[0].session_id != str(session_id):
+                continue
+            projection = replay_entries(entries)
+            if not projection.terminal:
+                return directory.name, tuple(entries), projection
+        return "", (), None
 
-    def write_report(self, task_state, report):
-        path = self.report_path(task_state)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_json_atomic(path, report)
-        return path
+    def session_summaries(self, session_id, *, exclude_run_id="", limit=8):
+        from .evidence import EvidenceLedger
 
-    def load_task_state(self, task_id):
-        return json.loads(self.task_state_path(task_id).read_text(encoding="utf-8"))
-
-    def load_report(self, task_id):
-        return json.loads(self.report_path(task_id).read_text(encoding="utf-8"))
-
-    def _write_json_atomic(self, path, payload):
-        atomic_write_json(path, payload)
+        rows = []
+        directories = self.root.iterdir() if self.root.exists() else ()
+        for directory in directories:
+            if not directory.is_dir() or directory.name == str(exclude_run_id):
+                continue
+            try:
+                entries = self.read_entries(directory.name)
+            except (OSError, ValueError):
+                continue
+            if not entries or entries[0].session_id != str(session_id):
+                continue
+            projection = replay_entries(entries)
+            if not projection.terminal:
+                continue
+            evidence = EvidenceLedger.from_entries(entries)
+            verification_status = (
+                str(evidence.verifications[-1].get("status", "unknown"))
+                if evidence.verifications
+                else "not_run"
+            )
+            rows.append(
+                {
+                    "role": "run_summary",
+                    "run_id": projection.run_id,
+                    "request": projection.user_request,
+                    "content": projection.final_answer,
+                    "changed_paths": evidence.changed_paths,
+                    "verification_status": verification_status,
+                    "stop_reason": projection.stop_reason,
+                    "created_at": entries[-1].timestamp,
+                }
+            )
+        rows.sort(key=lambda item: (item["created_at"], item["run_id"]))
+        return rows[-max(0, int(limit)) :]

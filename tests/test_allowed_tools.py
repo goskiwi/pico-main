@@ -1,6 +1,13 @@
 import pytest
 
-from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 
 
 def build_agent(tmp_path, allowed_tools=None):
@@ -9,18 +16,20 @@ def build_agent(tmp_path, allowed_tools=None):
         FakeModelClient([ModelAction.final("Done.")]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        approval_policy="auto",
-        allowed_tools=allowed_tools,
-        verification_command="",
+        config=PicoConfig(
+            approval_policy="auto",
+            allowed_tools=allowed_tools,
+            verification_command="",
+        ),
     )
 
 
 def test_allowed_tools_filter_prompt_and_execution(tmp_path):
     agent = build_agent(tmp_path, ["read_file"])
-    prompt = agent.prompt("Read")
+    prompt, _ = agent.prompt.build("Read")
     assert "- read_file" in prompt
     assert "- run_shell" not in prompt
-    outcome = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+    outcome = agent.tools.run("run_shell", {"command": "echo hi", "timeout": 20})
     assert outcome.status == "rejected"
     assert outcome.failure.code == "tool_not_allowed"
 

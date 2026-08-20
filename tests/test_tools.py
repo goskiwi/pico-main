@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from pico import FakeModelClient, Pico, SessionStore, WorkspaceContext
-from pico.contracts import ToolCall
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico.contracts import ToolCall, ToolExecution
 from pico.mutations import WorkspaceMutationService, file_revision
 from pico.tool_context import ToolContext
 from pico.tools import build_tool_registry, tool_patch_file, tool_read_file, tool_search
@@ -19,9 +19,9 @@ def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
 
     result = tool_read_file(context, {"path": "sample.txt", "start": 1, "end": 1})
 
-    assert "# sample.txt" in result
-    assert "revision: sha256:" in result
-    assert "alpha" in result
+    assert "# sample.txt" in result.content
+    assert "revision: sha256:" in result.content
+    assert "alpha" in result.content
 
 
 def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
@@ -52,8 +52,8 @@ def test_search_returns_workspace_relative_paths(tmp_path):
 
     result = tool_search(context, {"pattern": "needle", "path": "src"})
 
-    assert "src/demo.py:1:" in result
-    assert str(tmp_path) not in result
+    assert "src/demo.py:1:" in result.content
+    assert str(tmp_path) not in result.content
 
 
 def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
@@ -62,13 +62,15 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        approval_policy="auto",
+        config=PicoConfig(approval_policy="auto"),
     )
     source = "".join(f"line-{index:04d} " + "x" * 80 + "\n" for index in range(300))
-    agent.all_tools["list_files"]["run"] = lambda _args: source
-    original = agent.run_tool(ToolCall("list_files", {"path": "."}, "call_source"))
+    agent.tools.registry["list_files"]["run"] = lambda _args: ToolExecution(source)
+    original = agent.tools.run(
+        ToolCall("list_files", {"path": "."}, "call_source")
+    )
 
-    page = agent.run_tool(
+    page = agent.tools.run(
         ToolCall(
             "read_artifact",
             {"artifact_id": original.artifact_id, "offset": 119 * 91, "max_bytes": 8192},
@@ -81,8 +83,10 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
     assert "line-0179" in page.content
     assert "line-0118" not in page.content
 
-    other = agent.artifact_store.write_tool_output("other-run", "call_other", "read_file", "secret\n")
-    rejected = agent.run_tool(
+    other = agent.services.artifacts.write_tool_output(
+        "other-run", "call_other", "read_file", "secret\n"
+    )
+    rejected = agent.tools.run(
         ToolCall(
             "read_artifact",
             {"artifact_id": other["artifact_id"], "offset": 0, "max_bytes": 8192},
@@ -107,7 +111,7 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
         context,
         {"path": "sample.txt", "old_text": "alpha", "new_text": "beta", "expected_revision": revision},
     )
-    assert "after_revision: sha256:" in result
+    assert "after_revision: sha256:" in result.content
     assert path.read_text(encoding="utf-8") == "beta\n"
 
     path.write_text("external\n", encoding="utf-8")

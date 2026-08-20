@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .contracts import ToolExecution
 from .mutations import file_revision
 from .sandbox import SandboxProfile, parse_command_invocation
 from .workspace import IGNORED_PATH_NAMES
@@ -295,7 +296,7 @@ def tool_list_files(context, args):
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
         lines.append(f"{kind} {entry.relative_to(context.root)}")
-    return "\n".join(lines) or "(empty)"
+    return ToolExecution("\n".join(lines) or "(empty)")
 
 
 def tool_read_file(context, args):
@@ -308,7 +309,9 @@ def tool_read_file(context, args):
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
-    return f"# {path.relative_to(context.root)}\nrevision: {file_revision(path)}\n{body}"
+    return ToolExecution(
+        f"# {path.relative_to(context.root)}\nrevision: {file_revision(path)}\n{body}"
+    )
 
 
 def tool_read_artifact(context, args):
@@ -328,7 +331,7 @@ def tool_read_artifact(context, args):
             "\n[More output available; call read_artifact with "
             f"offset={page['end_offset']}.]"
         )
-    return header + page["content"] + continuation
+    return ToolExecution(header + page["content"] + continuation)
 
 
 def tool_search(context, args):
@@ -353,7 +356,7 @@ def tool_search(context, args):
         output = result.stdout.strip() or result.stderr.strip()
         if output:
             output = output.replace(str(context.root) + "/", "")
-        return output or "(no matches)"
+        return ToolExecution(output or "(no matches)")
 
     matches = []
     files = [path] if path.is_file() else [
@@ -365,8 +368,8 @@ def tool_search(context, args):
             if pattern.lower() in line.lower():
                 matches.append(f"{file_path.relative_to(context.root)}:{number}:{line}")
                 if len(matches) >= 200:
-                    return "\n".join(matches)
-    return "\n".join(matches) or "(no matches)"
+                    return ToolExecution("\n".join(matches))
+    return ToolExecution("\n".join(matches) or "(no matches)")
 
 
 def tool_run_shell(context, args):
@@ -387,28 +390,39 @@ def tool_run_shell(context, args):
         execution_context=context.execution_context(),
         profile=SandboxProfile.INSPECT,
     )
-    return textwrap.dedent(
-        f"""\
-        exit_code: {result.returncode if result.returncode is not None else -1}
-        sandbox: docker (profile=inspect, network=none, read_only_rootfs=true, read_only_workspace=true)
-        stop_reason: {result.stop_reason or "none"}
-        cleanup_state: {result.cleanup_state}
-        output_truncated: {result.output_truncated}
-        stdout:
-        {result.stdout.strip() or "(empty)"}
-        stderr:
-        {result.stderr.strip() or "(empty)"}
-        """
-    ).strip()
+    return ToolExecution(
+        textwrap.dedent(
+            f"""\
+            exit_code: {result.returncode if result.returncode is not None else -1}
+            sandbox: docker (profile=inspect, network=none, read_only_rootfs=true, read_only_workspace=true)
+            stop_reason: {result.stop_reason or "none"}
+            cleanup_state: {result.cleanup_state}
+            output_truncated: {result.output_truncated}
+            stdout:
+            {result.stdout.strip() or "(empty)"}
+            stderr:
+            {result.stderr.strip() or "(empty)"}
+            """
+        ).strip()
+    )
 
 
 def tool_write_file(context, args):
     path = context.path(args["path"])
     content = str(args["content"])
     before, after = context.mutation_service.write(path, content, args["expected_revision"])
-    return (
-        f"wrote {path.relative_to(context.root)} ({len(content)} chars)\n"
-        f"before_revision: {before}\nafter_revision: {after}"
+    relative = path.relative_to(context.root).as_posix()
+    changed = before != after
+    return ToolExecution(
+        content=(
+            f"wrote {relative} ({len(content)} chars)\n"
+            f"before_revision: {before}\nafter_revision: {after}"
+        ),
+        affected_paths=(relative,) if changed else (),
+        diff_summary=(f"{'created' if before == 'absent' else 'modified'}:{relative}",)
+        if changed
+        else (),
+        effect_scope="workspace" if changed else "none",
     )
 
 
@@ -424,7 +438,28 @@ def tool_patch_file(context, args):
     before, after = context.mutation_service.patch(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
-    return f"patched {path.relative_to(context.root)}\nbefore_revision: {before}\nafter_revision: {after}"
+    relative = path.relative_to(context.root).as_posix()
+    changed = before != after
+    return ToolExecution(
+        content=f"patched {relative}\nbefore_revision: {before}\nafter_revision: {after}",
+        affected_paths=(relative,) if changed else (),
+        diff_summary=(f"modified:{relative}",) if changed else (),
+        effect_scope="workspace" if changed else "none",
+    )
+
+
+def _memory_effect_paths(context, filename):
+    paths = (
+        context.project_memory.cards_root / filename,
+        context.project_memory.index_path,
+    )
+    logical = []
+    for path in paths:
+        try:
+            logical.append(path.relative_to(context.root).as_posix())
+        except ValueError:
+            logical.append(path.as_posix())
+    return tuple(logical)
 
 
 def tool_memory_store(context, args):
@@ -437,7 +472,6 @@ def tool_memory_store(context, args):
         content=args["content"],
         why=args.get("why", ""),
         how_to_apply=args.get("how_to_apply", ""),
-        origin="explicit",
         source_session_id=context.session_id,
         source_run_id=context.run_id(),
         source_entry_ids=context.source_entry_ids(),
@@ -445,13 +479,19 @@ def tool_memory_store(context, args):
         expires_at=args.get("expires_at", ""),
     )
     if action == "unchanged":
-        return (
-            f"unchanged project memory {card.filename}; the requested content is already "
-            "committed. Do not repeat memory_store; submit the final answer if the task is complete."
+        return ToolExecution(
+            f"{action} project memory {card.filename}; no data changed. "
+            "Do not repeat memory_store; submit the final answer if the task is complete."
         )
-    return (
-        f"{action} project memory {card.filename}; commit complete. "
-        "Do not repeat memory_store for the same fact."
+    paths = _memory_effect_paths(context, card.filename)
+    return ToolExecution(
+        content=(
+            f"{action} project memory {card.filename}; commit complete. "
+            "Do not repeat memory_store for the same fact."
+        ),
+        affected_paths=paths,
+        diff_summary=tuple(f"modified:{path}" for path in paths),
+        effect_scope="project_memory",
     )
 
 
@@ -459,7 +499,13 @@ def tool_memory_forget(context, args):
     card = context.project_memory.forget(args["filename"])
     if card is None:
         raise ValueError("memory file does not exist")
-    return f"forgot project memory {card.filename}"
+    paths = _memory_effect_paths(context, card.filename)
+    return ToolExecution(
+        content=f"forgot project memory {card.filename}",
+        affected_paths=paths,
+        diff_summary=(f"deleted:{paths[0]}", f"modified:{paths[1]}"),
+        effect_scope="project_memory",
+    )
 
 
 _TOOL_RUNNERS = {

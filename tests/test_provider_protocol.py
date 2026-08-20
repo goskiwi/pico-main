@@ -88,6 +88,19 @@ def test_action_session_replays_native_output_and_exact_tool_result():
     assert "replacement prompt" not in json.dumps(requests[1]["input"])
 
 
+def test_responses_payload_uses_total_output_token_budget():
+    captured = {}
+
+    def urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        return final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        client().complete_action("prompt", 1024, action_tools=TOOLS)
+
+    assert captured["max_output_tokens"] == 1024
+
+
 def test_action_session_requires_output_or_explicit_reset():
     instance = client()
     with patch("urllib.request.urlopen", return_value=tool_response()):
@@ -175,6 +188,22 @@ def test_sse_text_when_tool_is_required_becomes_retry_action():
     assert action.error == "invalid_function_call_count"
 
 
+@pytest.mark.parametrize("reason", ["max_output_tokens", "max_tokens"])
+def test_incomplete_max_token_response_reports_output_truncation(reason):
+    action = _action_from_response(
+        {
+            "status": "incomplete",
+            "incomplete_details": {"reason": reason},
+            "output": [],
+        },
+        TOOLS,
+    )
+
+    assert action.kind == "retry"
+    assert action.error == "model_output_truncated"
+    assert "one concise function call" in action.content
+
+
 @pytest.mark.parametrize(
     ("output", "error"),
     [
@@ -205,6 +234,7 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
         "completion_tokens": 4,
         "total_tokens": 15,
         "prompt_tokens_details": {"cached_tokens": 7},
+        "completion_tokens_details": {"reasoning_tokens": 3},
     }
     instance = client()
     with patch("urllib.request.urlopen", return_value=final_response(usage=usage)):

@@ -1,8 +1,4 @@
-"""一次 ask() 运行过程中的状态机快照。
-
-它回答的是：这次用户请求当前进行到哪了、调了多少次工具、最后为什么停下。
-这个对象会被不断写入 task_state.json，供运行中观察和运行后复盘。
-"""
+"""In-memory projection of one Run Journal."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,8 +30,6 @@ class TaskState:
     last_tool: str = ""
     stop_reason: str = ""
     final_answer: str = ""
-    checkpoint_id: str = ""
-    resume_status: str = ""
 
     @classmethod
     def create(cls, task_id, user_request, run_id=""):
@@ -55,8 +49,6 @@ class TaskState:
             last_tool=str(data.get("last_tool", "")),
             stop_reason=str(data.get("stop_reason", "")),
             final_answer=str(data.get("final_answer", "")),
-            checkpoint_id=str(data.get("checkpoint_id", "")),
-            resume_status=str(data.get("resume_status", "")),
         )
 
     def record_attempt(self):
@@ -104,6 +96,4 @@ class TaskState:
             "last_tool": self.last_tool,
             "stop_reason": self.stop_reason,
             "final_answer": self.final_answer,
-            "checkpoint_id": self.checkpoint_id,
-            "resume_status": self.resume_status,
         }

@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,18 +64,18 @@ def test_real_oss_publication_rejects_dirty_runtime():
 
 
 def test_provider_continuation_requires_a_reused_prompt_turn():
-    events = [
-        {"event_type": "prompt_built", "payload": {"prompt_metadata": {"prompt_reused": False}}},
-        {"event_type": "prompt_built", "payload": {"prompt_metadata": {"prompt_reused": True}}},
+    entries = [
+        SimpleNamespace(kind="turn_metrics", payload={"prompt_reused": False}),
+        SimpleNamespace(kind="turn_metrics", payload={"prompt_reused": True}),
     ]
 
-    assert MODULE.provider_continuation_check(events) == {
+    assert MODULE.provider_continuation_check(entries) == {
         "ok": True,
         "prompt_builds": 2,
         "reused_turns": 1,
         "provider_session_resets": 0,
     }
-    assert MODULE.provider_continuation_check(events[:1])["ok"] is False
+    assert MODULE.provider_continuation_check(entries[:1])["ok"] is False
 
 
 def test_suite_retries_only_provider_infrastructure_errors():

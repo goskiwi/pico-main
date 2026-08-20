@@ -157,6 +157,18 @@ def _extract_usage_cache_details(data):
 
 
 def _action_from_response(data, action_tools):
+    if data.get("status") == "incomplete":
+        details = data.get("incomplete_details") or {}
+        reason = str(details.get("reason", ""))
+        if reason in {"max_output_tokens", "max_tokens"}:
+            return ModelAction.retry(
+                (
+                    "The model response reached max_output_tokens before "
+                    "producing one complete function call. Return exactly "
+                    "one concise function call."
+                ),
+                error="model_output_truncated",
+            )
     allowed = {str(item["name"]) for item in action_tools}
     calls = [
         item for item in data.get("output", [])

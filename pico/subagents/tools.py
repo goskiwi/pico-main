@@ -6,6 +6,7 @@ import json
 
 from pydantic import Field
 
+from ..contracts import ToolExecution
 from .contracts import StrictModel, SubtaskSpec
 
 
@@ -24,17 +25,23 @@ class ApplyTaskPatchesArgs(StrictModel):
 
 def _delegate(manager, args):
     result = manager.delegate(tuple(SubtaskSpec.model_validate(item) for item in args["tasks"]))
-    return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    return ToolExecution(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 def _continue(manager, args):
     result = manager.continue_task(args["task_id"], args["message"])
-    return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    return ToolExecution(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 def _apply(manager, args):
-    result = manager.apply_task_patches(tuple(args["task_ids"]))
-    return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    result = manager.integration.apply(tuple(args["task_ids"]))
+    changed = tuple(result["changed_paths"])
+    return ToolExecution(
+        content=json.dumps(result, ensure_ascii=False, sort_keys=True),
+        affected_paths=changed,
+        diff_summary=tuple(f"modified:{path}" for path in changed),
+        effect_scope="workspace" if changed else "none",
+    )
 
 
 def build_tool_registry(manager):

@@ -1,5 +1,13 @@
-from pico import FakeModelClient, ModelAction, Pico, SessionStore, WorkspaceContext
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 from pico.agent_loop import AgentLoop
+from pico.hooks import HookDirective
 
 
 def build_agent(tmp_path, outputs):
@@ -10,7 +18,7 @@ def build_agent(tmp_path, outputs):
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
-        approval_policy="auto",
+        config=PicoConfig(approval_policy="auto"),
     )
 
 
@@ -27,31 +35,21 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     answer = AgentLoop(agent).run("Inspect hello.txt")
 
     assert answer == "Done."
-    assert agent.current_task_state.status == "completed"
-    assert agent.run_store.report_path(agent.current_task_state.run_id).exists()
+    assert agent.run.task_state.status == "completed"
 
-    report = agent.run_store.load_report(agent.current_task_state.run_id)
+    report = agent.build_report(agent.run.task_state)
     assert "task_state" not in report
     assert report["project_memory"] == {"count": 0}
-    assert report["event_summary"]["event_counts"]["run_finished"] == 1
-    assert not {
-        "run_id", "task_id", "status", "stop_reason", "attempts",
-        "tool_steps", "last_tool", "checkpoint_id",
-    } & set(report["event_summary"])
-    agent.evidence_ledger.observations.append({"tool": "invented"})
-    rebuilt = agent.build_report(agent.current_task_state)
+    assert report["journal_summary"]["kind_counts"]["assistant_final"] == 1
+    assert report["journal_summary"]["stop_reason"] == "final_answer_returned"
+    agent.run.evidence.observations.append({"tool": "invented"})
+    rebuilt = agent.build_report(agent.run.task_state)
     assert rebuilt["evidence"] == report["evidence"]
 
-    events = agent.run_store.read_events(agent.current_task_state)
-    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
-    assert events[0]["causation_id"] == ""
-    assert all(
-        event["causation_id"] == events[index - 1]["event_id"]
-        for index, event in enumerate(events[1:], start=1)
-    )
-    tool_event = next(event for event in events if event["event_type"] == "operation_finished")
-    outcome = tool_event["payload"]["outcome"]
-    assert tool_event["correlation_id"] == outcome["tool_call_id"]
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
+    tool_entry = next(entry for entry in entries if entry.kind == "tool_result")
+    outcome = tool_entry.payload["outcome"]
     assert outcome["artifact"]["artifact_id"] == outcome["artifact_id"]
 
 
@@ -76,43 +74,161 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     assert agent.model_client.recorded_action_results[0][0] == "tool"
     assert "alpha" in agent.model_client.recorded_action_results[0][1]
-    prompt_events = [
-        event for event in agent.run_store.read_events(agent.current_task_state)
-        if event["event_type"] == "prompt_built"
+    turns = [
+        entry for entry in agent.services.run_store.read_entries(agent.run.task_state)
+        if entry.kind == "turn_metrics"
     ]
-    assert prompt_events[0]["payload"]["prompt_metadata"]["prompt_reused"] is False
-    assert prompt_events[1]["payload"]["prompt_metadata"]["prompt_reused"] is True
+    assert [entry.payload["prompt_reused"] for entry in turns] == [False, True]
 
 
-def test_provider_session_resets_at_input_threshold_and_persists_decision(tmp_path):
+def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
 
     class ThresholdClient(FakeModelClient):
+        request_count = 0
+
         def complete_action(self, *args, **kwargs):
             action = super().complete_action(*args, **kwargs)
-            self.last_completion_metadata = {"input_tokens": 7900}
+            self.request_count += 1
+            self.last_completion_metadata = (
+                {"input_tokens": 6800, "output_tokens": 300}
+                if self.request_count == 1
+                else {"input_tokens": 1000, "output_tokens": 50}
+            )
             return action
 
     client = ThresholdClient([
         ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.tool("list_files", {"path": "."}),
         ModelAction.final("Done after reset."),
     ])
     agent = Pico(
         client,
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        approval_policy="auto",
-        verification_command="",
-        provider_context_limit_tokens=8000,
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="",
+            provider_context_limit_tokens=8000,
+        ),
+    )
+    original_count = agent.prompt.context.tokenizer.count
+    agent.prompt.context.tokenizer.count = lambda text: (
+        200 if "alpha" in str(text) else original_count(text)
     )
 
     assert agent.ask("Inspect hello") == "Done after reset."
     assert client.prompts[0] != client.prompts[1]
+    assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
-    events = agent.run_store.read_events(agent.current_task_state)
-    reset = next(event for event in events if event["event_type"] == "provider_session_reset")
-    assert reset["payload"]["reason"] == "input_threshold"
-    assert reset["payload"]["input_tokens"] == 7900
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    resets = [
+        entry for entry in entries if entry.kind == "provider_session_reset"
+    ]
+    assert len(resets) == 1
+    reset = resets[0]
+    assert reset.payload == {
+        "reason": "next_input_threshold",
+        "input_tokens": 6800,
+        "output_tokens": 300,
+        "tool_result_tokens": 200,
+        "estimated_next_total": 8324,
+        "tool_call_id": reset.payload["tool_call_id"],
+    }
+    turns = [
+        entry for entry in entries if entry.kind == "turn_metrics"
+    ]
+    assert [
+        entry.payload["prompt_reused"] for entry in turns
+    ] == [False, False, True]
+    assert len({
+        entry.payload["prompt_metadata"]["prefix_hash"] for entry in turns
+    }) == 1
+
+
+def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+
+    class CapacityClient(FakeModelClient):
+        def complete_action(self, *args, **kwargs):
+            action = super().complete_action(*args, **kwargs)
+            self.last_completion_metadata = {
+                "input_tokens": 6000,
+                "output_tokens": 300,
+            }
+            return action
+
+    client = CapacityClient([
+        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.final("Done without reset."),
+    ])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="",
+            provider_context_limit_tokens=8000,
+        ),
+    )
+    original_count = agent.prompt.context.tokenizer.count
+    agent.prompt.context.tokenizer.count = lambda text: (
+        200 if "alpha" in str(text) else original_count(text)
+    )
+
+    assert agent.ask("Inspect hello") == "Done without reset."
+    assert client.prompts[0] == client.prompts[1]
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    assert not any(
+        entry.kind == "provider_session_reset" for entry in entries
+    )
+
+
+def test_provider_capacity_estimate_counts_runtime_guidance(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+
+    class GuidanceClient(FakeModelClient):
+        def complete_action(self, *args, **kwargs):
+            action = super().complete_action(*args, **kwargs)
+            self.last_completion_metadata = {
+                "input_tokens": 6800,
+                "output_tokens": 0,
+            }
+            return action
+
+    class GuideAfterRead:
+        def after_tool_result(self, context):
+            return HookDirective(guidance="Inspect the registry next.")
+
+    client = GuidanceClient([
+        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.final("Done after guided reset."),
+    ])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="",
+            provider_context_limit_tokens=8000,
+        ),
+        hooks=[GuideAfterRead()],
+    )
+    original_count = agent.prompt.context.tokenizer.count
+    agent.prompt.context.tokenizer.count = lambda text: (
+        300 if "Runtime guidance:" in str(text) else original_count(text)
+    )
+
+    assert agent.ask("Inspect hello") == "Done after guided reset."
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    reset = next(
+        entry for entry in entries if entry.kind == "provider_session_reset"
+    )
+    assert reset.payload["tool_result_tokens"] == 300
+    assert reset.payload["estimated_next_total"] == 8124
+    assert "Inspect the registry next." in client.prompts[1]
 
 
 def test_last_tool_step_gets_one_final_only_model_turn(tmp_path):
@@ -124,13 +240,13 @@ def test_last_tool_step_gets_one_final_only_model_turn(tmp_path):
             ModelAction.final("Done at the tool boundary."),
         ],
     )
-    agent.max_steps = 1
+    agent.config = PicoConfig.build(agent.config, max_steps=1)
 
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Done at the tool boundary."
-    assert agent.current_task_state.tool_steps == 1
-    assert agent.current_task_state.status == "completed"
+    assert agent.run.task_state.tool_steps == 1
+    assert agent.run.task_state.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
 
 
@@ -149,8 +265,8 @@ def test_default_loop_has_no_tool_step_limit(tmp_path):
     answer = agent.ask("Read seven distinct lines")
 
     assert answer == "Completed seven reads."
-    assert agent.max_steps is None
-    assert agent.current_task_state.tool_steps == 7
+    assert agent.config.max_steps is None
+    assert agent.run.task_state.tool_steps == 7
 
 
 def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
@@ -171,10 +287,7 @@ def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
     assert "[prior/run_summary] request: Inspect hello.txt" in second_run_prompt
     assert "result: First run completed." in second_run_prompt
     assert "[prior/tool" not in second_run_prompt
-    assert [item["role"] for item in agent.session["history"]] == [
-        "run_summary",
-        "run_summary",
-    ]
+    assert agent.session.data["active_run_id"] == ""
 
 
 def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
@@ -186,16 +299,17 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
             ModelAction.tool("list_files", {"path": "."}),
         ],
     )
-    agent.max_steps = 1
+    agent.config = PicoConfig.build(agent.config, max_steps=1)
 
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Stopped after reaching the step limit without a final answer."
-    assert agent.current_task_state.tool_steps == 1
+    assert agent.run.task_state.tool_steps == 1
     finished_tools = [
-        event["payload"]["tool_name"]
-        for event in agent.run_store.read_events(agent.current_task_state)
-        if event["event_type"] == "operation_finished"
+        entry.payload["tool_name"]
+        for entry in agent.services.run_store.read_entries(agent.run.task_state)
+        if entry.kind == "tool_result"
+        and entry.payload["outcome"]["execution_state"] != "not_started"
     ]
     assert finished_tools == ["read_file"]
 
@@ -210,21 +324,25 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
             ModelAction.final("Recovered after correcting the call."),
         ],
     )
-    agent.max_steps = 1
+    agent.config = PicoConfig.build(agent.config, max_steps=1)
 
     answer = agent.ask("Inspect hello.txt")
 
     assert answer == "Recovered after correcting the call."
-    assert agent.current_task_state.tool_steps == 1
-    assert agent.current_task_state.attempts == 3
-    events = agent.run_store.read_events(agent.current_task_state)
-    assert sum(event["event_type"] == "tool_rejected" for event in events) == 1
-    assert sum(event["event_type"] == "operation_finished" for event in events) == 1
+    assert agent.run.task_state.tool_steps == 1
+    assert agent.run.task_state.attempts == 3
+    results = [
+        entry
+        for entry in agent.services.run_store.read_entries(agent.run.task_state)
+        if entry.kind == "tool_result"
+    ]
+    assert sum(entry.payload["outcome"]["status"] == "rejected" for entry in results) == 1
+    assert sum(entry.payload["outcome"]["execution_state"] == "completed" for entry in results) == 1
 
 
-def test_project_memory_selection_is_written_to_event_log(tmp_path):
+def test_project_memory_selection_is_written_to_journal(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("staging")])
-    agent.project_memory.store(
+    agent.services.project_memory.store(
         action="create",
         filename="project_deploy.md",
         name="Deploy target",
@@ -233,13 +351,12 @@ def test_project_memory_selection_is_written_to_event_log(tmp_path):
         content="deploy target is staging",
         why="Deploy commands require the correct environment.",
         how_to_apply="Use staging unless the user overrides it.",
-        origin="explicit",
-        source_session_id=agent.session["id"],
+        source_session_id=agent.session.data["id"],
         source_run_id="bootstrap",
     )
     agent.model_client.select_memory_filenames = lambda *args, **kwargs: ["project_deploy.md"]
 
     assert agent.ask("What is the deploy target?") == "staging"
-    events = agent.run_store.read_events(agent.current_task_state)
-    memory_event = next(event for event in events if event["event_type"] == "memory_selection")
-    assert memory_event["payload"]["selected_filenames"] == ["project_deploy.md"]
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    memory_entry = next(entry for entry in entries if entry.kind == "memory_selection")
+    assert memory_entry.payload["selected_filenames"] == ["project_deploy.md"]

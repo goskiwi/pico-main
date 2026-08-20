@@ -3,14 +3,18 @@
 Pico is a compact, single-protocol local multi-agent coding Runtime.
 
 - `pico.contracts`: provider-neutral Runtime contracts after native Responses parsing.
-- `pico.context_ledger` / `pico.context_manager`: causal state, transactional compaction and Token governance.
+- `pico.run_journal` / `pico.context_manager`: single-source causal state, compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
-- `pico.features.memory` / `pico.project_memory`: revision-bound working state and Markdown long-term facts.
+- `pico.features.memory` / `pico.project_memory`: minimal current-task state and Markdown long-term facts with separate catalog/retrieval budgets.
 - `pico.tool_executor` / `pico.mutations` / `pico.sandbox`: staged admission, atomic edits and Docker execution.
-- `pico.checkpoint` / `pico.run_store`: strict resume, operation receipts and run artifacts.
+- `pico.runtime_recovery` / `pico.run_store`: Journal-tail resume, operation receipts and artifacts.
 - `pico.evidence` / `pico.verification` / `pico.completion`: evidence-bound completion.
-- `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and verified Patch integration.
+- `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and a separate receipt-bound Patch integrator.
 - `pico.evaluation`: deterministic Runtime regressions and mechanism evaluations.
+- `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool, Recovery and Prompt ownership;
+  `pico.runtime.Pico` is the small composition root.
+- `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,
+  durable Run lifecycle and completion authority have separate owners.
 
 ## 30-second interview framing
 
@@ -18,9 +22,9 @@ Pico is not an LLM chat wrapper. It is the control plane around a coding model: 
 
 The four strongest deep dives are:
 
-1. Continuous Responses tool context, Context Ledger reset/resume, and RepoMap.
+1. Continuous Responses tool context, Run Journal reset/resume, and RepoMap.
 2. Revision-bound atomic mutations plus interrupted-operation reconciliation.
-3. Hash-chained events, workspace-bound verification, and the Completion Gate.
+3. Single-source Run Journal, workspace-bound verification, and the Completion Gate.
 4. Model-planned subtasks with Runtime-validated dependencies, read-only exploration, exact write scopes and verified integration.
 
 See [Agent Runtime](../architecture/agent-runtime.md) for invariants, [resume wording](../resume-project.md) for claims aligned with the code, and [the interview demo](interview-demo.md) for a short evidence-first walkthrough.
