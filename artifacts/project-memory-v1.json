@@ -1,9 +1,9 @@
 {
   "artifact_type": "project-memory-v1",
-  "evaluation_snapshot_id": "sha256:0f9f2386a2a34a8dfb398c14bbf102f06855baa6f2fe753f642c3bd2f5b389e7",
-  "runtime_snapshot_id": "sha256:331540d8f6b86e3a5643652f7ecdb34d15bf3855138d0bfc437b788dd2b566de",
+  "evaluation_snapshot_id": "sha256:d65dbe459d3aadfef46ebbade8da9f7309e8b1363a33aa83dfdabcdd3e5262e9",
+  "runtime_snapshot_id": "sha256:1533b45076e1fdf432f7e8aa8b5bf94ee39584ed677bc094fadbe9923d610822",
   "summary": {
-    "explicit_precedence": true,
+    "catalog_generated": true,
     "index_generated": true,
     "markdown_source_of_truth": true,
     "provenance_complete": true

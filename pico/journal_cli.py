@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .run_journal import replay_entries
 from .run_store import RunStore
 
 
@@ -22,7 +23,7 @@ def journal_main(argv=None):
     if not entries:
         raise SystemExit(f"Run Journal not found for {args.run_id}")
     if args.command == "stats":
-        print(json.dumps(store.replay(args.run_id).summary(), indent=2, sort_keys=True))
+        print(json.dumps(replay_entries(entries).summary(), indent=2, sort_keys=True))
         return 0
     for entry in entries:
         print(json.dumps(entry.to_dict(), sort_keys=True))

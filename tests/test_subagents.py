@@ -35,15 +35,18 @@ def git(root, *args):
     return result.stdout.strip()
 
 
-def repository(tmp_path):
+def repository(tmp_path, *, ignore_pico=True):
     root = tmp_path / "repo"
     root.mkdir()
     git(root, "init")
     git(root, "config", "user.email", "pico@example.test")
     git(root, "config", "user.name", "Pico Test")
-    (root / ".gitignore").write_text(".pico/\n", encoding="utf-8")
     (root / "README.md").write_text("demo\n", encoding="utf-8")
-    git(root, "add", ".gitignore", "README.md")
+    tracked = ["README.md"]
+    if ignore_pico:
+        (root / ".gitignore").write_text(".pico/\n", encoding="utf-8")
+        tracked.append(".gitignore")
+    git(root, "add", *tracked)
     git(root, "commit", "-m", "base")
     return root
 
@@ -52,9 +55,6 @@ class PassingSandbox:
     def __init__(self, root, *, side_effect=None):
         self.root = Path(root)
         self.side_effect = side_effect
-
-    def identity(self):
-        return {"backend": "fake", "root": str(self.root)}
 
     def run(self, *_args, **_kwargs):
         if self.side_effect is not None:
@@ -624,8 +624,8 @@ def test_failed_integrated_verification_does_not_modify_parent(tmp_path):
     assert not (root / "feature.py").exists()
 
 
-def test_parent_agent_delegates_implementation_and_applies_verified_patch(tmp_path):
-    root = repository(tmp_path)
+def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_path):
+    root = repository(tmp_path, ignore_pico=False)
     task = {
         "task_id": "implement-parent-flow",
         "kind": "implement",
@@ -684,6 +684,47 @@ def test_parent_agent_delegates_implementation_and_applies_verified_patch(tmp_pa
         and entry.payload["status"] == "subtasks_incomplete"
     ]
     assert len(blocked) == 1
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "untracked"])
+def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind):
+    root = repository(tmp_path)
+    if dirty_kind == "tracked":
+        (root / "README.md").write_text("dirty\n", encoding="utf-8")
+    else:
+        (root / "user-note.txt").write_text("dirty\n", encoding="utf-8")
+    task = {
+        "task_id": "implement-dirty",
+        "kind": "implement",
+        "prompt": "create feature.py",
+        "depends_on": [],
+        "allowed_write_paths": ["feature.py"],
+        "max_steps": 4,
+    }
+    parent = build_parent(
+        root,
+        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
+        parent_outputs=[
+            ModelAction.tool(
+                "delegate_tasks", {"tasks": [task]}, call_id="delegate-dirty"
+            ),
+            ModelAction.final("delegation was rejected"),
+        ],
+        verification_command="",
+    )
+
+    answer = parent.ask("Delegate despite a dirty workspace")
+
+    assert answer == "delegation was rejected"
+    assert parent.services.subagents.completion_issue() == ""
+    run_id = parent.run.task_state.run_id
+    assert not (parent.services.run_store.run_dir(run_id) / "subtasks.json").exists()
+    blocked = [
+        entry
+        for entry in parent.services.run_store.read_entries(run_id)
+        if entry.kind == "completion_blocked"
+    ]
+    assert blocked == []
 
 
 def test_tampered_child_patch_is_rejected_before_integration(tmp_path):

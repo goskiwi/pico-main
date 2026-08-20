@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from ..persistence import atomic_write_json
+from ..run_journal import replay_entries
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext, clip
@@ -98,26 +99,38 @@ class SubagentManager:
         reused = set()
         for spec in specs:
             existing = records.get(spec.task_id)
-            if existing is None:
-                records[spec.task_id] = SubtaskRecord(spec=spec)
-            elif self._outcome_status(run_id, existing) == "completed":
+            if (
+                existing is not None
+                and self._outcome_status(run_id, existing) == "completed"
+            ):
                 self.integration.verify_record_receipt(run_id, existing)
                 reused.add(spec.task_id)
 
+        requires_clean = any(
+            spec.task_id not in reused and spec.kind == "implement" for spec in specs
+        )
+        base_sha = self._delegation_base_sha(requires_clean)
+        staged = {
+            task_id: record.model_copy(deep=True)
+            for task_id, record in records.items()
+        }
+        for spec in specs:
+            if spec.task_id not in staged:
+                staged[spec.task_id] = SubtaskRecord(spec=spec)
         implementations = [
-            records[spec.task_id]
+            staged[spec.task_id]
             for spec in specs
             if spec.task_id not in reused and spec.kind == "implement"
         ]
-        base_sha = self._delegation_base_sha(bool(implementations))
         for record in implementations:
             record.base_sha = base_sha
         for spec in specs:
-            record = records[spec.task_id]
+            record = staged[spec.task_id]
             if not record.base_sha:
                 record.base_sha = base_sha
-        self._save(run_id, records)
-        return records, reused
+        self._save(run_id, staged)
+        self._records_by_run[run_id] = staged
+        return staged, reused
 
     def _delegation_base_sha(self, requires_clean):
         if requires_clean:
@@ -255,11 +268,15 @@ class SubagentManager:
             raise ValueError(f"subtask has no child run receipt: {record.spec.task_id}")
         run_store = self._child_run_store(run_id, record)
         child_run_id = record.child_run_ids[-1]
-        if not run_store.verify_cursor(
-            child_run_id, record.journal_sequence, record.journal_entry_id
+        entries = run_store.read_entries(child_run_id)
+        sequence = int(record.journal_sequence)
+        if (
+            sequence < 1
+            or len(entries) < sequence
+            or entries[sequence - 1].entry_id != record.journal_entry_id
         ):
             raise ValueError(f"subtask Journal receipt is invalid: {record.spec.task_id}")
-        return run_store.replay(child_run_id)
+        return replay_entries(entries)
 
     def _outcome_status(self, run_id, record):
         if record.status == "finished":

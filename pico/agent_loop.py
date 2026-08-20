@@ -20,6 +20,7 @@ class ModelTurn:
     prompt_metadata: dict[str, Any]
     provider_input_tokens: int | None
     provider_output_tokens: int | None
+    provider_total_tokens: int | None
 
 
 class AgentLoop:
@@ -35,7 +36,12 @@ class AgentLoop:
             if frame.execution_stop:
                 break
 
-            turn = self._next_model_turn(frame)
+            try:
+                turn = self._next_model_turn(frame)
+            except RuntimeError as exc:
+                if self._recover_context_overflow(frame, exc):
+                    continue
+                raise
             if turn.action.kind == "tool":
                 frame.execution_stop = self._handle_tool_action(frame, turn)
             elif turn.action.kind == "retry":
@@ -50,7 +56,6 @@ class AgentLoop:
 
     def _next_model_turn(self, frame):
         agent = self.agent
-        frame.attempts += 1
         frame.task_state.record_attempt()
         prompt, prompt_metadata = self._prepare_prompt(frame)
         agent.emit_event(
@@ -67,18 +72,25 @@ class AgentLoop:
         )
         provider_input_tokens = completion_metadata.get("input_tokens")
         provider_output_tokens = completion_metadata.get("output_tokens")
+        provider_total_tokens = completion_metadata.get("total_tokens")
+        frame.overflow_recovery_attempted = False
         return ModelTurn(
             action=action,
             prompt_metadata=prompt_metadata,
             provider_input_tokens=provider_input_tokens,
             provider_output_tokens=provider_output_tokens,
+            provider_total_tokens=provider_total_tokens,
         )
 
     def _prepare_prompt(self, frame):
         agent = self.agent
         prompt_reused = frame.prompt_snapshot is not None
         if frame.prompt_snapshot is None:
-            prompt, prompt_metadata = agent.prompt.build(frame.user_message)
+            prompt, prompt_metadata = agent.prompt.build(
+                frame.user_message,
+                provider_context_tokens=frame.provider_context_tokens,
+            )
+            frame.provider_context_tokens = None
             frame.prompt_snapshot = (prompt, dict(prompt_metadata))
         else:
             prompt, original_metadata = frame.prompt_snapshot
@@ -92,10 +104,6 @@ class AgentLoop:
         if prompt_reused:
             return
         agent = self.agent
-        next_generation = int(
-            prompt_metadata.get("journal_generation", frame.journal.generation)
-        )
-        frame.context_generation = max(frame.context_generation, next_generation)
         memory_audit = dict(prompt_metadata.get("memory_retrieval", {}) or {})
         if memory_audit.get("available_count") or memory_audit.get(
             "selected_filenames"
@@ -116,7 +124,7 @@ class AgentLoop:
                 if tool["name"] == "submit_final"
             ]
             if agent.config.max_steps is not None
-            and frame.tool_steps >= agent.config.max_steps
+            and frame.task_state.tool_steps >= agent.config.max_steps
             else agent.tools.action_schemas
         )
         model_started_at = time.monotonic()
@@ -132,7 +140,6 @@ class AgentLoop:
         )
         if completion_metadata:
             prompt_metadata.update(completion_metadata)
-        agent.run.last_completion_metadata = completion_metadata
         agent.run.last_prompt_metadata = prompt_metadata
         agent.emit_event(
             frame.task_state,
@@ -148,23 +155,32 @@ class AgentLoop:
         )
         return action, completion_metadata
 
-    def _should_rotate_provider(self, turn, provider_result):
+    def _context_tokens_after_result(self, turn, provider_result):
         input_tokens = turn.provider_input_tokens
         if not isinstance(input_tokens, int):
-            return False
+            return None
         output_tokens = (
             turn.provider_output_tokens
             if isinstance(turn.provider_output_tokens, int)
             else 0
         )
-        result_tokens = self.agent.prompt.context.tokenizer.count(provider_result)
-        estimated_next_total = (
-            input_tokens
-            + output_tokens
-            + result_tokens
-            + self.agent.config.max_new_tokens
+        base_tokens = (
+            turn.provider_total_tokens
+            if isinstance(turn.provider_total_tokens, int)
+            and turn.provider_total_tokens > 0
+            else input_tokens + output_tokens
         )
-        return estimated_next_total >= self.agent.config.provider_context_limit_tokens
+        result_tokens = self.agent.prompt.context.tokenizer.count(provider_result)
+        return base_tokens + result_tokens
+
+    def _should_rotate_provider(self, turn, provider_result):
+        context_tokens = self._context_tokens_after_result(turn, provider_result)
+        if context_tokens is None:
+            return False
+        return (
+            context_tokens + self.agent.config.max_new_tokens
+            >= self.agent.config.provider_context_limit_tokens
+        )
 
     def _continue_provider(self, frame, turn, provider_result, tool_call_id=""):
         agent = self.agent
@@ -175,14 +191,11 @@ class AgentLoop:
                 else 0
             )
             result_tokens = agent.prompt.context.tokenizer.count(provider_result)
-            estimated_next_total = (
-                turn.provider_input_tokens
-                + output_tokens
-                + result_tokens
-                + agent.config.max_new_tokens
-            )
+            context_tokens = self._context_tokens_after_result(turn, provider_result)
+            estimated_next_total = context_tokens + agent.config.max_new_tokens
             agent.model_client.reset_action_session()
             frame.prompt_snapshot = None
+            frame.provider_context_tokens = context_tokens
             agent.emit_event(
                 frame.task_state,
                 "provider_session_reset",
@@ -192,17 +205,57 @@ class AgentLoop:
                     "output_tokens": output_tokens,
                     "tool_result_tokens": result_tokens,
                     "estimated_next_total": estimated_next_total,
+                    "provider_context_tokens": context_tokens,
                     "tool_call_id": tool_call_id,
                 },
             )
             return
         agent.model_client.record_action_result(turn.action, provider_result)
 
+    @staticmethod
+    def _is_context_overflow_error(exc):
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "context window",
+                "maximum context length",
+                "max context length",
+                "prompt is too long",
+                "input is too long",
+                "too many tokens",
+                "token limit exceeded",
+            )
+        )
+
+    def _recover_context_overflow(self, frame, exc):
+        if (
+            frame.overflow_recovery_attempted
+            or not self._is_context_overflow_error(exc)
+        ):
+            return False
+        frame.overflow_recovery_attempted = True
+        frame.prompt_snapshot = None
+        frame.provider_context_tokens = (
+            self.agent.config.provider_context_limit_tokens
+        )
+        self.agent.model_client.reset_action_session()
+        self.agent.emit_event(
+            frame.task_state,
+            "provider_session_reset",
+            {
+                "reason": "context_overflow_retry",
+                "provider_context_tokens": frame.provider_context_tokens,
+                "tool_call_id": "",
+            },
+        )
+        return True
+
     def _handle_tool_action(self, frame, turn):
         agent = self.agent
         if (
             agent.config.max_steps is not None
-            and frame.tool_steps >= agent.config.max_steps
+            and frame.task_state.tool_steps >= agent.config.max_steps
         ):
             return "step_limit_reached"
         frame.malformed_retries = 0
@@ -210,9 +263,7 @@ class AgentLoop:
         frame.journal.append_tool_call(call)
         outcome = agent.tools.run(call)
         if outcome.execution_state != "not_started":
-            frame.tool_steps += 1
             frame.task_state.record_tool(call.name)
-        frame.completion_gate.observe(outcome)
 
         guidance, policy_stop, reason = self._tool_policy(frame, call, outcome)
         provider_result = outcome.content
@@ -233,7 +284,7 @@ class AgentLoop:
         hook_decision = agent.services.hooks.after_tool_result(
             AfterToolContext(
                 outcome=outcome,
-                tool_steps=frame.tool_steps,
+                tool_steps=frame.task_state.tool_steps,
                 run_id=frame.task_state.run_id,
                 task_id=frame.task_state.task_id,
             )
@@ -241,8 +292,8 @@ class AgentLoop:
         turn_decision = agent.services.hooks.should_stop_after_turn(
             TurnContext(
                 action_kind="tool",
-                tool_steps=frame.tool_steps,
-                attempts=frame.attempts,
+                tool_steps=frame.task_state.tool_steps,
+                attempts=frame.task_state.attempts,
                 run_id=frame.task_state.run_id,
                 task_id=frame.task_state.task_id,
             )
@@ -258,7 +309,7 @@ class AgentLoop:
         policy_stop = bool(
             hook_decision.stop
             or turn_decision.stop
-            or outcome.metadata.get("policy_stop_requested")
+            or outcome.policy_stop_requested
         )
         reason = self._policy_reason(hook_decision, turn_decision, outcome)
         if hook_decision.active or turn_decision.active or policy_stop:
@@ -278,7 +329,7 @@ class AgentLoop:
         agent = self.agent
         if (
             agent.config.max_steps is None
-            or frame.tool_steps < agent.config.max_steps
+            or frame.task_state.tool_steps < agent.config.max_steps
         ):
             return guidance
         budget_guidance = (
@@ -292,7 +343,7 @@ class AgentLoop:
     def _policy_reason(hook_decision, turn_decision, outcome):
         outcome_reason = (
             outcome.failure.detail
-            if outcome.metadata.get("policy_stop_requested") and outcome.failure
+            if outcome.policy_stop_requested and outcome.failure
             else ""
         )
         return " | ".join(

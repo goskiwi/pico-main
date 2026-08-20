@@ -29,6 +29,20 @@ def new_journal(agent, state):
     )
 
 
+def ok_outcome(call, content, *, artifact=None, output_truncated=False):
+    return ToolOutcome(
+        tool_call_id=call.call_id,
+        tool_name=call.name,
+        status="ok",
+        execution_state="completed",
+        side_effect_state="none",
+        content=content,
+        admission_status="admitted",
+        artifact=dict(artifact or {}),
+        output_truncated=output_truncated,
+    )
+
+
 def test_context_uses_token_budgets_and_preserves_request(tmp_path):
     agent = build_agent(tmp_path)
     agent.session.memory.set_goal("deploy key is red")
@@ -122,6 +136,33 @@ def test_small_journal_is_not_compacted_by_entry_count(tmp_path):
     assert summary_requested is False
 
 
+def test_provider_usage_can_trigger_compaction_when_local_prompt_is_under_limit(
+    tmp_path,
+):
+    agent = build_agent(tmp_path)
+    state = TaskState.create("task_provider_usage", "inspect", run_id="run_provider_usage")
+    agent.run.task_state = state
+    agent.services.run_store.start_run(state)
+    ledger = new_journal(agent, state)
+    ledger.append_user("inspect")
+    for index in range(5):
+        call = ToolCall("read_file", {"path": f"file_{index}.py"}, f"call_{index}")
+        ledger.append_tool_call(call)
+        ledger.append_tool_result(ok_outcome(call, "result " + "x " * 500))
+    agent.run.journal = ledger
+
+    _, metadata = ContextManager(
+        agent,
+        total_budget=10_000,
+        compaction_reserve_tokens=2_000,
+        compaction_keep_recent_tokens=100,
+    ).build("continue", provider_context_tokens=9_500)
+
+    assert metadata["compaction"] is not None
+    assert metadata["compaction"]["trigger_context_tokens"] == 9_500
+    assert metadata["compaction"]["local_context_tokens"] < 8_000
+
+
 def test_runtime_preserves_context_beyond_the_old_eight_thousand_token_cap(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_large", "inspect", run_id="run_large")
@@ -148,12 +189,7 @@ def test_ledger_compaction_keeps_audit_entries_and_changes_active_projection(tmp
     for index in range(5):
         call = ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, f"call_{index}")
         ledger.append_tool_call(call)
-        ledger.append_tool_result(
-            ToolOutcome(
-                call.call_id, call.name, "ok", "completed", "none", "result " + "x " * 100,
-                f"fp_{index}", {"status": "admitted", "stages": []}
-            )
-        )
+        ledger.append_tool_result(ok_outcome(call, "result " + "x " * 100))
     agent.run.journal = ledger
 
     _, metadata = ContextManager(
@@ -188,18 +224,7 @@ def test_current_run_session_events_are_not_duplicated_with_ledger(tmp_path):
     ledger.append_user("inspect")
     call = ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_dedupe")
     ledger.append_tool_call(call)
-    ledger.append_tool_result(
-        ToolOutcome(
-            call.call_id,
-            call.name,
-            "ok",
-            "completed",
-            "none",
-            "unique-current-run-result",
-            "fp_dedupe",
-            {"status": "admitted", "stages": []},
-        )
-    )
+    ledger.append_tool_result(ok_outcome(call, "unique-current-run-result"))
     agent.run.journal = ledger
 
     prompt, metadata = ContextManager(agent, total_budget=900).build("inspect")
@@ -305,18 +330,14 @@ def test_bounded_tool_result_uses_executor_projection_without_second_truncation(
         "[Output truncated; use read_artifact artifact_id=tool_call_bounded_deadbeef]"
     )
     entry = ledger.append_tool_result(
-        ToolOutcome(
-            call.call_id,
-            call.name,
-            "ok",
-            "completed",
-            "none",
+        ok_outcome(
+            call,
             bounded,
-            "fp_bounded",
-            {"status": "admitted", "stages": []},
-            artifact_id="tool_call_bounded_deadbeef",
-            artifact={"size_bytes": 12000},
-            metadata={"output_truncated": True},
+            artifact={
+                "artifact_id": "tool_call_bounded_deadbeef",
+                "size_bytes": 12000,
+            },
+            output_truncated=True,
         )
     )
 
@@ -334,18 +355,7 @@ def test_structured_compaction_preserves_key_facts_and_repeated_summary(tmp_path
     ledger.append_user("inspect deploy")
     call = ToolCall("read_file", {"path": "deploy.txt"}, "call_summary")
     ledger.append_tool_call(call)
-    ledger.append_tool_result(
-        ToolOutcome(
-            call.call_id,
-            call.name,
-            "ok",
-            "completed",
-            "none",
-            "deploy target is staging",
-            "fp_summary",
-            {"status": "admitted", "stages": []},
-        )
-    )
+    ledger.append_tool_result(ok_outcome(call, "deploy target is staging"))
     source = ledger.active_entries()
     first = ledger.commit_compaction(
         ledger.build_structured_summary(source),
@@ -383,18 +393,7 @@ def test_llm_semantic_summary_is_merged_with_runtime_facts_and_recent_tail(tmp_p
             f"call_semantic_{index}",
         )
         ledger.append_tool_call(call)
-        ledger.append_tool_result(
-            ToolOutcome(
-                call.call_id,
-                call.name,
-                "ok",
-                "completed",
-                "none",
-                content,
-                f"fp_semantic_{index}",
-                {"status": "admitted", "stages": []},
-            )
-        )
+        ledger.append_tool_result(ok_outcome(call, content))
     agent.run.journal = ledger
     requests = []
 
@@ -468,16 +467,7 @@ def test_second_compaction_semantically_merges_the_previous_summary(tmp_path):
             )
             ledger.append_tool_call(call)
             ledger.append_tool_result(
-                ToolOutcome(
-                    call.call_id,
-                    call.name,
-                    "ok",
-                    "completed",
-                    "none",
-                    f"confirmed fact {index} " + "x " * 500,
-                    f"fp_merge_{index}",
-                    {"status": "admitted", "stages": []},
-                )
+                ok_outcome(call, f"confirmed fact {index} " + "x " * 500)
             )
 
     append_reads(0, 5)
@@ -535,18 +525,7 @@ def test_pending_tool_call_prevents_compaction_and_summary_request(tmp_path):
             f"call_complete_{index}",
         )
         ledger.append_tool_call(call)
-        ledger.append_tool_result(
-            ToolOutcome(
-                call.call_id,
-                call.name,
-                "ok",
-                "completed",
-                "none",
-                "x " * 500,
-                f"fp_complete_{index}",
-                {"status": "admitted", "stages": []},
-            )
-        )
+        ledger.append_tool_result(ok_outcome(call, "x " * 500))
     ledger.append_tool_call(
         ToolCall("read_file", {"path": "pending.py"}, "call_pending")
     )
@@ -577,9 +556,7 @@ def test_compaction_rejects_split_tool_batch(tmp_path):
 
     call = ToolCall("read_file", {"path": "README.md"}, "call_tx")
     ledger.append_tool_call(call)
-    ledger.append_tool_result(
-        ToolOutcome(call.call_id, call.name, "ok", "completed", "none", "ok", "fp", {"status": "admitted", "stages": []})
-    )
+    ledger.append_tool_result(ok_outcome(call, "ok"))
     with pytest.raises(ValueError, match="split"):
         ledger.commit_compaction(
             {"summary": ["bad"]},

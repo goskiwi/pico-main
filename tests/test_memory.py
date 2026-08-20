@@ -23,6 +23,16 @@ def _store(store, filename="reference_test_command.md", **overrides):
     return store.store(**values)
 
 
+def _render_selected(store, cards):
+    tokenizer = Tokenizer()
+    rendered, _ = store.render_selected_with_budget(
+        cards,
+        max_tokens=100_000,
+        token_counter=tokenizer.count,
+    )
+    return rendered
+
+
 def test_working_memory_contains_only_the_current_goal(tmp_path):
     memory = SessionWorkingMemory(workspace_root=tmp_path)
     memory.set_goal("Inspect sample")
@@ -35,7 +45,7 @@ def test_working_memory_contains_only_the_current_goal(tmp_path):
 
 
 def test_markdown_card_is_source_of_truth_and_index_is_generated(tmp_path):
-    store = ProjectMemoryStore(tmp_path / ".pico/memory", tmp_path)
+    store = ProjectMemoryStore(tmp_path / ".pico/memory")
     card, action = _store(store)
     assert action == "created"
     assert store.recall(card.filename) == card
@@ -44,7 +54,7 @@ def test_markdown_card_is_source_of_truth_and_index_is_generated(tmp_path):
 
 
 def test_markdown_memory_uses_filename_identity(tmp_path):
-    store = ProjectMemoryStore(tmp_path / ".pico/memory", tmp_path)
+    store = ProjectMemoryStore(tmp_path / ".pico/memory")
     _store(store)
     with pytest.raises(ValueError, match="use update"):
         _store(store)
@@ -59,11 +69,11 @@ def test_markdown_memory_uses_filename_identity(tmp_path):
 
 
 def test_project_memory_selector_only_accepts_manifest_filenames(tmp_path):
-    store = ProjectMemoryStore(tmp_path / ".pico/memory", tmp_path)
+    store = ProjectMemoryStore(tmp_path / ".pico/memory")
     _store(store)
     cards = store.selected_cards(["reference_test_command.md"])
     assert cards[0].content == "Run `python3 -m pytest -q`."
-    rendered = store.render_selected(cards)
+    rendered = _render_selected(store, cards)
     assert "not workspace paths" in rendered
     assert "Project test command" in rendered
     with pytest.raises(ValueError, match="unavailable filename"):
@@ -71,11 +81,11 @@ def test_project_memory_selector_only_accepts_manifest_filenames(tmp_path):
 
 
 def test_selected_memories_are_packed_as_complete_cards(tmp_path):
-    store = ProjectMemoryStore(tmp_path / ".pico/memory", tmp_path)
+    store = ProjectMemoryStore(tmp_path / ".pico/memory")
     first, _ = _store(store, filename="reference_first.md", content="first complete card")
     second, _ = _store(store, filename="reference_second.md", content="second complete card")
     tokenizer = Tokenizer()
-    one_card_budget = tokenizer.count(store.render_selected([first]))
+    one_card_budget = tokenizer.count(_render_selected(store, [first]))
 
     rendered, included = store.render_selected_with_budget(
         [first, second],
@@ -102,7 +112,7 @@ def test_legacy_memory_is_ignored_and_preserved(tmp_path):
     (root / "index.md").write_text("legacy\n", encoding="utf-8")
     (topics / "old.md").write_text("legacy\n", encoding="utf-8")
 
-    store = ProjectMemoryStore(root, tmp_path)
+    store = ProjectMemoryStore(root)
 
     assert store.count() == 0
     assert sqlite.read_bytes() == b"legacy sqlite"
@@ -114,7 +124,7 @@ def test_legacy_memory_is_ignored_and_preserved(tmp_path):
 
 
 def test_stale_selected_card_warns_before_use(tmp_path):
-    store = ProjectMemoryStore(tmp_path / ".pico/memory", tmp_path)
+    store = ProjectMemoryStore(tmp_path / ".pico/memory")
     card, _ = _store(store)
     path = tmp_path / ".pico/memory/cards" / card.filename
     text = path.read_text(encoding="utf-8").replace(
@@ -122,6 +132,6 @@ def test_stale_selected_card_warns_before_use(tmp_path):
         'updated_at: "2020-01-01T00:00:00+00:00"',
     )
     path.write_text(text, encoding="utf-8")
-    rendered = store.render_selected([store.recall(card.filename)])
+    rendered = _render_selected(store, [store.recall(card.filename)])
     assert "WARNING: saved" in rendered
     assert datetime.now(timezone.utc).year >= 2026

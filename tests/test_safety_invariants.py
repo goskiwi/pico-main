@@ -18,10 +18,6 @@ class FakeSandbox:
         self.calls.append((argv, kwargs))
         return SandboxResult(returncode=0, stdout="sandbox-ok\n")
 
-    def identity(self):
-        return {"backend": "fake-test-sandbox"}
-
-
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
     sandbox = kwargs.pop("sandbox", None)

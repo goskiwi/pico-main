@@ -8,7 +8,7 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.features.memory` / `pico.project_memory`: minimal current-task state and Markdown long-term facts with separate catalog/retrieval budgets.
 - `pico.tool_executor` / `pico.mutations` / `pico.sandbox`: staged admission, atomic edits and Docker execution.
 - `pico.runtime_recovery` / `pico.run_store`: Journal-tail resume, operation receipts and artifacts.
-- `pico.evidence` / `pico.verification` / `pico.completion`: evidence-bound completion.
+- `pico.evidence` / `pico.verification` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and a separate receipt-bound Patch integrator.
 - `pico.evaluation`: deterministic Runtime regressions and mechanism evaluations.
 - `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool, Recovery and Prompt ownership;

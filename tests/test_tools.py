@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -6,7 +7,13 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceConte
 from pico.contracts import ToolCall, ToolExecution
 from pico.mutations import WorkspaceMutationService, file_revision
 from pico.tool_context import ToolContext
-from pico.tools import build_tool_registry, tool_patch_file, tool_read_file, tool_search
+from pico.tools import (
+    build_tool_registry,
+    tool_patch_file,
+    tool_read_file,
+    tool_search,
+    validate_tool,
+)
 
 
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
@@ -22,6 +29,25 @@ def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
     assert "# sample.txt" in result.content
     assert "revision: sha256:" in result.content
     assert "alpha" in result.content
+
+
+def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
+    (tmp_path / "large.txt").write_text("12345", encoding="utf-8")
+    context = ToolContext(
+        root=tmp_path.resolve(),
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    with (
+        patch("pico.tools.READ_FILE_MAX_BYTES", 4),
+        pytest.raises(ValueError, match="exceeds 4 bytes"),
+    ):
+        validate_tool(
+            context,
+            "read_file",
+            {"path": "large.txt", "start": 1, "end": 1},
+        )
 
 
 def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
@@ -54,6 +80,42 @@ def test_search_returns_workspace_relative_paths(tmp_path):
 
     assert "src/demo.py:1:" in result.content
     assert str(tmp_path) not in result.content
+
+
+def test_fallback_search_skips_symlinks_that_leave_workspace(tmp_path):
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("EXTERNAL_SENTINEL\n", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(outside)
+    context = ToolContext(
+        root=tmp_path.resolve(),
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    with patch("pico.tools.shutil.which", return_value=None):
+        result = tool_search(
+            context, {"pattern": "EXTERNAL_SENTINEL", "path": "."}
+        )
+
+    assert "EXTERNAL_SENTINEL" not in result.content
+
+
+def test_fallback_search_has_a_global_match_limit(tmp_path):
+    (tmp_path / "many.txt").write_text(
+        "".join(f"needle {index}\n" for index in range(500)), encoding="utf-8"
+    )
+    context = ToolContext(
+        root=tmp_path.resolve(),
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    with patch("pico.tools.shutil.which", return_value=None):
+        result = tool_search(context, {"pattern": "needle", "path": "."})
+
+    matches = [line for line in result.content.splitlines() if "needle" in line]
+    assert len(matches) == 200
+    assert "search result limit reached" in result.content
 
 
 def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):

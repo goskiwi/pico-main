@@ -38,7 +38,7 @@ class CompletionController:
                 guidance=guidance,
             )
 
-        verification_guidance = self._ensure_verification(frame)
+        fingerprint, verification_guidance = self._ensure_verification(frame)
         if verification_guidance:
             return CompletionAssessment(
                 status="verification_failed",
@@ -46,7 +46,7 @@ class CompletionController:
                 guidance=verification_guidance,
             )
 
-        decision = frame.completion_gate.assess()
+        decision = self.runtime.run.evidence.assess_completion(fingerprint)
         if not decision.allowed:
             return CompletionAssessment(
                 status=decision.status,
@@ -77,13 +77,17 @@ class CompletionController:
 
     def _ensure_verification(self, frame):
         runtime = self.runtime
-        preliminary = frame.completion_gate.assess()
+        unresolved = runtime.run.evidence.unresolved_effects()
+        workspace_unresolved = any(
+            effect.get("effect_scope") in {"workspace", "mixed"}
+            for effect in unresolved
+        )
         needs_verification = bool(
-            (runtime.run.evidence.changed_paths or not preliminary.allowed)
+            (runtime.run.evidence.changed_paths or workspace_unresolved)
             and runtime.config.verification_command
         )
         if not needs_verification:
-            return ""
+            return "", ""
         fingerprint = runtime.workspace.content_fingerprint(force=True)
         verification = runtime.run.evidence.current_verification(fingerprint)
         if verification is None:
@@ -100,10 +104,9 @@ class CompletionController:
             )
             runtime.run.evidence.apply_entry(event)
         if not verification or verification.get("status") != "passed":
-            return (
+            return fingerprint, (
                 "Runtime verification failed; inspect and repair before "
                 "submit_final.\n"
                 + str((verification or {}).get("output", "verification unavailable"))
             )
-        frame.completion_gate.observe_verification(True)
-        return ""
+        return fingerprint, ""

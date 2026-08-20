@@ -149,36 +149,6 @@ class DockerSandbox:
         self.config = config or DockerSandboxConfig()
         self.docker_binary = str(docker_binary or shutil.which("docker") or "docker")
 
-    def identity(self):
-        return {
-            "backend": self.backend,
-            "image": self.config.image,
-            "cpus": float(self.config.cpus),
-            "memory": self.config.memory,
-            "pids_limit": int(self.config.pids_limit),
-            "max_output_bytes": int(self.config.max_output_bytes),
-            "network": "none",
-            "rootfs_read_only": True,
-            "profiles": [profile.value for profile in SandboxProfile],
-            "workspace_read_only": True,
-        }
-
-    def audit_metadata(self, *, profile=SandboxProfile.INSPECT, timed_out=False):
-        profile = SandboxProfile(profile)
-        return {
-            "sandbox_backend": self.backend,
-            "sandbox_image": self.config.image,
-            "sandbox_network": "none",
-            "sandbox_rootfs_read_only": True,
-            "sandbox_cpus": float(self.config.cpus),
-            "sandbox_memory": self.config.memory,
-            "sandbox_pids_limit": int(self.config.pids_limit),
-            "sandbox_max_output_bytes": int(self.config.max_output_bytes),
-            "sandbox_timed_out": bool(timed_out),
-            "sandbox_profile": profile.value,
-            "sandbox_workspace_read_only": profile.workspace_read_only,
-        }
-
     def ensure_ready(self):
         if not shutil.which(self.docker_binary) and not Path(self.docker_binary).exists():
             raise SandboxUnavailableError(

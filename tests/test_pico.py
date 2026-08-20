@@ -150,3 +150,33 @@ def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp
 
     assert agent.workspace.context.repo_root == str(workspace_root.resolve())
     assert agent.workspace.context.cwd == str(invocation_cwd.resolve())
+
+
+def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path):
+    agent = build_agent(tmp_path, [])
+    with pytest.raises(RuntimeError, match="ran out of outputs"):
+        agent.ask("old task")
+    old_run_id = agent.run.task_state.run_id
+
+    agent.reset()
+    agent.model_client.outputs.append(ModelAction.final("new answer"))
+
+    assert agent.ask("new task") == "new answer"
+    assert agent.run.task_state.run_id != old_run_id
+    assert agent.run.task_state.user_request == "new task"
+    old_projection = agent.services.run_store.replay(old_run_id)
+    assert old_projection.terminal is True
+    assert old_projection.stop_reason == "user_reset"
+
+
+def test_custom_prompt_prefix_rebuilds_its_cache_hash(tmp_path):
+    agent = build_agent(tmp_path, [])
+    original_hash = agent.prompt.prefix_state.hash
+
+    agent.prompt.prefix = "custom interview rules"
+    prompt, metadata = agent.prompt.build("inspect")
+
+    assert "custom interview rules" in prompt
+    assert agent.prompt.prefix_state.hash != original_hash
+    assert metadata["prefix_hash"] == agent.prompt.prefix_state.hash
+    assert metadata["prompt_cache_key"] == agent.prompt.prefix_state.hash

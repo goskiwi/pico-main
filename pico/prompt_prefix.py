@@ -1,12 +1,8 @@
 """Stable prompt prefix construction."""
 
 import hashlib
-import json
 import textwrap
 from dataclasses import dataclass
-
-from .tools import function_schema
-from .workspace import now
 
 
 @dataclass
@@ -15,27 +11,9 @@ class PromptPrefix:
     # 这样 runtime 才能明确判断 prefix 是否可以复用。
     text: str
     hash: str
-    workspace_fingerprint: str
-    tool_signature: str
-    built_at: str
 
 
-def tool_signature(tools):
-    payload = []
-    for name in sorted(tools):
-        tool = tools[name]
-        payload.append(
-            {
-                "name": name,
-                "schema": function_schema(tool["args_schema"]),
-                "risky": tool["risky"],
-                "description": tool["description"],
-            }
-        )
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def build_prompt_prefix(workspace, tools, built_at=None, repository_overview=None):
+def build_prompt_prefix(workspace, tools):
     tool_lines = []
     for name, tool in tools.items():
         risk = "approval required" if tool["risky"] else "safe"
@@ -65,15 +43,9 @@ def build_prompt_prefix(workspace, tools, built_at=None, repository_overview=Non
         {tool_text}
 
         {workspace.text()}
-
-        {repository_overview.to_prompt() if repository_overview is not None else ""}
         """
     ).strip()
-    signature = tool_signature(tools)
     return PromptPrefix(
         text=text,
         hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        workspace_fingerprint=workspace.fingerprint(),
-        tool_signature=signature,
-        built_at=built_at or now(),
     )

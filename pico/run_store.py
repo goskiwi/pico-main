@@ -121,21 +121,8 @@ class RunStore:
         self._cursors[run_id] = JournalCursor(sequence, entry.entry_id)
         return entry
 
-    def verify_cursor(self, run_id, sequence, entry_id):
-        sequence = int(sequence)
-        if sequence == 0:
-            return not entry_id
-        entries = self.read_entries(run_id)
-        return (
-            len(entries) >= sequence
-            and entries[sequence - 1].entry_id == str(entry_id)
-        )
-
     def replay(self, run_id):
         return replay_entries(self.read_entries(run_id))
-
-    def operation_receipt(self, run_id, call_id):
-        return self.replay(run_id).operation_receipt(call_id)
 
     def find_active_run(self, session_id):
         if not self.root.exists():

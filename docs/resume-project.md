@@ -14,7 +14,7 @@ Session 只保存 `active_run_id`。副作用前 fsync `tool_started`，记录�
 
 ## 长上下文治理
 
-以配置的模型 Context Window 组装 RepoMap、工作记忆、项目记忆、完整活动 Journal 和当前请求。只有总上下文越过保留输出空间后的阈值才触发 Compaction；它按 token 保留近期原文，以完整 Tool Call/Result 批次为边界，并保存包含目标与约束的结构化摘要和覆盖 Entry ID。原始 Journal Entry 不删除。
+以配置的模型 Context Window 组装 RepoMap、工作记忆、项目记忆、完整活动 Journal 和当前请求。最近一次 fresh Provider usage 是总上下文基准，其后的 Tool Result 使用本地 tokenizer 估算；超过保留输出空间后的阈值才触发 Compaction。本地 token 统计只负责 section 分配和 cut point；Compaction 以完整 Tool Call/Result 批次为边界，并保存包含目标与约束的结构化摘要和覆盖 Entry ID。Provider 明确报告 context overflow 时只 compact-and-retry 一次。原始 Journal Entry 不删除。
 
 ## 工具安全
 

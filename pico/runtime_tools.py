@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from . import tools as toolkit
 from .contracts import ToolCall
-from .prompt_prefix import tool_signature
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
 
@@ -40,9 +39,6 @@ class RuntimeTools:
             raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
         allowed = set(allowed_tools)
         return {name: tool for name, tool in tools.items() if name in allowed}
-
-    def signature(self):
-        return tool_signature(self.surface)
 
     def validate(self, name, args):
         runtime = self.runtime
@@ -123,5 +119,4 @@ class RuntimeTools:
             else ToolCall(str(call_or_name), dict(args or {}))
         )
         outcome = self.executor.execute(call)
-        self.runtime.run.last_tool_outcome = outcome
         return outcome

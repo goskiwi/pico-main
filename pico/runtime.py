@@ -13,18 +13,18 @@ from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .projections import build_run_report
 from .repo_map import RepoMap
-from .repository_overview import discover_repository_overview
-from .run_journal import JournalEntry
+from .run_journal import JournalEntry, RunJournal, replay_entries
 from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_prompt import RuntimePrompt
-from .runtime_recovery import RuntimeRecovery
+from .runtime_recovery import RESUME_NONE, RESUME_READY, RuntimeRecovery
 from .runtime_services import RuntimeServices
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .runtime_tools import RuntimeTools
 from .sandbox import DockerSandbox, DockerSandboxConfig
 from .session_store import SessionStore
+from .task_state import TaskState
 from .verification import discover_verification_command, run_verification
 from .workspace_tracker import WorkspaceTracker
 
@@ -69,7 +69,7 @@ class Pico:
             if project_memory_root is not None
             else self.workspace.root / ".pico" / "memory"
         )
-        project_memory = ProjectMemoryStore(memory_root, self.workspace.root)
+        project_memory = ProjectMemoryStore(memory_root)
         mutations = WorkspaceMutationService(self.workspace.root)
 
         if sandbox_factory is None:
@@ -93,7 +93,6 @@ class Pico:
             sandbox_factory=sandbox_factory,
             hooks=HookRunner(hooks),
             repo_map=RepoMap(self.workspace.root),
-            repository_overview=discover_repository_overview(self.workspace.root),
             parent_cancellation_token=parent_cancellation_token,
         )
         if subagent_model_client_factory is not None:
@@ -208,8 +207,41 @@ class Pico:
         )
 
     def reset(self):
+        journal = self.run.journal
+        task_state = self.run.task_state
+        recovery_state = dict(self.recovery.state)
+        if journal is None and recovery_state.get("status") == RESUME_READY:
+            entries = tuple(recovery_state.get("entries", ()))
+            if entries:
+                first = entries[0]
+                journal = RunJournal(
+                    first.run_id,
+                    first.task_id,
+                    first.session_id,
+                    self.services.run_store,
+                    entries,
+                )
+                projection = recovery_state.get("projection") or replay_entries(entries)
+                task_state = TaskState.from_dict(projection.task_state())
+        if journal is not None and not replay_entries(journal.entries).terminal:
+            self.run.journal = journal
+            self.run.task_state = task_state
+            journal.reconcile_interrupted(self)
+            journal.append_stopped(
+                "Session reset by user.",
+                "user_reset",
+            )
+        if self.run.execution is not None:
+            self.run.execution.request_stop("user_reset")
         self.session.reset()
-        self.run.task_memory_selection = None
+        self.run = ActiveRunState()
+        self.recovery.state = {
+            "status": RESUME_NONE,
+            "active_run_id": "",
+            "projection": None,
+            "entries": (),
+        }
+        self.model_client.reset_action_session()
 
     def cancel_current_run(self, reason="user_cancelled"):
         if self.run.execution is None:

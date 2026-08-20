@@ -64,19 +64,6 @@ def _extract_openai_text(data):
                 if text:
                     return text
 
-    choices = data.get("choices", [])
-    if choices:
-        message = choices[0].get("message", {})
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if text:
-                        return text
-
     return ""
 
 
@@ -132,20 +119,13 @@ def _extract_openai_response_from_sse(body_text):
     return "", {}
 
 
-def _extract_openai_text_from_sse(body_text):
-    text, _response = _extract_openai_response_from_sse(body_text)
-    return text
-
-
 def _extract_usage_cache_details(data):
     # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
     # 让 Runtime event/report 不需要关心传输细节。
     usage = data.get("usage") or {}
-    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
-    output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
-    input_details = (
-        usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
-    )
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    input_details = usage.get("input_tokens_details") or {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
     return {
         "input_tokens": input_tokens,
@@ -160,7 +140,7 @@ def _action_from_response(data, action_tools):
     if data.get("status") == "incomplete":
         details = data.get("incomplete_details") or {}
         reason = str(details.get("reason", ""))
-        if reason in {"max_output_tokens", "max_tokens"}:
+        if reason == "max_output_tokens":
             return ModelAction.retry(
                 (
                     "The model response reached max_output_tokens before "
@@ -208,7 +188,7 @@ def _action_from_response(data, action_tools):
                 error="invalid_final_answer",
             )
         return ModelAction.final(answer)
-    call_id = str(call.get("call_id") or call.get("id") or "")
+    call_id = str(call.get("call_id") or "")
     if not call_id:
         return ModelAction.retry(
             f"function {name} is missing a call id",
@@ -313,10 +293,30 @@ class OpenAICompatibleModelClient:
             method="POST",
         )
         attempts = 3
-        effective_timeout = self.timeout if request_timeout is None else min(
-            float(self.timeout), float(request_timeout)
+        total_timeout = (
+            float(self.timeout)
+            if request_timeout is None
+            else float(request_timeout)
         )
+        deadline = time.monotonic() + max(0.001, total_timeout)
+
+        def retry_delay(attempt):
+            delay = 0.5 * (attempt + 1)
+            remaining = deadline - time.monotonic()
+            if remaining <= delay:
+                return False
+            time.sleep(delay)
+            return True
+
         for attempt in range(attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    "Could not reach the OpenAI-compatible backend before the request deadline.\n"
+                    f"Base URL: {self.base_url}\n"
+                    f"Model: {self.model}"
+                )
+            effective_timeout = min(float(self.timeout), remaining)
             try:
                 with urllib.request.urlopen(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
@@ -325,8 +325,7 @@ class OpenAICompatibleModelClient:
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 transient = exc.code in {408, 429} or exc.code >= 500
-                if transient and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                if transient and attempt < attempts - 1 and retry_delay(attempt):
                     continue
                 raise RuntimeError(
                     f"OpenAI-compatible request failed with HTTP {exc.code}: {body}"
@@ -337,8 +336,7 @@ class OpenAICompatibleModelClient:
                 RemoteDisconnected,
                 TimeoutError,
             ) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
+                if attempt < attempts - 1 and retry_delay(attempt):
                     continue
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible backend.\n"
@@ -444,10 +442,10 @@ class OpenAICompatibleModelClient:
         if isinstance(output, list):
             self._action_input.extend(item for item in output if isinstance(item, dict))
             self._pending_call_ids = [
-                str(item.get("call_id") or item.get("id") or "")
+                str(item.get("call_id") or "")
                 for item in output
                 if item.get("type") == "function_call"
-                and str(item.get("call_id") or item.get("id") or "")
+                and str(item.get("call_id") or "")
             ]
         return action
 
@@ -467,15 +465,4 @@ class OpenAICompatibleModelClient:
         payload = json.loads(self.complete(prompt, int(max_new_tokens)))
         if not isinstance(payload, dict) or set(payload) != {"filenames"}:
             raise ValueError("memory selector returned an invalid top-level schema")
-        filenames = payload["filenames"]
-        if (
-            not isinstance(filenames, list)
-            or len(filenames) > int(max_files)
-            or any(not isinstance(item, str) or not item for item in filenames)
-            or len(set(filenames)) != len(filenames)
-        ):
-            raise ValueError("memory selector returned invalid filenames")
-        allowed = {str(item["filename"]) for item in memories}
-        if any(filename not in allowed for filename in filenames):
-            raise ValueError("memory selector returned an unavailable filename")
-        return filenames
+        return payload["filenames"]

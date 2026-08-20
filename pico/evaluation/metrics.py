@@ -53,7 +53,7 @@ def run_context_governance_ablation(path=Path("artifacts/context-governance-v4.j
 def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json")):
     with tempfile.TemporaryDirectory(prefix="pico-project-memory-eval-") as directory:
         root = Path(directory)
-        store = ProjectMemoryStore(root / ".pico/memory", root)
+        store = ProjectMemoryStore(root / ".pico/memory")
         card, _created = store.store(
             action="create", filename="project_test_command.md", name="Test command",
             description="Stable project test workflow", memory_type="project",
@@ -104,21 +104,25 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
         )
         policy = RecoveryPolicy()
         outcome = ToolOutcome(
-            "call_eval", "run_shell", "error", "failed", "none", "exit_code: 1",
-            "same-call", {"status": "admitted", "stages": []},
+            tool_call_id="call_eval",
+            tool_name="run_shell",
+            status="error",
+            execution_state="failed",
+            side_effect_state="none",
+            content="exit_code: 1",
+            admission_status="admitted",
             failure=FailureInfo("tool_failed", "command", "same failure", True),
-            workspace_fingerprint="workspace-eval",
         )
         first = policy.assess(
             outcome.failure,
             status=outcome.status,
-            fingerprint=outcome.call_fingerprint,
+            fingerprint="same-call",
             scope="run_eval",
         )
         second = policy.assess(
             outcome.failure,
             status=outcome.status,
-            fingerprint=outcome.call_fingerprint,
+            fingerprint="same-call",
             scope="run_eval",
         )
         for decision in (first, second):
@@ -129,7 +133,7 @@ def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json"))
                 "policy_decided",
                 {
                     "stop": decision.action == "stop",
-                    "reason": decision.reason,
+                    "reason": outcome.failure.detail,
                     "guidance": "\n".join(decision.guidance),
                 },
             )

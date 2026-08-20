@@ -88,8 +88,6 @@ def test_journal_projection_keeps_interrupted_operation_pending(tmp_path):
         {"tool_call_id": "call_pending", "tool_name": "patch_file"},
     )
 
-    receipt = store.operation_receipt("run_pending", "call_pending")
-    assert receipt["state"] == "started"
     assert store.replay("run_pending").summary()["pending_operations"] == [
         "call_pending"
     ]
@@ -109,11 +107,10 @@ def test_run_store_creates_only_run_directory_until_first_entry(tmp_path):
 
 def test_journal_cursor_uses_sequence_and_entry_id(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
-    first = append(store, "run_cursor", "run_started")
+    append(store, "run_cursor", "run_started")
     last = append(store, "run_cursor", "model_requested", {"attempts": 1})
 
     cursor = store.cursor("run_cursor")
 
     assert cursor.sequence == 2
     assert cursor.entry_id == last.entry_id
-    assert store.verify_cursor("run_cursor", 1, first.entry_id)

@@ -72,7 +72,7 @@ After execution, `tool_result` records the canonical ToolOutcome. On resume:
 
 ## Context and compaction
 
-The model Context uses the configured provider window and includes every active context-bearing Journal entry. Compaction starts only when total context crosses the window minus its output reserve, keeps a recent token budget without splitting Tool Call/Result units, and replaces an exact older prefix with Runtime Facts plus a structured semantic summary. Original entries remain in the Journal. Provider continuation metrics remain as `turn_metrics` so evaluation and reports retain prompt reuse, token and latency evidence without creating a second fact source.
+The model Context uses the configured provider window and includes every active context-bearing Journal entry. The latest fresh Provider `total_tokens` is the context baseline; local token estimates cover Tool Results appended after that response and select the compaction cut point. Compaction starts when that combined usage crosses the window minus its output reserve, keeps a recent token budget without splitting Tool Call/Result units, and replaces an exact older prefix with Runtime Facts plus a structured semantic summary. A reported context overflow gets at most one compact-and-retry attempt. Original entries remain in the Journal. Provider continuation metrics remain as `turn_metrics` so evaluation and reports retain prompt reuse, token and latency evidence without creating a second fact source.
 
 ## Resume
 

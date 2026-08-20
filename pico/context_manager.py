@@ -126,7 +126,7 @@ class ContextManager:
         self.tokenizer = Tokenizer(model)
         self._last_history_metadata = {}
 
-    def build(self, user_message):
+    def build(self, user_message, *, provider_context_tokens=None):
         request = f"Current user request:\n{user_message!s}"
         output_reserve = int(self.agent.config.max_new_tokens)
         if self.tokenizer.count(request) + output_reserve >= self.total_budget:
@@ -142,7 +142,10 @@ class ContextManager:
             "history": self._history_text(user_message),
             "current_request": request,
         }
-        compaction_metadata = self._compact_journal_if_needed(raw)
+        compaction_metadata = self._compact_journal_if_needed(
+            raw,
+            provider_context_tokens=provider_context_tokens,
+        )
         if compaction_metadata is not None:
             raw["history"] = self._history_text(user_message)
         available = self.total_budget - output_reserve
@@ -227,6 +230,7 @@ class ContextManager:
                 getattr(self.agent.run.journal, "generation", 0)
             ),
             "compaction": compaction_metadata,
+            "provider_context_tokens": provider_context_tokens,
         }
         return prompt, metadata
 
@@ -407,12 +411,19 @@ class ContextManager:
         }
         return "\n".join(lines)
 
-    def _compact_journal_if_needed(self, raw):
+    def _compact_journal_if_needed(self, raw, *, provider_context_tokens=None):
         journal = self.agent.run.journal
         if journal is None or journal.pending_call_id():
             return
         separator_tokens = self.tokenizer.count("\n\n" * (len(SECTION_ORDER) - 1))
-        context_tokens = sum(self.tokenizer.count(text) for text in raw.values()) + separator_tokens
+        local_context_tokens = (
+            sum(self.tokenizer.count(text) for text in raw.values())
+            + separator_tokens
+        )
+        context_tokens = max(
+            local_context_tokens,
+            int(provider_context_tokens or 0),
+        )
         reserve_tokens = max(
             int(self.agent.config.max_new_tokens),
             self.compaction_reserve_tokens,
@@ -466,6 +477,7 @@ class ContextManager:
             "retained_tokens": int(regions["retained_tokens"]),
             "summary_tokens": self.tokenizer.count(rendered_summary),
             "trigger_context_tokens": context_tokens,
+            "local_context_tokens": local_context_tokens,
             "trigger_threshold_tokens": threshold_tokens,
             "fallback": not bool(semantic_summary),
         }

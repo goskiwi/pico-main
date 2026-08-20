@@ -20,18 +20,6 @@ def is_secret_env_name(name, secret_env_names=None):
     return upper in _normalized_secret_names(secret_env_names) or looks_sensitive_env_name(upper)
 
 
-def configured_secret_env_items(env=None, secret_env_names=None):
-    env = os.environ if env is None else env
-    configured_names = _normalized_secret_names(secret_env_names)
-    items = [
-        (name, value)
-        for name, value in env.items()
-        if str(name).upper() in configured_names and value
-    ]
-    items.sort(key=lambda item: item[0])
-    return items
-
-
 def detected_secret_env_items(env=None, secret_env_names=None):
     env = os.environ if env is None else env
     items = [
@@ -41,14 +29,6 @@ def detected_secret_env_items(env=None, secret_env_names=None):
     ]
     items.sort(key=lambda item: item[0])
     return items
-
-
-def secret_env_summary(env=None, secret_env_names=None):
-    names = [name for name, _ in configured_secret_env_items(env=env, secret_env_names=secret_env_names)]
-    return {
-        "secret_env_count": len(names),
-        "secret_env_names": names,
-    }
 
 
 def detected_secret_env_summary(env=None, secret_env_names=None):

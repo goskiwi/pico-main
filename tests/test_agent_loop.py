@@ -50,7 +50,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
     tool_entry = next(entry for entry in entries if entry.kind == "tool_result")
     outcome = tool_entry.payload["outcome"]
-    assert outcome["artifact"]["artifact_id"] == outcome["artifact_id"]
+    assert outcome["artifact"]["artifact_id"]
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
@@ -133,6 +133,7 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
         "output_tokens": 300,
         "tool_result_tokens": 200,
         "estimated_next_total": 8324,
+        "provider_context_tokens": 7300,
         "tool_call_id": reset.payload["tool_call_id"],
     }
     turns = [
@@ -228,7 +229,61 @@ def test_provider_capacity_estimate_counts_runtime_guidance(tmp_path):
     )
     assert reset.payload["tool_result_tokens"] == 300
     assert reset.payload["estimated_next_total"] == 8124
+    assert reset.payload["provider_context_tokens"] == 7100
     assert "Inspect the registry next." in client.prompts[1]
+
+
+def test_context_overflow_compacts_and_retries_once(tmp_path):
+    for name in ("first.txt", "second.txt"):
+        (tmp_path / name).write_text((name + " x" * 200 + "\n") * 80)
+
+    class OverflowClient(FakeModelClient):
+        request_count = 0
+
+        def complete_action(self, *args, **kwargs):
+            self.request_count += 1
+            if self.request_count == 3:
+                raise RuntimeError("maximum context length exceeded")
+            return super().complete_action(*args, **kwargs)
+
+        def complete(self, prompt, max_new_tokens, **kwargs):
+            if kwargs.get("action_tools", object()) is None:
+                return "Compacted earlier reads."
+            return super().complete(prompt, max_new_tokens, **kwargs)
+
+    client = OverflowClient(
+        [
+            ModelAction.tool(
+                "read_file", {"path": "first.txt", "start": 1, "end": 80}
+            ),
+            ModelAction.tool(
+                "read_file", {"path": "second.txt", "start": 1, "end": 80}
+            ),
+            ModelAction.final("Recovered after compaction."),
+        ]
+    )
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="",
+            max_new_tokens=64,
+            provider_context_limit_tokens=3_000,
+            compaction_reserve_tokens=750,
+            compaction_keep_recent_tokens=100,
+        ),
+    )
+
+    assert agent.ask("Read both files and finish") == "Recovered after compaction."
+    entries = agent.services.run_store.read_entries(agent.run.task_state)
+    assert sum(entry.kind == "compaction" for entry in entries) == 1
+    resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
+    assert [entry.payload["reason"] for entry in resets] == [
+        "context_overflow_retry"
+    ]
+    assert client.request_count == 4
 
 
 def test_last_tool_step_gets_one_final_only_model_turn(tmp_path):
@@ -360,3 +415,31 @@ def test_project_memory_selection_is_written_to_journal(tmp_path):
     entries = agent.services.run_store.read_entries(agent.run.task_state)
     memory_entry = next(entry for entry in entries if entry.kind == "memory_selection")
     assert memory_entry.payload["selected_filenames"] == ["project_deploy.md"]
+
+
+def test_custom_memory_selector_cannot_escape_the_manifest(tmp_path):
+    agent = build_agent(tmp_path, [ModelAction.final("Done.")])
+    agent.services.project_memory.store(
+        action="create",
+        filename="project_available.md",
+        name="Available",
+        description="Available memory.",
+        memory_type="project",
+        content="available",
+        why="test",
+        how_to_apply="test",
+        source_session_id=agent.session.data["id"],
+        source_run_id="bootstrap",
+    )
+    agent.model_client.select_memory_filenames = lambda *_args, **_kwargs: [
+        "project_unavailable.md"
+    ]
+
+    assert agent.ask("Inspect memory") == "Done."
+    selection = next(
+        entry
+        for entry in agent.run.journal.entries
+        if entry.kind == "memory_selection"
+    )
+    assert selection.payload["status"] == "unavailable"
+    assert selection.payload["selected_filenames"] == []

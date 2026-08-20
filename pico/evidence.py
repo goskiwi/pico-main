@@ -15,10 +15,10 @@ def fact_from_entry(entry):
         "side_effect_state": str(outcome.get("side_effect_state", "unknown")),
         "affected_paths": list(outcome.get("affected_paths", [])),
         "workspace_revision": int(payload.get("workspace_revision", 0)),
-        "artifact_id": str(outcome.get("artifact_id", "")),
-        "effect_scope": str(
-            dict(outcome.get("metadata", {}) or {}).get("effect_scope", "none")
+        "artifact_id": str(
+            dict(outcome.get("artifact", {}) or {}).get("artifact_id", "")
         ),
+        "effect_scope": str(outcome.get("effect_scope", "none")),
     }
 
 
@@ -91,9 +91,64 @@ class EvidenceLedger:
             None,
         )
 
+    def unresolved_effects(self):
+        unresolved = []
+        for index, effect in enumerate(self.effects):
+            if effect.get("side_effect_state") not in {"partial", "unknown"}:
+                continue
+            affected = set(effect.get("affected_paths", ()))
+            effect_scope = effect.get("effect_scope", "none")
+            repaired = bool(affected) and any(
+                later.get("status") == "ok"
+                and later.get("side_effect_state") == "changed"
+                and later.get("effect_scope") in {effect_scope, "mixed"}
+                and affected.issubset(set(later.get("affected_paths", ())))
+                for later in self.effects[index + 1 :]
+            )
+            if not repaired:
+                unresolved.append(effect)
+        return unresolved
+
+    def assess_completion(self, workspace_fingerprint=""):
+        unresolved = self.unresolved_effects()
+        verified = bool(
+            workspace_fingerprint
+            and self.current_verification(workspace_fingerprint) is not None
+        )
+        remaining = [
+            effect
+            for effect in unresolved
+            if not (
+                verified
+                and effect.get("effect_scope") in {"workspace", "mixed"}
+            )
+        ]
+        if remaining:
+            paths = sorted(
+                {
+                    path
+                    for effect in remaining
+                    for path in effect.get("affected_paths", ())
+                }
+            )
+            detail = ", ".join(paths) or "unknown workspace state"
+            return CompletionDecision(
+                False,
+                "partial",
+                f"unresolved partial side effects: {detail}",
+            )
+        return CompletionDecision(True, "completed")
+
     def to_dict(self):
         return {
             "observations": list(self.observations),
             "effects": list(self.effects),
             "verifications": list(self.verifications),
         }
+
+
+@dataclass(frozen=True)
+class CompletionDecision:
+    allowed: bool
+    status: str
+    reason: str = ""

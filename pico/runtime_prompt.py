@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from .context_manager import ContextManager
@@ -17,19 +19,26 @@ class RuntimePrompt:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
         self.prefix_state = self._build_prefix()
-        self.prefix = self.prefix_state.text
         self.context = ContextManager(runtime)
-        self.last_refresh = {
-            "workspace_changed": False,
-            "prefix_changed": False,
-        }
 
     def _build_prefix(self):
         runtime = self.runtime
         return build_prompt_prefix(
             workspace=runtime.workspace.context,
             tools=runtime.tools.surface,
-            repository_overview=runtime.services.repository_overview,
+        )
+
+    @property
+    def prefix(self):
+        return self.prefix_state.text
+
+    @prefix.setter
+    def prefix(self, value):
+        text = str(value)
+        self.prefix_state = replace(
+            self.prefix_state,
+            text=text,
+            hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
     def refresh(self, *, force=False):
@@ -41,12 +50,10 @@ class RuntimePrompt:
         prefix_changed = force or previous_hash != prefix_state.hash
         if prefix_changed:
             self.prefix_state = prefix_state
-            self.prefix = prefix_state.text
-        self.last_refresh = {
+        return {
             "workspace_changed": workspace_changed,
             "prefix_changed": prefix_changed,
         }
-        return dict(self.last_refresh)
 
     def memory_text(self):
         return (
@@ -70,8 +77,24 @@ class RuntimePrompt:
                         max_files=MEMORY_SELECTOR_MAX_SELECTED,
                         max_new_tokens=192,
                     )
+                    if (
+                        not isinstance(filenames, list)
+                        or len(filenames) > MEMORY_SELECTOR_MAX_SELECTED
+                        or any(
+                            not isinstance(filename, str) or not filename
+                            for filename in filenames
+                        )
+                        or len(set(filenames)) != len(filenames)
+                    ):
+                        raise ValueError("memory selector returned invalid filenames")
+                    allowed = {str(item["filename"]) for item in manifest}
+                    if any(filename not in allowed for filename in filenames):
+                        raise ValueError(
+                            "memory selector returned an unavailable filename"
+                        )
                     status = "available"
                 except Exception as exc:  # noqa: BLE001 - optional model boundary
+                    filenames = []
                     failure = {
                         "code": "memory_selector_failed",
                         "detail": clip(str(exc), 300),
@@ -102,29 +125,17 @@ class RuntimePrompt:
             },
         )
 
-    def build(self, user_message):
+    def build(self, user_message, *, provider_context_tokens=None):
         runtime = self.runtime
         refresh = self.refresh()
-        prompt, metadata = self.context.build(user_message)
-        tokenizer = self.context.tokenizer
+        prompt, metadata = self.context.build(
+            user_message,
+            provider_context_tokens=provider_context_tokens,
+        )
         metadata.update(
             {
-                "prefix_tokens": tokenizer.count(self.prefix),
-                "workspace_tokens": tokenizer.count(runtime.workspace.context.text()),
-                "working_memory_tokens": tokenizer.count(
-                    runtime.session.memory.render_panel()
-                ),
-                "memory_catalog_tokens": tokenizer.count(
-                    runtime.services.project_memory.index_text()
-                ),
-                "request_tokens": tokenizer.count(user_message),
-                "tool_count": len(runtime.tools.surface),
-                "workspace_docs": len(runtime.workspace.context.project_docs),
-                "recent_commits": len(runtime.workspace.context.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
-                "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
-                "tool_signature": self.prefix_state.tool_signature,
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
                 "prompt_cache_supported": bool(

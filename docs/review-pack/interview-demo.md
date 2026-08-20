@@ -5,7 +5,7 @@
 1. Open `pico/agent_loop.py`, `pico/run_lifecycle.py` and `pico/completion_controller.py`: model/tool turns, durable Run transitions and completion authority are separate.
 2. Open `pico/subagents/manager.py` and `pico/subagents/integration.py`: explicit DAG → parallel independent Children → isolated implementation Worktrees → receipt-bound Patch integration.
 3. Run `uv run pytest -q tests/test_subagents.py`; show actual parallelism, failure propagation, session continuation, write-scope rejection and verified Patch application.
-4. Run `uv run python scripts/demo_runtime.py`; point out `[false, true, true]` provider prompt reuse, Run Journal v2, changed-file evidence, and the empty pending-operation set.
+4. Run `uv run python scripts/demo_runtime.py`; point out `[false, true, true]` provider prompt reuse, Run Journal v3, changed-file evidence, and the empty pending-operation set.
 5. Run `uv run python scripts/run_evaluations.py`; point out that the command fails closed and the Native Harness covers edit, recovery, safety, and governance.
 6. Open `artifacts/runtime-policy-v1.json`: recovery advice, hook boundaries, structured verification, and Journal replay are deterministic evidence.
 

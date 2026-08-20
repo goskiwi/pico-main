@@ -11,12 +11,10 @@ def changed_outcome():
         execution_state="completed",
         side_effect_state="changed",
         content="patched",
-        call_fingerprint="fingerprint",
-        admission={"status": "admitted", "stages": []},
+        admission_status="admitted",
         affected_paths=("src/app.py",),
-        workspace_fingerprint="workspace-before",
-        artifact_id="artifact_1",
-        metadata={"effect_scope": "workspace"},
+        effect_scope="workspace",
+        artifact={"artifact_id": "artifact_1"},
     )
 
 
@@ -76,3 +74,65 @@ def test_workspace_fact_invalidates_current_verification():
 
     assert ledger.verifications[0]["freshness"] == "stale"
     assert ledger.verifications[0]["invalidated_by"] == "call_1"
+
+
+def effect(call_id, status, side_effect_state, paths, scope="workspace"):
+    return {
+        "tool_call_id": call_id,
+        "status": status,
+        "side_effect_state": side_effect_state,
+        "effect_scope": scope,
+        "affected_paths": list(paths),
+    }
+
+
+def test_completion_evidence_tracks_repair_and_verification_scope():
+    unresolved = EvidenceLedger(
+        effects=[effect("call_partial", "partial_success", "partial", ("x.py",))]
+    )
+    assert unresolved.assess_completion("").allowed is False
+
+    repaired = EvidenceLedger(
+        effects=[
+            effect("call_partial", "partial_success", "partial", ("x.py",)),
+            effect("call_repair", "ok", "changed", ("x.py",)),
+        ]
+    )
+    assert repaired.assess_completion("").allowed is True
+
+    verification = {
+        "verification_id": "verify_workspace",
+        "status": "passed",
+        "freshness": "current",
+        "workspace_fingerprint": "workspace-current",
+    }
+    workspace_partial = EvidenceLedger(
+        effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],
+        verifications=[verification],
+    )
+    assert workspace_partial.assess_completion("workspace-current").allowed is True
+
+    memory_partial = EvidenceLedger(
+        effects=[
+            effect(
+                "call_memory",
+                "partial_success",
+                "partial",
+                (".pico/memory/MEMORY.md",),
+                scope="project_memory",
+            )
+        ],
+        verifications=[verification],
+    )
+    assert memory_partial.assess_completion("workspace-current").allowed is False
+
+    memory_partial.effects.append(
+        effect(
+            "call_memory_repair",
+            "ok",
+            "changed",
+            (".pico/memory/MEMORY.md",),
+            scope="project_memory",
+        )
+    )
+    assert memory_partial.assess_completion("workspace-current").allowed is True

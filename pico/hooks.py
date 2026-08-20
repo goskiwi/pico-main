@@ -45,12 +45,6 @@ class HookRunner:
     def __init__(self, hooks=()):
         self.hooks = tuple(hooks or ())
 
-    def identity(self):
-        return [
-            f"{hook.__class__.__module__}.{hook.__class__.__qualname__}"
-            for hook in self.hooks
-        ]
-
     @staticmethod
     def _normalize(value):
         if value is None:

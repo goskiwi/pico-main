@@ -276,8 +276,7 @@ def _parse_markdown(filename, text):
 class ProjectMemoryStore:
     """Project-scoped Markdown cards plus a generated, bounded index."""
 
-    def __init__(self, root, workspace_root):
-        self.workspace_root = Path(workspace_root).expanduser().resolve()
+    def __init__(self, root):
         self.root = Path(root).expanduser().absolute()
         if self.root.is_symlink() or self.root.parent.is_symlink():
             raise ValueError("project memory path must not use a symlink")
@@ -287,14 +286,6 @@ class ProjectMemoryStore:
         self._lock = threading.RLock()
         self.cards_root.mkdir(parents=True, exist_ok=True)
         self.rebuild_index()
-
-    def identity(self):
-        return {
-            "backend": "markdown",
-            "schema_version": PROJECT_MEMORY_SCHEMA_VERSION,
-            "index_schema_version": MEMORY_INDEX_SCHEMA_VERSION,
-            "root": str(self.root.relative_to(self.workspace_root)),
-        }
 
     def _path(self, filename):
         filename = validate_memory_filename(filename)
@@ -325,9 +316,6 @@ class ProjectMemoryStore:
         if card.expired and not include_expired:
             return None
         return card
-
-    def contains(self, filename):
-        return self._path(filename).is_file()
 
     def list_cards(self, *, include_expired=False):
         cards = []
@@ -487,17 +475,16 @@ class ProjectMemoryStore:
             return card
 
     def selected_cards(self, filenames):
-        allowed = {item["filename"] for item in self.selector_manifest()}
         selected = []
         seen = set()
         for filename in filenames:
             filename = validate_memory_filename(filename)
-            if filename in seen or filename not in allowed:
+            if filename in seen:
                 raise ValueError("memory selector returned an unavailable filename")
             seen.add(filename)
             card = self.recall(filename)
             if card is None:
-                raise ValueError("memory selector returned a missing or expired file")
+                raise ValueError("memory selector returned an unavailable filename")
             selected.append(card)
             if len(selected) > MEMORY_SELECTOR_MAX_SELECTED:
                 raise ValueError("memory selector returned too many files")
@@ -530,15 +517,6 @@ class ProjectMemoryStore:
             )
         lines.extend(["", card.render_body()])
         return lines
-
-    def render_selected(self, cards):
-        lines = self._selected_header()
-        for card in cards:
-            lines.extend(self._selected_card_lines(card))
-        if not cards:
-            lines.extend(["", "- no memory selected"])
-        lines.append("</project_memories>")
-        return "\n".join(lines)
 
     def render_selected_with_budget(self, cards, *, max_tokens, token_counter):
         lines = self._selected_header()

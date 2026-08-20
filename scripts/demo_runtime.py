@@ -53,7 +53,7 @@ def main():
             "pending_operations": agent.services.run_store.replay(
                 agent.run.task_state.run_id
             ).summary()["pending_operations"],
-            "run_dir": str(agent.run.run_dir),
+            "run_dir": str(agent.services.run_store.run_dir(agent.run.task_state)),
         }, indent=2, ensure_ascii=False))
 
 

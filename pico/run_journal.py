@@ -6,10 +6,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .contracts import FailureInfo, ToolOutcome, canonical_fingerprint
+from .contracts import FailureInfo, ToolOutcome
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED
 
-JOURNAL_SCHEMA_VERSION = "run-journal-v2"
+JOURNAL_SCHEMA_VERSION = "run-journal-v3"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -129,7 +129,7 @@ class JournalEntry:
                 guidance = " | ".join(str(item) for item in recovery.get("guidance", []))
                 content += (
                     f"\nRuntime recovery: action={recovery.get('action', '')}; "
-                    f"retryability={recovery.get('retryability', '')}; {guidance}"
+                    f"{guidance}"
                 )
             return content
         if self.kind == "compaction":
@@ -177,13 +177,13 @@ class JournalEntry:
     @property
     def artifact_id(self):
         outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(outcome.get("artifact_id", ""))
+        artifact = dict(outcome.get("artifact", {}) or {})
+        return str(artifact.get("artifact_id", ""))
 
     @property
     def content_tier(self):
         outcome = dict(self.payload.get("outcome", {}) or {})
-        metadata = dict(outcome.get("metadata", {}) or {})
-        return "artifact_reference" if metadata.get("output_truncated") else "inline"
+        return "artifact_reference" if outcome.get("output_truncated") else "inline"
 
     @property
     def original_size_bytes(self):
@@ -279,9 +279,6 @@ class RunProjection:
     @property
     def terminal(self):
         return self.status in {"completed", "stopped"}
-
-    def operation_receipt(self, call_id):
-        return self.operations.get(str(call_id))
 
     def task_state(self):
         return {
@@ -456,10 +453,8 @@ class RunJournal:
                 execution_state="not_started",
                 side_effect_state="none",
                 content=detail,
-                call_fingerprint=canonical_fingerprint(call.name, call.args),
-                admission={"status": "recovered", "stages": []},
+                admission_status="recovered",
                 failure=FailureInfo("operation_not_started", "recovery", detail, True),
-                metadata={"effect_scope": "none", "recovered_from_interruption": True},
             )
         else:
             potential = list(started.payload.get("potential_effects", []))
@@ -486,16 +481,12 @@ class RunJournal:
                 execution_state="failed",
                 side_effect_state="partial" if changed else ("unknown" if unknown else "none"),
                 content=detail,
-                call_fingerprint=canonical_fingerprint(call.name, call.args),
-                admission={"status": "recovered", "stages": []},
+                admission_status="recovered",
                 failure=FailureInfo(
                     "operation_interrupted", "recovery", detail, not uncertain
                 ),
                 affected_paths=tuple(changed),
-                metadata={
-                    "effect_scope": effect_scope if changed or unknown else "none",
-                    "recovered_from_interruption": True,
-                },
+                effect_scope=effect_scope if changed or unknown else "none",
             )
         entry = self.append(
             "tool_result",

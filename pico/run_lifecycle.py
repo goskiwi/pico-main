@@ -6,7 +6,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .completion import CompletionGate
 from .evidence import EvidenceLedger
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_journal import RunJournal
@@ -23,11 +22,9 @@ class LoopFrame:
     run_started_at: float
     task_state: TaskState
     journal: RunJournal
-    completion_gate: CompletionGate
-    context_generation: int
     prompt_snapshot: tuple[str, dict[str, Any]] | None = None
-    tool_steps: int = 0
-    attempts: int = 0
+    provider_context_tokens: int | None = None
+    overflow_recovery_attempted: bool = False
     malformed_retries: int = 0
     execution_stop: str = ""
 
@@ -48,7 +45,7 @@ class RunLifecycle:
         runtime.run.task_state = task_state
         runtime.run.journal = journal
         runtime.run.execution = self._root_execution(task_state)
-        runtime.run.run_dir = runtime.services.run_store.start_run(task_state)
+        runtime.services.run_store.start_run(task_state)
         runtime.run.evidence = EvidenceLedger.from_entries(journal.entries)
 
         reconciled = journal.reconcile_interrupted(runtime)
@@ -59,7 +56,6 @@ class RunLifecycle:
                 projection.apply(entry)
             if outcome.execution_state != "not_started":
                 task_state.record_tool(outcome.tool_name)
-        completion_gate = self._completion_gate(journal)
         if resumed:
             journal.append_guidance(f"Resume request: {user_message}")
 
@@ -77,10 +73,6 @@ class RunLifecycle:
             run_started_at=run_started_at,
             task_state=task_state,
             journal=journal,
-            completion_gate=completion_gate,
-            context_generation=journal.generation,
-            tool_steps=task_state.tool_steps,
-            attempts=task_state.attempts,
         )
 
     def _restore_or_create_task(self, user_message):
@@ -132,22 +124,6 @@ class RunLifecycle:
             max_seconds=runtime.config.run_timeout_seconds,
             token=token,
         )
-
-    @staticmethod
-    def _completion_gate(journal):
-        gate = CompletionGate()
-        for entry in journal.entries:
-            if entry.kind != "tool_result":
-                continue
-            outcome = dict(entry.payload.get("outcome", {}) or {})
-            if outcome.get("status") == "partial_success" or outcome.get(
-                "side_effect_state"
-            ) == "unknown":
-                paths = outcome.get("affected_paths", []) or [
-                    f"operation:{entry.call_id}"
-                ]
-                gate.restore_partial_paths(paths)
-        return gate
 
     def execution_stop(self):
         try:

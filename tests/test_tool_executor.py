@@ -32,11 +32,26 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     assert outcome.status == "ok"
     assert outcome.execution_state == "completed"
     assert outcome.side_effect_state == "none"
-    assert outcome.admission["status"] == "admitted"
-    assert len(outcome.attempts) == 1
-    assert [stage["stage"] for stage in outcome.admission["stages"]] == [
-        "registry", "surface", "schema", "policy", "approval"
-    ]
+    assert outcome.admission_status == "admitted"
+    assert outcome.rejected_at == ""
+    assert set(outcome.to_dict()) == {
+        "tool_call_id",
+        "tool_name",
+        "status",
+        "execution_state",
+        "side_effect_state",
+        "content",
+        "admission_status",
+        "failure",
+        "recovery",
+        "affected_paths",
+        "effect_scope",
+        "duration_ms",
+        "artifact",
+        "output_truncated",
+        "policy_stop_requested",
+        "rejected_at",
+    }
     artifact = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
     assert artifact.read_text(encoding="utf-8") == outcome.content
     assert agent.services.artifacts.verify("manual", outcome.artifact_id)["sha256"]
@@ -51,8 +66,8 @@ def test_rejected_call_never_enters_execution(tmp_path):
     assert outcome.execution_state == "not_started"
     assert outcome.failure.code == "unknown_tool"
     assert outcome.recovery.action == "replan"
-    assert outcome.attempts == ()
-    assert outcome.admission["stages"][-1]["stage"] == "registry"
+    assert outcome.admission_status == "rejected"
+    assert outcome.rejected_at == "registry"
 
 
 def test_artifact_integrity_verification_detects_tampering(tmp_path):
@@ -164,8 +179,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
     card = agent.services.project_memory.recall("project_release_command.md")
     assert outcome.status == "ok"
     assert outcome.side_effect_state == "changed"
-    assert outcome.metadata["effect_scope"] == "project_memory"
-    assert outcome.workspace_changed is False
+    assert outcome.effect_scope == "project_memory"
     assert ".pico/memory/cards/project_release_command.md" in outcome.affected_paths
     assert agent.run.evidence.changed_paths == []
     assert (
@@ -286,7 +300,6 @@ def test_workspace_mutation_records_exact_path_without_scanning(tmp_path, monkey
 
     assert scans == 0
     assert outcome.affected_paths == ("created.txt",)
-    assert outcome.diff_summary == ("created:created.txt",)
     assert agent.workspace.revision == 1
 
 

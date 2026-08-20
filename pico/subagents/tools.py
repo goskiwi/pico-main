@@ -39,7 +39,6 @@ def _apply(manager, args):
     return ToolExecution(
         content=json.dumps(result, ensure_ascii=False, sort_keys=True),
         affected_paths=changed,
-        diff_summary=tuple(f"modified:{path}" for path in changed),
         effect_scope="workspace" if changed else "none",
     )
 

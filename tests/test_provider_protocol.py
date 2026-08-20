@@ -151,6 +151,32 @@ def test_timeout_is_retried_then_normalized_without_leaking_api_key():
     assert "secret" not in str(raised.value)
 
 
+def test_retries_share_one_request_deadline():
+    instance = client()
+    clock = {"value": 0.0}
+    timeouts = []
+
+    def monotonic():
+        return clock["value"]
+
+    def urlopen(_request, timeout):
+        timeouts.append(timeout)
+        clock["value"] += timeout
+        raise TimeoutError("socket stalled")
+
+    with (
+        patch("pico.providers.clients.time.monotonic", monotonic),
+        patch("pico.providers.clients.time.sleep") as sleep,
+        patch("urllib.request.urlopen", urlopen),
+        pytest.raises(RuntimeError, match="Could not reach"),
+    ):
+        instance._request_with_retry({"model": "test"}, request_timeout=1.0)
+
+    assert timeouts == [1.0]
+    assert clock["value"] == 1.0
+    sleep.assert_not_called()
+
+
 def test_incomplete_chunked_response_is_retried():
     with (
         patch(
@@ -188,12 +214,11 @@ def test_sse_text_when_tool_is_required_becomes_retry_action():
     assert action.error == "invalid_function_call_count"
 
 
-@pytest.mark.parametrize("reason", ["max_output_tokens", "max_tokens"])
-def test_incomplete_max_token_response_reports_output_truncation(reason):
+def test_incomplete_max_token_response_reports_output_truncation():
     action = _action_from_response(
         {
             "status": "incomplete",
-            "incomplete_details": {"reason": reason},
+            "incomplete_details": {"reason": "max_output_tokens"},
             "output": [],
         },
         TOOLS,
@@ -230,11 +255,11 @@ def test_invalid_function_call_shapes_are_retry_actions(output, error):
 
 def test_usage_and_cache_metadata_are_optional_and_normalized():
     usage = {
-        "prompt_tokens": 11,
-        "completion_tokens": 4,
+        "input_tokens": 11,
+        "output_tokens": 4,
         "total_tokens": 15,
-        "prompt_tokens_details": {"cached_tokens": 7},
-        "completion_tokens_details": {"reasoning_tokens": 3},
+        "input_tokens_details": {"cached_tokens": 7},
+        "output_tokens_details": {"reasoning_tokens": 3},
     }
     instance = client()
     with patch("urllib.request.urlopen", return_value=final_response(usage=usage)):

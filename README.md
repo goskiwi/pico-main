@@ -10,7 +10,7 @@ OpenAI-compatible Responses 原生 function calling 提出下一步动作；上�
 
 ```text
 User request
-  -> Run Journal v2
+  -> Run Journal v3
   -> RepoMap + separated Working/Catalog/Retrieved Memory
   -> Token-budgeted prompt projection
   -> Responses function_call -> ModelAction
@@ -68,7 +68,7 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Journal 终态；
 
 - 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用，最终回答也通过 `submit_final`。
 - 单一事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `journal.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；Context、TaskState、Evidence 和 Report 都是确定性投影。
-- 长上下文治理：Prompt 使用配置的模型 Context Window；只有总上下文越过 `context window - reserve tokens` 时才压缩。Compaction 按 token 保留近期完整 Tool Call/Result 单元，并以结构化 `Goal / Constraints / Progress / Decisions / Next Steps / Critical Context` 摘要替换更早前缀；语义摘要失败时退化为包含原始目标的 Runtime Facts。原始 Journal Entry 不删除。
+- 长上下文治理：Prompt 使用配置的模型 Context Window；最近一次 Provider `total_tokens` 加上其后新增 Tool Result 的本地估算决定 rotation 与 Compaction，本地 tokenizer 负责 section 预算和 cut point。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 单元，并以结构化 `Goal / Constraints / Progress / Decisions / Next Steps / Critical Context` 摘要替换更早前缀；语义摘要失败时退化为包含原始目标的 Runtime Facts。Provider 明确报告 context overflow 时只执行一次 compact-and-retry。原始 Journal Entry 不删除。
 - Workspace 新鲜度：工具 runner 以结构化结果声明精确影响路径；普通读取不扫描全仓，写入后只失效 Runtime Workspace revision。Completion/Verifier 才对完整 Workspace 内容做强制指纹扫描并绑定验证证据。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层记忆：Session Working Memory 只保存当前任务目标；Project Memory 以 Markdown Card 为唯一事实源。受限的 `MEMORY.md` 目录常驻上下文，语义选择的 Card 正文使用独立的高优先级预算逐张完整装入，装不下的 Card 不会被静默截成半张。文件事实始终从 Workspace、搜索和 Run Journal 获取。

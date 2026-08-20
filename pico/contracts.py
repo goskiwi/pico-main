@@ -14,6 +14,7 @@ EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
 RECOVERY_ACTIONS = frozenset({"continue", "retry", "repair", "replan", "stop"})
 EFFECT_SCOPES = frozenset({"none", "workspace", "project_memory", "mixed"})
+ADMISSION_STATUSES = frozenset({"admitted", "rejected", "recovered"})
 
 
 def canonical_fingerprint(name: str, args: dict[str, Any]) -> str:
@@ -47,7 +48,6 @@ class ToolExecution:
 
     content: str
     affected_paths: tuple[str, ...] = ()
-    diff_summary: tuple[str, ...] = ()
     effect_scope: str = "none"
 
     def __post_init__(self):
@@ -107,8 +107,6 @@ class FailureInfo:
 @dataclass(frozen=True)
 class RecoveryAssessment:
     action: str
-    reason: str
-    retryability: str
     occurrence: int = 1
     guidance: tuple[str, ...] = ()
 
@@ -119,30 +117,8 @@ class RecoveryAssessment:
     def to_dict(self):
         return {
             "action": self.action,
-            "reason": self.reason,
-            "retryability": self.retryability,
             "occurrence": self.occurrence,
             "guidance": list(self.guidance),
-        }
-
-
-@dataclass(frozen=True)
-class ToolAttempt:
-    attempt: int
-    status: str
-    execution_state: str
-    side_effect_state: str
-    duration_ms: int
-    affected_paths: tuple[str, ...] = ()
-
-    def to_dict(self):
-        return {
-            "attempt": self.attempt,
-            "status": self.status,
-            "execution_state": self.execution_state,
-            "side_effect_state": self.side_effect_state,
-            "duration_ms": self.duration_ms,
-            "affected_paths": list(self.affected_paths),
         }
 
 
@@ -156,18 +132,16 @@ class ToolOutcome:
     execution_state: str
     side_effect_state: str
     content: str
-    call_fingerprint: str
-    admission: dict[str, Any]
+    admission_status: str
     failure: FailureInfo | None = None
     recovery: RecoveryAssessment | None = None
-    attempts: tuple[ToolAttempt, ...] = ()
     affected_paths: tuple[str, ...] = ()
-    diff_summary: tuple[str, ...] = ()
-    workspace_fingerprint: str = ""
+    effect_scope: str = "none"
     duration_ms: int = 0
-    artifact_id: str = ""
     artifact: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    output_truncated: bool = False
+    policy_stop_requested: bool = False
+    rejected_at: str = ""
 
     def __post_init__(self):
         if self.status not in TOOL_STATUSES:
@@ -176,17 +150,20 @@ class ToolOutcome:
             raise ValueError(f"invalid execution state: {self.execution_state}")
         if self.side_effect_state not in SIDE_EFFECT_STATES:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
+        if self.effect_scope not in EFFECT_SCOPES:
+            raise ValueError(f"invalid effect scope: {self.effect_scope}")
+        if self.admission_status not in ADMISSION_STATUSES:
+            raise ValueError(f"invalid admission status: {self.admission_status}")
         if self.status in {"error", "rejected", "partial_success"} and self.failure is None:
             raise ValueError(f"{self.status} outcome requires failure information")
         if self.status == "ok" and self.failure is not None:
             raise ValueError("ok outcome cannot contain failure information")
+        if self.status == "rejected" and self.admission_status != "rejected":
+            raise ValueError("rejected outcome requires rejected admission")
 
     @property
-    def workspace_changed(self):
-        return (
-            self.side_effect_state in {"changed", "partial"}
-            and self.metadata.get("effect_scope", "workspace") in {"workspace", "mixed"}
-        )
+    def artifact_id(self):
+        return str(self.artifact.get("artifact_id", ""))
 
     def to_dict(self):
         return {
@@ -196,17 +173,14 @@ class ToolOutcome:
             "execution_state": self.execution_state,
             "side_effect_state": self.side_effect_state,
             "content": self.content,
-            "call_fingerprint": self.call_fingerprint,
-            "admission": dict(self.admission),
+            "admission_status": self.admission_status,
             "failure": self.failure.to_dict() if self.failure else None,
             "recovery": self.recovery.to_dict() if self.recovery else None,
-            "attempts": [attempt.to_dict() for attempt in self.attempts],
             "affected_paths": list(self.affected_paths),
-            "diff_summary": list(self.diff_summary),
-            "workspace_fingerprint": self.workspace_fingerprint,
+            "effect_scope": self.effect_scope,
             "duration_ms": self.duration_ms,
-            "artifact_id": self.artifact_id,
             "artifact": dict(self.artifact),
-            "workspace_changed": self.workspace_changed,
-            "metadata": dict(self.metadata),
+            "output_truncated": bool(self.output_truncated),
+            "policy_stop_requested": bool(self.policy_stop_requested),
+            "rejected_at": self.rejected_at,
         }

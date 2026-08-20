@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
-from pico.completion import CompletionGate
 from pico.completion_controller import CompletionController
 from pico.task_state import TaskState
 
@@ -46,7 +45,7 @@ def test_completion_does_not_reuse_verification_after_external_edit(tmp_path):
         }
 
     agent.run_verification = verify
-    frame = SimpleNamespace(completion_gate=CompletionGate(), task_state=state)
+    frame = SimpleNamespace(task_state=state)
 
     assessment = CompletionController(agent).assess(frame, "done")
 

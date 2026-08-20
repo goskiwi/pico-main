@@ -42,8 +42,25 @@ def require_clean_repository(root):
         raise GitWorktreeError("implementation subtasks require a Git repository") from exc
     if top != root:
         raise GitWorktreeError("implementation subtasks must run from the repository root")
-    status = _git(root, "status", "--porcelain", "--untracked-files=all")
-    if status.strip():
+    tracked_status = _git(
+        root,
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=no",
+    )
+    untracked = tuple(
+        path
+        for path in _git(
+            root,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ).split(b"\0")
+        if path and path != b".pico" and not path.startswith(b".pico/")
+    )
+    if tracked_status or untracked:
         raise GitWorktreeError(
             "implementation subtasks require a clean working tree before delegation"
         )

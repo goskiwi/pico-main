@@ -4,10 +4,17 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import os
+import selectors
 import shutil
+import stat
 import subprocess
 import textwrap
+import time
+from collections import deque
 from functools import partial
+from itertools import islice
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +23,14 @@ from .contracts import ToolExecution
 from .mutations import file_revision
 from .sandbox import SandboxProfile, parse_command_invocation
 from .workspace import IGNORED_PATH_NAMES
+
+READ_FILE_MAX_BYTES = 8 * 1024 * 1024
+READ_FILE_MAX_LINES = 2000
+SEARCH_MAX_FILES = 5000
+SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+SEARCH_MAX_MATCHES = 200
+SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
+SEARCH_TIMEOUT_SECONDS = 10.0
 
 
 class ToolArgs(BaseModel):
@@ -209,10 +224,17 @@ def _validate_list_files(context, args):
 
 
 def _validate_read_file(context, args):
-    if not context.path(args["path"]).is_file():
+    path = context.path(args["path"])
+    if not path.is_file():
         raise ValueError("path is not a file")
     if int(args.get("end", 200)) < int(args.get("start", 1)):
         raise ValueError("invalid line range")
+    if int(args.get("end", 200)) - int(args.get("start", 1)) + 1 > READ_FILE_MAX_LINES:
+        raise ValueError(f"read_file returns at most {READ_FILE_MAX_LINES} lines")
+    if path.stat().st_size > READ_FILE_MAX_BYTES:
+        raise ValueError(
+            f"read_file target exceeds {READ_FILE_MAX_BYTES} bytes; use search or a narrower artifact"
+        )
     return args
 
 
@@ -286,8 +308,6 @@ def validate_tool(context, name, args):
 
 def tool_list_files(context, args):
     path = context.path(args.get("path", "."))
-    if not path.is_dir():
-        raise ValueError("path is not a directory")
     entries = [
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         if item.name not in IGNORED_PATH_NAMES
@@ -301,14 +321,15 @@ def tool_list_files(context, args):
 
 def tool_read_file(context, args):
     path = context.path(args["path"])
-    if not path.is_file():
-        raise ValueError("path is not a file")
     start = int(args.get("start", 1))
     end = int(args.get("end", 200))
-    if start < 1 or end < start:
-        raise ValueError("invalid line range")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        lines = islice(handle, start - 1, end)
+        rendered = []
+        for number, line in enumerate(lines, start=start):
+            line = line.removesuffix("\n").removesuffix("\r")
+            rendered.append(f"{number:>4}: {line}")
+        body = "\n".join(rendered)
     return ToolExecution(
         f"# {path.relative_to(context.root)}\nrevision: {file_revision(path)}\n{body}"
     )
@@ -334,51 +355,164 @@ def tool_read_artifact(context, args):
     return ToolExecution(header + page["content"] + continuation)
 
 
+def _bounded_rg_search(root, relative_path, pattern):
+    process = subprocess.Popen(
+        [
+            "rg",
+            "-n",
+            "--with-filename",
+            "--smart-case",
+            "--max-columns",
+            "2000",
+            "--max-filesize",
+            str(SEARCH_MAX_FILE_BYTES),
+            "--",
+            pattern,
+            relative_path,
+        ],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    selector = selectors.DefaultSelector()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+        selector.register(stream, selectors.EVENT_READ, name)
+    deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
+    limited = False
+    timed_out = False
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            events = selector.select(timeout=min(0.1, remaining))
+            for key, _ in events:
+                chunk = os.read(key.fileobj.fileno(), 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                target = buffers[key.data]
+                available = SEARCH_MAX_OUTPUT_BYTES - sum(
+                    len(value) for value in buffers.values()
+                )
+                if available <= 0:
+                    limited = True
+                    break
+                target.extend(chunk[:available])
+                if len(chunk) > available:
+                    limited = True
+                    break
+            if limited:
+                break
+        if limited or timed_out:
+            process.kill()
+        process.wait(timeout=2)
+    finally:
+        selector.close()
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+    stdout_lines = buffers["stdout"].decode("utf-8", errors="replace").splitlines()
+    match_limited = len(stdout_lines) > SEARCH_MAX_MATCHES
+    lines = stdout_lines[:SEARCH_MAX_MATCHES]
+    if timed_out:
+        lines.append("[search timed out]")
+    elif limited or match_limited:
+        lines.append("[search result limit reached]")
+    if lines:
+        return "\n".join(lines).replace(str(root) + "/", "")
+    stderr = buffers["stderr"].decode("utf-8", errors="replace").strip()
+    return stderr or "(no matches)"
+
+
+def _fallback_search_files(path, deadline):
+    if path.is_file():
+        return [path], False
+    files = []
+    pending = deque([path])
+    limited = False
+    while pending:
+        if time.monotonic() >= deadline or len(files) >= SEARCH_MAX_FILES:
+            limited = True
+            break
+        directory = pending.popleft()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name.lower())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in IGNORED_PATH_NAMES:
+                continue
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                continue
+            candidate = Path(entry.path)
+            if stat.S_ISDIR(metadata.st_mode):
+                pending.append(candidate)
+            elif (
+                stat.S_ISREG(metadata.st_mode)
+                and metadata.st_size <= SEARCH_MAX_FILE_BYTES
+            ):
+                files.append(candidate)
+                if len(files) >= SEARCH_MAX_FILES:
+                    limited = True
+                    break
+    return files, limited
+
+
+def _fallback_search(context, path, pattern):
+    deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
+    files, limited = _fallback_search_files(path, deadline)
+    matches = []
+    needle = pattern.lower()
+    for file_path in files:
+        if time.monotonic() >= deadline:
+            limited = True
+            break
+        try:
+            with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for number, line in enumerate(handle, start=1):
+                    if time.monotonic() >= deadline:
+                        limited = True
+                        break
+                    if needle in line.lower():
+                        line = line.removesuffix("\n").removesuffix("\r")
+                        matches.append(
+                            f"{file_path.relative_to(context.root)}:{number}:{line}"
+                        )
+                        if len(matches) >= SEARCH_MAX_MATCHES:
+                            limited = True
+                            break
+        except OSError:
+            continue
+        if limited:
+            break
+    if limited:
+        matches.append("[search result limit reached]")
+    return "\n".join(matches) or "(no matches)"
+
+
 def tool_search(context, args):
     pattern = str(args.get("pattern", "")).strip()
-    if not pattern:
-        raise ValueError("pattern must not be empty")
     path = context.path(args.get("path", "."))
 
     if shutil.which("rg"):
-        # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
         relative_path = path.relative_to(context.root).as_posix() or "."
-        result = subprocess.run(
-            [
-                "rg", "-n", "--with-filename", "--smart-case", "--max-count", "200",
-                "--", pattern, relative_path,
-            ],
-            cwd=context.root,
-            capture_output=True,
-            text=True,
-            check=False,
+        return ToolExecution(
+            _bounded_rg_search(context.root, relative_path, pattern)
         )
-        output = result.stdout.strip() or result.stderr.strip()
-        if output:
-            output = output.replace(str(context.root) + "/", "")
-        return ToolExecution(output or "(no matches)")
-
-    matches = []
-    files = [path] if path.is_file() else [
-        item for item in path.rglob("*")
-        if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(context.root).parts)
-    ]
-    for file_path in files:
-        for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-            if pattern.lower() in line.lower():
-                matches.append(f"{file_path.relative_to(context.root)}:{number}:{line}")
-                if len(matches) >= 200:
-                    return ToolExecution("\n".join(matches))
-    return ToolExecution("\n".join(matches) or "(no matches)")
+    return ToolExecution(_fallback_search(context, path, pattern))
 
 
 def tool_run_shell(context, args):
     command = str(args.get("command", "")).strip()
-    if not command:
-        raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
-    if timeout < 1 or timeout > 120:
-        raise ValueError("timeout must be in [1, 120]")
     if context.sandbox is None:
         raise RuntimeError("Docker sandbox is unavailable")
     argv, command_env = parse_command_invocation(command)
@@ -419,22 +553,13 @@ def tool_write_file(context, args):
             f"before_revision: {before}\nafter_revision: {after}"
         ),
         affected_paths=(relative,) if changed else (),
-        diff_summary=(f"{'created' if before == 'absent' else 'modified'}:{relative}",)
-        if changed
-        else (),
         effect_scope="workspace" if changed else "none",
     )
 
 
 def tool_patch_file(context, args):
     path = context.path(args["path"])
-    if not path.is_file():
-        raise ValueError("path is not a file")
     old_text = str(args.get("old_text", ""))
-    if not old_text:
-        raise ValueError("old_text must not be empty")
-    if "new_text" not in args:
-        raise ValueError("missing new_text")
     before, after = context.mutation_service.patch(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
@@ -443,7 +568,6 @@ def tool_patch_file(context, args):
     return ToolExecution(
         content=f"patched {relative}\nbefore_revision: {before}\nafter_revision: {after}",
         affected_paths=(relative,) if changed else (),
-        diff_summary=(f"modified:{relative}",) if changed else (),
         effect_scope="workspace" if changed else "none",
     )
 
@@ -490,7 +614,6 @@ def tool_memory_store(context, args):
             "Do not repeat memory_store for the same fact."
         ),
         affected_paths=paths,
-        diff_summary=tuple(f"modified:{path}" for path in paths),
         effect_scope="project_memory",
     )
 
@@ -503,7 +626,6 @@ def tool_memory_forget(context, args):
     return ToolExecution(
         content=f"forgot project memory {card.filename}",
         affected_paths=paths,
-        diff_summary=(f"deleted:{paths[0]}", f"modified:{paths[1]}"),
         effect_scope="project_memory",
     )
 

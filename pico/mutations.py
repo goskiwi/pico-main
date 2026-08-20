@@ -19,7 +19,13 @@ def content_revision(payload: bytes) -> str:
 
 
 def file_revision(path: Path) -> str:
-    return content_revision(path.read_bytes()) if path.is_file() else ABSENT_REVISION
+    if not path.is_file():
+        return ABSENT_REVISION
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
 
 
 class RevisionConflict(RuntimeError):
