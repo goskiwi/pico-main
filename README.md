@@ -168,6 +168,7 @@ uv run ruff check pico tests scripts
 
 评测分为 native Harness regression、Context governance、Markdown Project Memory 和
 RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
+评测实现位于仓库顶层 `evals/`，不属于 `pyproject.toml` 打包的 `pico` Runtime。
 
 当前确定性 Artifact 为 `harness-regression-v3.json`、`context-governance-v5.json`、
 `project-memory-v2.json` 与 `repo-map-v1.json`；每份均记录 Runtime/Evaluation snapshot ID。

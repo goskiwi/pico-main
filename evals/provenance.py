@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SNAPSHOT_INPUTS = (
     Path("pyproject.toml"),
     Path("pico"),
 )
 EVALUATION_SNAPSHOT_INPUTS = (
-    Path("pico/evaluation"),
+    Path("evals"),
     Path("scripts/run_evaluations.py"),
     Path("benchmarks/coding_tasks.json"),
     Path("tests/fixtures/bench_repo_patch"),
@@ -49,11 +49,7 @@ def _snapshot_id(root, inputs, *, exclude=()):
 
 
 def runtime_snapshot_id(root=REPOSITORY_ROOT):
-    return _snapshot_id(
-        root,
-        RUNTIME_SNAPSHOT_INPUTS,
-        exclude=(Path("pico/evaluation"),),
-    )
+    return _snapshot_id(root, RUNTIME_SNAPSHOT_INPUTS)
 
 
 def evaluation_snapshot_id(root=REPOSITORY_ROOT):

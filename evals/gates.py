@@ -1,4 +1,4 @@
-"""Fail-closed checks for deterministic evaluation artifacts."""
+"""Fail-closed checks for repository-local evaluation artifacts."""
 
 
 def evaluation_failures(results):

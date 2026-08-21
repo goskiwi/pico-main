@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pico.evaluation.evaluator import run_harness_regression_v3
+from evals.evaluator import run_harness_regression_v3
 
 
 def test_native_harness_runs_fresh_fixtures_and_recovery(tmp_path):

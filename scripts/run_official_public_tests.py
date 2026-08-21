@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pico.evaluation.provenance import runtime_snapshot_id
+from evals.provenance import runtime_snapshot_id
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, SandboxProfile
 from pico.verification import parse_verification_output
 from scripts.run_real_oss_validation import (

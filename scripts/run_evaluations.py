@@ -2,10 +2,16 @@
 """Run deterministic Runtime evaluations and fail closed on regressions."""
 
 import json
+import sys
+from pathlib import Path
 
-from pico.evaluation.evaluator import run_harness_regression_v3
-from pico.evaluation.gates import evaluation_failures
-from pico.evaluation.metrics import (
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from evals.evaluator import run_harness_regression_v3
+from evals.gates import evaluation_failures
+from evals.metrics import (
     run_context_governance_evaluation,
     run_project_memory_evaluation,
     run_repo_map_evaluation,

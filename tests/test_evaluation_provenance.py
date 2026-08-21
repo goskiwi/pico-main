@@ -1,4 +1,4 @@
-from pico.evaluation.provenance import evaluation_snapshot_id, runtime_snapshot_id
+from evals.provenance import evaluation_snapshot_id, runtime_snapshot_id
 
 
 def test_runtime_snapshot_is_stable_and_content_bound(tmp_path):
@@ -15,16 +15,17 @@ def test_runtime_snapshot_is_stable_and_content_bound(tmp_path):
 
 
 def test_evaluation_snapshot_is_separate_from_runtime_source(tmp_path):
-    (tmp_path / "pico" / "evaluation").mkdir(parents=True)
+    (tmp_path / "pico").mkdir(parents=True)
+    (tmp_path / "evals").mkdir()
     (tmp_path / "pico" / "runtime.py").write_text("VALUE = 1\n")
-    (tmp_path / "pico" / "evaluation" / "evaluator.py").write_text("VALUE = 1\n")
+    (tmp_path / "evals" / "evaluator.py").write_text("VALUE = 1\n")
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run_evaluations.py").write_text("pass\n")
     (tmp_path / "pyproject.toml").write_text("[project]\n")
     before_runtime = runtime_snapshot_id(tmp_path)
     before_evaluation = evaluation_snapshot_id(tmp_path)
 
-    (tmp_path / "pico" / "evaluation" / "evaluator.py").write_text("VALUE = 2\n")
+    (tmp_path / "evals" / "evaluator.py").write_text("VALUE = 2\n")
 
     assert runtime_snapshot_id(tmp_path) == before_runtime
     assert evaluation_snapshot_id(tmp_path) != before_evaluation

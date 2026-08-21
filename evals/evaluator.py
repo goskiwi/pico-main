@@ -14,11 +14,11 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..contracts import ModelAction
-from ..runtime import Pico, PicoConfig
-from ..session_store import SessionStore
-from ..workspace import WorkspaceContext
-from .provenance import evaluation_snapshot_id, runtime_snapshot_id
+from evals.provenance import evaluation_snapshot_id, runtime_snapshot_id
+from pico.contracts import ModelAction
+from pico.runtime import Pico, PicoConfig
+from pico.session_store import SessionStore
+from pico.workspace import WorkspaceContext
 
 REQUIRED_TASK_FIELDS = {
     "id", "prompt", "fixture_repo", "allowed_tools", "step_budget",
@@ -130,7 +130,7 @@ def summarize_rows(rows):
 class BenchmarkEvaluator:
     def __init__(self, benchmark_path=Path("benchmarks/coding_tasks.json"),
                  artifact_path=Path("artifacts/harness-regression-v3.json"),
-                 workspace_root=Path(".pico/evaluation")):
+                 workspace_root=Path(".pico/evals")):
         self.benchmark_path = Path(benchmark_path)
         self.artifact_path = Path(artifact_path)
         self.workspace_root = Path(workspace_root)

@@ -1,6 +1,6 @@
 import json
 
-from pico.evaluation.metrics import (
+from evals.metrics import (
     run_context_governance_evaluation,
     run_project_memory_evaluation,
     run_repo_map_evaluation,

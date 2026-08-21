@@ -6,16 +6,16 @@ import json
 import tempfile
 from pathlib import Path
 
-from ..context_manager import ContextManager, Tokenizer
-from ..contracts import ModelAction, ToolCall, ToolOutcome
-from ..providers.clients import FakeModelClient
-from ..repo_map import RepoMap
-from ..run_lifecycle import RunLifecycle
-from ..runtime import Pico
-from ..runtime_config import PicoConfig
-from ..session_store import SessionStore
-from ..workspace import WorkspaceContext
-from .provenance import evaluation_snapshot_id, runtime_snapshot_id
+from evals.provenance import evaluation_snapshot_id, runtime_snapshot_id
+from pico.context_manager import ContextManager, Tokenizer
+from pico.contracts import ModelAction, ToolCall, ToolOutcome
+from pico.providers.clients import FakeModelClient
+from pico.repo_map import RepoMap
+from pico.run_lifecycle import RunLifecycle
+from pico.runtime import Pico
+from pico.runtime_config import PicoConfig
+from pico.session_store import SessionStore
+from pico.workspace import WorkspaceContext
 
 
 def _write(path, payload):

@@ -10,7 +10,7 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.runtime_recovery` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts.
 - `pico.evidence` / `pico.verification` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and a separate receipt-bound Patch integrator.
-- `pico.evaluation`: deterministic Runtime regressions and mechanism evaluations.
+- `evals`: repository-local deterministic Runtime regressions and mechanism evaluations; it is excluded from the installable `pico` package.
 - `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool, Recovery and Prompt ownership;
   `pico.runtime.Pico` is the small composition root.
 - `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,

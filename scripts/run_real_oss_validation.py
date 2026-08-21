@@ -9,10 +9,16 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from evals.provenance import runtime_snapshot_id
 from pico import (
     OpenAICompatibleModelClient,
     Pico,
@@ -21,7 +27,6 @@ from pico import (
     WorkspaceContext,
 )
 from pico.config import load_project_env, provider_env
-from pico.evaluation.provenance import runtime_snapshot_id
 from pico.sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
@@ -29,7 +34,6 @@ from pico.sandbox import (
     parse_command_invocation,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
 ALLOWED_TOOLS = (
     "list_files",
