@@ -32,7 +32,9 @@ tmp/
 .worktrees/
 .pico/
 .mini-pico/
-artifacts/
+artifacts/*
+!artifacts/context-governance-v5.json
+!artifacts/project-memory-v2.json
 release/
 readme_intro_locked/
 output/

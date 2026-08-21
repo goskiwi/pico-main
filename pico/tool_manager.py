@@ -1,4 +1,4 @@
-"""Tool surface, schemas, validation, approval, and execution."""
+"""Build, validate, approve, and execute the agent's tool set."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .runtime import Pico
 
 
-class RuntimeTools:
+class ToolManager:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
         self.registry = self._build_registry()
@@ -60,19 +60,19 @@ class RuntimeTools:
     def context(self):
         runtime = self.runtime
 
-        def pending_call_entry_ids():
-            journal = runtime.run.journal
-            if journal is None:
+        def pending_call_event_ids():
+            run_log = runtime.run.run_log
+            if run_log is None:
                 return ()
-            call_id = journal.pending_call_id()
+            call_id = run_log.pending_call_id()
             return tuple(
-                entry.entry_id
-                for entry in journal.entries
+                entry.event_id
+                for entry in run_log.events
                 if entry.kind == "assistant_tool_call" and entry.call_id == call_id
             )
 
         return ToolContext(
-            root=runtime.workspace.root,
+            workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_path,
             shell_env_provider=runtime.shell_env,
             project_memory=runtime.services.project_memory,
@@ -81,17 +81,25 @@ class RuntimeTools:
             run_id_provider=lambda: str(
                 getattr(runtime.run.task_state, "run_id", "") or "manual"
             ),
-            source_entry_ids_provider=pending_call_entry_ids,
+            source_event_ids_provider=pending_call_event_ids,
             tool_call_id_provider=lambda: (
-                runtime.run.journal.pending_call_id()
-                if runtime.run.journal is not None
+                runtime.run.run_log.pending_call_id()
+                if runtime.run.run_log is not None
                 else ""
+            ),
+            working_state_provider=lambda: (
+                runtime.run.task_state.working_state
+                if runtime.run.task_state is not None
+                else None
+            ),
+            token_counter_provider=lambda text: runtime.prompt.context.tokenizer.count(
+                text
             ),
             mutation_service=runtime.services.mutations,
             sandbox=runtime.services.sandbox,
             execution_context_provider=lambda: (
-                runtime.run.execution.child(owner="run_shell")
-                if runtime.run.execution is not None
+                runtime.run.execution_context.child(owner="run_shell")
+                if runtime.run.execution_context is not None
                 else None
             ),
         )

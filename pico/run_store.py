@@ -1,4 +1,4 @@
-"""Single-writer Run Journal and artifact directory storage."""
+"""Single-writer Run Log and artifact directory storage."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .run_journal import JournalCursor, JournalEntry, replay_entries
+from .run_log import RunCursor, RunEvent, replay_events, validate_run_events
 
 
 def _run_id(value):
@@ -18,13 +18,13 @@ class RunStore:
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self._cursors: dict[str, JournalCursor] = {}
+        self._cursors: dict[str, RunCursor] = {}
 
     def run_dir(self, run_id):
         return self.root / _run_id(run_id)
 
-    def journal_path(self, run_id):
-        return self.run_dir(run_id) / "journal.jsonl"
+    def events_path(self, run_id):
+        return self.run_dir(run_id) / "events.jsonl"
 
     def artifact_dir(self, run_id):
         return self.run_dir(run_id) / "artifacts"
@@ -34,8 +34,8 @@ class RunStore:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
-    def has_journal(self, run_id):
-        return self.journal_path(run_id).is_file()
+    def has_events(self, run_id):
+        return self.events_path(run_id).is_file()
 
     @staticmethod
     def _repair_incomplete_tail(path):
@@ -50,13 +50,13 @@ class RunStore:
             os.fsync(handle.fileno())
         return repaired
 
-    def read_entries(self, run_id):
+    def read_events(self, run_id):
         run_id = _run_id(run_id)
-        path = self.journal_path(run_id)
+        path = self.events_path(run_id)
         if not path.exists():
             return []
         data = self._repair_incomplete_tail(path)
-        entries = []
+        events = []
         for number, raw in enumerate(data.splitlines(), start=1):
             if not raw.strip():
                 continue
@@ -64,52 +64,66 @@ class RunStore:
                 value = json.loads(raw)
             except json.JSONDecodeError as exc:
                 raise ValueError(
-                    f"Run Journal line {number} is not valid JSON"
+                    f"Run Log line {number} is not valid JSON"
                 ) from exc
-            entry = JournalEntry.from_dict(value)
-            expected = len(entries) + 1
+            entry = RunEvent.from_dict(value)
+            expected = len(events) + 1
             if entry.run_id != run_id:
-                raise ValueError("Run Journal entry belongs to another run")
+                raise ValueError("Run event belongs to another run")
             if entry.sequence != expected:
-                raise ValueError("Run Journal sequence is not contiguous")
-            if entry.entry_id != f"{run_id}:entry:{expected:06d}":
-                raise ValueError("Run Journal entry id does not match its sequence")
-            if entries:
-                first = entries[0]
+                raise ValueError("Run Log sequence is not contiguous")
+            if entry.event_id != f"{run_id}:event:{expected:06d}":
+                raise ValueError("Run event id does not match its sequence")
+            if events:
+                first = events[0]
                 if (
                     entry.task_id != first.task_id
                     or entry.session_id != first.session_id
                 ):
-                    raise ValueError("Run Journal identity changed within one run")
-            entries.append(entry)
+                    raise ValueError("Run Log identity changed within one run")
+            events.append(entry)
         self._cursors[run_id] = (
-            JournalCursor(entries[-1].sequence, entries[-1].entry_id)
-            if entries
-            else JournalCursor()
+            RunCursor(events[-1].sequence, events[-1].event_id)
+            if events
+            else RunCursor()
         )
-        return entries
+        validate_run_events(events)
+        return events
 
     def cursor(self, run_id):
         run_id = _run_id(run_id)
         if run_id not in self._cursors:
-            self.read_entries(run_id)
-        return self._cursors.get(run_id, JournalCursor())
+            self.read_events(run_id)
+        return self._cursors.get(run_id, RunCursor())
 
-    def append_entry(self, run_id, task_id, session_id, kind, payload=None):
+    def append_event(
+        self,
+        run_id,
+        task_id,
+        session_id,
+        kind,
+        payload=None,
+        *,
+        protocol_checked=False,
+    ):
         run_id = _run_id(run_id)
-        path = self.journal_path(run_id)
+        payload = dict(payload or {})
+        if not protocol_checked:
+            protocol = validate_run_events(self.read_events(run_id))
+            protocol.check(str(kind), payload)
+        path = self.events_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         cursor = self.cursor(run_id)
         sequence = cursor.sequence + 1
-        entry = JournalEntry(
-            entry_id=f"{run_id}:entry:{sequence:06d}",
+        entry = RunEvent(
+            event_id=f"{run_id}:event:{sequence:06d}",
             sequence=sequence,
             run_id=run_id,
             task_id=str(task_id),
             session_id=str(session_id),
             kind=str(kind),
             timestamp=datetime.now(timezone.utc).isoformat(),
-            payload=dict(payload or {}),
+            payload=payload,
         )
         encoded = (
             json.dumps(entry.to_dict(), sort_keys=True, ensure_ascii=True) + "\n"
@@ -118,11 +132,11 @@ class RunStore:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        self._cursors[run_id] = JournalCursor(sequence, entry.entry_id)
+        self._cursors[run_id] = RunCursor(sequence, entry.event_id)
         return entry
 
     def replay(self, run_id):
-        return replay_entries(self.read_entries(run_id))
+        return replay_events(self.read_events(run_id))
 
     def find_active_run(self, session_id):
         if not self.root.exists():
@@ -131,18 +145,18 @@ class RunStore:
             if not directory.is_dir():
                 continue
             try:
-                entries = self.read_entries(directory.name)
+                events = self.read_events(directory.name)
             except (OSError, ValueError):
                 continue
-            if not entries or entries[0].session_id != str(session_id):
+            if not events or events[0].session_id != str(session_id):
                 continue
-            projection = replay_entries(entries)
+            projection = replay_events(events)
             if not projection.terminal:
-                return directory.name, tuple(entries), projection
+                return directory.name, tuple(events), projection
         return "", (), None
 
     def session_summaries(self, session_id, *, exclude_run_id="", limit=8):
-        from .evidence import EvidenceLedger
+        from .evidence import RunEvidence
 
         rows = []
         directories = self.root.iterdir() if self.root.exists() else ()
@@ -150,15 +164,15 @@ class RunStore:
             if not directory.is_dir() or directory.name == str(exclude_run_id):
                 continue
             try:
-                entries = self.read_entries(directory.name)
+                events = self.read_events(directory.name)
             except (OSError, ValueError):
                 continue
-            if not entries or entries[0].session_id != str(session_id):
+            if not events or events[0].session_id != str(session_id):
                 continue
-            projection = replay_entries(entries)
+            projection = replay_events(events)
             if not projection.terminal:
                 continue
-            evidence = EvidenceLedger.from_entries(entries)
+            evidence = RunEvidence.from_events(events)
             verification_status = (
                 str(evidence.verifications[-1].get("status", "unknown"))
                 if evidence.verifications
@@ -173,7 +187,7 @@ class RunStore:
                     "changed_paths": evidence.changed_paths,
                     "verification_status": verification_status,
                     "stop_reason": projection.stop_reason,
-                    "created_at": entries[-1].timestamp,
+                    "created_at": events[-1].timestamp,
                 }
             )
         rows.sort(key=lambda item: (item["created_at"], item["run_id"]))

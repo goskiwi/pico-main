@@ -9,7 +9,7 @@ import json
 import subprocess
 import textwrap
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MAX_TOOL_OUTPUT = 4000
 MAX_HISTORY = 12000
@@ -17,6 +17,16 @@ MAX_HISTORY = 12000
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+
+
+def normalize_relative_file(value: str) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    path = PurePosixPath(text)
+    if not text or text == "." or path.is_absolute() or ".." in path.parts:
+        raise ValueError("path must be a repository-relative file")
+    if any(part in {"", "."} for part in path.parts):
+        raise ValueError("path must be normalized")
+    return path.as_posix()
 
 
 def now():
@@ -42,12 +52,12 @@ def middle(text, limit):
 
 
 class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
+    def __init__(self, cwd, repo_root, branch, default_branch, git_status, recent_commits, project_docs):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
         self.default_branch = default_branch
-        self.status = status
+        self.git_status = git_status
         self.recent_commits = recent_commits
         self.project_docs = project_docs
 
@@ -95,7 +105,7 @@ class WorkspaceContext:
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
             default_branch=default_branch,
-            status=clip(git(["status", "--short"], "clean") or "clean", 1500),
+            git_status=clip(git(["status", "--short"], "clean") or "clean", 1500),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
         )
@@ -118,7 +128,7 @@ class WorkspaceContext:
             - branch: {self.branch}
             - default_branch: {self.default_branch}
             - status:
-            {self.status}
+            {self.git_status}
             - recent_commits:
             {commits}
             - project_docs:
@@ -134,7 +144,7 @@ class WorkspaceContext:
             "repo_root": self.repo_root,
             "branch": self.branch,
             "default_branch": self.default_branch,
-            "status": self.status,
+            "git_status": self.git_status,
             "recent_commits": list(self.recent_commits),
             "project_docs": dict(self.project_docs),
         }

@@ -155,8 +155,8 @@ def verify_workspace(
 
 def run_verification(agent, workspace_fingerprint):
     execution_context = (
-        agent.run.execution.child(owner="runtime_verifier")
-        if agent.run.execution
+        agent.run.execution_context.child(owner="runtime_verifier")
+        if agent.run.execution_context
         else None
     )
     return verify_workspace(

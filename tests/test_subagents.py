@@ -111,7 +111,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
             "prompt": "inspect auth",
             "depends_on": [],
             "allowed_write_paths": [],
-            "max_steps": 4,
+            "max_tool_executions": 4,
         },
         {
             "task_id": "explore-cache",
@@ -119,7 +119,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
             "prompt": "inspect cache",
             "depends_on": [],
             "allowed_write_paths": [],
-            "max_steps": 4,
+            "max_tool_executions": 4,
         },
     ]
     parent = build_parent(
@@ -138,8 +138,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
     payload = json.loads(tool_result)
     receipts = payload["tasks"]
     assert {item["status"] for item in receipts} == {"completed"}
-    assert len({item["child_session_id"] for item in receipts}) == 2
-    assert len({item["child_run_ids"][0] for item in receipts}) == 2
+    assert len({item["child_run_id"] for item in receipts}) == 2
     assert all("delegate_tasks" not in client.action_tool_surfaces[0] for client in clients)
     assert "delegate_tasks" in parent.model_client.action_tool_surfaces[0]
 
@@ -151,37 +150,6 @@ def test_delegate_tool_schema_is_strict_at_nested_task_level():
     assert set(schema["required"]) == set(schema["properties"])
     assert set(task_schema["required"]) == set(task_schema["properties"])
     assert task_schema["additionalProperties"] is False
-
-
-def test_legacy_subtask_state_is_rejected_without_migration(tmp_path):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-    )
-    state_path = parent.services.run_store.run_dir("manual") / "subtasks.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "pico-subtasks-v1",
-                "parent_run_id": "manual",
-                "tasks": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="unsupported subtask state schema"):
-        parent.services.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="explore-new",
-                    kind="explore",
-                    prompt="inspect",
-                ),
-            )
-        )
 
 
 def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):
@@ -401,7 +369,7 @@ def test_write_scope_is_enforced_before_execution(tmp_path):
         / record.spec.task_id
         / "runs"
     )
-    entries = run_store.read_entries(record.child_run_ids[0])
+    entries = run_store.read_events(record.child_run_id)
     rejection = next(
         entry
         for entry in entries
@@ -455,36 +423,6 @@ def test_post_execution_diff_detects_an_out_of_scope_side_effect(tmp_path):
     assert receipt["status"] == "failed"
     assert receipt["changed_paths"] == ["forbidden.py", "safe.py"]
     assert "write scope violation after execution" in receipt["error"]
-
-
-def test_continue_task_reuses_child_session_and_prior_summary(tmp_path):
-    root = repository(tmp_path)
-    clients = []
-
-    def child_factory(_spec):
-        answer = "first result" if not clients else "continued result"
-        client = FakeModelClient([ModelAction.final(answer)])
-        clients.append(client)
-        return client
-
-    parent = build_parent(root, child_factory)
-    first = parent.services.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="explore-session",
-                kind="explore",
-                prompt="first question",
-            ),
-        )
-    )["tasks"][0]
-    continued = parent.services.subagents.continue_task(
-        "explore-session", "follow-up question"
-    )
-
-    assert continued["child_session_id"] == first["child_session_id"]
-    assert len(continued["child_run_ids"]) == 2
-    assert continued["continuation_count"] == 1
-    assert "result: first result" in clients[1].prompts[0]
 
 
 def test_completed_task_id_is_reused_without_another_model_call(tmp_path):
@@ -632,7 +570,7 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
         "prompt": "create feature.py",
         "depends_on": [],
         "allowed_write_paths": ["feature.py"],
-        "max_steps": 4,
+        "max_tool_executions": 4,
     }
     child_clients = []
 
@@ -679,7 +617,7 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
     assert "delegate_tasks" not in child_clients[0].action_tool_surfaces[0]
     blocked = [
         entry
-        for entry in parent.services.run_store.read_entries(parent.run.task_state.run_id)
+        for entry in parent.services.run_store.read_events(parent.run.task_state.run_id)
         if entry.kind == "completion_blocked"
         and entry.payload["status"] == "subtasks_incomplete"
     ]
@@ -699,7 +637,7 @@ def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind
         "prompt": "create feature.py",
         "depends_on": [],
         "allowed_write_paths": ["feature.py"],
-        "max_steps": 4,
+        "max_tool_executions": 4,
     }
     parent = build_parent(
         root,
@@ -721,7 +659,7 @@ def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind
     assert not (parent.services.run_store.run_dir(run_id) / "subtasks.json").exists()
     blocked = [
         entry
-        for entry in parent.services.run_store.read_entries(run_id)
+        for entry in parent.services.run_store.read_events(run_id)
         if entry.kind == "completion_blocked"
     ]
     assert blocked == []

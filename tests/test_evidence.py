@@ -1,26 +1,25 @@
 from pico.contracts import ToolOutcome
-from pico.evidence import EvidenceLedger
-from pico.run_journal import JournalEntry
+from pico.evidence import RunEvidence
+from pico.run_log import RunEvent
 
 
 def changed_outcome():
     return ToolOutcome(
         tool_call_id="call_1",
         tool_name="patch_file",
-        status="ok",
+        status="success",
         execution_state="completed",
         side_effect_state="changed",
         content="patched",
-        admission_status="admitted",
         affected_paths=("src/app.py",),
         effect_scope="workspace",
         artifact={"artifact_id": "artifact_1"},
     )
 
 
-def entry(kind, payload, sequence=1):
-    return JournalEntry(
-        entry_id=f"run:entry:{sequence:06d}",
+def event(kind, payload, sequence=1):
+    return RunEvent(
+        event_id=f"run:event:{sequence:06d}",
         sequence=sequence,
         run_id="run",
         task_id="task",
@@ -31,26 +30,28 @@ def entry(kind, payload, sequence=1):
     )
 
 
-def test_live_and_journal_recovery_build_identical_evidence():
+def test_live_and_run_log_recovery_build_identical_evidence():
     outcome = changed_outcome()
-    journal_entry = entry(
+    run_event = event(
         "tool_result",
         {
+            "tool_call_id": outcome.tool_call_id,
+            "tool_name": outcome.tool_name,
             "workspace_revision": 1,
             "outcome": outcome.to_dict(),
         },
     )
-    live = EvidenceLedger()
-    live.apply_entry(journal_entry)
-    restored = EvidenceLedger.from_entries([journal_entry])
+    live = RunEvidence()
+    live.apply_event(run_event)
+    restored = RunEvidence.from_events([run_event])
 
     assert restored.to_dict() == live.to_dict()
 
 
 def test_workspace_fact_invalidates_current_verification():
-    ledger = EvidenceLedger()
-    ledger.apply_entry(
-        entry(
+    evidence = RunEvidence()
+    evidence.apply_event(
+        event(
             "verification_result",
             {
                 "verification_id": "verify_1",
@@ -61,19 +62,21 @@ def test_workspace_fact_invalidates_current_verification():
         )
     )
 
-    ledger.apply_entry(
-        entry(
+    evidence.apply_event(
+        event(
             "tool_result",
-            {
-                "workspace_revision": 1,
-                "outcome": changed_outcome().to_dict(),
+                {
+                    "tool_call_id": "call_1",
+                    "tool_name": "patch_file",
+                    "workspace_revision": 1,
+                    "outcome": changed_outcome().to_dict(),
             },
             sequence=2,
         )
     )
 
-    assert ledger.verifications[0]["freshness"] == "stale"
-    assert ledger.verifications[0]["invalidated_by"] == "call_1"
+    assert evidence.verifications[0]["freshness"] == "stale"
+    assert evidence.verifications[0]["invalidated_by"] == "call_1"
 
 
 def effect(call_id, status, side_effect_state, paths, scope="workspace"):
@@ -87,15 +90,15 @@ def effect(call_id, status, side_effect_state, paths, scope="workspace"):
 
 
 def test_completion_evidence_tracks_repair_and_verification_scope():
-    unresolved = EvidenceLedger(
+    unresolved = RunEvidence(
         effects=[effect("call_partial", "partial_success", "partial", ("x.py",))]
     )
     assert unresolved.assess_completion("").allowed is False
 
-    repaired = EvidenceLedger(
+    repaired = RunEvidence(
         effects=[
             effect("call_partial", "partial_success", "partial", ("x.py",)),
-            effect("call_repair", "ok", "changed", ("x.py",)),
+            effect("call_repair", "success", "changed", ("x.py",)),
         ]
     )
     assert repaired.assess_completion("").allowed is True
@@ -106,13 +109,13 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
         "freshness": "current",
         "workspace_fingerprint": "workspace-current",
     }
-    workspace_partial = EvidenceLedger(
+    workspace_partial = RunEvidence(
         effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],
         verifications=[verification],
     )
     assert workspace_partial.assess_completion("workspace-current").allowed is True
 
-    memory_partial = EvidenceLedger(
+    memory_partial = RunEvidence(
         effects=[
             effect(
                 "call_memory",
@@ -129,7 +132,7 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
     memory_partial.effects.append(
         effect(
             "call_memory_repair",
-            "ok",
+            "success",
             "changed",
             (".pico/memory/MEMORY.md",),
             scope="project_memory",

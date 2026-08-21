@@ -1,0 +1,115 @@
+{
+  "artifact_type": "context-governance-v5",
+  "evaluation_snapshot_id": "sha256:09593e68682d203de3b6481af1baa804491ad48036b95c3438e7fc1a4712402d",
+  "rows": [
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 4290,
+      "repetition": 0,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 12290,
+      "repetition": 0,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 24290,
+      "repetition": 0,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 4290,
+      "repetition": 1,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 12290,
+      "repetition": 1,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 24290,
+      "repetition": 1,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 4290,
+      "repetition": 2,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 12290,
+      "repetition": 2,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 518,
+      "original_events_preserved": true,
+      "raw_tokens": 24290,
+      "repetition": 2,
+      "request_preserved": true,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    }
+  ],
+  "runtime_snapshot_id": "sha256:78f03ae2093e7c93b7b15bcb752756177b6adbc13f432544b6d07439e35a8578",
+  "summary": {
+    "compaction_commit_rate": 1.0,
+    "current_request_preserved_rate": 1.0,
+    "mean_token_reduction": 13105.333333333334,
+    "original_event_preservation_rate": 1.0,
+    "tool_transaction_integrity_rate": 1.0,
+    "within_budget_rate": 1.0,
+    "working_state_preservation_rate": 1.0
+  }
+}

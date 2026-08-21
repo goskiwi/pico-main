@@ -1,3 +1,5 @@
+import pytest
+
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -6,8 +8,8 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
-from pico.contracts import ToolCall, ToolExecution, ToolOutcome
-from pico.run_journal import RunJournal
+from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
+from pico.run_log import RunLog
 from pico.task_state import TaskState
 
 
@@ -29,10 +31,9 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     )
 
     assert isinstance(outcome, ToolOutcome)
-    assert outcome.status == "ok"
+    assert outcome.status == "success"
     assert outcome.execution_state == "completed"
     assert outcome.side_effect_state == "none"
-    assert outcome.admission_status == "admitted"
     assert outcome.rejected_at == ""
     assert set(outcome.to_dict()) == {
         "tool_call_id",
@@ -41,15 +42,12 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
         "execution_state",
         "side_effect_state",
         "content",
-        "admission_status",
         "failure",
-        "recovery",
         "affected_paths",
         "effect_scope",
         "duration_ms",
         "artifact",
         "output_truncated",
-        "policy_stop_requested",
         "rejected_at",
     }
     artifact = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
@@ -65,8 +63,6 @@ def test_rejected_call_never_enters_execution(tmp_path):
     assert outcome.status == "rejected"
     assert outcome.execution_state == "not_started"
     assert outcome.failure.code == "unknown_tool"
-    assert outcome.recovery.action == "replan"
-    assert outcome.admission_status == "rejected"
     assert outcome.rejected_at == "registry"
 
 
@@ -113,7 +109,7 @@ def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     agent = build_agent(tmp_path)
     output = "head-marker\n" + "noise\n" * 5000 + "tail-marker\n"
     agent.tools.registry["run_shell"]["run"] = (
-        lambda _args: ToolExecution("exit_code: 0\n" + output)
+        lambda _args: ToolRunnerResult("exit_code: 0\n" + output)
     )
 
     outcome = agent.tools.run(
@@ -130,6 +126,75 @@ def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     assert "head-marker" in artifact.read_text(encoding="utf-8")
 
 
+def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
+    failed_agent = build_agent(tmp_path)
+    failed_agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
+        "command display format changed",
+        failure=FailureInfo(
+            "command_failed", "command", "command exited with 7", True
+        ),
+    )
+
+    failed = failed_agent.tools.run(
+        ToolCall("run_shell", {"command": "false", "timeout": 20}, "call_failed")
+    )
+
+    assert failed.status == "error"
+    assert failed.execution_state == "completed"
+    assert failed.failure.code == "command_failed"
+
+    successful_agent = build_agent(tmp_path)
+    successful_agent.tools.registry["run_shell"]["run"] = (
+        lambda _args: ToolRunnerResult("exit_code: 99")
+    )
+
+    successful = successful_agent.tools.run(
+        ToolCall("run_shell", {"command": "true", "timeout": 20}, "call_success")
+    )
+
+    assert successful.status == "success"
+    assert successful.failure is None
+
+
+def test_tool_outcome_rejects_impossible_execution_states():
+    with pytest.raises(ValueError, match="successful outcome must complete"):
+        ToolOutcome(
+            tool_call_id="call_invalid",
+            tool_name="read_file",
+            status="success",
+            execution_state="not_started",
+            side_effect_state="none",
+            content="invalid",
+        )
+
+
+def test_tool_outcome_requires_consistent_effect_facts():
+    failure = FailureInfo("tool_partial_success", "execution", "partial", False)
+
+    with pytest.raises(ValueError, match="known side effects require affected paths"):
+        ToolOutcome(
+            tool_call_id="call_partial",
+            tool_name="write_file",
+            status="partial_success",
+            execution_state="failed",
+            side_effect_state="partial",
+            content="partial",
+            failure=failure,
+            effect_scope="workspace",
+        )
+
+    with pytest.raises(ValueError, match="unknown side effects require an effect scope"):
+        ToolOutcome(
+            tool_call_id="call_unknown",
+            tool_name="write_file",
+            status="partial_success",
+            execution_state="failed",
+            side_effect_state="unknown",
+            content="unknown",
+            failure=failure,
+        )
+
+
 def test_tool_runner_rejects_legacy_string_result(tmp_path):
     agent = build_agent(tmp_path)
     agent.tools.registry["list_files"]["run"] = lambda _args: "legacy result"
@@ -137,20 +202,20 @@ def test_tool_runner_rejects_legacy_string_result(tmp_path):
     outcome = agent.tools.run(ToolCall("list_files", {}, "call_legacy_runner"))
 
     assert outcome.status == "error"
-    assert outcome.failure.detail == "tool runner must return ToolExecution"
+    assert outcome.failure.detail == "tool runner must return ToolRunnerResult"
 
 
 def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_memory", "Remember", run_id="run_memory")
     agent.run.task_state = state
-    ledger = RunJournal(
+    run_log = RunLog(
         state.run_id,
         state.task_id,
         agent.session.data["id"],
         agent.services.run_store,
     )
-    ledger.append_user("Remember the release command")
+    run_log.append_user("Remember the release command")
     call = ToolCall(
         "memory_store",
         {
@@ -158,7 +223,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
             "filename": "project_release_command.md",
             "name": "Release command",
             "description": "Stable command used before release.",
-            "type": "project",
+            "memory_type": "project",
             "content": "Run `python -m pytest -q`.",
             "why": "The user explicitly requested this convention.",
             "how_to_apply": "Run it before release.",
@@ -166,18 +231,23 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         },
         "call_memory",
     )
-    source = ledger.append_tool_call(call)
-    agent.run.journal = ledger
-    verification = ledger.append(
+    agent.run.run_log = run_log
+    verification = run_log.append(
         "verification_result",
-        {"verification_id": "verify_current", "freshness": "current"},
+        {
+            "verification_id": "verify_current",
+            "status": "passed",
+            "freshness": "current",
+            "workspace_fingerprint": "workspace_current",
+        },
     )
-    agent.run.evidence.apply_entry(verification)
+    agent.run.evidence.apply_event(verification)
+    source = run_log.append_tool_call(call)
 
     outcome = agent.tools.run(call)
 
     card = agent.services.project_memory.recall("project_release_command.md")
-    assert outcome.status == "ok"
+    assert outcome.status == "success"
     assert outcome.side_effect_state == "changed"
     assert outcome.effect_scope == "project_memory"
     assert ".pico/memory/cards/project_release_command.md" in outcome.affected_paths
@@ -187,7 +257,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         in agent.run.evidence.control_changed_paths
     )
     assert agent.run.evidence.verifications[0]["freshness"] == "current"
-    assert card.source_entry_ids == (source.entry_id,)
+    assert card.source_event_ids == (source.event_id,)
     assert card.source_tool_call_id == call.call_id
 
 
@@ -200,10 +270,10 @@ def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
     (tmp_path / "README.md").write_text("changed\n", encoding="utf-8")
     after_change = agent.tools.run(ToolCall("read_file", args, "call_read_3"))
 
-    assert first.status == "ok"
+    assert first.status == "success"
     assert repeated.status == "rejected"
     assert repeated.failure.code == "repeated_identical_call"
-    assert after_change.status == "ok"
+    assert after_change.status == "success"
     assert "changed" in after_change.content
 
 
@@ -223,9 +293,7 @@ def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
     third = agent.tools.run(ToolCall("run_shell", args, "call_shell_3"))
 
     assert first.status == "error"
-    assert first.recovery.action == "retry"
     assert second.status == "error"
-    assert second.recovery.action == "replan"
     assert third.status == "rejected"
     assert len(executions) == 2
 
@@ -247,7 +315,7 @@ def test_read_only_tools_do_not_scan_workspace(tmp_path, monkeypatch):
     assert scans == 0
 
 
-def test_read_only_agent_turn_and_journal_do_not_scan_workspace(
+def test_read_only_agent_turn_and_run_log_do_not_scan_workspace(
     tmp_path, monkeypatch
 ):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")

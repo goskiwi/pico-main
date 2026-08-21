@@ -19,8 +19,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .contracts import ToolExecution
+from .contracts import FailureInfo, ToolRunnerResult
+from .features.memory import normalize_working_update
 from .mutations import file_revision
+from .project_memory import MEMORY_RECALL_MAX_CARDS
 from .sandbox import SandboxProfile, parse_command_invocation
 from .workspace import IGNORED_PATH_NAMES
 
@@ -31,6 +33,7 @@ SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
+MEMORY_RECALL_MAX_TOKENS = 2400
 
 
 class ToolArgs(BaseModel):
@@ -86,12 +89,21 @@ class SubmitFinalArgs(ToolArgs):
     answer: str = Field(min_length=1)
 
 
+class UpdateWorkingStateArgs(ToolArgs):
+    add_constraints: tuple[str, ...] = Field(default=(), max_length=24)
+    remove_constraints: tuple[str, ...] = Field(default=(), max_length=24)
+    add_decisions: tuple[str, ...] = Field(default=(), max_length=24)
+    remove_decisions: tuple[str, ...] = Field(default=(), max_length=24)
+    add_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
+    remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
+
+
 class MemoryStoreArgs(ToolArgs):
     action: Literal["create", "update"]
     filename: str = Field(pattern=r"^(?:user|feedback|project|reference)_[a-z0-9][a-z0-9_-]{0,55}\.md$")
     name: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=240)
-    type: Literal["user", "feedback", "project", "reference"]
+    memory_type: Literal["user", "feedback", "project", "reference"]
     content: str = Field(min_length=1, max_length=1000)
     why: str = Field(default="", max_length=500)
     how_to_apply: str = Field(default="", max_length=500)
@@ -100,6 +112,13 @@ class MemoryStoreArgs(ToolArgs):
 
 class MemoryForgetArgs(ToolArgs):
     filename: str = Field(pattern=r"^(?:user|feedback|project|reference)_[a-z0-9][a-z0-9_-]{0,55}\.md$")
+
+
+class MemoryRecallArgs(ToolArgs):
+    filenames: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=MEMORY_RECALL_MAX_CARDS,
+    )
 
 
 BASE_TOOL_SPECS = {
@@ -145,12 +164,31 @@ BASE_TOOL_SPECS = {
             "content: exclude read_file's file/revision headers and line-number prefixes."
         ),
     },
+    "update_working_state": {
+        "args_schema": UpdateWorkingStateArgs,
+        "risky": False,
+        "description": (
+            "Incrementally update the current Run's constraints, evidence-backed decisions, "
+            "and next steps. The Runtime owns the immutable goal. Do not store current file "
+            "contents, transient command output, guesses, or cross-task project knowledge here."
+        ),
+    },
+    "memory_recall": {
+        "args_schema": MemoryRecallArgs,
+        "risky": False,
+        "description": (
+            "Recall one to five complete Project Memory cards by exact filename from the "
+            "visible Catalog. Use only for relevant user preferences, prior feedback, stable "
+            "project conventions, or reference procedures. Current workspace facts must be "
+            "checked with workspace tools."
+        ),
+    },
     "memory_store": {
         "args_schema": MemoryStoreArgs,
         "risky": True,
         "description": (
             "Create or update one explicit Markdown project-memory card. Runtime adds trusted "
-            "provenance; do not invent source dates, entry IDs, or provenance claims in content."
+            "provenance; do not invent source dates, event IDs, or provenance claims in content."
         ),
     },
     "memory_forget": {
@@ -285,6 +323,22 @@ def _validate_project_memory(context, args):
     return args
 
 
+def _validate_memory_recall(context, args):
+    _validate_project_memory(context, args)
+    filenames = tuple(str(item).strip() for item in args["filenames"])
+    context.project_memory.recall_cards(filenames)
+    return {"filenames": filenames}
+
+
+def _validate_working_state(context, args):
+    state = context.working_state()
+    if state is None or not context.tool_call_id():
+        raise ValueError("working state updates require an active Run tool call")
+    normalized = normalize_working_update(args)
+    state.updated(normalized)
+    return normalized
+
+
 _TOOL_VALIDATORS = {
     "list_files": _validate_list_files,
     "read_file": _validate_read_file,
@@ -293,6 +347,8 @@ _TOOL_VALIDATORS = {
     "run_shell": _validate_run_shell,
     "write_file": _validate_write_file,
     "patch_file": _validate_patch_file,
+    "update_working_state": _validate_working_state,
+    "memory_recall": _validate_memory_recall,
     "memory_store": _validate_project_memory,
     "memory_forget": _validate_project_memory,
 }
@@ -315,8 +371,8 @@ def tool_list_files(context, args):
     lines = []
     for entry in entries[:200]:
         kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {entry.relative_to(context.root)}")
-    return ToolExecution("\n".join(lines) or "(empty)")
+        lines.append(f"{kind} {entry.relative_to(context.workspace_root)}")
+    return ToolRunnerResult("\n".join(lines) or "(empty)")
 
 
 def tool_read_file(context, args):
@@ -330,8 +386,8 @@ def tool_read_file(context, args):
             line = line.removesuffix("\n").removesuffix("\r")
             rendered.append(f"{number:>4}: {line}")
         body = "\n".join(rendered)
-    return ToolExecution(
-        f"# {path.relative_to(context.root)}\nrevision: {file_revision(path)}\n{body}"
+    return ToolRunnerResult(
+        f"# {path.relative_to(context.workspace_root)}\nrevision: {file_revision(path)}\n{body}"
     )
 
 
@@ -352,7 +408,7 @@ def tool_read_artifact(context, args):
             "\n[More output available; call read_artifact with "
             f"offset={page['end_offset']}.]"
         )
-    return ToolExecution(header + page["content"] + continuation)
+    return ToolRunnerResult(header + page["content"] + continuation)
 
 
 def _bounded_rg_search(root, relative_path, pattern):
@@ -484,7 +540,7 @@ def _fallback_search(context, path, pattern):
                     if needle in line.lower():
                         line = line.removesuffix("\n").removesuffix("\r")
                         matches.append(
-                            f"{file_path.relative_to(context.root)}:{number}:{line}"
+                            f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
                         )
                         if len(matches) >= SEARCH_MAX_MATCHES:
                             limited = True
@@ -503,11 +559,11 @@ def tool_search(context, args):
     path = context.path(args.get("path", "."))
 
     if shutil.which("rg"):
-        relative_path = path.relative_to(context.root).as_posix() or "."
-        return ToolExecution(
-            _bounded_rg_search(context.root, relative_path, pattern)
+        relative_path = path.relative_to(context.workspace_root).as_posix() or "."
+        return ToolRunnerResult(
+            _bounded_rg_search(context.workspace_root, relative_path, pattern)
         )
-    return ToolExecution(_fallback_search(context, path, pattern))
+    return ToolRunnerResult(_fallback_search(context, path, pattern))
 
 
 def tool_run_shell(context, args):
@@ -518,13 +574,57 @@ def tool_run_shell(context, args):
     argv, command_env = parse_command_invocation(command)
     result = context.sandbox.run(
         argv,
-        cwd=context.root,
+        cwd=context.workspace_root,
         timeout=timeout,
         env={**context.shell_env(), **command_env},
         execution_context=context.execution_context(),
         profile=SandboxProfile.INSPECT,
     )
-    return ToolExecution(
+    if result.cancelled:
+        failure = FailureInfo(
+            "command_cancelled",
+            "cancellation",
+            result.stop_reason or "command cancelled",
+            False,
+        )
+    elif result.timed_out:
+        failure = FailureInfo(
+            "command_timeout",
+            "timeout",
+            result.stop_reason or "command timed out",
+            True,
+        )
+    elif result.output_limited:
+        failure = FailureInfo(
+            "command_output_limit",
+            "resource_limit",
+            result.stop_reason or "command exceeded the output limit",
+            False,
+        )
+    elif result.killed:
+        failure = FailureInfo(
+            "command_killed",
+            "execution",
+            result.stop_reason or "command was killed",
+            False,
+        )
+    elif result.returncode is None:
+        failure = FailureInfo(
+            "command_result_missing",
+            "execution",
+            result.stop_reason or "command did not report an exit code",
+            True,
+        )
+    elif result.returncode != 0:
+        failure = FailureInfo(
+            "command_failed",
+            "command",
+            f"command exited with {result.returncode}",
+            True,
+        )
+    else:
+        failure = None
+    return ToolRunnerResult(
         textwrap.dedent(
             f"""\
             exit_code: {result.returncode if result.returncode is not None else -1}
@@ -537,7 +637,8 @@ def tool_run_shell(context, args):
             stderr:
             {result.stderr.strip() or "(empty)"}
             """
-        ).strip()
+        ).strip(),
+        failure=failure,
     )
 
 
@@ -545,9 +646,9 @@ def tool_write_file(context, args):
     path = context.path(args["path"])
     content = str(args["content"])
     before, after = context.mutation_service.write(path, content, args["expected_revision"])
-    relative = path.relative_to(context.root).as_posix()
+    relative = path.relative_to(context.workspace_root).as_posix()
     changed = before != after
-    return ToolExecution(
+    return ToolRunnerResult(
         content=(
             f"wrote {relative} ({len(content)} chars)\n"
             f"before_revision: {before}\nafter_revision: {after}"
@@ -563,9 +664,9 @@ def tool_patch_file(context, args):
     before, after = context.mutation_service.patch(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
-    relative = path.relative_to(context.root).as_posix()
+    relative = path.relative_to(context.workspace_root).as_posix()
     changed = before != after
-    return ToolExecution(
+    return ToolRunnerResult(
         content=f"patched {relative}\nbefore_revision: {before}\nafter_revision: {after}",
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
@@ -580,7 +681,7 @@ def _memory_effect_paths(context, filename):
     logical = []
     for path in paths:
         try:
-            logical.append(path.relative_to(context.root).as_posix())
+            logical.append(path.relative_to(context.workspace_root).as_posix())
         except ValueError:
             logical.append(path.as_posix())
     return tuple(logical)
@@ -592,23 +693,23 @@ def tool_memory_store(context, args):
         filename=args["filename"],
         name=args["name"],
         description=args["description"],
-        memory_type=args["type"],
+        memory_type=args["memory_type"],
         content=args["content"],
         why=args.get("why", ""),
         how_to_apply=args.get("how_to_apply", ""),
         source_session_id=context.session_id,
         source_run_id=context.run_id(),
-        source_entry_ids=context.source_entry_ids(),
+        source_event_ids=context.source_event_ids(),
         source_tool_call_id=context.tool_call_id(),
         expires_at=args.get("expires_at", ""),
     )
     if action == "unchanged":
-        return ToolExecution(
+        return ToolRunnerResult(
             f"{action} project memory {card.filename}; no data changed. "
             "Do not repeat memory_store; submit the final answer if the task is complete."
         )
     paths = _memory_effect_paths(context, card.filename)
-    return ToolExecution(
+    return ToolRunnerResult(
         content=(
             f"{action} project memory {card.filename}; commit complete. "
             "Do not repeat memory_store for the same fact."
@@ -618,12 +719,35 @@ def tool_memory_store(context, args):
     )
 
 
+def tool_update_working_state(context, args):
+    context.working_state().updated(args)
+    return ToolRunnerResult("working state update accepted")
+
+
+def tool_memory_recall(context, args):
+    cards = context.project_memory.recall_cards(args["filenames"])
+    rendered, included = context.project_memory.render_recalled_with_budget(
+        cards,
+        max_tokens=MEMORY_RECALL_MAX_TOKENS,
+        token_counter=context.count_tokens,
+    )
+    included_names = tuple(card.filename for card in included)
+    omitted_names = tuple(card.filename for card in cards if card not in included)
+    lines = ["recalled project memory: " + ", ".join(included_names)]
+    if omitted_names:
+        lines.append(
+            "omitted by recall budget: " + ", ".join(omitted_names)
+        )
+    lines.extend(["", rendered])
+    return ToolRunnerResult("\n".join(lines))
+
+
 def tool_memory_forget(context, args):
     card = context.project_memory.forget(args["filename"])
     if card is None:
         raise ValueError("memory file does not exist")
     paths = _memory_effect_paths(context, card.filename)
-    return ToolExecution(
+    return ToolRunnerResult(
         content=f"forgot project memory {card.filename}",
         affected_paths=paths,
         effect_scope="project_memory",
@@ -638,6 +762,8 @@ _TOOL_RUNNERS = {
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,
+    "update_working_state": tool_update_working_state,
+    "memory_recall": tool_memory_recall,
     "memory_store": tool_memory_store,
     "memory_forget": tool_memory_forget,
 }

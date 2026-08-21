@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
-from pico.contracts import ToolCall, ToolExecution
+from pico.contracts import ToolCall, ToolRunnerResult
 from pico.mutations import WorkspaceMutationService, file_revision
 from pico.tool_context import ToolContext
 from pico.tools import (
@@ -19,7 +19,7 @@ from pico.tools import (
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
     (tmp_path / "sample.txt").write_text("alpha\n", encoding="utf-8")
     context = ToolContext(
-        root=tmp_path,
+        workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=lambda: {"PWD": str(tmp_path)},
     )
@@ -34,7 +34,7 @@ def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
 def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
     (tmp_path / "large.txt").write_text("12345", encoding="utf-8")
     context = ToolContext(
-        root=tmp_path.resolve(),
+        workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=dict,
     )
@@ -52,7 +52,7 @@ def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
 
 def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
     context = ToolContext(
-        root=tmp_path,
+        workspace_root=tmp_path,
         path_resolver=lambda raw_path: Path(tmp_path / raw_path),
         shell_env_provider=lambda: {"PWD": str(tmp_path)},
     )
@@ -62,7 +62,8 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
     assert "read_file" in tools
     assert set(tools) == {
         "list_files", "read_file", "read_artifact", "search", "run_shell",
-        "write_file", "patch_file", "memory_store", "memory_forget",
+        "write_file", "patch_file", "update_working_state", "memory_recall",
+        "memory_store", "memory_forget",
     }
 
 
@@ -71,7 +72,7 @@ def test_search_returns_workspace_relative_paths(tmp_path):
     source.parent.mkdir()
     source.write_text("needle = 1\n", encoding="utf-8")
     context = ToolContext(
-        root=tmp_path,
+        workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=dict,
     )
@@ -87,7 +88,7 @@ def test_fallback_search_skips_symlinks_that_leave_workspace(tmp_path):
     outside.write_text("EXTERNAL_SENTINEL\n", encoding="utf-8")
     (tmp_path / "link.txt").symlink_to(outside)
     context = ToolContext(
-        root=tmp_path.resolve(),
+        workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=dict,
     )
@@ -105,7 +106,7 @@ def test_fallback_search_has_a_global_match_limit(tmp_path):
         "".join(f"needle {index}\n" for index in range(500)), encoding="utf-8"
     )
     context = ToolContext(
-        root=tmp_path.resolve(),
+        workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=dict,
     )
@@ -127,7 +128,7 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
         config=PicoConfig(approval_policy="auto"),
     )
     source = "".join(f"line-{index:04d} " + "x" * 80 + "\n" for index in range(300))
-    agent.tools.registry["list_files"]["run"] = lambda _args: ToolExecution(source)
+    agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(source)
     original = agent.tools.run(
         ToolCall("list_files", {"path": "."}, "call_source")
     )
@@ -163,7 +164,7 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
     path = tmp_path / "sample.txt"
     path.write_text("alpha\n", encoding="utf-8")
     context = ToolContext(
-        root=tmp_path,
+        workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=dict,
         mutation_service=WorkspaceMutationService(tmp_path),

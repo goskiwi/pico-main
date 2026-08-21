@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .persistence import atomic_write_json
 
-SESSION_SCHEMA_VERSION = "session-v9"
+SESSION_SCHEMA_VERSION = "session-v10"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 class SessionStore:
     def __init__(self, root):
@@ -34,14 +34,11 @@ class SessionStore:
             "created_at",
             "workspace_root",
             "active_run_id",
-            "memory",
         }
         if set(session) != required:
             raise ValueError("invalid session fields")
         if not isinstance(session["active_run_id"], str):
             raise TypeError("session active_run_id must be a string")
-        if not isinstance(session["memory"], dict):
-            raise TypeError("invalid session state")
 
     def save(self, session):
         self.validate(session)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .run_lifecycle import LoopFrame
+from .run_lifecycle import AgentLoopState
 from .verification import changed_python_syntax_issues
 
 if TYPE_CHECKING:
@@ -13,50 +13,50 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class CompletionAssessment:
-    final: str | None = None
+class CompletionResult:
+    final_answer: str | None = None
     status: str = ""
     reason: str = ""
-    guidance: str = ""
+    model_instruction: str = ""
 
     @property
     def allowed(self):
-        return self.final is not None
+        return self.final_answer is not None
 
 
 class CompletionController:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def assess(self, frame: LoopFrame, final: str) -> CompletionAssessment:
+    def assess(self, loop_state: AgentLoopState, final: str) -> CompletionResult:
         blocker = self._static_blocker()
         if blocker:
-            status, guidance = blocker
-            return CompletionAssessment(
+            status, model_instruction = blocker
+            return CompletionResult(
                 status=status,
-                reason=guidance,
-                guidance=guidance,
+                reason=model_instruction,
+                model_instruction=model_instruction,
             )
 
-        fingerprint, verification_guidance = self._ensure_verification(frame)
+        fingerprint, verification_guidance = self._ensure_verification(loop_state)
         if verification_guidance:
-            return CompletionAssessment(
+            return CompletionResult(
                 status="verification_failed",
                 reason=verification_guidance,
-                guidance=verification_guidance,
+                model_instruction=verification_guidance,
             )
 
         decision = self.runtime.run.evidence.assess_completion(fingerprint)
         if not decision.allowed:
-            return CompletionAssessment(
+            return CompletionResult(
                 status=decision.status,
                 reason=decision.reason,
-                guidance=(
+                model_instruction=(
                     f"Runtime completion gate: {decision.reason}. "
                     "Inspect or repair before returning a final answer."
                 ),
             )
-        return CompletionAssessment(final=final)
+        return CompletionResult(final_answer=final)
 
     def _static_blocker(self):
         runtime = self.runtime
@@ -75,7 +75,7 @@ class CompletionController:
             )
         return None
 
-    def _ensure_verification(self, frame):
+    def _ensure_verification(self, loop_state):
         runtime = self.runtime
         unresolved = runtime.run.evidence.unresolved_effects()
         workspace_unresolved = any(
@@ -92,17 +92,16 @@ class CompletionController:
         verification = runtime.run.evidence.current_verification(fingerprint)
         if verification is None:
             runtime.emit_event(
-                frame.task_state,
+                loop_state.task_state,
                 "verification_started",
                 {"command": runtime.config.verification_command},
             )
             verification = runtime.run_verification(fingerprint)
-            event = runtime.emit_event(
-                frame.task_state,
+            runtime.emit_event(
+                loop_state.task_state,
                 "verification_result",
                 verification or {"status": "skipped"},
             )
-            runtime.run.evidence.apply_entry(event)
         if not verification or verification.get("status") != "passed":
             return fingerprint, (
                 "Runtime verification failed; inspect and repair before "

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from .artifacts import ArtifactStore
 from .execution import CancellationToken
-from .hooks import HookRunner
 from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .repo_map import RepoMap
@@ -31,7 +30,6 @@ class RuntimeServices:
     mutations: WorkspaceMutationService
     sandbox: SandboxService
     sandbox_factory: Callable[[Path], SandboxService]
-    hooks: HookRunner
     repo_map: RepoMap
     subagents: SubagentManager | None = None
     parent_cancellation_token: CancellationToken | None = None

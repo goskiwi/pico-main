@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import tempfile
 import threading
 from pathlib import Path
+
+from .persistence import atomic_replace_bytes
 
 ABSENT_REVISION = "absent"
 MAX_TEXT_FILE_BYTES = 2_000_000
@@ -60,15 +61,8 @@ class WorkspaceMutationService:
 
     @staticmethod
     def _atomic_replace(path: Path, payload: bytes):
-        path.parent.mkdir(parents=True, exist_ok=True)
         mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        temporary.chmod(mode)
-        temporary.replace(path)
+        atomic_replace_bytes(path, payload, mode=mode)
 
     def write(self, path, content, expected_revision):
         target = self._target(path)

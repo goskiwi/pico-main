@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
+from pico.run_log import RunLog
 from pico.task_state import TaskState
 
 
@@ -17,6 +18,13 @@ def test_completion_does_not_reuse_verification_after_external_edit(tmp_path):
     state = TaskState.create("task_verify", "verify", run_id="run_verify")
     agent.run.task_state = state
     agent.services.run_store.start_run(state)
+    agent.run.run_log = RunLog(
+        state.run_id,
+        state.task_id,
+        agent.session.data["id"],
+        agent.services.run_store,
+    )
+    agent.run.run_log.append_user(state.user_request)
     before = agent.workspace.content_fingerprint(force=True)
     agent.run.evidence.effects.append(
         {
@@ -45,9 +53,9 @@ def test_completion_does_not_reuse_verification_after_external_edit(tmp_path):
         }
 
     agent.run_verification = verify
-    frame = SimpleNamespace(task_state=state)
+    loop_state = SimpleNamespace(task_state=state)
 
-    assessment = CompletionController(agent).assess(frame, "done")
+    assessment = CompletionController(agent).assess(loop_state, "done")
 
     assert assessment.allowed is True
     assert calls == [True]

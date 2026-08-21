@@ -9,7 +9,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import normalize_relative_file
+from ..persistence import write_once_bytes
+from ..workspace import normalize_relative_file
 
 
 class GitWorktreeError(RuntimeError):
@@ -71,6 +72,26 @@ def current_head(root):
     return _git(root, "rev-parse", "HEAD").decode("utf-8").strip()
 
 
+def repository_changed_paths(root):
+    tracked = _git(root, "diff", "--name-only", "-z", "HEAD")
+    untracked = _git(
+        root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    )
+    return tuple(
+        sorted(
+            {
+                normalize_relative_file(raw.decode("utf-8"))
+                for raw in (tracked + untracked).split(b"\0")
+                if raw and raw != b".pico" and not raw.startswith(b".pico/")
+            }
+        )
+    )
+
+
 @dataclass
 class GitWorktree:
     repository_root: Path
@@ -114,20 +135,7 @@ class GitWorktree:
         )
 
     def changed_paths(self):
-        tracked = _git(self.path, "diff", "--name-only", "-z", "HEAD")
-        untracked = _git(
-            self.path,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        )
-        values = []
-        for raw in (tracked + untracked).split(b"\0"):
-            if not raw:
-                continue
-            values.append(normalize_relative_file(raw.decode("utf-8")))
-        return tuple(sorted(set(values)))
+        return repository_changed_paths(self.path)
 
     def patch(self):
         changed = self.changed_paths()
@@ -153,15 +161,13 @@ class GitWorktree:
         if not payload:
             raise GitWorktreeError("implementation subtask produced no patch")
         destination = Path(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with destination.open("xb") as handle:
-                handle.write(payload)
-        except FileExistsError:
-            if destination.read_bytes() != payload:
-                raise GitWorktreeError(
-                    f"immutable subtask patch collision: {destination.name}"
-                )
+        if (
+            not write_once_bytes(destination, payload)
+            and destination.read_bytes() != payload
+        ):
+            raise GitWorktreeError(
+                f"immutable subtask patch collision: {destination.name}"
+            )
         return hashlib.sha256(payload).hexdigest()
 
     def cleanup(self):

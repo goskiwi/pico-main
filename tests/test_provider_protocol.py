@@ -201,7 +201,7 @@ def test_invalid_json_response_shape_has_normalized_provider_error(body):
         client().complete_action("prompt", 32, action_tools=TOOLS)
 
 
-def test_sse_text_when_tool_is_required_becomes_retry_action():
+def test_sse_text_when_tool_is_required_becomes_invalid_action():
     body = (
         'data: {"type":"response.output_text.delta","delta":"not a tool"}\n\n'
         "data: [DONE]\n"
@@ -210,7 +210,7 @@ def test_sse_text_when_tool_is_required_becomes_retry_action():
         "urllib.request.urlopen", return_value=Response(body, "text/event-stream")
     ):
         action = client().complete_action("prompt", 32, action_tools=TOOLS)
-    assert action.kind == "retry"
+    assert action.kind == "invalid"
     assert action.error == "invalid_function_call_count"
 
 
@@ -224,7 +224,7 @@ def test_incomplete_max_token_response_reports_output_truncation():
         TOOLS,
     )
 
-    assert action.kind == "retry"
+    assert action.kind == "invalid"
     assert action.error == "model_output_truncated"
     assert "one concise function call" in action.content
 
@@ -247,9 +247,9 @@ def test_incomplete_max_token_response_reports_output_truncation():
          "missing_function_call_id"),
     ],
 )
-def test_invalid_function_call_shapes_are_retry_actions(output, error):
+def test_invalid_function_call_shapes_are_invalid_actions(output, error):
     action = _action_from_response({"output": output}, TOOLS)
-    assert action.kind == "retry"
+    assert action.kind == "invalid"
     assert action.error == error
 
 

@@ -2,20 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
-def normalize_relative_file(value: str) -> str:
-    text = str(value or "").strip().replace("\\", "/")
-    path = PurePosixPath(text)
-    if not text or text == "." or path.is_absolute() or ".." in path.parts:
-        raise ValueError("path must be a repository-relative file")
-    if any(part in {"", "."} for part in path.parts):
-        raise ValueError("path must be normalized")
-    return path.as_posix()
+from ..workspace import normalize_relative_file
 
 
 class StrictModel(BaseModel):
@@ -28,7 +19,7 @@ class SubtaskSpec(StrictModel):
     prompt: str = Field(min_length=1, max_length=6000)
     depends_on: tuple[str, ...] = ()
     allowed_write_paths: tuple[str, ...] = ()
-    max_steps: int = Field(default=20, ge=1, le=80)
+    max_tool_executions: int = Field(default=20, ge=1, le=80)
 
     @field_validator("prompt")
     @classmethod
@@ -69,14 +60,10 @@ class SubtaskRecord(StrictModel):
     status: Literal["pending", "running", "finished", "failed", "blocked"] = (
         "pending"
     )
-    child_session_id: str = ""
-    child_run_ids: tuple[str, ...] = ()
+    child_run_id: str = ""
     base_sha: str = ""
     changed_paths: tuple[str, ...] = ()
     patch_path: str = ""
     patch_sha256: str = ""
-    journal_sequence: int = 0
-    journal_entry_id: str = ""
     error: str = ""
-    continuation_count: int = 0
-    integrated: bool = False
+    applied: bool = False

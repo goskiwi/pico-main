@@ -44,14 +44,14 @@ class ExecutionBudget:
     deadline: float
     max_output_bytes: int
     max_processes: int
-    memory: str
+    memory_limit: str
 
     def __post_init__(self):
         if int(self.max_output_bytes) < 1024:
             raise ValueError("execution max_output_bytes must be at least 1024")
         if int(self.max_processes) < 1:
             raise ValueError("execution max_processes must be positive")
-        if not str(self.memory).strip():
+        if not str(self.memory_limit).strip():
             raise ValueError("execution memory budget is required")
 
     def to_dict(self):
@@ -59,7 +59,7 @@ class ExecutionBudget:
             "deadline_monotonic": float(self.deadline),
             "max_output_bytes": int(self.max_output_bytes),
             "max_processes": int(self.max_processes),
-            "memory": self.memory,
+            "memory_limit": self.memory_limit,
         }
 
 

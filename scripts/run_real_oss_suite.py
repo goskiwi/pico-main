@@ -60,7 +60,7 @@ def infrastructure_failure(task_id, runtime, model, error, attempts):
             "passed": False,
             "status": "infrastructure_error",
             "stop_reason": "provider_unavailable",
-            "tool_steps": 0,
+            "executed_tool_count": 0,
             "duration_ms": 0,
             "changed_files": [],
             "final_answer": "",
@@ -86,7 +86,7 @@ def write_suite_report(path, artifact):
         result = item["result"]
         rows.append(
             f"| `{item['task']['id']}` | {'PASS' if result['passed'] else 'FAIL'} | "
-            f"{item.get('suite_attempt', 1)} | {result['tool_steps']} | "
+            f"{item.get('suite_attempt', 1)} | {result['executed_tool_count']} | "
             f"{result['duration_ms'] / 1000:.1f} | "
             f"{', '.join(result['changed_files']) or 'none'} |"
         )
@@ -104,7 +104,7 @@ def main(argv=None):
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--base-url")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--max-tool-executions", type=int)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")
@@ -129,7 +129,7 @@ def main(argv=None):
             model=args.model,
             base_url=args.base_url,
             max_new_tokens=args.max_new_tokens,
-            max_steps=args.max_steps,
+            max_tool_executions=args.max_tool_executions,
             temperature=args.temperature,
             timeout=args.timeout,
             sandbox_image=args.sandbox_image,
@@ -166,7 +166,7 @@ def main(argv=None):
         "runtime": runtime,
         "model": args.model,
         "tool_budget": (
-            args.max_steps
+            args.max_tool_executions
             or json.loads(args.manifest.read_text(encoding="utf-8"))["tool_budget"]
         ),
         "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed},

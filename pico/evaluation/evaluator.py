@@ -151,7 +151,7 @@ class BenchmarkEvaluator:
             session_store=SessionStore(fixture / ".pico" / "sessions"),
             config=PicoConfig(
                 approval_policy="auto",
-                max_steps=int(task["step_budget"]),
+                max_tool_executions=int(task["step_budget"]),
                 max_new_tokens=128,
                 allowed_tools=task["allowed_tools"],
                 verification_command="",
@@ -163,13 +163,13 @@ class BenchmarkEvaluator:
             argv, cwd=fixture, capture_output=True, text=True, timeout=20, check=False
         ).returncode == 0
         state = agent.run.task_state
-        within_budget = state.tool_steps <= int(task["step_budget"])
+        within_budget = state.executed_tool_count <= int(task["step_budget"])
         passed = state.status == "completed" and within_budget and verified
         run_dir = agent.services.run_store.run_dir(state.run_id)
         return {
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,
-            "tool_steps": state.tool_steps, "stop_reason": state.stop_reason, "answer": answer,
+            "executed_tool_count": state.executed_tool_count, "stop_reason": state.stop_reason, "answer": answer,
             "fixture_copy": _portable_path(fixture), "run_dir": _portable_path(run_dir),
             "failure_category": "" if passed else ("verifier_failed" if not verified else "runtime_failed"),
         }

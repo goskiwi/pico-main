@@ -8,16 +8,31 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-ACTION_KINDS = frozenset({"tool", "final", "retry"})
-TOOL_STATUSES = frozenset({"ok", "error", "rejected", "partial_success"})
+ACTION_KINDS = frozenset({"tool", "final", "invalid"})
+TOOL_STATUSES = frozenset({"success", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
-RECOVERY_ACTIONS = frozenset({"continue", "retry", "repair", "replan", "stop"})
 EFFECT_SCOPES = frozenset({"none", "workspace", "project_memory", "mixed"})
-ADMISSION_STATUSES = frozenset({"admitted", "rejected", "recovered"})
 
 
-def canonical_fingerprint(name: str, args: dict[str, Any]) -> str:
+def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
+    if side_effect_state == "none":
+        if affected_paths:
+            raise ValueError("effect-free outcome cannot contain affected paths")
+        if effect_scope != "none":
+            raise ValueError("effect-free outcome requires none effect scope")
+        return
+    if side_effect_state in {"changed", "partial"}:
+        if not affected_paths:
+            raise ValueError("known side effects require affected paths")
+        if effect_scope == "none":
+            raise ValueError("known side effects require an effect scope")
+        return
+    if effect_scope == "none":
+        raise ValueError("unknown side effects require an effect scope")
+
+
+def tool_call_hash(name: str, args: dict[str, Any]) -> str:
     payload = json.dumps(
         {"name": str(name), "args": dict(args)},
         ensure_ascii=False,
@@ -43,12 +58,13 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
-class ToolExecution:
+class ToolRunnerResult:
     """Exact result returned by a tool runner before Runtime auditing."""
 
     content: str
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
+    failure: FailureInfo | None = None
 
     def __post_init__(self):
         if self.effect_scope not in EFFECT_SCOPES:
@@ -84,8 +100,8 @@ class ModelAction:
         return cls("final", content=content)
 
     @classmethod
-    def retry(cls, content: str, *, error: str = "invalid_model_action"):
-        return cls("retry", content=str(content), error=str(error))
+    def invalid(cls, content: str, *, error: str = "invalid_model_action"):
+        return cls("invalid", content=str(content), error=str(error))
 
 
 @dataclass(frozen=True)
@@ -95,6 +111,10 @@ class FailureInfo:
     detail: str = ""
     retryable: bool = False
 
+    def __post_init__(self):
+        if not self.code or not self.category:
+            raise ValueError("failure information requires code and category")
+
     def to_dict(self):
         return {
             "code": self.code,
@@ -103,23 +123,19 @@ class FailureInfo:
             "retryable": self.retryable,
         }
 
-
-@dataclass(frozen=True)
-class RecoveryAssessment:
-    action: str
-    occurrence: int = 1
-    guidance: tuple[str, ...] = ()
-
-    def __post_init__(self):
-        if self.action not in RECOVERY_ACTIONS:
-            raise ValueError(f"invalid recovery action: {self.action}")
-
-    def to_dict(self):
-        return {
-            "action": self.action,
-            "occurrence": self.occurrence,
-            "guidance": list(self.guidance),
-        }
+    @classmethod
+    def from_dict(cls, value):
+        expected = {"code", "category", "detail", "retryable"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid failure information")
+        if not isinstance(value["retryable"], bool):
+            raise TypeError("failure retryable must be boolean")
+        return cls(
+            code=str(value["code"]),
+            category=str(value["category"]),
+            detail=str(value["detail"]),
+            retryable=value["retryable"],
+        )
 
 
 @dataclass(frozen=True)
@@ -132,15 +148,12 @@ class ToolOutcome:
     execution_state: str
     side_effect_state: str
     content: str
-    admission_status: str
     failure: FailureInfo | None = None
-    recovery: RecoveryAssessment | None = None
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
     duration_ms: int = 0
     artifact: dict[str, Any] = field(default_factory=dict)
     output_truncated: bool = False
-    policy_stop_requested: bool = False
     rejected_at: str = ""
 
     def __post_init__(self):
@@ -152,14 +165,19 @@ class ToolOutcome:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
         if self.effect_scope not in EFFECT_SCOPES:
             raise ValueError(f"invalid effect scope: {self.effect_scope}")
-        if self.admission_status not in ADMISSION_STATUSES:
-            raise ValueError(f"invalid admission status: {self.admission_status}")
+        if self.status == "success" and self.execution_state != "completed":
+            raise ValueError("successful outcome must complete execution")
+        if self.status == "rejected" and self.execution_state != "not_started":
+            raise ValueError("rejected outcome must not start execution")
         if self.status in {"error", "rejected", "partial_success"} and self.failure is None:
             raise ValueError(f"{self.status} outcome requires failure information")
-        if self.status == "ok" and self.failure is not None:
-            raise ValueError("ok outcome cannot contain failure information")
-        if self.status == "rejected" and self.admission_status != "rejected":
-            raise ValueError("rejected outcome requires rejected admission")
+        if self.status == "success" and self.failure is not None:
+            raise ValueError("successful outcome cannot contain failure information")
+        if self.status == "rejected" and not self.rejected_at:
+            raise ValueError("rejected outcome requires rejected_at")
+        _validate_effect_facts(
+            self.side_effect_state, self.affected_paths, self.effect_scope
+        )
 
     @property
     def artifact_id(self):
@@ -173,14 +191,53 @@ class ToolOutcome:
             "execution_state": self.execution_state,
             "side_effect_state": self.side_effect_state,
             "content": self.content,
-            "admission_status": self.admission_status,
             "failure": self.failure.to_dict() if self.failure else None,
-            "recovery": self.recovery.to_dict() if self.recovery else None,
             "affected_paths": list(self.affected_paths),
             "effect_scope": self.effect_scope,
             "duration_ms": self.duration_ms,
             "artifact": dict(self.artifact),
             "output_truncated": bool(self.output_truncated),
-            "policy_stop_requested": bool(self.policy_stop_requested),
             "rejected_at": self.rejected_at,
         }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {
+            "tool_call_id",
+            "tool_name",
+            "status",
+            "execution_state",
+            "side_effect_state",
+            "content",
+            "failure",
+            "affected_paths",
+            "effect_scope",
+            "duration_ms",
+            "artifact",
+            "output_truncated",
+            "rejected_at",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid ToolOutcome")
+        if not isinstance(value["affected_paths"], list) or not isinstance(
+            value["artifact"], dict
+        ):
+            raise TypeError("ToolOutcome collection fields have invalid types")
+        if not isinstance(value["output_truncated"], bool):
+            raise TypeError("ToolOutcome boolean fields have invalid types")
+        failure = value["failure"]
+        return cls(
+            tool_call_id=str(value["tool_call_id"]),
+            tool_name=str(value["tool_name"]),
+            status=str(value["status"]),
+            execution_state=str(value["execution_state"]),
+            side_effect_state=str(value["side_effect_state"]),
+            content=str(value["content"]),
+            failure=FailureInfo.from_dict(failure) if failure is not None else None,
+            affected_paths=tuple(str(item) for item in value["affected_paths"]),
+            effect_scope=str(value["effect_scope"]),
+            duration_ms=int(value["duration_ms"]),
+            artifact=dict(value["artifact"]),
+            output_truncated=value["output_truncated"],
+            rejected_at=str(value["rejected_at"]),
+        )

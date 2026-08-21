@@ -26,3 +26,16 @@ def test_atomic_write_json_failure_preserves_previous_snapshot(tmp_path):
 
     assert path.read_text(encoding="utf-8") == original
     assert list(tmp_path.glob("state.json.*.tmp")) == []
+
+
+def test_atomic_write_json_fsyncs_temporary_file(tmp_path, monkeypatch):
+    calls = []
+
+    def record_fsync(descriptor):
+        calls.append(descriptor)
+
+    monkeypatch.setattr("pico.persistence.os.fsync", record_fsync)
+
+    atomic_write_json(tmp_path / "nested" / "state.json", {"value": 1})
+
+    assert len(calls) == 1

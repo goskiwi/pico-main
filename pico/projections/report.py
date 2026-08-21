@@ -1,23 +1,29 @@
-"""Terminal report projected on demand from a Run Journal."""
+"""Terminal report projected on demand from a Run Log."""
 
-from ..evidence import EvidenceLedger
-from ..run_journal import replay_entries
+from ..evidence import RunEvidence
+from ..run_log import replay_events
 
 
 def build_run_report(
     *,
-    entries,
-    prompt_metadata,
-    project_memory_count,
-    redacted_env,
+    events,
 ):
-    projection = replay_entries(entries)
+    projection = replay_events(events)
     projected_state = projection.task_state()
-    journal_summary = projection.summary()
+    run_summary = projection.summary()
     persisted_prompt_metadata = next(
         (
             dict(entry.payload.get("prompt_metadata", {}) or {})
-            for entry in reversed(entries)
+            for entry in reversed(events)
+            if entry.kind == "turn_metrics"
+            and dict(entry.payload.get("prompt_metadata", {}) or {}).get("sections")
+        ),
+        {},
+    )
+    completion_metadata = next(
+        (
+            dict(entry.payload.get("completion_metadata", {}) or {})
+            for entry in reversed(events)
             if entry.kind == "turn_metrics"
         ),
         {},
@@ -28,11 +34,11 @@ def build_run_report(
         "status": projected_state["status"],
         "stop_reason": projected_state["stop_reason"],
         "final_answer": projected_state["final_answer"],
-        "tool_steps": projected_state["tool_steps"],
-        "attempts": projected_state["attempts"],
-        "prompt_metadata": dict(prompt_metadata or persisted_prompt_metadata),
-        "project_memory": {"count": int(project_memory_count)},
-        "evidence": EvidenceLedger.from_entries(entries).to_dict(),
-        "journal_summary": journal_summary,
-        "redacted_env": dict(redacted_env),
+        "working_state": projected_state["working_state"],
+        "executed_tool_count": projected_state["executed_tool_count"],
+        "model_request_count": projected_state["model_request_count"],
+        "prompt_metadata": persisted_prompt_metadata,
+        "completion_metadata": completion_metadata,
+        "evidence": RunEvidence.from_events(events).to_dict(),
+        "run_summary": run_summary,
     }

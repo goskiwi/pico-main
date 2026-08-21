@@ -170,15 +170,15 @@ def require_clean_runtime(metadata):
         )
 
 
-def provider_continuation_check(entries):
+def provider_continuation_check(events):
     turns = [
-        entry for entry in entries if entry.kind == "turn_metrics"
+        entry for entry in events if entry.kind == "turn_metrics"
     ]
     reused_turns = sum(
         bool(entry.payload.get("prompt_reused")) for entry in turns
     )
     reset_count = sum(
-        entry.kind == "provider_session_reset" for entry in entries
+        entry.kind == "provider_session_reset" for entry in events
     )
     return {
         "ok": len(turns) >= 2 and reused_turns >= 1,
@@ -199,7 +199,7 @@ def write_report(path, artifact):
         f"- Runtime status: `{result['status']}`",
         f"- Hidden verifier: `{'pass' if checks['hidden_verifier']['ok'] else 'fail'}`",
         f"- Mutation scope: `{'pass' if checks['mutation_scope']['ok'] else 'fail'}`",
-        f"- Run Journal: `{'pass' if checks['run_journal']['ok'] else 'fail'}`",
+        f"- Run Log: `{'pass' if checks['run_log']['ok'] else 'fail'}`",
         f"- Provider continuation: `{'pass' if checks['provider_continuation']['ok'] else 'fail'}`",
         f"- Changed files: {', '.join(result['changed_files']) or 'none'}", "",
         "This is one end-to-end validation run, not a general success-rate claim.", "",
@@ -241,7 +241,7 @@ def run_validation(args):
         "reference_fix_commit": task["reference_fix_commit"],
         "sandbox_image": args.sandbox_image,
         "sandbox_image_id": docker_image_id(args.sandbox_image),
-        "tool_budget": int(args.max_steps or task["tool_budget"]),
+        "tool_budget": int(args.max_tool_executions or task["tool_budget"]),
     }
 
     client = OpenAICompatibleModelClient(model, base_url, api_key, args.temperature, args.timeout)
@@ -251,7 +251,7 @@ def run_validation(args):
         SessionStore(workspace / ".pico" / "sessions"),
         config=PicoConfig(
             approval_policy="auto",
-            max_steps=int(args.max_steps or task["tool_budget"]),
+            max_tool_executions=int(args.max_tool_executions or task["tool_budget"]),
             max_new_tokens=args.max_new_tokens,
             run_timeout_seconds=360,
             allowed_tools=ALLOWED_TOOLS,
@@ -283,17 +283,17 @@ def run_validation(args):
     }
     verifier = run_verifier(workspace, task, args.sandbox_image)
     try:
-        entries = agent.services.run_store.read_entries(agent.run.task_state.run_id)
-        run_journal = {"ok": True, "entry_count": len(entries), "errors": []}
+        events = agent.services.run_store.read_events(agent.run.task_state.run_id)
+        run_log = {"ok": True, "event_count": len(events), "errors": []}
     except Exception as exc:  # noqa: BLE001 - audit failures are evidence
-        run_journal = {"ok": False, "entry_count": 0, "errors": [str(exc)]}
-        entries = []
-    provider_continuation = provider_continuation_check(entries)
+        run_log = {"ok": False, "event_count": 0, "errors": [str(exc)]}
+        events = []
+    provider_continuation = provider_continuation_check(events)
     passed = (
         agent.run.task_state.status == "completed"
         and mutation_scope["ok"]
         and verifier["ok"]
-        and run_journal["ok"]
+        and run_log["ok"]
         and provider_continuation["ok"]
     )
     artifact = {
@@ -313,7 +313,7 @@ def run_validation(args):
             "passed": passed,
             "status": agent.run.task_state.status,
             "stop_reason": agent.run.task_state.stop_reason,
-            "tool_steps": agent.run.task_state.tool_steps,
+            "executed_tool_count": agent.run.task_state.executed_tool_count,
             "duration_ms": duration_ms,
             "changed_files": changed,
             "final_answer": answer,
@@ -321,7 +321,7 @@ def run_validation(args):
             "checks": {
                 "hidden_verifier": verifier,
                 "mutation_scope": mutation_scope,
-                "run_journal": run_journal,
+                "run_log": run_log,
                 "provider_continuation": provider_continuation,
             },
         },
@@ -342,7 +342,7 @@ def main(argv=None):
     parser.add_argument("--model")
     parser.add_argument("--base-url")
     parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--max-tool-executions", type=int)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--sandbox-image", default="pico/real-oss-suite:latest")

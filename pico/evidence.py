@@ -1,11 +1,11 @@
-"""Task-scoped effects and verifier evidence projected from a Run Journal."""
+"""Task-scoped effects and verifier evidence projected from a Run Log."""
 
 from dataclasses import dataclass, field
 
 OBSERVATION_TOOLS = frozenset({"read_file", "list_files", "search"})
 
 
-def fact_from_entry(entry):
+def fact_from_event(entry):
     payload = dict(entry.payload)
     outcome = dict(payload.get("outcome", {}) or {})
     return {
@@ -23,19 +23,19 @@ def fact_from_entry(entry):
 
 
 @dataclass
-class EvidenceLedger:
+class RunEvidence:
     observations: list[dict] = field(default_factory=list)
     effects: list[dict] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
 
     @classmethod
-    def from_entries(cls, entries):
-        ledger = cls()
-        for entry in entries:
-            ledger.apply_entry(entry)
-        return ledger
+    def from_events(cls, events):
+        evidence = cls()
+        for entry in events:
+            evidence.apply_event(entry)
+        return evidence
 
-    def apply_entry(self, entry):
+    def apply_event(self, entry):
         if entry.kind == "verification_result" and entry.payload.get(
             "verification_id"
         ):
@@ -43,8 +43,8 @@ class EvidenceLedger:
             return
         if entry.kind != "tool_result":
             return
-        fact = fact_from_entry(entry)
-        if fact["tool"] in OBSERVATION_TOOLS and fact["status"] == "ok":
+        fact = fact_from_event(entry)
+        if fact["tool"] in OBSERVATION_TOOLS and fact["status"] == "success":
             self.observations.append(fact)
         if fact["side_effect_state"] != "none":
             self.effects.append(fact)
@@ -99,7 +99,7 @@ class EvidenceLedger:
             affected = set(effect.get("affected_paths", ()))
             effect_scope = effect.get("effect_scope", "none")
             repaired = bool(affected) and any(
-                later.get("status") == "ok"
+                later.get("status") == "success"
                 and later.get("side_effect_state") == "changed"
                 and later.get("effect_scope") in {effect_scope, "mixed"}
                 and affected.issubset(set(later.get("affected_paths", ())))
@@ -132,12 +132,12 @@ class EvidenceLedger:
                 }
             )
             detail = ", ".join(paths) or "unknown workspace state"
-            return CompletionDecision(
+            return EvidenceCompletionCheck(
                 False,
                 "partial",
                 f"unresolved partial side effects: {detail}",
             )
-        return CompletionDecision(True, "completed")
+        return EvidenceCompletionCheck(True, "completed")
 
     def to_dict(self):
         return {
@@ -148,7 +148,7 @@ class EvidenceLedger:
 
 
 @dataclass(frozen=True)
-class CompletionDecision:
+class EvidenceCompletionCheck:
     allowed: bool
     status: str
     reason: str = ""

@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -176,8 +176,6 @@ class Symbol:
     kind: str
     line: int
     end_line: int
-    start_character: int
-    end_character: int
     signature: str
 
     @property
@@ -192,41 +190,7 @@ class Reference:
     source_id: str
     target: str
     kind: str
-    line: int
-    start_character: int = 0
-    end_line: int = 0
-    end_character: int = 0
     target_is_id: bool = False
-
-
-@dataclass(frozen=True)
-class StaticRelation:
-    """One resolved, ambiguous, or unresolved AST-visible relationship."""
-
-    source_symbol_id: str
-    target_text: str
-    kind: str
-    path: str
-    line: int
-    start_character: int
-    end_line: int
-    end_character: int
-    resolution: str
-    target_symbol_ids: tuple[str, ...]
-
-    def to_dict(self):
-        return {
-            "source_symbol_id": self.source_symbol_id,
-            "target_text": self.target_text,
-            "kind": self.kind,
-            "path": self.path,
-            "line": self.line,
-            "start_character": self.start_character,
-            "end_line": self.end_line,
-            "end_character": self.end_character,
-            "resolution": self.resolution,
-            "target_symbol_ids": list(self.target_symbol_ids),
-        }
 
 
 @dataclass(frozen=True)
@@ -241,7 +205,6 @@ class ParsedFile:
 class RepoSnapshot:
     symbols: dict[str, Symbol]
     edges: dict[str, dict[str, float]]
-    relations: tuple[StaticRelation, ...]
     index_revision: str
     index_state: str
     semantic_backend: str
@@ -267,7 +230,7 @@ class RankedSymbol:
 
 
 @dataclass(frozen=True)
-class RepoMapRender:
+class RenderedRepoMap:
     text: str
     details: dict = field(default_factory=dict)
 
@@ -284,7 +247,7 @@ class RepoMapQuery:
         max_results = max(1, int(max_results))
         token_counter = token_counter or count_tokens
         if budget_tokens == 0:
-            return RepoMapRender(
+            return RenderedRepoMap(
                 text="",
                 details=self._details((), truncated=bool(self.ranked)),
             )
@@ -298,7 +261,7 @@ class RepoMapQuery:
                 budget_tokens,
                 token_counter=token_counter,
             )
-            return RepoMapRender(
+            return RenderedRepoMap(
                 text=text,
                 details=self._details((), truncated=False),
             )
@@ -332,7 +295,7 @@ class RepoMapQuery:
             text = "\n".join(lines)
         truncated = len(accepted) < len(self.ranked)
         accepted_tuple = tuple(accepted)
-        return RepoMapRender(
+        return RenderedRepoMap(
             text=text,
             details=self._details(accepted_tuple, truncated=truncated),
         )
@@ -362,7 +325,6 @@ class RepoMapQuery:
             "query": self.query,
             "graph_nodes": len(self.snapshot.symbols),
             "graph_edges": self.snapshot.edge_count,
-            "relation_count": len(self.snapshot.relations),
             "index_revision": self.snapshot.index_revision,
             "index_state": self.snapshot.index_state,
             "semantic_backend": self.snapshot.semantic_backend,
@@ -502,7 +464,6 @@ class RepoMap:
             return RepoSnapshot(
                 symbols=cached_snapshot.symbols,
                 edges=cached_snapshot.edges,
-                relations=cached_snapshot.relations,
                 index_revision=cached_snapshot.index_revision,
                 index_state="degraded" if scan_truncated else cached_snapshot.index_state,
                 semantic_backend=cached_snapshot.semantic_backend,
@@ -524,7 +485,7 @@ class RepoMap:
             for parsed in parsed_files
             for reference in parsed.references
         ]
-        edges, relations = _resolve_graph(symbols, references)
+        edges = _resolve_graph(symbols, references)
         revision_payload = [
             [path, *self._file_cache[path].fingerprint]
             for path in sorted(active_paths)
@@ -536,7 +497,6 @@ class RepoMap:
         snapshot = RepoSnapshot(
             symbols=symbols,
             edges=edges,
-            relations=relations,
             index_revision=index_revision,
             index_state="degraded" if scan_truncated else "fresh",
             semantic_backend="python-tree-sitter-static",
@@ -556,7 +516,7 @@ class RepoMap:
         scanned = 0
         truncated = False
         started = time.monotonic()
-        queue = [(self.root, Path("."))]
+        queue = deque([(self.root, Path("."))])
         while queue:
             if (
                 scanned >= REPO_MAP_SCAN_MAX_ENTRIES
@@ -564,7 +524,7 @@ class RepoMap:
             ):
                 truncated = True
                 break
-            absolute, relative = queue.pop(0)
+            absolute, relative = queue.popleft()
             try:
                 with os.scandir(absolute) as iterator:
                     entries = sorted(iterator, key=lambda item: item.name.lower())
@@ -621,8 +581,6 @@ class RepoMap:
                 kind="module",
                 line=1,
                 end_line=max(1, source.count(b"\n") + 1),
-                start_character=0,
-                end_character=0,
                 signature=f"module {module_name}",
             )
         ]
@@ -653,8 +611,6 @@ class RepoMap:
                     kind=kind,
                     line=node.start_point.row + 1,
                     end_line=node.end_point.row + 1,
-                    start_character=node.start_point.column,
-                    end_character=node.end_point.column,
                     signature=signature,
                 )
                 symbols.append(symbol)
@@ -663,10 +619,6 @@ class RepoMap:
                         source_id=current_id,
                         target=symbol_id,
                         kind="contains",
-                        line=symbol.line,
-                        start_character=symbol.start_character,
-                        end_line=symbol.line,
-                        end_character=symbol.start_character + len(name),
                         target_is_id=True,
                     )
                 )
@@ -680,10 +632,6 @@ class RepoMap:
                                         source_id=symbol_id,
                                         target=target,
                                         kind="inherit",
-                                        line=symbol.line,
-                                        start_character=superclasses.start_point.column,
-                                        end_line=superclasses.end_point.row + 1,
-                                        end_character=superclasses.end_point.column,
                                     )
                                 )
                 for child in node.children:
@@ -702,10 +650,6 @@ class RepoMap:
                                 source_id=current_id,
                                 target=target,
                                 kind="call",
-                                line=function_node.start_point.row + 1,
-                                start_character=function_node.start_point.column,
-                                end_line=function_node.end_point.row + 1,
-                                end_character=function_node.end_point.column,
                             )
                         )
             elif node.type in {"import_statement", "import_from_statement"}:
@@ -713,10 +657,6 @@ class RepoMap:
                     _import_references(
                         current_id,
                         _node_text(source, node),
-                        node.start_point.row + 1,
-                        node.start_point.column,
-                        node.end_point.row + 1,
-                        node.end_point.column,
                     )
                 )
 
@@ -763,14 +703,7 @@ def _call_target(text):
     return ".".join(identifiers[-2:]) if len(identifiers) > 1 else identifiers[-1]
 
 
-def _import_references(
-    source_id,
-    text,
-    line,
-    start_character=0,
-    end_line=0,
-    end_character=0,
-):
+def _import_references(source_id, text):
     compact = _WHITESPACE_RE.sub(" ", text).strip()
     references = []
     if compact.startswith("from ") and " import " in compact:
@@ -782,10 +715,6 @@ def _import_references(
                     source_id,
                     module_text.lstrip("."),
                     "import_module",
-                    line,
-                    start_character,
-                    end_line or line,
-                    end_character,
                 )
             )
         imported_text = imported_text.strip("() ")
@@ -797,10 +726,6 @@ def _import_references(
                         source_id,
                         name,
                         "import",
-                        line,
-                        start_character,
-                        end_line or line,
-                        end_character,
                     )
                 )
         return references
@@ -813,10 +738,6 @@ def _import_references(
                         source_id,
                         name,
                         "import_module",
-                        line,
-                        start_character,
-                        end_line or line,
-                        end_character,
                     )
                 )
     return references
@@ -835,7 +756,6 @@ def _resolve_graph(symbols, references):
         if symbol.kind == "module":
             modules[symbol.qualified_name.lower()].append(symbol)
 
-    relations = []
     for reference in references:
         if reference.source_id not in symbols:
             continue
@@ -849,22 +769,6 @@ def _resolve_graph(symbols, references):
                 by_qualified,
                 modules,
             )
-        source = symbols[reference.source_id]
-        resolution = _relation_resolution(source, reference, candidates)
-        relations.append(
-            StaticRelation(
-                source_symbol_id=reference.source_id,
-                target_text=reference.target,
-                kind=reference.kind,
-                path=source.path,
-                line=reference.line,
-                start_character=reference.start_character,
-                end_line=reference.end_line or reference.line,
-                end_character=reference.end_character,
-                resolution=resolution,
-                target_symbol_ids=tuple(item.symbol_id for item in candidates),
-            )
-        )
         if not candidates:
             continue
         weight = _REFERENCE_WEIGHTS.get(reference.kind, 0.5) / len(candidates)
@@ -890,49 +794,7 @@ def _resolve_graph(symbols, references):
         for candidate in matches:
             _add_edge(edges, symbol.symbol_id, candidate.symbol_id, _REFERENCE_WEIGHTS["test"])
             _add_edge(edges, candidate.symbol_id, symbol.symbol_id, _REFERENCE_WEIGHTS["test"] * 0.28)
-        if matches:
-            relations.append(
-                StaticRelation(
-                    source_symbol_id=symbol.symbol_id,
-                    target_text=test_name,
-                    kind="test",
-                    path=symbol.path,
-                    line=symbol.line,
-                    start_character=symbol.start_character,
-                    end_line=symbol.line,
-                    end_character=symbol.end_character,
-                    resolution="heuristic_test_name" if len(matches) == 1 else "ambiguous",
-                    target_symbol_ids=tuple(item.symbol_id for item in matches),
-                )
-            )
-    relations.sort(
-        key=lambda item: (
-            item.path,
-            item.line,
-            item.start_character,
-            item.kind,
-            item.target_text,
-        )
-    )
-    return edges, tuple(relations)
-
-
-def _relation_resolution(source, reference, candidates):
-    if not candidates:
-        return "unresolved"
-    if len(candidates) > 1:
-        return "ambiguous"
-    candidate = candidates[0]
-    if reference.target_is_id:
-        return "exact_internal"
-    target = reference.target.strip(".").lower()
-    if target == candidate.qualified_name.lower():
-        return "exact_qualified"
-    if reference.kind == "import_module" and candidate.kind == "module":
-        return "module_match"
-    if candidate.path == source.path:
-        return "same_file_static"
-    return "name_based_static"
+    return edges
 
 
 def _reference_candidates(source, reference, by_name, by_qualified, modules):
@@ -976,21 +838,6 @@ def _add_edge(edges, source_id, target_id, weight):
     if source_id == target_id or source_id not in edges or target_id not in edges:
         return
     edges[source_id][target_id] = edges[source_id].get(target_id, 0.0) + float(weight)
-
-
-def _symbol_dict(symbol):
-    return {
-        "symbol_id": symbol.symbol_id,
-        "path": symbol.path,
-        "name": symbol.name,
-        "qualified_name": symbol.qualified_name,
-        "kind": symbol.kind,
-        "line": symbol.line,
-        "end_line": symbol.end_line,
-        "start_character": symbol.start_character,
-        "end_character": symbol.end_character,
-        "signature": symbol.signature,
-    }
 
 
 def _is_test_symbol(symbol):

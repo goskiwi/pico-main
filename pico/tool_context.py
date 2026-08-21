@@ -7,15 +7,17 @@ from pathlib import Path
 
 @dataclass
 class ToolContext:
-    root: Path
+    workspace_root: Path
     path_resolver: Callable[[str], Path]
     shell_env_provider: Callable[[], dict]
     project_memory: object | None = None
     artifact_store: object | None = None
     session_id: str = ""
     run_id_provider: Callable[[], str] | None = None
-    source_entry_ids_provider: Callable[[], tuple[str, ...]] | None = None
+    source_event_ids_provider: Callable[[], tuple[str, ...]] | None = None
     tool_call_id_provider: Callable[[], str] | None = None
+    working_state_provider: Callable[[], object | None] | None = None
+    token_counter_provider: Callable[[str], int] | None = None
     mutation_service: object | None = None
     sandbox: object | None = None
     execution_context_provider: Callable[[], object] | None = None
@@ -29,11 +31,19 @@ class ToolContext:
     def run_id(self):
         return self.run_id_provider() if self.run_id_provider else ""
 
-    def source_entry_ids(self):
-        return self.source_entry_ids_provider() if self.source_entry_ids_provider else ()
+    def source_event_ids(self):
+        return self.source_event_ids_provider() if self.source_event_ids_provider else ()
 
     def tool_call_id(self):
         return self.tool_call_id_provider() if self.tool_call_id_provider else ""
+
+    def working_state(self):
+        return self.working_state_provider() if self.working_state_provider else None
+
+    def count_tokens(self, text):
+        if self.token_counter_provider is None:
+            raise RuntimeError("tool token counter is unavailable")
+        return int(self.token_counter_provider(str(text)))
 
     def execution_context(self):
         return self.execution_context_provider() if self.execution_context_provider else None

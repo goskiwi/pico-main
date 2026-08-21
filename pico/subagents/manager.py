@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import atexit
-import json
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from ..persistence import atomic_write_json
-from ..run_journal import replay_entries
+from ..run_log import replay_events
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext, clip
@@ -23,7 +20,13 @@ from .worktree import (
     require_clean_repository,
 )
 
-EXPLORE_TOOLS = ("list_files", "read_file", "read_artifact", "search")
+EXPLORE_TOOLS = (
+    "list_files",
+    "read_file",
+    "read_artifact",
+    "search",
+    "update_working_state",
+)
 IMPLEMENT_TOOLS = (
     "list_files",
     "read_file",
@@ -32,6 +35,7 @@ IMPLEMENT_TOOLS = (
     "run_shell",
     "write_file",
     "patch_file",
+    "update_working_state",
 )
 
 
@@ -39,10 +43,11 @@ class SubagentManager:
     def __init__(self, parent, model_client_factory, *, max_workers=3):
         self.parent = parent
         self.model_client_factory = model_client_factory
-        self.max_workers = max(1, min(int(max_workers), 3))
+        self.max_workers = int(max_workers)
+        if not 1 <= self.max_workers <= 3:
+            raise ValueError("subagent max_workers must be between 1 and 3")
         self._records_by_run: dict[str, dict[str, SubtaskRecord]] = {}
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
-        self._lock = threading.RLock()
         self.integration = PatchIntegrator(
             parent=self.parent,
             parent_run_id=self._parent_run_id,
@@ -50,7 +55,6 @@ class SubagentManager:
             outcome_status=self._outcome_status,
             child_projection=self._child_projection,
             release_worktree=self._release_worktree,
-            save_records=self._save,
         )
         atexit.register(self.cleanup)
 
@@ -61,37 +65,8 @@ class SubagentManager:
     def _run_root(self, run_id):
         return self.parent.services.run_store.run_dir(run_id) / "subagents"
 
-    def _state_path(self, run_id):
-        return self.parent.services.run_store.run_dir(run_id) / "subtasks.json"
-
     def _records(self, run_id):
-        if run_id in self._records_by_run:
-            return self._records_by_run[run_id]
-        path = self._state_path(run_id)
-        records = {}
-        if path.is_file():
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if value.get("schema_version") != "pico-subtasks-v3":
-                raise ValueError("unsupported subtask state schema")
-            records = {
-                task_id: SubtaskRecord.model_validate(record)
-                for task_id, record in value.get("tasks", {}).items()
-            }
-        self._records_by_run[run_id] = records
-        return records
-
-    def _save(self, run_id, records):
-        atomic_write_json(
-            self._state_path(run_id),
-            {
-                "schema_version": "pico-subtasks-v3",
-                "parent_run_id": run_id,
-                "tasks": {
-                    task_id: record.model_dump(mode="json")
-                    for task_id, record in sorted(records.items())
-                },
-            },
-        )
+        return self._records_by_run.setdefault(run_id, {})
 
     def _register_specs(self, run_id, specs):
         records = self._records(run_id)
@@ -110,27 +85,21 @@ class SubagentManager:
             spec.task_id not in reused and spec.kind == "implement" for spec in specs
         )
         base_sha = self._delegation_base_sha(requires_clean)
-        staged = {
-            task_id: record.model_copy(deep=True)
-            for task_id, record in records.items()
-        }
         for spec in specs:
-            if spec.task_id not in staged:
-                staged[spec.task_id] = SubtaskRecord(spec=spec)
+            if spec.task_id not in records:
+                records[spec.task_id] = SubtaskRecord(spec=spec)
         implementations = [
-            staged[spec.task_id]
+            records[spec.task_id]
             for spec in specs
             if spec.task_id not in reused and spec.kind == "implement"
         ]
         for record in implementations:
             record.base_sha = base_sha
         for spec in specs:
-            record = staged[spec.task_id]
+            record = records[spec.task_id]
             if not record.base_sha:
                 record.base_sha = base_sha
-        self._save(run_id, staged)
-        self._records_by_run[run_id] = staged
-        return staged, reused
+        return records, reused
 
     def _delegation_base_sha(self, requires_clean):
         if requires_clean:
@@ -159,12 +128,13 @@ class SubagentManager:
         )
 
     def _block_pending_tasks(self, run_id, records, target_ids):
+        del run_id
         for task_id in target_ids:
             record = records[task_id]
             if record.status == "pending":
                 record.status = "blocked"
                 record.error = "no runnable dependency path remains"
-        self._save(run_id, records)
+        return records
 
     def _prepare_batch(self, run_id, records, ready):
         batch = []
@@ -181,8 +151,7 @@ class SubagentManager:
                 record.error = self.parent.redact_text(
                     f"{type(exc).__name__}: {exc}"
                 )
-        self._save(run_id, records)
-        return batch
+        return records, batch
 
     def _run_batch(self, pool, run_id, records, batch):
         futures = {
@@ -199,25 +168,25 @@ class SubagentManager:
                 record.error = self.parent.redact_text(
                     f"{type(exc).__name__}: {exc}"
                 )
-            self._save(run_id, records)
+        return records
 
     def _schedule_targets(self, pool, run_id, records, target_ids):
         while any(records[item].status == "pending" for item in target_ids):
             ready = self._ready_tasks(run_id, records, target_ids)
             if not ready:
-                self._block_pending_tasks(run_id, records, target_ids)
+                records = self._block_pending_tasks(run_id, records, target_ids)
                 break
-            batch = self._prepare_batch(run_id, records, ready)
+            records, batch = self._prepare_batch(run_id, records, ready)
             if batch:
-                self._run_batch(pool, run_id, records, batch)
+                records = self._run_batch(pool, run_id, records, batch)
+        return records
 
     def delegate(self, specs: tuple[SubtaskSpec, ...]):
         run_id = self._parent_run_id()
-        with self._lock:
-            records, reused = self._register_specs(run_id, specs)
+        records, reused = self._register_specs(run_id, specs)
         target_ids = {spec.task_id for spec in specs if spec.task_id not in reused}
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            self._schedule_targets(pool, run_id, records, target_ids)
+            records = self._schedule_targets(pool, run_id, records, target_ids)
         receipts = []
         for spec in specs:
             receipt = self._receipt(run_id, records[spec.task_id])
@@ -264,19 +233,13 @@ class SubagentManager:
         return RunStore(self._task_root(run_id, record.spec.task_id) / "runs")
 
     def _child_projection(self, run_id, record):
-        if not record.child_run_ids:
+        if not record.child_run_id:
             raise ValueError(f"subtask has no child run receipt: {record.spec.task_id}")
         run_store = self._child_run_store(run_id, record)
-        child_run_id = record.child_run_ids[-1]
-        entries = run_store.read_entries(child_run_id)
-        sequence = int(record.journal_sequence)
-        if (
-            sequence < 1
-            or len(entries) < sequence
-            or entries[sequence - 1].entry_id != record.journal_entry_id
-        ):
-            raise ValueError(f"subtask Journal receipt is invalid: {record.spec.task_id}")
-        return replay_entries(entries)
+        entries = run_store.read_events(record.child_run_id)
+        if not entries:
+            raise ValueError(f"subtask Run Log is missing: {record.spec.task_id}")
+        return replay_events(entries)
 
     def _outcome_status(self, run_id, record):
         if record.status == "finished":
@@ -287,7 +250,7 @@ class SubagentManager:
     def _receipt(self, run_id, record):
         projection = (
             self._child_projection(run_id, record)
-            if record.child_run_ids
+            if record.child_run_id
             else None
         )
         status = self._outcome_status(run_id, record)
@@ -299,8 +262,7 @@ class SubagentManager:
             "kind": record.spec.kind,
             "status": status,
             "depends_on": list(record.spec.depends_on),
-            "child_session_id": record.child_session_id,
-            "child_run_ids": list(record.child_run_ids),
+            "child_run_id": record.child_run_id,
             "base_sha": record.base_sha,
             "result": self.parent.redact_text(
                 projection.final_answer if projection is not None else ""
@@ -308,11 +270,8 @@ class SubagentManager:
             "changed_paths": list(record.changed_paths),
             "patch_path": record.patch_path,
             "patch_sha256": record.patch_sha256,
-            "journal_sequence": record.journal_sequence,
-            "journal_entry_id": record.journal_entry_id,
             "error": error,
-            "continuation_count": record.continuation_count,
-            "integrated": record.integrated,
+            "applied": record.applied,
         }
 
     def _build_child(self, run_id, record):
@@ -328,19 +287,11 @@ class SubagentManager:
         session_store = SessionStore(task_root / "sessions")
         config = PicoConfig(
             approval_policy="auto",
-            max_steps=record.spec.max_steps,
+            max_tool_executions=record.spec.max_tool_executions,
             max_new_tokens=self.parent.config.max_new_tokens,
             read_only=record.spec.kind == "explore",
             shell_env_allowlist=self.parent.config.shell_env_allowlist,
             secret_env_names=self.parent.config.secret_env_names,
-            feature_flags={
-                "working_memory": True,
-                "project_memory": False,
-                "context_reduction": self.parent.feature_enabled(
-                    "context_reduction"
-                ),
-                "prompt_cache": self.parent.feature_enabled("prompt_cache"),
-            },
             allowed_tools=(
                 EXPLORE_TOOLS
                 if record.spec.kind == "explore"
@@ -363,23 +314,20 @@ class SubagentManager:
                 else self.parent.config.verification_command
             ),
         )
-        kwargs = {
-            "model_client": self.model_client_factory(record.spec),
-            "workspace": workspace,
-            "session_store": session_store,
-            "run_store": RunStore(task_root / "runs"),
-            "config": config,
-            "sandbox": self.parent.services.sandbox_factory(workspace_root),
-            "project_memory_root": task_root / "memory",
-            "parent_cancellation_token": (
-                self.parent.run.execution.token
-                if self.parent.run.execution is not None
+        return Pico(
+            model_client=self.model_client_factory(record.spec),
+            workspace=workspace,
+            session_store=session_store,
+            run_store=RunStore(task_root / "runs"),
+            config=config,
+            sandbox=self.parent.services.sandbox_factory(workspace_root),
+            project_memory_root=task_root / "memory",
+            parent_cancellation_token=(
+                self.parent.run.execution_context.token
+                if self.parent.run.execution_context is not None
                 else None
             ),
-        }
-        if record.child_session_id:
-            kwargs["session"] = session_store.load(record.child_session_id)
-        return Pico(**kwargs)
+        )
 
     def _dependency_context(self, run_id, records, record):
         if not record.spec.depends_on:
@@ -395,12 +343,9 @@ class SubagentManager:
             sections
         )
 
-    def _run_record(self, run_id, records, record, *, continuation=""):
+    def _run_record(self, run_id, records, record):
         child = self._build_child(run_id, record)
-        record.child_session_id = child.session.data["id"]
-        prompt = str(continuation or record.spec.prompt).strip()
-        if not continuation:
-            prompt += self._dependency_context(run_id, records, record)
+        prompt = record.spec.prompt + self._dependency_context(run_id, records, record)
         child_error = None
         try:
             child.ask(prompt)
@@ -409,10 +354,7 @@ class SubagentManager:
         state = child.run.task_state
         projection = None
         if state is not None:
-            record.child_run_ids = (*record.child_run_ids, state.run_id)
-            cursor = child.services.run_store.cursor(state.run_id)
-            record.journal_sequence = cursor.sequence
-            record.journal_entry_id = cursor.entry_id
+            record.child_run_id = state.run_id
             projection = child.services.run_store.replay(state.run_id)
 
         if record.spec.kind == "implement":
@@ -437,42 +379,13 @@ class SubagentManager:
 
         if record.spec.kind == "implement":
             handle = self._worktrees[(run_id, record.spec.task_id)]
-            patch_path = self._task_root(run_id, record.spec.task_id) / (
-                f"patch-{record.continuation_count:03d}.diff"
-            )
+            patch_path = self._task_root(run_id, record.spec.task_id) / "patch.diff"
             digest = handle.write_patch(patch_path)
             record.patch_path = str(patch_path.resolve())
             record.patch_sha256 = digest
         record.status = "finished"
         record.error = ""
         return record
-
-    def continue_task(self, task_id, message):
-        run_id = self._parent_run_id()
-        records = self._records(run_id)
-        if task_id not in records:
-            raise ValueError(f"unknown subtask: {task_id}")
-        record = records[task_id]
-        if self._outcome_status(run_id, record) != "completed":
-            raise ValueError("only a completed subtask can be continued")
-        if record.integrated:
-            raise ValueError("an integrated implementation subtask cannot be continued")
-        if record.spec.kind == "implement" and (run_id, task_id) not in self._worktrees:
-            raise ValueError("implementation worktree is no longer available")
-        record.status = "running"
-        record.continuation_count += 1
-        self._save(run_id, records)
-        try:
-            records[task_id] = self._run_record(
-                run_id, records, record, continuation=str(message).strip()
-            )
-        except Exception as exc:  # noqa: BLE001 - child failure is task state
-            record.status = "failed"
-            record.error = self.parent.redact_text(
-                f"{type(exc).__name__}: {exc}"
-            )
-        self._save(run_id, records)
-        return self._receipt(run_id, records[task_id])
 
     def completion_issue(self):
         run_id = self._parent_run_id()
@@ -489,7 +402,7 @@ class SubagentManager:
             for task_id, record in records.items()
             if record.spec.kind == "implement"
             and self._outcome_status(run_id, record) == "completed"
-            and not record.integrated
+            and not record.applied
         )
         if unapplied:
             return "completed implementation patches are not applied: " + ", ".join(

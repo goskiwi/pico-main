@@ -32,11 +32,63 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
         ModelAction.final("Read successfully."),
     ])
     assert agent.ask("Read hello") == "Read successfully."
-    assert [entry.kind for entry in agent.run.journal.context_entries()] == [
+    assert [entry.kind for entry in agent.run.run_log.context_events()] == [
         "user_message", "assistant_tool_call", "tool_result", "assistant_final"
     ]
-    assert "Read hello" in agent.session.memory.render_panel()
+    assert "Read hello" in agent.run.task_state.working_state.render_panel()
     assert agent.run.task_state.status == "completed"
+
+
+def test_working_state_tool_is_durable_and_replayable(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool(
+                "update_working_state",
+                {
+                    "add_constraints": ["Keep Python 3.10 compatibility"],
+                    "add_decisions": ["The timeout is in token refresh"],
+                    "add_next_steps": ["Add a concurrent refresh test"],
+                },
+            ),
+            ModelAction.final("Working state recorded."),
+        ],
+    )
+
+    assert agent.ask("Fix the login timeout") == "Working state recorded."
+    state = agent.run.task_state.working_state
+    assert state.goal == "Fix the login timeout"
+    assert state.constraints == ("Keep Python 3.10 compatibility",)
+    assert state.decisions == ("The timeout is in token refresh",)
+    assert state.next_steps == ("Add a concurrent refresh test",)
+    replayed = agent.services.run_store.replay(agent.run.task_state.run_id)
+    assert replayed.working_state.to_dict() == state.to_dict()
+    assert agent.build_report(agent.run.task_state)["working_state"] == state.to_dict()
+
+
+def test_rejected_working_state_update_does_not_change_projection(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool(
+                "update_working_state",
+                {
+                    "add_constraints": ["Keep the public API"],
+                    "remove_constraints": ["Keep the public API"],
+                },
+            ),
+            ModelAction.final("Rejected update left state unchanged."),
+        ],
+    )
+
+    assert agent.ask("Inspect the API") == "Rejected update left state unchanged."
+    assert agent.run.task_state.working_state.constraints == ()
+    results = [
+        event
+        for event in agent.run.run_log.events
+        if event.kind == "tool_result"
+    ]
+    assert results[0].outcome_status == "rejected"
 
 
 def test_fake_client_refuses_legacy_text_protocol(tmp_path):
@@ -58,7 +110,7 @@ def test_response_action_parser_requires_one_allowed_function():
                     "arguments": {"answer": "done"}}]
     }, tools)
     assert final == ModelAction.final("done")
-    assert _action_from_response({"output": []}, tools).kind == "retry"
+    assert _action_from_response({"output": []}, tools).kind == "invalid"
 
 
 class Response:
@@ -169,14 +221,56 @@ def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path)
     assert old_projection.stop_reason == "user_reset"
 
 
+def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path, [])
+    with pytest.raises(RuntimeError, match="ran out of outputs"):
+        agent.ask("old task")
+
+    def fail_session_reset():
+        raise OSError("session persistence failed")
+
+    monkeypatch.setattr(agent.session, "reset", fail_session_reset)
+
+    with pytest.raises(OSError, match="session persistence failed"):
+        agent.reset()
+
+    assert agent.run.task_state.status == "stopped"
+    assert agent.run.task_state.stop_reason == "user_reset"
+    assert (
+        agent.services.run_store.replay(agent.run.task_state.run_id).task_state()
+        == agent.run.task_state.to_dict()
+    )
+
+
+def test_terminal_run_closes_execution_when_session_pointer_save_fails(
+    tmp_path, monkeypatch
+):
+    agent = build_agent(tmp_path, [ModelAction.final("Done.")])
+    original_set_active_run = agent.session.set_active_run
+
+    def fail_terminal_pointer(run_id):
+        if str(run_id) == "":
+            raise OSError("terminal pointer failed")
+        return original_set_active_run(run_id)
+
+    monkeypatch.setattr(agent.session, "set_active_run", fail_terminal_pointer)
+
+    with pytest.raises(OSError, match="terminal pointer failed"):
+        agent.ask("Finish")
+
+    assert agent.run.task_state.status == "completed"
+    assert agent.run.execution_context is None
+    assert agent.services.run_store.replay(agent.run.task_state.run_id).terminal
+
+
 def test_custom_prompt_prefix_rebuilds_its_cache_hash(tmp_path):
     agent = build_agent(tmp_path, [])
-    original_hash = agent.prompt.prefix_state.hash
+    original_hash = agent.prompt.prefix_state.content_hash
 
     agent.prompt.prefix = "custom interview rules"
     prompt, metadata = agent.prompt.build("inspect")
 
     assert "custom interview rules" in prompt
-    assert agent.prompt.prefix_state.hash != original_hash
-    assert metadata["prefix_hash"] == agent.prompt.prefix_state.hash
-    assert metadata["prompt_cache_key"] == agent.prompt.prefix_state.hash
+    assert agent.prompt.prefix_state.content_hash != original_hash
+    assert metadata["prefix_hash"] == agent.prompt.prefix_state.content_hash
+    assert metadata["prompt_cache_key"] == agent.prompt.prefix_state.content_hash

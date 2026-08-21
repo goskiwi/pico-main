@@ -10,10 +10,20 @@ def evaluation_failures(results):
         )
 
     context = results["context"]["summary"]
-    if context["within_budget_rate"] != 1.0 or context["current_request_preserved_rate"] != 1.0:
+    required_context_rates = (
+        "within_budget_rate",
+        "current_request_preserved_rate",
+        "compaction_commit_rate",
+        "tool_transaction_integrity_rate",
+        "original_event_preservation_rate",
+        "working_state_preservation_rate",
+    )
+    if any(context[name] != 1.0 for name in required_context_rates):
         failures.append("context governance invariant failed")
+    if context["mean_token_reduction"] <= 0:
+        failures.append("context governance did not reduce tokens")
 
-    for name in ("project_memory", "repo_map", "runtime_policy"):
+    for name in ("project_memory", "repo_map"):
         failed_checks = [
             key for key, passed in results[name]["summary"].items() if passed is not True
         ]

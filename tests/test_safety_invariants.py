@@ -11,12 +11,13 @@ from pico.sandbox import (
 
 
 class FakeSandbox:
-    def __init__(self):
+    def __init__(self, result=None):
         self.calls = []
+        self.result = result or SandboxResult(returncode=0, stdout="sandbox-ok\n")
 
     def run(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
-        return SandboxResult(returncode=0, stdout="sandbox-ok\n")
+        return self.result
 
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
@@ -43,12 +44,29 @@ def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
         outcome = agent.tools.run(
             "run_shell", {"command": "python -c 'print(1)'", "timeout": 3}
         )
-    assert outcome.status == "ok"
+    assert outcome.status == "success"
     argv, options = sandbox.calls[0]
     assert argv == ("python", "-c", "print(1)")
     assert "OPENAI_API_KEY" not in options["env"]
     assert options["timeout"] == 3
     assert options["profile"] == SandboxProfile.INSPECT
+
+
+def test_shell_failure_is_structured_before_tool_executor_classification(tmp_path):
+    sandbox = FakeSandbox(
+        SandboxResult(returncode=7, stderr="command failed\n")
+    )
+    agent = build_agent(tmp_path, sandbox=sandbox)
+
+    outcome = agent.tools.run(
+        "run_shell", {"command": "false", "timeout": 3}
+    )
+
+    assert outcome.status == "error"
+    assert outcome.execution_state == "completed"
+    assert outcome.side_effect_state == "none"
+    assert outcome.failure.code == "command_failed"
+    assert outcome.failure.detail == "command exited with 7"
 
 
 def test_shell_parser_does_not_invoke_a_host_shell():

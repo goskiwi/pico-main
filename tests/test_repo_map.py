@@ -1,5 +1,7 @@
 """Direct contracts for tokenizer budgeting and Python repository understanding."""
 
+from pathlib import Path
+
 import tiktoken
 
 from pico.repo_map import RepoMap, _token_clip, count_tokens
@@ -44,6 +46,7 @@ def test_repo_map_ranks_cross_file_implementation_and_test_relations(tmp_path):
     assert "tests/test_services.py" in result.text
     assert "test_create_user_saves_once" in result.text
     assert result.details["parsed_files"] == 4
+    assert result.details["graph_edges"] > 0
     assert result.details["index_revision"].startswith("sha256:")
 
 
@@ -77,3 +80,84 @@ def test_token_clipping_uses_the_real_tokenizer_limit():
 
     assert count_tokens(text) == len(encoding.encode(text, disallowed_special=()))
     assert count_tokens(_token_clip(text, 20)) <= 20
+
+
+def test_repo_map_cache_invalidates_only_changed_and_deleted_files(tmp_path):
+    _write_python_repo(tmp_path)
+    repo_map = RepoMap(tmp_path)
+
+    first = repo_map.refresh()
+    second = repo_map.refresh()
+
+    assert first.cache_misses == 4
+    assert second.cache_hits == 4
+    assert second.cache_misses == 0
+
+    services = tmp_path / "app" / "services.py"
+    services.write_text(
+        services.read_text(encoding="utf-8")
+        + "\ndef delete_user():\n    return None\n",
+        encoding="utf-8",
+    )
+    changed = repo_map.refresh()
+
+    assert changed.cache_hits == 3
+    assert changed.cache_misses == 1
+    assert any(symbol.name == "delete_user" for symbol in changed.symbols.values())
+    assert changed.index_revision != first.index_revision
+
+    (tmp_path / "app" / "models.py").unlink()
+    deleted = repo_map.refresh()
+
+    assert deleted.parsed_files == 3
+    assert all(symbol.path != "app/models.py" for symbol in deleted.symbols.values())
+
+
+def test_repo_map_counts_parse_errors_without_failing_the_map(tmp_path):
+    (tmp_path / "valid.py").write_text(
+        "def valid_symbol():\n    return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "broken.py").write_text(
+        "def broken(:\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    result = RepoMap(tmp_path).render("valid symbol", budget_tokens=200)
+
+    assert "valid_symbol" in result.text
+    assert result.details["parse_error_files"] == 1
+
+
+def test_repo_map_skips_python_symlinks(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+    outside.write_text("def outside_symbol():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "inside.py").write_text(
+        "def inside_symbol():\n    return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "linked.py").symlink_to(outside)
+
+    snapshot = RepoMap(tmp_path).refresh()
+
+    assert any(symbol.name == "inside_symbol" for symbol in snapshot.symbols.values())
+    assert all(symbol.name != "outside_symbol" for symbol in snapshot.symbols.values())
+    assert snapshot.skipped_files >= 1
+
+
+def test_repo_map_reports_degraded_state_when_file_limit_truncates_scan(
+    tmp_path,
+    monkeypatch,
+):
+    for index in range(3):
+        (tmp_path / f"module_{index}.py").write_text(
+            f"def symbol_{index}():\n    return {index}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("pico.repo_map.REPO_MAP_MAX_FILES", 1)
+
+    snapshot = RepoMap(Path(tmp_path)).refresh()
+
+    assert snapshot.index_state == "degraded"
+    assert snapshot.scan_truncated is True
+    assert snapshot.parsed_files == 1

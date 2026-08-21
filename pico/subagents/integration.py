@@ -10,7 +10,11 @@ from ..execution import ExecutionContext
 from ..verification import verify_workspace
 from ..workspace import clip
 from .dag import implementation_order
-from .worktree import GitWorktree, apply_patch, require_clean_repository
+from .worktree import (
+    GitWorktree,
+    apply_patch,
+    require_clean_repository,
+)
 
 
 class PatchIntegrator:
@@ -23,7 +27,6 @@ class PatchIntegrator:
         outcome_status: Callable[[str, object], str],
         child_projection: Callable[[str, object], object],
         release_worktree: Callable[[str, str], object],
-        save_records: Callable[[str, dict], None],
     ):
         self.parent = parent
         self.parent_run_id = parent_run_id
@@ -31,7 +34,6 @@ class PatchIntegrator:
         self.outcome_status = outcome_status
         self.child_projection = child_projection
         self.release_worktree = release_worktree
-        self.save_records = save_records
 
     def verify_record_receipt(self, run_id, record):
         projection = self.child_projection(run_id, record)
@@ -92,7 +94,7 @@ class PatchIntegrator:
             for record in selected
         ):
             raise ValueError("all implementation subtasks must be completed")
-        if any(record.integrated for record in selected):
+        if any(record.applied for record in selected):
             raise ValueError("implementation subtask was already integrated")
         for record in selected:
             self.verify_record_receipt(run_id, record)
@@ -123,11 +125,10 @@ class PatchIntegrator:
             integration.cleanup()
 
         for record in selected:
-            record.integrated = True
+            record.applied = True
             handle = self.release_worktree(run_id, record.spec.task_id)
             if handle is not None:
                 handle.cleanup()
-        self.save_records(run_id, records)
         return {
             "status": "applied",
             "task_ids": list(order),

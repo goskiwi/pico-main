@@ -1,12 +1,12 @@
-"""Session shape, working memory, summaries, and persistence."""
+"""Session identity and active Run pointer persistence."""
 
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .features import memory as memorylib
 from .session_store import SESSION_SCHEMA_VERSION, SessionStore
 from .workspace import now
 
@@ -20,13 +20,8 @@ class RuntimeSession:
     ):
         self.store = store
         self.workspace_root = workspace_root
-        self.data = session or self._new_session()
+        self.data = deepcopy(session) if session is not None else self._new_session()
         self.ensure_shape()
-        self.memory = memorylib.SessionWorkingMemory(
-            self.data.setdefault("memory", memorylib.default_memory_state()),
-            workspace_root=workspace_root,
-        )
-        self.data["memory"] = self.memory.to_dict()
         self.path = None
 
     def _new_session(self):
@@ -38,25 +33,27 @@ class RuntimeSession:
             "created_at": now(),
             "workspace_root": str(self.workspace_root),
             "active_run_id": "",
-            "memory": memorylib.default_memory_state(),
         }
 
     def ensure_shape(self):
-        if self.data.get("schema_version") != SESSION_SCHEMA_VERSION:
-            raise ValueError("unsupported session schema")
-        self.data.setdefault("active_run_id", "")
-        self.data.setdefault("memory", memorylib.default_memory_state())
+        self.store.validate(self.data)
+
+    def _commit(self, candidate):
+        candidate = deepcopy(candidate)
+        path = self.store.save(candidate)
+        self.data = candidate
+        self.path = path
+        return path
 
     def save(self):
-        self.path = self.store.save(self.data)
-        return self.path
+        return self._commit(self.data)
+
+    def set_active_run(self, run_id):
+        candidate = deepcopy(self.data)
+        candidate["active_run_id"] = str(run_id)
+        return self._commit(candidate)
 
     def reset(self):
-        self.data["active_run_id"] = ""
-        self.data["memory"].clear()
-        self.data["memory"].update(memorylib.default_memory_state())
-        self.memory = memorylib.SessionWorkingMemory(
-            self.data["memory"],
-            workspace_root=self.workspace_root,
-        )
-        return self.save()
+        candidate = deepcopy(self.data)
+        candidate["active_run_id"] = ""
+        return self._commit(candidate)

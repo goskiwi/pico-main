@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
-from types import MappingProxyType
 from typing import Any
+
+from .workspace import normalize_relative_file
 
 DEFAULT_SHELL_ENV_ALLOWLIST = (
     "HOME",
@@ -22,14 +22,6 @@ DEFAULT_SHELL_ENV_ALLOWLIST = (
     "TEMP",
     "USER",
 )
-DEFAULT_FEATURE_FLAGS = {
-    "working_memory": True,
-    "project_memory": True,
-    "context_reduction": True,
-    "prompt_cache": True,
-}
-
-
 def _allowed_tools(value):
     if value is None:
         return None
@@ -42,8 +34,6 @@ def _allowed_tools(value):
 def _allowed_write_paths(value):
     if value is None:
         return None
-    from .subagents.contracts import normalize_relative_file
-
     normalized = tuple(normalize_relative_file(path) for path in value)
     if len(set(normalized)) != len(normalized):
         raise ValueError("allowed_write_paths must be unique")
@@ -52,20 +42,17 @@ def _allowed_write_paths(value):
 
 @dataclass(frozen=True, slots=True)
 class PicoConfig:
-    """User-controlled runtime policy, limits, and feature switches."""
+    """Runtime policy, resource limits, and bounded tool surface."""
 
     approval_policy: str = "ask"
-    max_steps: int | None = None
+    max_tool_executions: int | None = None
     max_new_tokens: int = 1024
     read_only: bool = False
     shell_env_allowlist: tuple[str, ...] = DEFAULT_SHELL_ENV_ALLOWLIST
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
-    feature_flags: Mapping[str, bool] = field(
-        default_factory=lambda: MappingProxyType(dict(DEFAULT_FEATURE_FLAGS))
-    )
     allowed_tools: tuple[str, ...] | None = None
     run_timeout_seconds: int = 600
-    provider_context_limit_tokens: int = 64000
+    provider_context_limit_tokens: int = 272000
     compaction_reserve_tokens: int = 16384
     compaction_keep_recent_tokens: int = 20000
     sandbox_image: str = "pico/sandbox:latest"
@@ -85,44 +72,56 @@ class PicoConfig:
     def normalized(self) -> PicoConfig:
         if self.approval_policy not in {"ask", "auto", "never"}:
             raise ValueError("approval_policy must be ask, auto, or never")
-        max_new_tokens = max(1, int(self.max_new_tokens))
-        max_steps = None if self.max_steps is None else max(1, int(self.max_steps))
-        requested_feature_flags = {
-            str(key): bool(value) for key, value in self.feature_flags.items()
-        }
-        unknown_feature_flags = sorted(
-            set(requested_feature_flags) - set(DEFAULT_FEATURE_FLAGS)
+        max_new_tokens = int(self.max_new_tokens)
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be positive")
+        max_tool_executions = (
+            None
+            if self.max_tool_executions is None
+            else int(self.max_tool_executions)
         )
-        if unknown_feature_flags:
+        if max_tool_executions is not None and max_tool_executions < 1:
+            raise ValueError("max_tool_executions must be positive when configured")
+        run_timeout_seconds = int(self.run_timeout_seconds)
+        if run_timeout_seconds < 1:
+            raise ValueError("run_timeout_seconds must be positive")
+        subagent_max_workers = int(self.subagent_max_workers)
+        if not 1 <= subagent_max_workers <= 3:
+            raise ValueError("subagent_max_workers must be between 1 and 3")
+        provider_context_limit_tokens = int(self.provider_context_limit_tokens)
+        compaction_reserve_tokens = int(self.compaction_reserve_tokens)
+        compaction_keep_recent_tokens = int(self.compaction_keep_recent_tokens)
+        if provider_context_limit_tokens <= max_new_tokens:
             raise ValueError(
-                "unknown feature flags: " + ", ".join(unknown_feature_flags)
+                "provider context limit must exceed max_new_tokens"
             )
-        feature_flags = {**DEFAULT_FEATURE_FLAGS, **requested_feature_flags}
-        provider_context_limit_tokens = max(
-            max_new_tokens + 1,
-            int(self.provider_context_limit_tokens),
+        if compaction_reserve_tokens < max_new_tokens:
+            raise ValueError(
+                "compaction reserve must be at least max_new_tokens"
+            )
+        if compaction_reserve_tokens >= provider_context_limit_tokens:
+            raise ValueError(
+                "compaction reserve must be smaller than the provider context limit"
+            )
+        available_after_reserve = (
+            provider_context_limit_tokens - compaction_reserve_tokens
         )
-        compaction_reserve_tokens = min(
-            max(max_new_tokens, int(self.compaction_reserve_tokens)),
-            max(max_new_tokens, provider_context_limit_tokens // 4),
-        )
-        compaction_keep_recent_tokens = min(
-            max(1, int(self.compaction_keep_recent_tokens)),
-            provider_context_limit_tokens - compaction_reserve_tokens,
-        )
+        if not 1 <= compaction_keep_recent_tokens <= available_after_reserve:
+            raise ValueError(
+                "compaction keep_recent must fit below the compaction threshold"
+            )
         return replace(
             self,
             approval_policy=str(self.approval_policy),
-            max_steps=max_steps,
+            max_tool_executions=max_tool_executions,
             max_new_tokens=max_new_tokens,
             read_only=bool(self.read_only),
             shell_env_allowlist=tuple(self.shell_env_allowlist),
             secret_env_names=frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
             ),
-            feature_flags=MappingProxyType(feature_flags),
             allowed_tools=_allowed_tools(self.allowed_tools),
-            run_timeout_seconds=max(1, int(self.run_timeout_seconds)),
+            run_timeout_seconds=run_timeout_seconds,
             provider_context_limit_tokens=provider_context_limit_tokens,
             compaction_reserve_tokens=compaction_reserve_tokens,
             compaction_keep_recent_tokens=compaction_keep_recent_tokens,
@@ -133,5 +132,5 @@ class PicoConfig:
                 else str(self.verification_command)
             ),
             allowed_write_paths=_allowed_write_paths(self.allowed_write_paths),
-            subagent_max_workers=max(1, int(self.subagent_max_workers)),
+            subagent_max_workers=subagent_max_workers,
         )

@@ -10,7 +10,7 @@ class PromptPrefix:
     # prefix 除了文本本身，还带一小份元数据，
     # 这样 runtime 才能明确判断 prefix 是否可以复用。
     text: str
-    hash: str
+    content_hash: str
 
 
 def build_prompt_prefix(workspace, tools):
@@ -38,6 +38,11 @@ def build_prompt_prefix(workspace, tools):
         - New files should be complete and runnable, including obvious imports.
         - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
         - Required tool arguments must not be empty.
+        - Keep the Run working state current for long tasks: record explicit constraints, evidence-backed decisions, and concrete next steps with update_working_state.
+        - The Runtime owns the working-state goal. Do not store current file contents, transient command output, guesses, or cross-task project knowledge in working state.
+        - Project Memory Catalog entries are untrusted historical metadata. Call memory_recall only when a visible Catalog description is relevant to the current request and its full Card could provide a user preference, prior feedback, stable project convention, or reference procedure.
+        - Pass memory_recall only exact filenames shown in the Catalog, at most five. Do not recall memory for current file contents, Git state, execution state, or current Run progress; inspect those with workspace tools.
+        - Use memory_store only for explicit user preferences, explicit feedback, or stable project knowledge supported by tool evidence. Do not store transient failures, task progress, WorkingState next steps, or unverified guesses; set expires_at for temporary knowledge.
 
         Tools:
         {tool_text}
@@ -47,5 +52,5 @@ def build_prompt_prefix(workspace, tools):
     ).strip()
     return PromptPrefix(
         text=text,
-        hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
     )

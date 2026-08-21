@@ -1,18 +1,15 @@
 """Staged tool admission and canonical outcome construction."""
 
-import re
 import time
 from pathlib import Path
 
 from .contracts import (
     FailureInfo,
     ToolCall,
-    ToolExecution,
     ToolOutcome,
-    canonical_fingerprint,
+    ToolRunnerResult,
+    tool_call_hash,
 )
-from .hooks import BeforeToolContext
-from .recovery import RecoveryPolicy
 
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
 SHELL_TOOL_PREVIEW_BYTES = 16 * 1024
@@ -64,11 +61,59 @@ class ToolExecutor:
     def __init__(self, agent):
         self.agent = agent
         self._outcomes_by_state = {}
-        self.recovery_policy = RecoveryPolicy()
+
+    @staticmethod
+    def _recorded_run_log(agent, call_id):
+        run_log = agent.run.run_log
+        if run_log is None:
+            return None
+        pending = run_log.pending_call_id()
+        if not pending:
+            return None
+        if pending != str(call_id):
+            raise RuntimeError("tool execution does not match the pending Run call")
+        return run_log
+
+    @classmethod
+    def _record_tool_started(
+        cls,
+        agent,
+        call,
+        *,
+        call_hash,
+        risky,
+        effect_scope,
+        potential_effects,
+    ):
+        run_log = cls._recorded_run_log(agent, call.call_id)
+        if run_log is None:
+            return None
+        return agent.apply_run_event(
+            run_log.append_tool_started(
+                call,
+                tool_call_hash=call_hash,
+                risky=risky,
+                effect_scope=effect_scope,
+                potential_effects=potential_effects,
+            )
+        )
+
+    @classmethod
+    def _record_tool_result(cls, agent, outcome):
+        run_log = cls._recorded_run_log(agent, outcome.tool_call_id)
+        if run_log is None:
+            return None
+        return agent.apply_run_event(
+            run_log.append_tool_result(
+                outcome,
+                workspace_revision=agent.workspace.revision,
+            )
+        )
 
     @classmethod
     def _call_state(cls, agent, name, args):
         paths = []
+        working_state = ()
         if name in {"read_file", "write_file", "patch_file"}:
             paths.append(agent.workspace.resolve_path(args["path"]))
         elif name in {"list_files", "search"}:
@@ -76,17 +121,28 @@ class ToolExecutor:
         elif name in {"memory_store", "memory_forget"}:
             memory = agent.services.project_memory
             paths.extend((memory.cards_root / args["filename"], memory.index_path))
+        elif name == "memory_recall":
+            memory = agent.services.project_memory
+            paths.extend(memory.cards_root / filename for filename in args["filenames"])
+        elif name == "update_working_state" and agent.run.task_state is not None:
+            state = agent.run.task_state.working_state
+            working_state = (
+                state.constraints,
+                state.decisions,
+                state.next_steps,
+            )
         return (
             agent.workspace.revision,
             tuple(
                 (path.as_posix(), agent.workspace.path_state(path))
                 for path in paths
             ),
+            working_state,
         )
 
     @staticmethod
-    def _repeat_key(run_id, call_fingerprint, state):
-        return str(run_id), str(call_fingerprint), state
+    def _repeat_key(run_id, call_hash, state):
+        return str(run_id), str(call_hash), state
 
     @staticmethod
     def _logical_path(agent, path):
@@ -134,7 +190,7 @@ class ToolExecutor:
         last = previous[-1]
         if last.side_effect_state in {"partial", "unknown"}:
             return "same call previously left an uncertain side effect; inspect state before another action"
-        if last.status == "ok":
+        if last.status == "success":
             if last.side_effect_state == "changed":
                 return "same mutation already committed in the current state"
             return "same successful call already ran in the current state and produced no new evidence"
@@ -142,8 +198,6 @@ class ToolExecutor:
             retryable = (
                 last.failure is not None
                 and last.failure.retryable
-                and last.recovery is not None
-                and last.recovery.action == "retry"
             )
             if retryable and sum(item.status == "error" for item in previous) < 2:
                 return ""
@@ -154,93 +208,80 @@ class ToolExecutor:
         started = time.monotonic()
         agent = self.agent
         name, args = call.name, call.args
-        fingerprint = canonical_fingerprint(name, args)
+        call_hash = tool_call_hash(name, args)
 
         tool = agent.tools.registry.get(name)
         if tool is None:
-            return self._rejected(call, fingerprint, "unknown_tool", "registry", "unknown tool", started)
+            return self._rejected(call, call_hash, "unknown_tool", "registry", "unknown tool", started)
         workspace_mutating = bool(tool.get("workspace_mutating", False))
 
         if (
             agent.config.allowed_tools is not None
             and name not in agent.config.allowed_tools
         ):
-            return self._rejected(call, fingerprint, "tool_not_allowed", "surface", "tool outside run surface", started)
+            return self._rejected(call, call_hash, "tool_not_allowed", "surface", "tool outside run surface", started)
 
         try:
             args = agent.tools.validate(name, args)
         except Exception as exc:  # noqa: BLE001 - admission converts validator failures to outcomes
             detail = str(exc)
             return self._rejected(
-                call, fingerprint, "invalid_arguments", "schema", detail, started,
+                call, call_hash, "invalid_arguments", "schema", detail, started,
             )
         call = ToolCall(name, args, call.call_id)
-        fingerprint = canonical_fingerprint(name, args)
+        call_hash = tool_call_hash(name, args)
 
         agent.prompt.refresh()
         run_id = agent.run.task_state.run_id if agent.run.task_state else "manual"
         call_state = self._call_state(agent, name, args)
-        repeat_key = self._repeat_key(run_id, fingerprint, call_state)
+        repeat_key = self._repeat_key(run_id, call_hash, call_state)
         repeat_reason = self._repeat_block_reason(self._outcomes_by_state.get(repeat_key, ()))
         if repeat_reason:
             return self._rejected(
-                call, fingerprint, "repeated_identical_call", "policy",
+                call, call_hash, "repeated_identical_call", "policy",
                 repeat_reason, started,
             )
-        hook_decision = agent.services.hooks.before_tool_call(
-            BeforeToolContext(
-                call=call,
-                run_id=str(run_id),
-                task_id=str(getattr(agent.run.task_state, "task_id", "manual")),
-            )
-        )
-        if hook_decision.block or hook_decision.stop:
-            return self._rejected(
-                call,
-                fingerprint,
-                "hook_blocked",
-                "policy",
-                hook_decision.reason or "runtime policy hook blocked the tool",
-                started,
-                policy_stop=hook_decision.stop,
-            )
-
         if tool["risky"] and not agent.tools.approve(name, args):
             return self._rejected(
-                call, fingerprint, "approval_denied", "approval", "approval denied", started,
+                call, call_hash, "approval_denied", "approval", "approval denied", started,
             )
 
         potential_scope, potential_paths = self._potential_effects(
             agent, name, args, workspace_mutating
         )
         effects_before = self._effect_snapshot(agent, potential_paths)
-        agent.emit_event(
-            agent.run.task_state,
-            "tool_started",
-            {
-                "tool_call_id": call.call_id,
-                "tool_name": name,
-                "call_fingerprint": fingerprint,
-                "risky": bool(tool["risky"]),
-                "effect_scope": potential_scope,
-                "potential_effects": [
-                    {"path": path, "before_state": state}
-                    for path, state in sorted(effects_before.items())
-                ],
-            },
+        self._record_tool_started(
+            agent,
+            call,
+            call_hash=call_hash,
+            risky=bool(tool["risky"]),
+            effect_scope=potential_scope,
+            potential_effects=[
+                {"path": path, "before_state": state}
+                for path, state in sorted(effects_before.items())
+            ],
         )
         try:
             execution = tool["run"](args)
-            if not isinstance(execution, ToolExecution):
-                raise TypeError("tool runner must return ToolExecution")
+            if not isinstance(execution, ToolRunnerResult):
+                raise TypeError("tool runner must return ToolRunnerResult")
             artifact_content = execution.content
             paths = list(execution.affected_paths)
             effect_scope = execution.effect_scope
-            status, failure = self._classify_result(name, artifact_content, bool(paths))
-            side_effect = "partial" if status == "partial_success" else ("changed" if paths else "none")
+            failure = execution.failure
+            status = (
+                "success"
+                if failure is None
+                else ("partial_success" if paths else "error")
+            )
+            side_effect = (
+                "partial"
+                if failure is not None and paths
+                else ("changed" if paths else "none")
+            )
             outcome = self._outcome(
-                call, fingerprint, status,
-                "completed" if status in {"ok", "partial_success"} else "failed",
+                call, status,
+                "completed",
                 side_effect, artifact_content, started, failure=failure, affected_paths=paths,
                 effect_scope=effect_scope,
                 artifact_content=artifact_content,
@@ -251,7 +292,7 @@ class ToolExecutor:
             unknown = bool(workspace_mutating and not potential_paths)
             uncertain = bool(paths or unknown)
             outcome = self._outcome(
-                call, fingerprint, "partial_success" if uncertain else "error", "failed",
+                call, "partial_success" if uncertain else "error", "failed",
                 "partial" if paths else ("unknown" if unknown else "none"),
                 f"error: tool {name} failed: {exc}", started,
                 failure=FailureInfo(
@@ -271,56 +312,31 @@ class ToolExecutor:
         if workspace_effect:
             agent.workspace.mark_changed()
             agent.prompt.refresh(force=True)
+        self._record_tool_result(agent, outcome)
         result_key = self._repeat_key(
             run_id,
-            fingerprint,
+            call_hash,
             self._call_state(agent, name, args),
         )
         self._outcomes_by_state.setdefault(result_key, []).append(outcome)
-        event = agent.emit_event(
-            agent.run.task_state,
-            "tool_result",
-            {
-                "tool_call_id": call.call_id,
-                "tool_name": name,
-                "workspace_revision": agent.workspace.revision,
-                "outcome": outcome.to_dict(),
-            },
-        )
-        agent.run.evidence.apply_entry(event)
         return outcome
 
-    @staticmethod
-    def _classify_result(name, content, changed):
-        if name != "run_shell":
-            return "ok", None
-        match = re.search(r"exit_code:\s*(-?\d+)", content)
-        if not match or int(match.group(1)) == 0:
-            return "ok", None
-        status = "partial_success" if changed else "error"
-        code = "tool_partial_success" if changed else "tool_failed"
-        return status, FailureInfo(code, "command", "shell command returned non-zero", True)
-
     def _rejected(
-        self, call, fingerprint, code, stage, detail, started, policy_stop=False,
+        self, call, call_hash, code, stage, detail, started,
     ):
         outcome = self._outcome(
-            call, fingerprint, "rejected", "not_started", "none",
+            call, "rejected", "not_started", "none",
             f"error: {detail} for {call.name}", started,
             failure=FailureInfo(code, "admission", detail, code == "repeated_identical_call"),
-            policy_stop=policy_stop, admission_status="rejected", rejected_at=stage,
+            rejected_at=stage,
         )
-        self.agent.emit_event(
-            self.agent.run.task_state,
-            "tool_result",
-            {"tool_call_id": call.call_id, "tool_name": call.name, "outcome": outcome.to_dict()},
-        )
+        self._record_tool_result(self.agent, outcome)
         return outcome
 
     def _outcome(
-        self, call, fingerprint, status, execution_state, side_effect_state,
+        self, call, status, execution_state, side_effect_state,
         content, started, *, failure=None, affected_paths=(), effect_scope="none",
-        artifact_content=None, policy_stop=False, admission_status="admitted",
+        artifact_content=None,
         rejected_at="",
     ):
         run_id = (
@@ -340,16 +356,6 @@ class ToolExecutor:
             descriptor,
         )
         duration_ms = int((time.monotonic() - started) * 1000)
-        recovery = (
-            self.recovery_policy.assess(
-                failure,
-                status=status,
-                fingerprint=fingerprint,
-                scope=run_id,
-            )
-            if failure is not None
-            else None
-        )
         return ToolOutcome(
             tool_call_id=call.call_id,
             tool_name=call.name,
@@ -357,14 +363,11 @@ class ToolExecutor:
             execution_state=execution_state,
             side_effect_state=side_effect_state,
             content=content,
-            admission_status=admission_status,
             failure=failure,
-            recovery=recovery,
             affected_paths=tuple(affected_paths),
             effect_scope=effect_scope if side_effect_state != "none" else "none",
             duration_ms=duration_ms,
             artifact=descriptor,
             output_truncated=output_truncated,
-            policy_stop_requested=bool(policy_stop),
             rejected_at=rejected_at,
         )

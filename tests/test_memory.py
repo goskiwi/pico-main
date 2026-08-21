@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pico.context_manager import Tokenizer
-from pico.features.memory import SessionWorkingMemory
+from pico.features.memory import WorkingState, normalize_working_update
 from pico.project_memory import ProjectMemoryStore
 
 
@@ -17,15 +17,15 @@ def _store(store, filename="reference_test_command.md", **overrides):
         "content": "Run `python3 -m pytest -q`.",
         "source_session_id": "session",
         "source_run_id": "run",
-        "source_entry_ids": ("evidence-1",),
+        "source_event_ids": ("evidence-1",),
     }
     values.update(overrides)
     return store.store(**values)
 
 
-def _render_selected(store, cards):
+def _render_recalled(store, cards):
     tokenizer = Tokenizer()
-    rendered, _ = store.render_selected_with_budget(
+    rendered, _ = store.render_recalled_with_budget(
         cards,
         max_tokens=100_000,
         token_counter=tokenizer.count,
@@ -33,15 +33,44 @@ def _render_selected(store, cards):
     return rendered
 
 
-def test_working_memory_contains_only_the_current_goal(tmp_path):
-    memory = SessionWorkingMemory(workspace_root=tmp_path)
-    memory.set_goal("Inspect sample")
+def test_working_state_tracks_goal_constraints_decisions_and_next_steps():
+    state = WorkingState(goal="Fix the timeout")
+    state.apply_update(
+        {
+            "add_constraints": ["Keep Python 3.10 compatibility"],
+            "add_decisions": ["The race is in token refresh"],
+            "add_next_steps": ["Add a concurrent refresh test"],
+        }
+    )
 
-    assert memory.to_dict() == {
-        "schema_version": "session-working-memory-v2",
-        "goal": "Inspect sample",
+    assert state.to_dict() == {
+        "schema_version": "run-working-state-v1",
+        "goal": "Fix the timeout",
+        "constraints": ["Keep Python 3.10 compatibility"],
+        "decisions": ["The race is in token refresh"],
+        "next_steps": ["Add a concurrent refresh test"],
     }
-    assert "Inspect sample" in memory.render_panel()
+    assert "The race is in token refresh" in state.render_panel()
+
+
+def test_working_state_updates_are_incremental_and_idempotent():
+    state = WorkingState(
+        goal="Fix the timeout",
+        constraints=("Do not change the schema",),
+        next_steps=("Inspect token refresh",),
+    )
+    update = normalize_working_update(
+        {
+            "add_constraints": ["Do not change the schema"],
+            "remove_next_steps": ["Inspect token refresh"],
+            "add_next_steps": ["Add a regression test"],
+        }
+    )
+
+    state.apply_update(update)
+
+    assert state.constraints == ("Do not change the schema",)
+    assert state.next_steps == ("Add a regression test",)
 
 
 def test_markdown_card_is_source_of_truth_and_index_is_generated(tmp_path):
@@ -68,26 +97,26 @@ def test_markdown_memory_uses_filename_identity(tmp_path):
     assert store.recall(updated.filename) is None
 
 
-def test_project_memory_selector_only_accepts_manifest_filenames(tmp_path):
+def test_project_memory_recall_only_accepts_available_filenames(tmp_path):
     store = ProjectMemoryStore(tmp_path / ".pico/memory")
     _store(store)
-    cards = store.selected_cards(["reference_test_command.md"])
+    cards = store.recall_cards(["reference_test_command.md"])
     assert cards[0].content == "Run `python3 -m pytest -q`."
-    rendered = _render_selected(store, cards)
+    rendered = _render_recalled(store, cards)
     assert "not workspace paths" in rendered
     assert "Project test command" in rendered
     with pytest.raises(ValueError, match="unavailable filename"):
-        store.selected_cards(["reference_missing.md"])
+        store.recall_cards(["reference_missing.md"])
 
 
-def test_selected_memories_are_packed_as_complete_cards(tmp_path):
+def test_recalled_memories_are_packed_as_complete_cards(tmp_path):
     store = ProjectMemoryStore(tmp_path / ".pico/memory")
     first, _ = _store(store, filename="reference_first.md", content="first complete card")
     second, _ = _store(store, filename="reference_second.md", content="second complete card")
     tokenizer = Tokenizer()
-    one_card_budget = tokenizer.count(_render_selected(store, [first]))
+    one_card_budget = tokenizer.count(_render_recalled(store, [first]))
 
-    rendered, included = store.render_selected_with_budget(
+    rendered, included = store.render_recalled_with_budget(
         [first, second],
         max_tokens=one_card_budget,
         token_counter=tokenizer.count,
@@ -123,7 +152,7 @@ def test_legacy_memory_is_ignored_and_preserved(tmp_path):
     assert store.index_path.is_file()
 
 
-def test_stale_selected_card_warns_before_use(tmp_path):
+def test_stale_recalled_card_warns_before_use(tmp_path):
     store = ProjectMemoryStore(tmp_path / ".pico/memory")
     card, _ = _store(store)
     path = tmp_path / ".pico/memory/cards" / card.filename
@@ -132,6 +161,6 @@ def test_stale_selected_card_warns_before_use(tmp_path):
         'updated_at: "2020-01-01T00:00:00+00:00"',
     )
     path.write_text(text, encoding="utf-8")
-    rendered = _render_selected(store, [store.recall(card.filename)])
+    rendered = _render_recalled(store, [store.recall(card.filename)])
     assert "WARNING: saved" in rendered
     assert datetime.now(timezone.utc).year >= 2026

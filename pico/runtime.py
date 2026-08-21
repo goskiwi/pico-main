@@ -8,23 +8,23 @@ from pathlib import Path
 
 from . import security as securitylib
 from .artifacts import ArtifactStore
-from .hooks import HookRunner
+from .evidence import RunEvidence
 from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .projections import build_run_report
+from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_journal import JournalEntry, RunJournal, replay_entries
+from .run_log import RunEvent, RunLog, replay_events
 from .run_store import RunStore
 from .runtime_config import PicoConfig
-from .runtime_prompt import RuntimePrompt
 from .runtime_recovery import RESUME_NONE, RESUME_READY, RuntimeRecovery
 from .runtime_services import RuntimeServices
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
-from .runtime_tools import RuntimeTools
 from .sandbox import DockerSandbox, DockerSandboxConfig
 from .session_store import SessionStore
 from .task_state import TaskState
+from .tool_manager import ToolManager
 from .verification import discover_verification_command, run_verification
 from .workspace_tracker import WorkspaceTracker
 
@@ -44,7 +44,6 @@ class Pico:
         session=None,
         run_store=None,
         sandbox=None,
-        hooks=None,
         project_memory_root=None,
         sandbox_factory=None,
         subagent_model_client_factory=None,
@@ -91,7 +90,6 @@ class Pico:
             mutations=mutations,
             sandbox=effective_sandbox,
             sandbox_factory=sandbox_factory,
-            hooks=HookRunner(hooks),
             repo_map=RepoMap(self.workspace.root),
             parent_cancellation_token=parent_cancellation_token,
         )
@@ -104,14 +102,11 @@ class Pico:
                 max_workers=self.config.subagent_max_workers,
             )
 
-        self.tools = RuntimeTools(self)
+        self.tools = ToolManager(self)
         self.recovery = RuntimeRecovery(self)
-        self.prompt = RuntimePrompt(self)
-        self.recovery.evaluate()
+        self.prompt = PromptBuilder(self)
         self.session.save()
-
-    def feature_enabled(self, name):
-        return bool(self.config.feature_flags.get(str(name), False))
+        self.recovery.evaluate()
 
     def detected_secret_env_summary(self):
         return securitylib.detected_secret_env_summary(
@@ -140,8 +135,8 @@ class Pico:
     def emit_event(self, task_state, event_type, payload=None):
         payload = self.redact_artifact(payload or {})
         if task_state is None:
-            return JournalEntry(
-                entry_id="manual:entry:000001",
+            return RunEvent(
+                event_id="manual:event:000001",
                 sequence=1,
                 run_id="manual",
                 task_id="manual",
@@ -152,24 +147,38 @@ class Pico:
             )
         run_id = task_state.run_id if task_state is not None else "manual"
         task_id = task_state.task_id if task_state is not None else "manual"
-        if self.run.journal is not None and self.run.journal.run_id == run_id:
-            entry = self.run.journal.append(event_type, payload)
+        if self.run.run_log is not None and self.run.run_log.run_id == run_id:
+            entry = self.run.run_log.append(event_type, payload)
         else:
-            entry = self.services.run_store.append_entry(
+            entry = self.services.run_store.append_event(
                 run_id,
                 task_id,
                 self.session.data["id"],
                 event_type,
                 payload,
             )
+        return self.apply_run_event(entry)
+
+    def apply_run_event(self, entry):
+        task_state = self.run.task_state
+        if task_state is not None and task_state.run_id == entry.run_id:
+            task_state.apply_event(entry)
+            self.run.evidence.apply_event(entry)
+
         recovery = getattr(self, "recovery", None)
         projection = recovery.state.get("projection") if recovery is not None else None
         if (
             projection is not None
             and projection.run_id == entry.run_id
-            and entry.sequence > projection.last_cursor.sequence
         ):
-            projection.apply(entry)
+            expected_sequence = projection.last_cursor.sequence + 1
+            if entry.sequence == expected_sequence:
+                projection.apply(entry)
+            elif entry.sequence > expected_sequence:
+                raise RuntimeError(
+                    "Run projection skipped an event: "
+                    f"expected sequence {expected_sequence}, got {entry.sequence}"
+                )
         return entry
 
     def run_verification(self, workspace_fingerprint):
@@ -200,51 +209,52 @@ class Pico:
 
     def build_report(self, task_state):
         return build_run_report(
-            entries=self.services.run_store.read_entries(task_state.run_id),
-            prompt_metadata=self.run.last_prompt_metadata,
-            project_memory_count=self.services.project_memory.count(),
-            redacted_env=self.detected_secret_env_summary(),
+            events=self.services.run_store.read_events(task_state.run_id),
         )
 
     def reset(self):
-        journal = self.run.journal
+        run_log = self.run.run_log
         task_state = self.run.task_state
         recovery_state = dict(self.recovery.state)
-        if journal is None and recovery_state.get("status") == RESUME_READY:
-            entries = tuple(recovery_state.get("entries", ()))
-            if entries:
-                first = entries[0]
-                journal = RunJournal(
+        if run_log is None and recovery_state.get("status") == RESUME_READY:
+            events = tuple(recovery_state.get("events", ()))
+            if events:
+                first = events[0]
+                run_log = RunLog(
                     first.run_id,
                     first.task_id,
                     first.session_id,
                     self.services.run_store,
-                    entries,
+                    events,
                 )
-                projection = recovery_state.get("projection") or replay_entries(entries)
+                projection = recovery_state.get("projection") or replay_events(events)
                 task_state = TaskState.from_dict(projection.task_state())
-        if journal is not None and not replay_entries(journal.entries).terminal:
-            self.run.journal = journal
+        if run_log is not None and not replay_events(run_log.events).terminal:
+            self.run.run_log = run_log
             self.run.task_state = task_state
-            journal.reconcile_interrupted(self)
-            journal.append_stopped(
-                "Session reset by user.",
-                "user_reset",
+            self.run.evidence = RunEvidence.from_events(run_log.events)
+            for _outcome, event in run_log.reconcile_interrupted(self):
+                self.apply_run_event(event)
+            self.apply_run_event(
+                run_log.append_stopped(
+                    "Session reset by user.",
+                    "user_reset",
+                )
             )
-        if self.run.execution is not None:
-            self.run.execution.request_stop("user_reset")
+        if self.run.execution_context is not None:
+            self.run.execution_context.request_stop("user_reset")
         self.session.reset()
         self.run = ActiveRunState()
         self.recovery.state = {
             "status": RESUME_NONE,
             "active_run_id": "",
             "projection": None,
-            "entries": (),
+            "events": (),
         }
         self.model_client.reset_action_session()
 
     def cancel_current_run(self, reason="user_cancelled"):
-        if self.run.execution is None:
+        if self.run.execution_context is None:
             return False
-        self.run.execution.request_stop(reason)
+        self.run.execution_context.request_stop(reason)
         return True

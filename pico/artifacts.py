@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from .persistence import write_once_bytes
 from .workspace import now
 
 ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
@@ -86,10 +87,8 @@ class ArtifactStore:
 
     @staticmethod
     def _write_once(path: Path, content: str):
-        try:
-            with path.open("x", encoding="utf-8") as handle:
-                handle.write(content)
-        except FileExistsError:
+        encoded = str(content).encode("utf-8")
+        if not write_once_bytes(path, encoded):
             existing = path.read_text(encoding="utf-8")
             if existing != content:
                 raise RuntimeError(f"immutable artifact collision: {path.name}")

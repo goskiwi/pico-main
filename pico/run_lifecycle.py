@@ -1,4 +1,4 @@
-"""Run creation, Journal recovery, and terminal settlement."""
+"""Run creation, Run Log recovery, and terminal settlement."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .evidence import EvidenceLedger
+from .evidence import RunEvidence
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
-from .run_journal import RunJournal
+from .run_log import RunLog
 from .runtime_recovery import RESUME_READY
 from .task_state import TaskState
 
@@ -17,15 +17,15 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class LoopFrame:
+class AgentLoopState:
     user_message: str
     run_started_at: float
     task_state: TaskState
-    journal: RunJournal
+    run_log: RunLog
     prompt_snapshot: tuple[str, dict[str, Any]] | None = None
     provider_context_tokens: int | None = None
     overflow_recovery_attempted: bool = False
-    malformed_retries: int = 0
+    invalid_output_count: int = 0
     execution_stop: str = ""
 
 
@@ -37,27 +37,21 @@ class RunLifecycle:
         runtime = self.runtime
         run_started_at = time.monotonic()
         runtime.run.begin_request()
-        if runtime.run.task_state is not None:
-            runtime.recovery.evaluate()
-        task_state, journal, resumed = self._restore_or_create_task(user_message)
-        runtime.session.memory.set_goal(task_state.user_request)
-        runtime.session.save()
+        runtime.recovery.evaluate()
+        task_state, run_log, resumed = self._restore_or_create_task(user_message)
         runtime.run.task_state = task_state
-        runtime.run.journal = journal
-        runtime.run.execution = self._root_execution(task_state)
+        runtime.run.run_log = run_log
+        runtime.run.execution_context = self._root_execution(task_state)
         runtime.services.run_store.start_run(task_state)
-        runtime.run.evidence = EvidenceLedger.from_entries(journal.entries)
+        runtime.run.evidence = RunEvidence.from_events(run_log.events)
 
-        reconciled = journal.reconcile_interrupted(runtime)
-        for outcome, entry in reconciled:
-            runtime.run.evidence.apply_entry(entry)
-            projection = runtime.recovery.state.get("projection")
-            if projection is not None:
-                projection.apply(entry)
-            if outcome.execution_state != "not_started":
-                task_state.record_tool(outcome.tool_name)
+        reconciled = run_log.reconcile_interrupted(runtime)
+        for _outcome, entry in reconciled:
+            runtime.apply_run_event(entry)
         if resumed:
-            journal.append_guidance(f"Resume request: {user_message}")
+            runtime.apply_run_event(
+                run_log.append_model_instruction(f"Resume request: {user_message}")
+            )
 
         runtime.emit_event(
             task_state,
@@ -68,47 +62,45 @@ class RunLifecycle:
             },
         )
         runtime.model_client.reset_action_session()
-        return LoopFrame(
+        return AgentLoopState(
             user_message=user_message,
             run_started_at=run_started_at,
             task_state=task_state,
-            journal=journal,
+            run_log=run_log,
         )
 
     def _restore_or_create_task(self, user_message):
         runtime = self.runtime
         if runtime.recovery.state.get("status") == RESUME_READY:
             projection = runtime.recovery.state["projection"]
-            entries = runtime.recovery.state.pop("entries")
-            if not entries:
-                raise RuntimeError("resumable Journal entries are unavailable")
-            first = entries[0]
-            journal = RunJournal(
+            events = runtime.recovery.state.pop("events")
+            if not events:
+                raise RuntimeError("resumable Run events are unavailable")
+            first = events[0]
+            run_log = RunLog(
                 first.run_id,
                 first.task_id,
                 first.session_id,
                 runtime.services.run_store,
-                entries,
+                events,
             )
             task_state = TaskState.from_dict(projection.task_state())
-            return task_state, journal, True
+            return task_state, run_log, True
 
         task_state = TaskState.create(
             run_id=runtime.new_run_id(),
             task_id=runtime.new_task_id(),
             user_request=user_message,
         )
-        runtime.services.run_store.start_run(task_state)
-        runtime.session.data["active_run_id"] = task_state.run_id
-        runtime.session.save()
-        journal = RunJournal(
+        run_log = RunLog(
             task_state.run_id,
             task_state.task_id,
             runtime.session.data["id"],
             runtime.services.run_store,
         )
-        journal.append_user(user_message)
-        return task_state, journal, False
+        run_log.append_user(user_message)
+        runtime.session.set_active_run(task_state.run_id)
+        return task_state, run_log, False
 
     def _root_execution(self, task_state):
         runtime = self.runtime
@@ -127,63 +119,69 @@ class RunLifecycle:
 
     def execution_stop(self):
         try:
-            self.runtime.run.execution.check_active()
+            self.runtime.run.execution_context.check_active()
         except ExecutionDeadlineExceeded:
             return "deadline_exceeded"
         except ExecutionCancelled as exc:
             return str(exc) or "user_cancelled"
         return ""
 
-    def finish_success(self, frame, final):
+    def finish_success(self, loop_state, final):
         runtime = self.runtime
-        frame.journal.append_final(
-            final,
-            run_duration_ms=int((time.monotonic() - frame.run_started_at) * 1000),
+        runtime.apply_run_event(
+            loop_state.run_log.append_final(
+                final,
+                run_duration_ms=int(
+                    (time.monotonic() - loop_state.run_started_at) * 1000
+                ),
+            )
         )
-        frame.task_state.finish_success(final)
-        runtime.session.data["active_run_id"] = ""
-        runtime.session.save()
-        runtime.run.execution.transition("completed")
-        runtime.run.execution = None
+        try:
+            runtime.session.set_active_run("")
+        finally:
+            execution = runtime.run.execution_context
+            if execution is not None:
+                execution.transition("completed")
+                runtime.run.execution_context = None
         return final
 
-    def finish_stopped(self, frame):
-        if frame.execution_stop == "step_limit_reached":
-            frame.execution_stop = ""
-        final = self._apply_stop_state(frame)
-        frame.journal.append_stopped(
-            final,
-            frame.task_state.stop_reason,
-            run_duration_ms=int((time.monotonic() - frame.run_started_at) * 1000),
+    def finish_stopped(self, loop_state):
+        if loop_state.execution_stop == "tool_execution_limit":
+            loop_state.execution_stop = ""
+        final, stop_reason = self._stopped_result(loop_state.execution_stop)
+        self.runtime.apply_run_event(
+            loop_state.run_log.append_stopped(
+                final,
+                stop_reason,
+                run_duration_ms=int(
+                    (time.monotonic() - loop_state.run_started_at) * 1000
+                ),
+            )
         )
-        self.runtime.session.data["active_run_id"] = ""
-        self.runtime.session.save()
-        self._transition_stopped_execution(frame.execution_stop)
+        try:
+            self.runtime.session.set_active_run("")
+        finally:
+            self._transition_stopped_execution(loop_state.execution_stop)
         return final
 
     @staticmethod
-    def _apply_stop_state(frame):
-        stop = frame.execution_stop
-        if stop.startswith("policy:"):
-            reason = stop.removeprefix("policy:")
-            final = f"Stopped by runtime policy: {reason}."
-            frame.task_state.stop("policy_stop", final_answer=final)
-        elif stop == "malformed_model_retry_limit":
+    def _stopped_result(stop):
+        if stop == "invalid_output_limit":
             final = (
-                "Stopped after too many malformed model responses without a "
+                "Stopped after too many invalid model outputs without a "
                 "valid tool call or final answer."
             )
-            frame.task_state.stop_retry_limit(final)
+            stop_reason = "invalid_output_limit"
         elif stop:
             final = f"Stopped because execution was interrupted: {stop}."
-            frame.task_state.stop(stop, final_answer=final)
+            stop_reason = stop
         else:
-            final = "Stopped after reaching the step limit without a final answer."
-            frame.task_state.stop_step_limit(final)
-        return final
+            final = "Stopped after reaching the tool execution limit without a final answer."
+            stop_reason = "tool_execution_limit"
+        return final, stop_reason
 
     def _transition_stopped_execution(self, execution_stop):
-        execution = self.runtime.run.execution
+        execution = self.runtime.run.execution_context
         if execution is None:
             return
         terminal_state = (
@@ -192,4 +190,4 @@ class RunLifecycle:
             else "timed_out" if execution_stop else "completed"
         )
         execution.transition(terminal_state, stop_reason=execution_stop)
-        self.runtime.run.execution = None
+        self.runtime.run.execution_context = None

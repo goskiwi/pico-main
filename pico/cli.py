@@ -39,9 +39,9 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
-    /memory  Show the agent's distilled working memory.
+    /memory  Show the current Run WorkingState and project-memory catalog.
     /session Show the path to the saved session file.
-    /reset   Clear the current session history and memory.
+    /reset   Stop the active Run and clear the Session pointer.
     /exit    Exit the agent.
     """
 ).strip()
@@ -90,7 +90,7 @@ def _build_model_client(args):
     )
 
 
-def build_welcome(agent, model, host):
+def build_welcome(agent, model):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
@@ -166,7 +166,7 @@ def build_agent(args):
     model = _build_model_client(args)
     config = PicoConfig(
         approval_policy=args.approval,
-        max_steps=args.max_steps,
+        max_tool_executions=args.max_tool_executions,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=set(configured_secret_names),
         run_timeout_seconds=args.run_timeout,
@@ -245,10 +245,10 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
-        "--max-steps",
+        "--max-tool-executions",
         type=int,
         default=None,
-        help="Optional maximum executed tool calls per request; unset means no step limit.",
+        help="Optional maximum executed tool calls per request; unset means no tool limit.",
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -263,20 +263,20 @@ def build_arg_parser():
     parser.add_argument(
         "--provider-context-limit",
         type=int,
-        default=64000,
+        default=272000,
         help="Model context window used for prompt budgeting, compaction, and Responses rotation.",
     )
     parser.add_argument(
         "--compaction-reserve-tokens",
         type=int,
         default=16384,
-        help="Context tokens reserved before automatic Journal compaction.",
+        help="Context tokens reserved before automatic Run Log compaction.",
     )
     parser.add_argument(
         "--compaction-keep-recent-tokens",
         type=int,
         default=20000,
-        help="Approximate recent Journal tokens retained after compaction.",
+        help="Approximate recent Run Log tokens retained after compaction.",
     )
     parser.add_argument("--sandbox-image", default="pico/sandbox:latest", help="Docker image for run_shell.")
     parser.add_argument("--verify-command", default=None, help="Runtime verifier; auto-detected when omitted, empty disables it.")
@@ -288,22 +288,17 @@ def build_arg_parser():
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if raw_argv[:1] == ["journal"]:
-        from .journal_cli import journal_main
+    if raw_argv[:1] == ["run"]:
+        from .run_cli import run_main
 
-        return journal_main(raw_argv[1:])
+        return run_main(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     agent = build_agent(args)
 
     model = getattr(
         agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
     )
-    host = getattr(
-        agent.model_client,
-        "base_url",
-        getattr(args, "base_url", DEFAULT_OPENAI_BASE_URL),
-    )
-    print(build_welcome(agent, model=model, host=host))
+    print(build_welcome(agent, model=model))
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
@@ -319,7 +314,7 @@ def main(argv=None):
 
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 session history 和 working memory 会跨轮延续。
+        # 因此 Run Log 和由它投影的 WorkingState 会跨恢复轮次延续。
         try:
             user_input = input("\npico> ").strip()
         except (EOFError, KeyboardInterrupt):

@@ -225,7 +225,7 @@ class DockerSandbox:
             deadline=min(command_deadline, context.deadline),
             max_output_bytes=self.config.max_output_bytes,
             max_processes=self.config.pids_limit,
-            memory=self.config.memory,
+            memory_limit=self.config.memory,
         )
         try:
             process = subprocess.Popen(

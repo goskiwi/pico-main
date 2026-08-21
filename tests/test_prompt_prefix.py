@@ -23,7 +23,7 @@ def test_build_prompt_prefix_renders_tools_and_workspace_metadata(tmp_path):
     assert "- read_file [safe]" in prefix.text
     assert "<tool>" not in prefix.text
     assert "Workspace:" in prefix.text
-    assert prefix.hash
+    assert prefix.content_hash
 
 
 def test_model_workspace_panel_never_exposes_host_absolute_paths(tmp_path):

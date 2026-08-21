@@ -1,17 +1,17 @@
-"""Resume discovery from Session active_run_id and the Run Journal tail."""
+"""Resume discovery from Session active_run_id and the Run Log tail."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .run_journal import replay_entries
+from .run_log import replay_events
 
 if TYPE_CHECKING:
     from .runtime import Pico
 
 RESUME_NONE = "no-active-run"
 RESUME_READY = "resumable"
-RESUME_MISSING = "journal-missing"
+RESUME_MISSING = "run-log-missing"
 RESUME_WORKSPACE_MISMATCH = "workspace-mismatch"
 
 
@@ -22,58 +22,60 @@ class RuntimeRecovery:
 
     def evaluate(self):
         runtime = self.runtime
-        active_run_id = str(runtime.session.data.get("active_run_id", ""))
+        original_active_run_id = str(runtime.session.data.get("active_run_id", ""))
+        active_run_id = original_active_run_id
         status = RESUME_NONE
         projection = None
-        entries = ()
+        events = ()
         if runtime.session.data.get("workspace_root") != str(runtime.workspace.root):
             status = RESUME_WORKSPACE_MISMATCH
         else:
             if not active_run_id:
-                active_run_id, entries, projection = (
+                active_run_id, events, projection = (
                     runtime.services.run_store.find_active_run(
                     runtime.session.data["id"]
                     )
                 )
-                if active_run_id:
-                    runtime.session.data["active_run_id"] = active_run_id
             if not active_run_id:
                 self.state = {
                     "status": status,
                     "active_run_id": "",
                     "projection": None,
-                    "entries": (),
+                    "events": (),
                 }
                 return self.state
-            if not runtime.services.run_store.has_journal(active_run_id):
+            if not runtime.services.run_store.has_events(active_run_id):
                 status = RESUME_MISSING
-                runtime.session.data["active_run_id"] = ""
+                active_run_id = ""
             else:
-                if not entries:
-                    entries = tuple(
-                        runtime.services.run_store.read_entries(active_run_id)
+                if not events:
+                    events = tuple(
+                        runtime.services.run_store.read_events(active_run_id)
                     )
-                    projection = replay_entries(entries)
+                    projection = replay_events(events)
                 if projection.session_id != runtime.session.data["id"]:
                     status = RESUME_MISSING
-                    runtime.session.data["active_run_id"] = ""
+                    active_run_id = ""
                 elif projection.terminal:
                     status = RESUME_NONE
-                    runtime.session.data["active_run_id"] = ""
+                    active_run_id = ""
                 else:
                     status = RESUME_READY
+        persisted_active_run_id = active_run_id if status == RESUME_READY else ""
+        if persisted_active_run_id != original_active_run_id:
+            runtime.session.set_active_run(persisted_active_run_id)
         self.state = {
             "status": status,
-            "active_run_id": active_run_id if status == RESUME_READY else "",
+            "active_run_id": persisted_active_run_id,
             "projection": projection,
-            "entries": entries if status == RESUME_READY else (),
+            "events": events if status == RESUME_READY else (),
         }
         return self.state
 
     def render(self):
         projection = self.state.get("projection")
         if projection is None or self.state.get("status") != RESUME_READY:
-            return "Run recovery:\n- no active Run Journal"
+            return "Run recovery:\n- no active Run Log"
         pending = projection.summary()["pending_operations"]
         return "\n".join(
             [
@@ -81,7 +83,7 @@ class RuntimeRecovery:
                 f"- status: {self.state['status']}",
                 f"- run: {projection.run_id}",
                 f"- goal: {projection.user_request or '-'}",
-                f"- last tool: {projection.last_tool or '-'}",
+                f"- last tool: {projection.last_executed_tool or '-'}",
                 f"- pending tools: {', '.join(pending) or '-'}",
             ]
         )

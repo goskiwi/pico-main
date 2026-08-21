@@ -6,13 +6,15 @@ import json
 import tempfile
 from pathlib import Path
 
-from ..context_manager import Tokenizer
-from ..contracts import FailureInfo, ToolOutcome
-from ..project_memory import ProjectMemoryStore
-from ..recovery import RecoveryPolicy
+from ..context_manager import ContextManager, Tokenizer
+from ..contracts import ModelAction, ToolCall, ToolOutcome
+from ..providers.clients import FakeModelClient
 from ..repo_map import RepoMap
-from ..run_store import RunStore
-from ..verification import parse_verification_output
+from ..run_lifecycle import RunLifecycle
+from ..runtime import Pico
+from ..runtime_config import PicoConfig
+from ..session_store import SessionStore
+from ..workspace import WorkspaceContext
 from .provenance import evaluation_snapshot_id, runtime_snapshot_id
 
 
@@ -23,53 +25,213 @@ def _write(path, payload):
     return payload
 
 
-def run_context_governance_ablation(path=Path("artifacts/context-governance-v4.json"), repetitions=3):
-    tokenizer = Tokenizer()
+def run_context_governance_evaluation(
+    path=Path("artifacts/context-governance-v5.json"),
+    repetitions=3,
+):
     rows = []
-    for repetition in range(int(repetitions)):
-        for size in (2000, 6000, 12000):
-            request = f"critical-request-{repetition}-{size}"
-            history = "old noise " * size
-            governed = tokenizer.clip(history, 1100) + "\nCurrent user request:\n" + request
-            rows.append({
-                "repetition": repetition, "raw_tokens": tokenizer.count(history),
-                "governed_tokens": tokenizer.count(governed),
-                "within_budget": tokenizer.count(governed) <= 1200,
-                "request_preserved": request in governed,
-            })
+    with tempfile.TemporaryDirectory(prefix="pico-context-eval-") as directory:
+        root = Path(directory)
+        for repetition in range(int(repetitions)):
+            for size in (2000, 6000, 12000):
+                task_root = root / f"rep-{repetition}-size-{size}"
+                task_root.mkdir(parents=True)
+                (task_root / "README.md").write_text("context evaluation\n")
+                request = f"critical-request-{repetition}-{size}"
+                agent = Pico(
+                    FakeModelClient([]),
+                    WorkspaceContext.build(task_root),
+                    SessionStore(task_root / ".pico" / "sessions"),
+                    config=PicoConfig(
+                        approval_policy="auto",
+                        max_new_tokens=64,
+                        provider_context_limit_tokens=1200,
+                        compaction_reserve_tokens=200,
+                        compaction_keep_recent_tokens=300,
+                        verification_command="",
+                    ),
+                )
+                loop_state = RunLifecycle(agent).initialize(request)
+                chunk = "old noise " * max(1, size // 8)
+                for index in range(8):
+                    call = ToolCall(
+                        "read_file",
+                        {"path": "README.md", "start": 1, "end": 1},
+                        f"call_{repetition}_{size}_{index}",
+                    )
+                    agent.apply_run_event(loop_state.run_log.append_tool_call(call))
+                    agent.apply_run_event(
+                        loop_state.run_log.append_tool_started(
+                            call,
+                            tool_call_hash=f"hash_{index}",
+                            risky=False,
+                            effect_scope="none",
+                            potential_effects=[],
+                        )
+                    )
+                    agent.apply_run_event(
+                        loop_state.run_log.append_tool_result(
+                            ToolOutcome(
+                                tool_call_id=call.call_id,
+                                tool_name=call.name,
+                                status="success",
+                                execution_state="completed",
+                                side_effect_state="none",
+                                content=chunk,
+                            ),
+                            workspace_revision=0,
+                        )
+                    )
+
+                manager = ContextManager(
+                    agent,
+                    total_budget=1200,
+                    section_budgets={
+                        "prefix": 300,
+                        "memory_catalog": 60,
+                        "repo_map": 80,
+                        "working_state": 100,
+                        "history": 400,
+                    },
+                    section_floors={
+                        "prefix": 80,
+                        "memory_catalog": 10,
+                        "repo_map": 20,
+                        "working_state": 30,
+                        "history": 100,
+                    },
+                    compaction_reserve_tokens=200,
+                    compaction_keep_recent_tokens=300,
+                )
+                raw_history_tokens = manager.tokenizer.count(
+                    manager._history_text(request)
+                )
+                original_event_ids = {
+                    event.event_id for event in loop_state.run_log.events
+                }
+                prompt, metadata = manager.build(request)
+                active = loop_state.run_log.active_events()
+                active_calls = {
+                    event.call_id
+                    for event in active
+                    if event.kind == "assistant_tool_call"
+                }
+                active_results = {
+                    event.call_id for event in active if event.kind == "tool_result"
+                }
+                governed_history_tokens = metadata["sections"]["history"][
+                    "rendered_tokens"
+                ]
+                rows.append(
+                    {
+                        "repetition": repetition,
+                        "raw_tokens": raw_history_tokens,
+                        "governed_tokens": governed_history_tokens,
+                        "within_budget": metadata["within_budget"],
+                        "request_preserved": request in prompt,
+                        "compaction_committed": metadata["compaction"] is not None,
+                        "tool_transactions_intact": active_calls == active_results,
+                        "original_events_preserved": original_event_ids
+                        <= {event.event_id for event in loop_state.run_log.events},
+                        "working_state_preserved": (
+                            agent.run.task_state.working_state.goal == request
+                        ),
+                    }
+                )
     return _write(path, {
-        "artifact_type": "context-governance-v4",
+        "artifact_type": "context-governance-v5",
         "runtime_snapshot_id": runtime_snapshot_id(),
         "evaluation_snapshot_id": evaluation_snapshot_id(),
         "rows": rows,
         "summary": {
             "within_budget_rate": sum(row["within_budget"] for row in rows) / len(rows),
             "current_request_preserved_rate": sum(row["request_preserved"] for row in rows) / len(rows),
+            "compaction_commit_rate": sum(row["compaction_committed"] for row in rows) / len(rows),
+            "tool_transaction_integrity_rate": sum(row["tool_transactions_intact"] for row in rows) / len(rows),
+            "original_event_preservation_rate": sum(row["original_events_preserved"] for row in rows) / len(rows),
+            "working_state_preservation_rate": sum(row["working_state_preserved"] for row in rows) / len(rows),
             "mean_token_reduction": sum(row["raw_tokens"] - row["governed_tokens"] for row in rows) / len(rows),
         },
     })
 
 
-def run_project_memory_evaluation(path=Path("artifacts/project-memory-v1.json")):
+def run_project_memory_evaluation(path=Path("artifacts/project-memory-v2.json")):
     with tempfile.TemporaryDirectory(prefix="pico-project-memory-eval-") as directory:
         root = Path(directory)
-        store = ProjectMemoryStore(root / ".pico/memory")
-        card, _created = store.store(
-            action="create", filename="project_test_command.md", name="Test command",
-            description="Stable project test workflow", memory_type="project",
-            content="Run python -m pytest -q.", why="It is the repository verifier.",
-            how_to_apply="Run after code changes.",
-            source_session_id="s", source_run_id="r", source_entry_ids=("e1",),
+        (root / "README.md").write_text("project memory evaluation\n")
+        agent = Pico(
+            FakeModelClient(
+                [
+                    ModelAction.tool(
+                        "memory_store",
+                        {
+                            "action": "create",
+                            "filename": "project_test_command.md",
+                            "name": "Test command",
+                            "description": "Stable project test workflow",
+                            "memory_type": "project",
+                            "content": "Run python -m pytest -q.",
+                            "why": "It is the repository verifier.",
+                            "how_to_apply": "Run after code changes.",
+                        },
+                    ),
+                    ModelAction.tool(
+                        "memory_recall",
+                        {"filenames": ["project_test_command.md"]},
+                    ),
+                    ModelAction.final("Stored and recalled project memory."),
+                ]
+            ),
+            WorkspaceContext.build(root),
+            SessionStore(root / ".pico" / "sessions"),
+            config=PicoConfig(approval_policy="auto", verification_command=""),
         )
+        answer = agent.ask("Remember and recall the stable project test command.")
+        card = agent.services.project_memory.recall("project_test_command.md")
+        events = agent.run.run_log.events
+        store_call = next(
+            event
+            for event in events
+            if event.kind == "assistant_tool_call" and event.name == "memory_store"
+        )
+        recall_call = next(
+            event
+            for event in events
+            if event.kind == "assistant_tool_call" and event.name == "memory_recall"
+        )
+        results = {
+            event.call_id: event
+            for event in events
+            if event.kind == "tool_result"
+        }
+        recall_result = results[recall_call.call_id]
         payload = {
-            "artifact_type": "project-memory-v1",
+            "artifact_type": "project-memory-v2",
             "runtime_snapshot_id": runtime_snapshot_id(),
             "evaluation_snapshot_id": evaluation_snapshot_id(),
             "summary": {
-                "markdown_source_of_truth": (store.cards_root / card.filename).is_file(),
-                "index_generated": card.filename in store.index_text(),
-                "catalog_generated": card.filename in store.index_text(),
-                "provenance_complete": bool(card.source_entry_ids and card.source_run_id),
+                "markdown_source_of_truth": (
+                    agent.services.project_memory.cards_root / card.filename
+                ).is_file(),
+                "catalog_generated": card.filename
+                in agent.services.project_memory.index_text(),
+                "store_transaction_recorded": results[store_call.call_id].outcome_status
+                == "success",
+                "recall_transaction_recorded": recall_result.outcome_status == "success",
+                "recalled_body_returned": "Run python -m pytest -q."
+                in recall_result.content,
+                "untrusted_boundary_rendered": 'trust="untrusted_data"'
+                in recall_result.content,
+                "write_provenance_recorded": bool(
+                    card.source_event_ids
+                    and card.source_run_id
+                    and card.source_tool_call_id == store_call.call_id
+                ),
+                "run_completed": agent.run.task_state.status == "completed"
+                and answer == "Stored and recalled project memory.",
+                "no_pending_operations": not agent.services.run_store.replay(
+                    agent.run.task_state.run_id
+                ).summary()["pending_operations"],
             },
         }
     return _write(path, payload)
@@ -96,79 +258,17 @@ def run_repo_map_evaluation(path=Path("artifacts/repo-map-v1.json")):
     return _write(path, payload)
 
 
-def run_runtime_policy_evaluation(path=Path("artifacts/runtime-policy-v1.json")):
-    with tempfile.TemporaryDirectory(prefix="pico-runtime-eval-") as directory:
-        store = RunStore(Path(directory) / "runs")
-        store.append_entry(
-            "run_eval", "task_eval", "session_eval", "run_started", {"user_request": "repair"}
-        )
-        policy = RecoveryPolicy()
-        outcome = ToolOutcome(
-            tool_call_id="call_eval",
-            tool_name="run_shell",
-            status="error",
-            execution_state="failed",
-            side_effect_state="none",
-            content="exit_code: 1",
-            admission_status="admitted",
-            failure=FailureInfo("tool_failed", "command", "same failure", True),
-        )
-        first = policy.assess(
-            outcome.failure,
-            status=outcome.status,
-            fingerprint="same-call",
-            scope="run_eval",
-        )
-        second = policy.assess(
-            outcome.failure,
-            status=outcome.status,
-            fingerprint="same-call",
-            scope="run_eval",
-        )
-        for decision in (first, second):
-            store.append_entry(
-                "run_eval",
-                "task_eval",
-                "session_eval",
-                "policy_decided",
-                {
-                    "stop": decision.action == "stop",
-                    "reason": outcome.failure.detail,
-                    "guidance": "\n".join(decision.guidance),
-                },
-            )
-        entries = store.read_entries("run_eval")
-        verification = parse_verification_output(
-            "python -m pytest -q", "FAILED tests/test_x.py::test_x\n1 failed, 2 passed", 1
-        )
-        payload = {
-            "artifact_type": "runtime-policy-v1",
-            "runtime_snapshot_id": runtime_snapshot_id(),
-            "evaluation_snapshot_id": evaluation_snapshot_id(),
-            "summary": {
-                "journal_valid": len(entries) == 3,
-                "replayable_policy": store.replay("run_eval").summary()["policy_counts"].get("continue") == 2,
-                "repeated_failure_replanned": second.action == "replan",
-                "verification_structured": verification["failed_tests"] == ["tests/test_x.py::test_x"],
-            },
-        }
-    return _write(path, payload)
-
-
 def write_runtime_report(
     path=Path("docs/metrics/runtime-evaluation.md"),
-    context_path=Path("artifacts/context-governance-v4.json"),
-    project_memory_path=Path("artifacts/project-memory-v1.json"),
+    context_path=Path("artifacts/context-governance-v5.json"),
+    project_memory_path=Path("artifacts/project-memory-v2.json"),
     repo_map_path=Path("artifacts/repo-map-v1.json"),
-    runtime_policy_path=Path("artifacts/runtime-policy-v1.json"),
     harness_path=Path("artifacts/harness-regression-v3.json"),
 ):
     harness = json.loads(Path(harness_path).read_text())
     context = json.loads(Path(context_path).read_text())
     project = json.loads(Path(project_memory_path).read_text())
     repo = json.loads(Path(repo_map_path).read_text())
-    policy_path = Path(runtime_policy_path)
-    policy = json.loads(policy_path.read_text()) if policy_path.exists() else None
     text = "\n".join([
         "# Pico Runtime Evaluation", "",
         "These deterministic artifacts measure Runtime mechanisms, not model intelligence.", "",
@@ -178,20 +278,20 @@ def write_runtime_report(
         f"- Within-budget rate: {harness['summary']['within_budget_rate']:.1%}", "",
         "## Context governance", "",
         f"- Within-budget rate: {context['summary']['within_budget_rate']:.1%}",
-        f"- Current-request preservation: {context['summary']['current_request_preserved_rate']:.1%}", "",
+        f"- Current-request preservation: {context['summary']['current_request_preserved_rate']:.1%}",
+        f"- Compaction commit rate: {context['summary']['compaction_commit_rate']:.1%}",
+        f"- Tool-transaction integrity: {context['summary']['tool_transaction_integrity_rate']:.1%}",
+        f"- Original-event preservation: {context['summary']['original_event_preservation_rate']:.1%}",
+        f"- WorkingState preservation: {context['summary']['working_state_preservation_rate']:.1%}", "",
         "## Project memory", "",
-        f"- Catalog generated: {project['summary']['catalog_generated']}", "",
+        f"- Catalog generated: {project['summary']['catalog_generated']}",
+        f"- Explicit Store transaction: {project['summary']['store_transaction_recorded']}",
+        f"- Explicit Recall transaction: {project['summary']['recall_transaction_recorded']}",
+        f"- Untrusted-data boundary: {project['summary']['untrusted_boundary_rendered']}", "",
         "## RepoMap", "",
         f"- Query hit: {repo['summary']['query_hit']}",
         f"- Within budget: {repo['summary']['within_budget']}", "",
     ])
-    if policy:
-        text += "\n" + "\n".join([
-            "## Runtime policy", "",
-            f"- Run Journal valid: {policy['summary']['journal_valid']}",
-            f"- Repeated failure replanned: {policy['summary']['repeated_failure_replanned']}",
-            f"- Structured verification: {policy['summary']['verification_structured']}", "",
-        ])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

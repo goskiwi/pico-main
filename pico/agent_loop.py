@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .completion_controller import CompletionController
-from .hooks import AfterToolContext, TurnContext
 from .run_lifecycle import RunLifecycle
 
 if TYPE_CHECKING:
@@ -30,50 +29,47 @@ class AgentLoop:
         self.completion = CompletionController(agent)
 
     def run(self, user_message):
-        frame = self.lifecycle.initialize(user_message)
+        loop_state = self.lifecycle.initialize(user_message)
         while True:
-            frame.execution_stop = self.lifecycle.execution_stop()
-            if frame.execution_stop:
+            loop_state.execution_stop = self.lifecycle.execution_stop()
+            if loop_state.execution_stop:
                 break
 
             try:
-                turn = self._next_model_turn(frame)
+                turn = self._next_model_turn(loop_state)
             except RuntimeError as exc:
-                if self._recover_context_overflow(frame, exc):
+                if self._recover_context_overflow(loop_state, exc):
                     continue
                 raise
             if turn.action.kind == "tool":
-                frame.execution_stop = self._handle_tool_action(frame, turn)
-            elif turn.action.kind == "retry":
-                frame.execution_stop = self._handle_retry_action(frame, turn)
+                loop_state.execution_stop = self._handle_tool_action(loop_state, turn)
+            elif turn.action.kind == "invalid":
+                loop_state.execution_stop = self._handle_invalid_output(loop_state, turn)
             else:
-                final = self._handle_final_action(frame, turn)
+                final = self._handle_final_action(loop_state, turn)
                 if final is not None:
-                    return self.lifecycle.finish_success(frame, final)
-            if frame.execution_stop:
+                    return self.lifecycle.finish_success(loop_state, final)
+            if loop_state.execution_stop:
                 break
-        return self.lifecycle.finish_stopped(frame)
+        return self.lifecycle.finish_stopped(loop_state)
 
-    def _next_model_turn(self, frame):
+    def _next_model_turn(self, loop_state):
         agent = self.agent
-        frame.task_state.record_attempt()
-        prompt, prompt_metadata = self._prepare_prompt(frame)
+        prompt, prompt_metadata = self._prepare_prompt(loop_state)
         agent.emit_event(
-            frame.task_state,
+            loop_state.task_state,
             "model_requested",
             {
-                "attempts": frame.task_state.attempts,
-                "tool_steps": frame.task_state.tool_steps,
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
             },
         )
         action, completion_metadata = self._request_action(
-            frame, prompt, prompt_metadata
+            loop_state, prompt, prompt_metadata
         )
         provider_input_tokens = completion_metadata.get("input_tokens")
         provider_output_tokens = completion_metadata.get("output_tokens")
         provider_total_tokens = completion_metadata.get("total_tokens")
-        frame.overflow_recovery_attempted = False
+        loop_state.overflow_recovery_attempted = False
         return ModelTurn(
             action=action,
             prompt_metadata=prompt_metadata,
@@ -82,35 +78,24 @@ class AgentLoop:
             provider_total_tokens=provider_total_tokens,
         )
 
-    def _prepare_prompt(self, frame):
+    def _prepare_prompt(self, loop_state):
         agent = self.agent
-        prompt_reused = frame.prompt_snapshot is not None
-        if frame.prompt_snapshot is None:
+        prompt_reused = loop_state.prompt_snapshot is not None
+        if loop_state.prompt_snapshot is None:
             prompt, prompt_metadata = agent.prompt.build(
-                frame.user_message,
-                provider_context_tokens=frame.provider_context_tokens,
+                loop_state.user_message,
+                provider_context_tokens=loop_state.provider_context_tokens,
             )
-            frame.provider_context_tokens = None
-            frame.prompt_snapshot = (prompt, dict(prompt_metadata))
+            loop_state.provider_context_tokens = None
+            loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
         else:
-            prompt, original_metadata = frame.prompt_snapshot
+            prompt, original_metadata = loop_state.prompt_snapshot
             prompt_metadata = dict(original_metadata)
         prompt_metadata["prompt_reused"] = prompt_reused
         prompt_metadata["provider_session_active"] = prompt_reused
-        self._record_prompt_projection(frame, prompt_metadata, prompt_reused)
         return prompt, prompt_metadata
 
-    def _record_prompt_projection(self, frame, prompt_metadata, prompt_reused):
-        if prompt_reused:
-            return
-        agent = self.agent
-        memory_audit = dict(prompt_metadata.get("memory_retrieval", {}) or {})
-        if memory_audit.get("available_count") or memory_audit.get(
-            "selected_filenames"
-        ):
-            agent.emit_event(frame.task_state, "memory_selection", memory_audit)
-
-    def _request_action(self, frame, prompt, prompt_metadata):
+    def _request_action(self, loop_state, prompt, prompt_metadata):
         agent = self.agent
         prompt_cache_key = (
             prompt_metadata.get("prompt_cache_key")
@@ -123,8 +108,8 @@ class AgentLoop:
                 for tool in agent.tools.action_schemas
                 if tool["name"] == "submit_final"
             ]
-            if agent.config.max_steps is not None
-            and frame.task_state.tool_steps >= agent.config.max_steps
+            if agent.config.max_tool_executions is not None
+            and loop_state.task_state.executed_tool_count >= agent.config.max_tool_executions
             else agent.tools.action_schemas
         )
         model_started_at = time.monotonic()
@@ -133,27 +118,40 @@ class AgentLoop:
             agent.config.max_new_tokens,
             action_tools=action_tools,
             prompt_cache_key=prompt_cache_key,
-            request_timeout=agent.run.execution.bounded_timeout(),
+            request_timeout=agent.run.execution_context.bounded_timeout(),
         )
         completion_metadata = dict(
             getattr(agent.model_client, "last_completion_metadata", {}) or {}
         )
-        if completion_metadata:
-            prompt_metadata.update(completion_metadata)
-        agent.run.last_prompt_metadata = prompt_metadata
+        persisted_prompt_metadata = self._persisted_prompt_metadata(prompt_metadata)
         agent.emit_event(
-            frame.task_state,
+            loop_state.task_state,
             "turn_metrics",
             {
                 "kind": action.kind,
                 "tool_call_id": action.tool_call.call_id if action.tool_call else "",
                 "completion_metadata": completion_metadata,
-                "prompt_metadata": prompt_metadata,
+                "prompt_metadata": persisted_prompt_metadata,
                 "prompt_reused": bool(prompt_metadata.get("prompt_reused")),
                 "duration_ms": int((time.monotonic() - model_started_at) * 1000),
             },
         )
         return action, completion_metadata
+
+    @staticmethod
+    def _persisted_prompt_metadata(prompt_metadata):
+        if not prompt_metadata.get("prompt_reused"):
+            return dict(prompt_metadata)
+        keys = (
+            "governance_version",
+            "prompt_reused",
+            "provider_session_active",
+            "prompt_cache_key",
+            "prefix_hash",
+            "run_log_generation",
+            "provider_context_tokens",
+        )
+        return {key: prompt_metadata.get(key) for key in keys}
 
     def _context_tokens_after_result(self, turn, provider_result):
         input_tokens = turn.provider_input_tokens
@@ -182,7 +180,7 @@ class AgentLoop:
             >= self.agent.config.provider_context_limit_tokens
         )
 
-    def _continue_provider(self, frame, turn, provider_result, tool_call_id=""):
+    def _continue_provider(self, loop_state, turn, provider_result, tool_call_id=""):
         agent = self.agent
         if self._should_rotate_provider(turn, provider_result):
             output_tokens = (
@@ -194,10 +192,10 @@ class AgentLoop:
             context_tokens = self._context_tokens_after_result(turn, provider_result)
             estimated_next_total = context_tokens + agent.config.max_new_tokens
             agent.model_client.reset_action_session()
-            frame.prompt_snapshot = None
-            frame.provider_context_tokens = context_tokens
+            loop_state.prompt_snapshot = None
+            loop_state.provider_context_tokens = context_tokens
             agent.emit_event(
-                frame.task_state,
+                loop_state.task_state,
                 "provider_session_reset",
                 {
                     "reason": "next_input_threshold",
@@ -228,167 +226,106 @@ class AgentLoop:
             )
         )
 
-    def _recover_context_overflow(self, frame, exc):
+    def _recover_context_overflow(self, loop_state, exc):
         if (
-            frame.overflow_recovery_attempted
+            loop_state.overflow_recovery_attempted
             or not self._is_context_overflow_error(exc)
         ):
             return False
-        frame.overflow_recovery_attempted = True
-        frame.prompt_snapshot = None
-        frame.provider_context_tokens = (
+        loop_state.overflow_recovery_attempted = True
+        loop_state.prompt_snapshot = None
+        loop_state.provider_context_tokens = (
             self.agent.config.provider_context_limit_tokens
         )
         self.agent.model_client.reset_action_session()
         self.agent.emit_event(
-            frame.task_state,
+            loop_state.task_state,
             "provider_session_reset",
             {
                 "reason": "context_overflow_retry",
-                "provider_context_tokens": frame.provider_context_tokens,
+                "provider_context_tokens": loop_state.provider_context_tokens,
                 "tool_call_id": "",
             },
         )
         return True
 
-    def _handle_tool_action(self, frame, turn):
+    def _handle_tool_action(self, loop_state, turn):
         agent = self.agent
         if (
-            agent.config.max_steps is not None
-            and frame.task_state.tool_steps >= agent.config.max_steps
+            agent.config.max_tool_executions is not None
+            and loop_state.task_state.executed_tool_count >= agent.config.max_tool_executions
         ):
-            return "step_limit_reached"
-        frame.malformed_retries = 0
+            return "tool_execution_limit"
+        loop_state.invalid_output_count = 0
         call = turn.action.tool_call
-        frame.journal.append_tool_call(call)
+        agent.apply_run_event(loop_state.run_log.append_tool_call(call))
         outcome = agent.tools.run(call)
-        if outcome.execution_state != "not_started":
-            frame.task_state.record_tool(call.name)
 
-        guidance, policy_stop, reason = self._tool_policy(frame, call, outcome)
+        model_instruction = self._append_budget_instruction(loop_state)
         provider_result = outcome.content
-        if guidance:
-            provider_result += "\n\nRuntime guidance: " + guidance
+        if model_instruction:
+            provider_result += "\n\nRuntime instruction: " + model_instruction
         self._continue_provider(
-            frame,
+            loop_state,
             turn,
             provider_result,
             tool_call_id=call.call_id,
         )
-        if policy_stop:
-            return "policy:" + (reason or "runtime policy requested stop")
         return ""
 
-    def _tool_policy(self, frame, call, outcome):
-        agent = self.agent
-        hook_decision = agent.services.hooks.after_tool_result(
-            AfterToolContext(
-                outcome=outcome,
-                tool_steps=frame.task_state.tool_steps,
-                run_id=frame.task_state.run_id,
-                task_id=frame.task_state.task_id,
-            )
-        )
-        turn_decision = agent.services.hooks.should_stop_after_turn(
-            TurnContext(
-                action_kind="tool",
-                tool_steps=frame.task_state.tool_steps,
-                attempts=frame.task_state.attempts,
-                run_id=frame.task_state.run_id,
-                task_id=frame.task_state.task_id,
-            )
-        )
-        guidance = "\n".join(
-            part
-            for part in (hook_decision.guidance, turn_decision.guidance)
-            if part
-        )
-        if guidance:
-            frame.journal.append_guidance(guidance)
-        guidance = self._append_budget_guidance(frame, guidance)
-        policy_stop = bool(
-            hook_decision.stop
-            or turn_decision.stop
-            or outcome.policy_stop_requested
-        )
-        reason = self._policy_reason(hook_decision, turn_decision, outcome)
-        if hook_decision.active or turn_decision.active or policy_stop:
-            agent.emit_event(
-                frame.task_state,
-                "policy_decided",
-                {
-                    "stop": policy_stop,
-                    "reason": reason,
-                    "guidance": guidance,
-                    "tool_call_id": call.call_id,
-                },
-            )
-        return guidance, policy_stop, reason
-
-    def _append_budget_guidance(self, frame, guidance):
+    def _append_budget_instruction(self, loop_state):
         agent = self.agent
         if (
-            agent.config.max_steps is None
-            or frame.task_state.tool_steps < agent.config.max_steps
+            agent.config.max_tool_executions is None
+            or loop_state.task_state.executed_tool_count < agent.config.max_tool_executions
         ):
-            return guidance
-        budget_guidance = (
+            return ""
+        budget_instruction = (
             "Runtime tool budget exhausted. Do not call another tool; "
             "use submit_final now with the available evidence."
         )
-        frame.journal.append_guidance(budget_guidance)
-        return "\n".join(part for part in (guidance, budget_guidance) if part)
-
-    @staticmethod
-    def _policy_reason(hook_decision, turn_decision, outcome):
-        outcome_reason = (
-            outcome.failure.detail
-            if outcome.policy_stop_requested and outcome.failure
-            else ""
+        agent.apply_run_event(
+            loop_state.run_log.append_model_instruction(budget_instruction)
         )
-        return " | ".join(
-            part
-            for part in (
-                hook_decision.reason,
-                turn_decision.reason,
-                outcome_reason,
-            )
-            if part
-        )
+        return budget_instruction
 
-    def _handle_retry_action(self, frame, turn):
-        frame.malformed_retries += 1
-        frame.journal.append_guidance(turn.action.content)
-        self._continue_provider(frame, turn, turn.action.content)
-        if frame.malformed_retries >= 8:
-            return "malformed_model_retry_limit"
+    def _handle_invalid_output(self, loop_state, turn):
+        loop_state.invalid_output_count += 1
+        self.agent.apply_run_event(
+            loop_state.run_log.append_model_instruction(turn.action.content)
+        )
+        self._continue_provider(loop_state, turn, turn.action.content)
+        if loop_state.invalid_output_count >= 8:
+            return "invalid_output_limit"
         return ""
 
-    def _handle_final_action(self, frame, turn):
-        assessment = self.completion.assess(frame, turn.action.content.strip())
+    def _handle_final_action(self, loop_state, turn):
+        assessment = self.completion.assess(loop_state, turn.action.content.strip())
         if assessment.allowed:
-            return assessment.final
+            return assessment.final_answer
         self._block_completion(
-            frame,
+            loop_state,
             turn,
             assessment.status,
             assessment.reason,
-            assessment.guidance,
+            assessment.model_instruction,
         )
         return None
 
     def _block_completion(
         self,
-        frame,
+        loop_state,
         turn,
         status,
         event_reason,
-        guidance,
+        model_instruction,
     ):
-        frame.journal.append_guidance(guidance)
+        self.agent.apply_run_event(
+            loop_state.run_log.append_model_instruction(model_instruction)
+        )
         self.agent.emit_event(
-            frame.task_state,
+            loop_state.task_state,
             "completion_blocked",
             {"status": status, "reason": event_reason},
         )
-        self._continue_provider(frame, turn, guidance)
+        self._continue_provider(loop_state, turn, model_instruction)

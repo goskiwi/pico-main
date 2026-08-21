@@ -12,18 +12,19 @@ These deterministic artifacts measure Runtime mechanisms, not model intelligence
 
 - Within-budget rate: 100.0%
 - Current-request preservation: 100.0%
+- Compaction commit rate: 100.0%
+- Tool-transaction integrity: 100.0%
+- Original-event preservation: 100.0%
+- WorkingState preservation: 100.0%
 
 ## Project memory
 
 - Catalog generated: True
+- Explicit Store transaction: True
+- Explicit Recall transaction: True
+- Untrusted-data boundary: True
 
 ## RepoMap
 
 - Query hit: True
 - Within budget: True
-
-## Runtime policy
-
-- Run Journal valid: True
-- Repeated failure replanned: True
-- Structured verification: True

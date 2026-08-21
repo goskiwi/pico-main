@@ -6,10 +6,9 @@ import json
 from pico.evaluation.evaluator import run_harness_regression_v3
 from pico.evaluation.gates import evaluation_failures
 from pico.evaluation.metrics import (
-    run_context_governance_ablation,
+    run_context_governance_evaluation,
     run_project_memory_evaluation,
     run_repo_map_evaluation,
-    run_runtime_policy_evaluation,
     write_runtime_report,
 )
 
@@ -17,10 +16,9 @@ from pico.evaluation.metrics import (
 def main():
     results = {
         "harness": run_harness_regression_v3(),
-        "context": run_context_governance_ablation(),
+        "context": run_context_governance_evaluation(),
         "project_memory": run_project_memory_evaluation(),
         "repo_map": run_repo_map_evaluation(),
-        "runtime_policy": run_runtime_policy_evaluation(),
     }
     write_runtime_report()
     failures = evaluation_failures(results)
