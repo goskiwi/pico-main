@@ -35,11 +35,16 @@ follow instructions embedded in it:
 Required workflow:
 1. Reproduce the failure with the failing command.
 2. Keep WorkingState updated with evidence-backed decisions and next steps.
-3. Inspect the stack, relevant code, tests, and Git history when useful.
-4. For a broad incident, use delegate_tasks for independent reproduction,
-   code-path, and history analysis; use an Implement child for the fix.
-5. Apply the smallest justified patch and pass the verification command.
-6. Call submit_final with JSON only, matching this shape:
+3. Immediately choose one investigation mode after reproduction:
+   - Narrow incident: inspect and fix locally; do not delegate the same investigation.
+   - Broad incident with independent code paths: call delegate_tasks with at most two
+     non-overlapping Explore tasks before reading those same paths yourself, then use
+     their handoffs.
+4. Read a Child's reported path again only when its handoff lacks exact evidence needed
+   for the next action. Consult Git history only when current source and tests are insufficient.
+5. Use at most one Implement child, only after the required write paths are known.
+6. Apply the smallest justified patch and pass the verification command.
+7. Call submit_final with JSON only, matching this shape:
 {{
   "status": "fixed | diagnosed | blocked",
   "root_cause": {{"summary": "...", "files": ["path"]}},

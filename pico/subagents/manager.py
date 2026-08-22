@@ -30,6 +30,17 @@ The parent has not seen your tool transcript, so make the handoff sufficient wit
 asking it to repeat the whole investigation.
 """.rstrip()
 
+IMPLEMENT_HANDOFF = """
+
+Runtime execution notes:
+- Do not run git commands. This child uses an isolated Git Worktree whose patch is
+  collected and integrated by the parent Runtime.
+- After making the required edits, call submit_final. The child Completion Gate
+  automatically runs the configured verification command against the final workspace.
+- Do not manually rerun that exact verifier; use tool calls only for additional focused
+  diagnostics that provide different evidence.
+""".rstrip()
+
 EXPLORE_TOOLS = (
     "list_files",
     "read_file",
@@ -338,6 +349,12 @@ class SubagentManager:
         prompt = record.spec.prompt + self._dependency_context(run_id, records, record)
         if record.spec.kind == "explore":
             prompt += EXPLORE_HANDOFF
+        else:
+            prompt += (
+                IMPLEMENT_HANDOFF
+                + "\nConfigured verification command:\n"
+                + str(self.parent.config.verification_command).strip()
+            )
         child_error = None
         try:
             child.ask(prompt)

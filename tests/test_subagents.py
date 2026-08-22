@@ -319,10 +319,11 @@ def test_implement_delegation_requires_verification_command(tmp_path):
 
 def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_path):
     root = repository(tmp_path)
+    clients = []
 
     def child_factory(spec):
         target = spec.allowed_write_paths[0]
-        return FakeModelClient(
+        client = FakeModelClient(
             [
                 ModelAction.tool(
                     "write_file",
@@ -335,6 +336,8 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
                 ModelAction.final(f"implemented {target}"),
             ]
         )
+        clients.append(client)
+        return client
 
     parent = build_parent(root, child_factory)
     result = parent.dependencies.subagents.delegate(
@@ -370,6 +373,11 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
     assert not (worktrees[0] / "cache.py").exists()
     assert (worktrees[1] / "cache.py").exists()
     assert not (worktrees[1] / "auth.py").exists()
+    assert all("Do not run git commands" in client.prompts[0] for client in clients)
+    assert all(
+        "Configured verification command:\npython -m pytest -q" in client.prompts[0]
+        for client in clients
+    )
 
     applied = parent.dependencies.subagents.integration.apply(
         ("implement-auth", "implement-cache")
