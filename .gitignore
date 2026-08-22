@@ -46,6 +46,7 @@ artifacts/*
 !artifacts/triage-urllib3-real.patch
 !artifacts/real-compaction.json
 !artifacts/real-compaction.patch
+!artifacts/semantic-compaction-ab.json
 release/
 readme_intro_locked/
 output/
