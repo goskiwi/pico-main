@@ -1,8 +1,8 @@
 {
   "artifact_type": "pico-triage-real-case",
-  "captured_at": "2026-08-22T11:18:46.130476+00:00",
+  "captured_at": "2026-08-22T12:22:58.075402+00:00",
   "case": {
-    "failing_baseline_commit": "a26b12ab20f31ce8f0be8f5bfbe04cd78a9f51b1",
+    "failing_baseline_commit": "1ddc2ab527691343073d39aa7613296af310dea0",
     "id": "urllib3_port_zero",
     "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
     "source_repository": "https://github.com/urllib3/urllib3.git"
@@ -23,48 +23,64 @@
     "visible_test_passed": true
   },
   "metrics": {
-    "cached_tokens": 0,
-    "child_count": 3,
-    "executed_tool_count": 14,
-    "input_tokens": 236245,
-    "model_request_count": 15,
-    "output_tokens": 2080,
-    "run_duration_ms": 198184
+    "cache_reporting_complete": true,
+    "cached_input_tokens": 425088,
+    "child_count": 0,
+    "executed_tool_count": 21,
+    "gross_input_tokens": 466230,
+    "model_request_count": 22,
+    "output_tokens": 2678,
+    "run_duration_ms": 294150,
+    "uncached_input_tokens": 41142
   },
   "model": "gpt-5.6-luna",
   "passed": true,
   "report": {
     "evidence": [
       {
-        "claim": "Initial focused reproduction failed 4 tests and passed 12 tests, covering pool, proxy, and URL netloc handling for port 0.",
+        "claim": "The incident reproduced with 4 failures and 12 passing focused tests.",
         "kind": "test_result",
         "line": null,
         "path": "",
-        "tool_call_id": "call_M3W7DieNkWPp9ve7rWJhZefc"
+        "tool_call_id": "call_S91DsoOYu2p2ptwXRNAQ99BU"
       },
       {
-        "claim": "Independent source tracing identified the three failing truthiness checks and confirmed omitted-port defaults must remain intact.",
+        "claim": "Url.netloc used `if self.port`, omitting an explicitly supplied port 0.",
         "kind": "source",
-        "line": null,
-        "path": "",
-        "tool_call_id": "call_rVgoXp0EQq2OmAZqlR5iwfbr"
+        "line": 159,
+        "path": "src/urllib3/util/url.py",
+        "tool_call_id": "call_QvaMa661ijsqOv7wUO3eHk4p"
       },
       {
-        "claim": "Required focused verification passes all 16 tests.",
-        "kind": "test_result",
-        "line": null,
-        "path": "",
-        "tool_call_id": "call_dZ9b8LcLlTNVSnO6OPIpsUdw"
+        "claim": "PoolManager.connection_from_host and ProxyManager initialization used truthiness checks that defaulted explicit port 0 to the scheme port.",
+        "kind": "source",
+        "line": 312,
+        "path": "src/urllib3/poolmanager.py",
+        "tool_call_id": "call_6uVKZbxsJLC1RG1Yr2PjywIU"
       },
       {
-        "claim": "Final diff contains only three explicit None-check changes in the two allowed production files, and git diff --check passes.",
+        "claim": "The focused verification command passed all 16 tests.",
         "kind": "other",
         "line": null,
         "path": "",
-        "tool_call_id": "call_1DZN7XfHqmOON5i8AYy77RYB"
+        "tool_call_id": "call_qfVyIk17lx3s4OdD83jZ82XV"
+      },
+      {
+        "claim": "Neighboring connectionpool, poolmanager, proxymanager, and util suites passed: 462 passed, 7 skipped.",
+        "kind": "test_result",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_FEp9y0ycflS6ioaTjCDBJbYk"
+      },
+      {
+        "claim": "The final diff changes only the three port checks in the two allowed production files; no tests or unrelated files changed.",
+        "kind": "source",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_0hsKTIiGLseQf432lsWU1m3E"
       }
     ],
-    "executed_tool_count": 14,
+    "executed_tool_count": 21,
     "incident_id": "urllib3-port-zero-ci",
     "patch": {
       "changed_paths": [
@@ -72,32 +88,32 @@
         "src/urllib3/util/url.py"
       ]
     },
-    "repository_revision": "a26b12ab20f31ce8f0be8f5bfbe04cd78a9f51b1",
+    "repository_revision": "1ddc2ab527691343073d39aa7613296af310dea0",
     "reproduction": {
-      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
-      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            .FF..F......F...                                                         [100%]\n=================================== FAILURES ===================================\n_____________ TestPoolManager.test_connection_from_host_port_zero ______________\n\nself = <test.test_poolmanager.TestPoolManager object at 0xffff812d36b0>\n\n    def test_connection_from_host_port_zero(self) -> None:\n        p = PoolManager()\n        pool = p.connection_from_host(\"example.com\", port=0, scheme=\"http\")\n>       assert pool.port == 0\nE       assert 80 == 0\nE        +  where 80 = <urllib3.connectionpool.HTTPConnectionPool object at 0xffff8141f200>.port\n\ntest/test_poolmanager.py:476: AssertionError\n____________________ TestProxyManager.test_proxy_port_zero _____________________\n\nself = <test.test_proxymanager.TestProxyManager object at 0xffff812d0560>\n\n    def test_proxy_port_zero(self) -> None:\n        with ProxyManager(\"http://proxy:0\") as p:\n            assert p.proxy is not None\n>           assert p.proxy.port == 0\nE           AssertionError: assert 80 == 0\nE            +  where 80 = Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None).port\nE            +    where Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None) = <urllib3.poolmanager.ProxyManager object at 0xffff810c3d70>.proxy\n\ntest/test_proxymanager.py:56: AssertionError\n_________ TestUtil.test_netloc[http://google.com:0/mail-google.com:0] __________\n\nself = <test.test_util.TestUtil object at 0xffff810a5b20>\nurl = 'http://google.com:0/mail', expected_netloc = 'google.com:0'\n\n    @pytest.mark.parametrize(\"url, expected_netloc\", url_netloc_map)\n    def test_netloc(self, url: str, expected_netloc: str | None) -> None:\n>       asser\n...[truncated 1291 chars]",
+      "command": "PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
+      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            .FF..F......F...                                                         [100%]\n=================================== FAILURES ===================================\n_____________ TestPoolManager.test_connection_from_host_port_zero ______________\ntest/test_poolmanager.py:476: in test_connection_from_host_port_zero\n    assert pool.port == 0\nE   assert 80 == 0\nE    +  where 80 = <urllib3.connectionpool.HTTPConnectionPool object at 0xffff7cbc30b0>.port\n____________________ TestProxyManager.test_proxy_port_zero _____________________\ntest/test_proxymanager.py:56: in test_proxy_port_zero\n    assert p.proxy.port == 0\nE   AssertionError: assert 80 == 0\nE    +  where 80 = Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None).port\nE    +    where Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None) = <urllib3.poolmanager.ProxyManager object at 0xffff7c863b00>.proxy\n_________ TestUtil.test_netloc[http://google.com:0/mail-google.com:0] __________\ntest/test_util.py:430: in test_netloc\n    assert parse_url(url).netloc == expected_netloc\nE   AssertionError: assert 'google.com' == 'google.com:0'\nE     \nE     - google.com:0\nE     ?           --\nE     + google.com\n_____________ TestUtil.test_netloc[http://localhost:0-localhost:0] _____________\ntest/test_util.py:430: in test_netloc\n    assert parse_url(url).netloc == expected_netloc\nE   AssertionError: assert 'localhost' == 'localhost:0'\nE     \nE     - localhost:0\nE     ?          --\nE     + localhost\n=========================== short test summary info ============================\nFAILED test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero\nFAILED test/test_proxymanager.py::TestProxyManager::test_proxy_po\n...[truncated 251 chars]",
       "status": "reproduced",
-      "tool_call_id": "call_M3W7DieNkWPp9ve7rWJhZefc"
+      "tool_call_id": "call_S91DsoOYu2p2ptwXRNAQ99BU"
     },
     "root_cause": {
       "files": [
-        "src/urllib3/poolmanager.py",
-        "src/urllib3/util/url.py"
+        "src/urllib3/util/url.py",
+        "src/urllib3/poolmanager.py"
       ],
-      "summary": "Explicit port 0 was incorrectly treated as an omitted port by truthiness checks. PoolManager and ProxyManager replaced it with scheme defaults, while Url.netloc omitted the :0 suffix."
+      "summary": "Explicit port 0 was treated as an omitted port through truthiness checks, causing URL netloc rendering and PoolManager/ProxyManager defaulting to replace it with or omit it instead of preserving :0."
     },
-    "run_id": "run_20260822-111525-09ba12",
+    "run_id": "run_20260822-121801-b03ce5",
     "schema_version": "pico-triage-report",
     "status": "fixed",
     "verification": {
-      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
-      "output": "................                                                         [100%]\n16 passed in 0.67s",
+      "command": "PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
+      "output": "exit_code: 0\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            ................                                                         [100%]\n16 passed in 0.67s\n            stderr:\n            (empty)",
       "status": "passed"
     }
   },
   "runtime": {
     "branch": "luna",
-    "commit_sha": "40beeebc16590231046074c5a73298c02cd8aa85",
+    "commit_sha": "40f7155778e43a2c0bdabc3c3e631611cfd4603f",
     "working_tree_dirty": false
   }
 }
