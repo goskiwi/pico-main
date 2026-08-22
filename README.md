@@ -221,7 +221,9 @@ Verification 和工具步数由 Run Log 与 RunEvidence 确定性派生，而不
 baseline，并在 Agent 停止后才注入 Hidden Verifier：
 
 ```bash
-uv run python scripts/run_click_triage.py --model gpt-5.6-luna
+uv run python scripts/run_real_triage.py \
+  --task click_empty_bytes_echo \
+  --model gpt-5.6-luna
 ```
 
 当前真实运行绑定 Runtime commit `9e3247d`，模型通过 Explore + Implement Child 定位并修复

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the first real-model Pico Triage case against Click."""
+"""Run one frozen Real OSS task through Pico Triage."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ if str(ROOT) not in sys.path:
 from applications.triage import TriageCase, TriageWorkflow
 from pico import OpenAICompatibleModelClient, PicoConfig
 from pico.config import load_project_env, provider_env
+from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, parse_command_invocation
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
 from scripts.run_official_public_tests import apply_patch
@@ -30,12 +32,6 @@ from scripts.run_real_oss_validation import (
     matches,
     require_clean_runtime,
     run_verifier,
-)
-
-TASK_ID = "click_empty_bytes_echo"
-VISIBLE_COMMAND = (
-    "PYTHONPATH=src python -m pytest -q -p no:cacheprovider "
-    "tests/test_utils.py::test_echo_custom_file"
 )
 
 
@@ -52,7 +48,7 @@ def _git(root, *args):
     return result.stdout.strip()
 
 
-def prepare_click_workspace(workspace, real_task, official_task):
+def prepare_triage_workspace(workspace, real_task, official_task):
     workspace = Path(workspace).resolve()
     fixture = (ROOT / real_task["fixture_repo"]).resolve()
     if workspace.exists():
@@ -72,8 +68,13 @@ def prepare_click_workspace(workspace, real_task, official_task):
     return _git(workspace, "rev-parse", "HEAD")
 
 
-def run_visible_test(workspace, image):
-    argv, env = parse_command_invocation(VISIBLE_COMMAND)
+def visible_command(official_task):
+    nodes = " ".join(shlex.quote(item) for item in official_task["official_test_nodes"])
+    return f"PYTHONPATH=src python -m pytest -q -p no:cacheprovider {nodes}"
+
+
+def run_visible_test(workspace, image, command):
+    argv, env = parse_command_invocation(command)
     result = DockerSandbox(
         workspace,
         DockerSandboxConfig(image=image),
@@ -87,8 +88,37 @@ def run_visible_test(workspace, image):
     }
 
 
+def collect_run_metrics(workspace, report):
+    store = RunStore(Path(workspace) / ".pico" / "runs")
+    events = store.read_events(report.run_id)
+    projection = store.replay(report.run_id)
+    turns = [entry for entry in events if entry.kind == "turn_metrics"]
+
+    def total(field):
+        return sum(
+            int(entry.payload.get("completion_metadata", {}).get(field) or 0)
+            for entry in turns
+        )
+
+    child_count = sum(
+        len(entry.args.get("tasks", ()))
+        for entry in events
+        if entry.kind == "assistant_tool_call" and entry.name == "delegate_tasks"
+    )
+    return {
+        "run_duration_ms": projection.run_duration_ms,
+        "model_request_count": projection.model_request_count,
+        "executed_tool_count": projection.executed_tool_count,
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "cached_tokens": total("cached_tokens"),
+        "child_count": child_count,
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
+    parser.add_argument("--task", default="click_empty_bytes_echo")
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -99,19 +129,26 @@ def main(argv=None):
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=ROOT / "artifacts" / "triage-real-workspaces" / TASK_ID,
     )
     parser.add_argument(
         "--artifact",
         type=Path,
-        default=ROOT / "artifacts" / "triage-click-real.json",
     )
     parser.add_argument(
         "--patch",
         type=Path,
-        default=ROOT / "artifacts" / "triage-click-real.patch",
     )
     args = parser.parse_args(argv)
+    project_name = args.task.split("_", 1)[0]
+    args.workspace = args.workspace or (
+        ROOT / "artifacts" / "triage-real-workspaces" / args.task
+    )
+    args.artifact = args.artifact or (
+        ROOT / "artifacts" / f"triage-{project_name}-real.json"
+    )
+    args.patch = args.patch or (
+        ROOT / "artifacts" / f"triage-{project_name}-real.patch"
+    )
 
     runtime = git_metadata()
     require_clean_runtime(runtime)
@@ -123,18 +160,25 @@ def main(argv=None):
         "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
     )
     real_manifest = load_real_manifest(ROOT / "validation" / "real_oss_suite.json")
-    real_task = next(task for task in real_manifest["tasks"] if task["id"] == TASK_ID)
+    real_task = next(
+        (task for task in real_manifest["tasks"] if task["id"] == args.task),
+        None,
+    )
     official_manifest = load_official_manifest(
         ROOT / "validation" / "official_public_tests.json"
     )
     official_task = next(
-        task for task in official_manifest["tasks"] if task["id"] == TASK_ID
+        (task for task in official_manifest["tasks"] if task["id"] == args.task),
+        None,
     )
-    baseline_sha = prepare_click_workspace(args.workspace, real_task, official_task)
+    if real_task is None or official_task is None:
+        raise ValueError(f"unknown Real Triage task: {args.task}")
+    command = visible_command(official_task)
+    baseline_sha = prepare_triage_workspace(args.workspace, real_task, official_task)
     before = file_snapshot(args.workspace)
-    initial = run_visible_test(args.workspace, args.sandbox_image)
+    initial = run_visible_test(args.workspace, args.sandbox_image, command)
     if initial["ok"]:
-        raise RuntimeError("Click visible CI test did not fail before Triage")
+        raise RuntimeError(f"{args.task} visible CI test did not fail before Triage")
 
     def model_client():
         return OpenAICompatibleModelClient(
@@ -157,26 +201,24 @@ def main(argv=None):
         sandbox_factory=lambda root: DockerSandbox(root, sandbox_config),
     ).run(
         TriageCase(
-            incident_id="click-empty-bytes-echo-ci",
+            incident_id=args.task.replace("_", "-") + "-ci",
             repository_root=args.workspace,
             revision=baseline_sha,
-            failing_command=VISIBLE_COMMAND,
-            verification_command=VISIBLE_COMMAND,
+            failing_command=command,
+            verification_command=command,
             ci_log="\n".join(
                 part for part in (initial["stdout"], initial["stderr"]) if part
             ),
-            issue=(
-                "click.echo writing an empty bytes or bytearray value to a binary "
-                "file raises TypeError when newline output is enabled."
-            ),
+            issue=real_task["prompt"],
             constraints=(
                 "Do not modify tests",
-                "Only modify production Python files under src/click",
-                "Preserve existing text output behavior",
+                "Only modify paths matching: "
+                + ", ".join(real_task["allowed_change_globs"]),
+                "Preserve public behavior outside the reported failure",
             ),
         )
     )
-    visible_after = run_visible_test(args.workspace, args.sandbox_image)
+    visible_after = run_visible_test(args.workspace, args.sandbox_image, command)
     hidden = run_verifier(args.workspace, real_task, args.hidden_image)
     after = file_snapshot(args.workspace)
     changed = changed_paths(before, after)
@@ -185,9 +227,14 @@ def main(argv=None):
     out_of_scope = [
         path for path in changed if not matches(path, real_task["allowed_change_globs"])
     ]
+    root_files = tuple(report.root_cause.files)
+    root_cause_top1 = bool(root_files and root_files[0] in changed)
+    root_cause_top3 = bool(set(root_files[:3]) & set(changed))
+    metrics = collect_run_metrics(args.workspace, report)
     passed = bool(
         report.status == "fixed"
         and report.reproduction.status == "reproduced"
+        and root_cause_top3
         and visible_after["ok"]
         and hidden["ok"]
         and patch_text
@@ -200,17 +247,20 @@ def main(argv=None):
         "runtime": runtime,
         "model": args.model,
         "case": {
-            "id": TASK_ID,
+            "id": args.task,
             "source_repository": real_task["source_repository"],
             "source_commit": real_task["source_commit"],
             "failing_baseline_commit": baseline_sha,
         },
+        "metrics": metrics,
         "report": report.model_dump(mode="json"),
         "checks": {
             "initial_failure_reproduced": not initial["ok"],
             "visible_test_passed": visible_after["ok"],
             "hidden_verifier_passed": hidden["ok"],
             "patch_recorded": bool(patch_text),
+            "root_cause_top1": root_cause_top1,
+            "root_cause_top3": root_cause_top3,
             "scope_valid": not forbidden and not out_of_scope,
             "changed_paths": changed,
             "forbidden_changes": forbidden,
