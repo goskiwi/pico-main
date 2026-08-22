@@ -35,6 +35,10 @@ IMPLEMENT_HANDOFF = """
 Runtime execution notes:
 - Do not run git commands. This child uses an isolated Git Worktree whose patch is
   collected and integrated by the parent Runtime.
+- The Parent already investigated the problem and supplied the implementation
+  specification. Treat that scope as authoritative: do not restart broad discovery.
+- Read only the declared write paths and make the first mutation after at most three
+  read_file calls. If the specification conflicts with the files, report the conflict.
 - After making the required edits, call submit_final. The child Completion Gate
   automatically runs the configured verification command against the final workspace.
 - Do not manually rerun that exact verifier; use tool calls only for additional focused
@@ -49,10 +53,7 @@ EXPLORE_TOOLS = (
     "update_working_state",
 )
 IMPLEMENT_TOOLS = (
-    "list_files",
     "read_file",
-    "read_artifact",
-    "search",
     "run_shell",
     "write_file",
     "patch_file",

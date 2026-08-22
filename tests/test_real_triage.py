@@ -114,6 +114,7 @@ def test_run_summary_aggregates_parent_and_child_usage():
         model_request_count=1,
         executed_tool_count=2,
         run_duration_ms=50,
+        status="completed",
     )
 
     assert summarize_runs(((turns, projection), (turns, projection))) == {
@@ -122,6 +123,7 @@ def test_run_summary_aggregates_parent_and_child_usage():
         "executed_tool_count": 4,
         "sum_duration_ms": 100,
         "max_duration_ms": 50,
+        "status_counts": {"completed": 2},
         "gross_input_tokens": 60,
         "cached_input_tokens": 40,
         "uncached_input_tokens": 20,

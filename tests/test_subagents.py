@@ -258,6 +258,12 @@ def test_explore_handoff_feeds_separate_implement_delegation(tmp_path):
     assert first["tasks"][0]["status"] == "completed"
     assert second["tasks"][0]["status"] == "completed"
     assert "change feature.py line 1" in clients["implement-feature"].prompts[0]
+    assert "make the first mutation after at most three" in clients[
+        "implement-feature"
+    ].prompts[0]
+    implement_tools = clients["implement-feature"].action_tool_surfaces[0]
+    assert "search" not in implement_tools
+    assert "list_files" not in implement_tools
 
 
 def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):

@@ -41,6 +41,8 @@ Required workflow:
      non-overlapping Explore tasks. Do not perform the same exploration in the Parent.
    - If three Parent discovery calls have not established the fix, the next discovery
      action must be delegate_tasks rather than a fourth Search, List, or Read call.
+   - Each Explore prompt must include the exact failing test names observed during
+     reproduction and identify focused tests that passed as negative evidence.
 4. One delegate_tasks call must contain only Explore tasks or only Implement tasks.
    Never combine Explore and Implement in one DAG. After Explore completes, the Parent
    must understand the handoffs and write a concrete implementation specification.
@@ -48,6 +50,8 @@ Required workflow:
    for the next action. Consult Git history only when current source and tests are insufficient.
 6. Use at most one Implement child, in a separate delegate_tasks call, only after the
    required write paths and exact change are known.
+   After it completes, the Parent's next action must be apply_task_patches for that task.
+   Never reread and reproduce a completed Implement Child's edits in the Parent.
 7. Treat passing cases in the focused reproduction command as negative evidence: do not
    modify their code paths merely because they contain similar-looking expressions.
    Apply the smallest patch justified by the actual failures and pass verification.

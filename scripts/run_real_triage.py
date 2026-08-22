@@ -127,6 +127,9 @@ def summarize_runs(runs):
     events = [entry for run_events, _projection in runs for entry in run_events]
     projections = [projection for _events, projection in runs]
     durations = [projection.run_duration_ms for projection in projections]
+    status_counts = {}
+    for projection in projections:
+        status_counts[projection.status] = status_counts.get(projection.status, 0) + 1
     turns = [entry for entry in events if entry.kind == "turn_metrics"]
     return {
         "run_count": len(runs),
@@ -138,6 +141,7 @@ def summarize_runs(runs):
         ),
         "sum_duration_ms": sum(durations),
         "max_duration_ms": max(durations, default=0),
+        "status_counts": status_counts,
         **usage_metrics(turns),
     }
 

@@ -53,6 +53,9 @@ def test_triage_prompt_marks_incident_text_as_untrusted(tmp_path):
     assert "Never combine Explore and Implement" in prompt
     assert "passing cases" in prompt
     assert "negative evidence" in prompt
+    assert "exact failing test names" in prompt
+    assert "next action must be apply_task_patches" in prompt
+    assert "Never reread and reproduce" in prompt
 
 
 def test_triage_report_rejects_unknown_evidence_call(tmp_path):
