@@ -309,6 +309,7 @@ def main(argv=None):
         "model": args.model,
         "policy": {
             "max_tool_executions": args.max_tool_executions,
+            "provider_base_url": base_url,
             "run_timeout_seconds": args.run_timeout_seconds,
         },
         "case": {

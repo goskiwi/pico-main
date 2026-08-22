@@ -75,6 +75,7 @@
   "passed": true,
   "policy": {
     "max_tool_executions": 40,
+    "provider_base_url": "https://www.rightapi.ai/codex/v1",
     "run_timeout_seconds": 900
   },
   "report": {

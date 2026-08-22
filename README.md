@@ -94,6 +94,10 @@ Worktree、独立 Model Client、Session、Run Log 和 Artifact namespace；
 复核一次。无依赖且写文件重叠的实现任务会在规划阶段被拒绝；有依赖的实现任务会把
 上游 Patch 作为临时基线后继续工作。
 
+应用预计需要超过 3 次 Search/List/Read 时才派 Explore；一次委派不能混合 Explore 与
+Implement。Parent 先消费 Explore 交接并合成规格，再单独派 Implement，成功后必须通过
+`apply_task_patches` 集成。每个 Child 最多执行 12 个 Tool，避免同步父子流程无限扩散。
+
 Parent 只接收 Child 的摘要、Run Log receipt 和 Patch 引用，不复制 Child 的工具历史。
 相同 Parent Run 中已完成的 Task ID 会复用现有结果；失败任务只阻断依赖它的下游分支。
 子任务 DAG 和应用状态只属于当前 Parent 进程；Child Run Log 和 Patch
@@ -189,7 +193,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
 | Real Click Triage | 1/1 | `gpt-5.6-luna`；可见测试与停止后 Hidden Verifier 均通过，只修改 `src/click/utils.py` |
 | Real Packaging Triage | 1/1 | `gpt-5.6-luna`；6 个可见测试与 Hidden Verifier 均通过，Root Cause Top-1/Top-3 命中 |
-| Real urllib3 Triage | 1/1 | `gpt-5.6-luna`；16 个可见测试与 Hidden Verifier 均通过，自适应选择 Parent 完成两文件修复 |
+| Real urllib3 Triage | 1/1 | `gpt-5.6-luna`；Explore → Parent 合成 → Implement → Patch 集成完成两文件修复，Hidden Verifier 通过 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
@@ -236,30 +240,32 @@ uv run python scripts/run_real_triage.py \
 结构化证据见 `artifacts/triage-click-real.json`，实际 Patch 见
 `artifacts/triage-click-real.patch`。
 
-第二个真实案例 `packaging_non_string_version` 绑定 Runtime commit `7334026`。模型复现 6 个
+第二个真实案例 `packaging_non_string_version` 绑定 Runtime commit `b149260`。模型复现 6 个
 非字符串版本失败，用 9 个 Tool Call 定位 `Version.__init__` 的字符串类型假设，只修改
 `src/packaging/version.py`；可见测试、Hidden Verifier、Root Cause Top-1/Top-3 和范围检查
 全部通过。证据见 `artifacts/triage-packaging-real.json` 与
 `artifacts/triage-packaging-real.patch`。
 
-第三个真实案例 `urllib3_port_zero` 绑定 Runtime commit `40f7155`。自适应编排将它判定为
-可由 Parent 直接处理，定位显式端口 `0` 被 truthiness 判断误当成缺省端口的问题，只修改
-`src/urllib3/poolmanager.py` 与 `src/urllib3/util/url.py`。修复后 16 个可见测试与 Hidden
-Verifier 全部通过，证据见 `artifacts/triage-urllib3-real.json` 与
-`artifacts/triage-urllib3-real.patch`。
+第三个真实案例 `urllib3_port_zero` 绑定 Runtime commit `19d8793`，使用两阶段父子编排：
+Explore Child 隔离源码调查，Parent 合成两文件实现规格，Implement Child 在独立 Worktree
+完成修改，Parent 通过 `apply_task_patches` 集成。Parent 没有重复 Patch；两个 Child 与
+Parent 均完成，16 个可见测试和停止后 Hidden Verifier 通过。证据见
+`artifacts/triage-urllib3-real.json` 与 `artifacts/triage-urllib3-real.patch`。
 
-最新真实运行将累计 Input 拆成 Gross、Cached 与 Uncached，避免把缓存前缀重复计费：
+最新真实运行分别统计 Parent、Children 和 Total，避免把 Child 成本遗漏在多 Agent 结果之外：
 
-| Case | Tool Calls | Children | Duration | Gross Input | Cached | Uncached |
-|---|---:|---:|---:|---:|---:|---:|
-| Click | 9 | 0 | 97.5s | 114.3k | 93.8k | 20.4k |
-| Packaging | 9 | 0 | 90.1s | 146.3k | 104.4k | 41.8k |
-| urllib3 | 21 | 0 | 294.2s | 466.2k | 425.1k | 41.1k |
+| Case | Parent Tools | Child Tools / Runs | Wall Time | Parent Uncached | Total Uncached |
+|---|---:|---:|---:|---:|---:|
+| Click | 9 | 0 / 0 | 97.5s | 20.4k | 20.4k |
+| Packaging | 9 | 0 / 0 | 86.2s | 24.9k | 24.9k |
+| urllib3 | 11 | 16 / 2 | 343.6s | 68.5k | 247.0k |
 
-Packaging 相比旧证据从 12 个 Tool Call、113 秒降到 9 个、90 秒，Uncached Input 从
-194.5k 降到 41.8k。urllib3 的 Uncached Input 从 236.2k 降到 41.1k，但本地调查和扩大
-回归验证使 Tool Call 从 14 增至 21、耗时从 198 秒增至 294 秒；结果明确表明多 Agent、
-单 Agent 与缓存命中优化的是不同维度，不能用 Gross Input 或单次成功掩盖延迟回归。
+Packaging 相比旧证据从 12 个 Tool Call、113 秒降到 9 个、86 秒，Uncached Input 从
+194.5k 降到 24.9k。urllib3 的当前多 Agent Run 将 Parent Tool 控制为 11 个，但两个
+Child 使总 Tool 达到 27 个、Total Uncached 达到 247.0k，Wall Time 为 344 秒。该 Run
+切换了 Provider 路由，不能作为严格的单/多 Agent 性能 A/B；它证明的是当前隔离、交接、
+Worktree、Patch 集成和 Verifier 链路端到端可用，同时也如实显示父子型编排保护 Parent
+上下文但不保证降低总成本或延迟。
 
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 
