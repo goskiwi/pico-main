@@ -200,6 +200,15 @@ class OpenAICompatibleModelClient:
         self._action_input = []
         self._pending_call_ids = []
 
+    def new_isolated_client(self):
+        return OpenAICompatibleModelClient(
+            self.model,
+            self.base_url,
+            self.api_key,
+            self.temperature,
+            self.timeout,
+        )
+
     @staticmethod
     def estimate_action_tool_tokens(action_tools, token_counter):
         serialized = json.dumps(

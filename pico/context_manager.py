@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import tiktoken
 
+from .compaction_brief import SemanticBriefSummarizer
 from .features.memory import WorkingState
 
 DEFAULT_SECTION_BUDGETS = {
@@ -116,6 +117,12 @@ class ContextManager:
         model = str(getattr(getattr(agent, "model_client", None), "model", ""))
         self.tokenizer = Tokenizer(model)
         self._last_history_metadata = {}
+        isolated_client = getattr(agent.model_client, "new_isolated_client", None)
+        self.semantic_summarizer = (
+            SemanticBriefSummarizer(isolated_client)
+            if callable(isolated_client)
+            else None
+        )
 
     def build(
         self,
@@ -393,16 +400,67 @@ class ContextManager:
         threshold_tokens = max(1, self.total_budget - reserve_tokens)
         if context_tokens <= threshold_tokens:
             return
-        compacted = run_log.compact(
-            retain_tokens=self.compaction_keep_recent_tokens,
-            token_counter=self.tokenizer.count,
-        )
+        semantic_call = None
+        semantic_error = ""
+        compacted = None
+        if self.semantic_summarizer is not None:
+            call_count = len(self.semantic_summarizer.calls)
+            try:
+                timeout = (
+                    self.agent.run.execution_context.bounded_timeout()
+                    if self.agent.run.execution_context is not None
+                    else None
+                )
+                compacted = run_log.compact(
+                    retain_tokens=self.compaction_keep_recent_tokens,
+                    token_counter=self.tokenizer.count,
+                    summary_builder=lambda events: self.semantic_summarizer.summarize(
+                        events,
+                        self.agent.run.task_state.working_state,
+                        request_timeout=timeout,
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 - deterministic fallback is mandatory
+                semantic_error = self.agent.redact_text(
+                    f"{type(exc).__name__}: {exc}"
+                )[:400]
+            if len(self.semantic_summarizer.calls) > call_count:
+                semantic_call = self.semantic_summarizer.calls[-1]
+        semantic_used = compacted is not None
+        if semantic_call is not None and not semantic_used and not semantic_error:
+            semantic_error = "semantic summary was not smaller than covered history"
+        if compacted is None:
+            compacted = run_log.compact(
+                retain_tokens=self.compaction_keep_recent_tokens,
+                token_counter=self.tokenizer.count,
+            )
         if compacted is None:
             return
         event, metadata = compacted
         self.agent.apply_run_event(event)
         return {
             **metadata,
+            "mode": (
+                "semantic_six_section"
+                if semantic_used
+                else "runtime_summary"
+            ),
+            "semantic_summary": {
+                "status": (
+                    "completed"
+                    if semantic_used
+                    else ("fallback" if semantic_error else "unavailable")
+                ),
+                "duration_ms": (
+                    semantic_call.get("duration_ms", 0) if semantic_call else 0
+                ),
+                "completion_metadata": (
+                    semantic_call.get("completion_metadata", {})
+                    if semantic_call
+                    else {}
+                ),
+                "error": semantic_error,
+            },
             "trigger_context_tokens": context_tokens,
             "local_context_tokens": local_context_tokens,
             "trigger_threshold_tokens": threshold_tokens,

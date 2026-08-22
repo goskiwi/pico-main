@@ -242,6 +242,8 @@ def main(argv=None):
             DockerSandboxConfig(image=args.sandbox_image),
         ),
     )
+    # This runner remains the deterministic baseline for semantic-compaction A/B.
+    agent.prompt.context.semantic_summarizer = None
     answer = agent.ask(build_prompt())
     events = agent.dependencies.run_store.read_events(agent.run.task_state.run_id)
     analysis = analyze_run(events, agent.run.task_state)

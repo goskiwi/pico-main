@@ -1,0 +1,311 @@
+{
+  "artifact_type": "pico-semantic-compaction-ab",
+  "captured_at": "2026-08-22T16:26:29.627981+00:00",
+  "comparison": {
+    "baseline_critical_token_retained": false,
+    "baseline_task_passed": true,
+    "semantic_critical_token_retained": true,
+    "semantic_summary_request_count": 2,
+    "semantic_task_passed": true,
+    "wall_duration_delta_ms": 44500
+  },
+  "critical_token": "ORBIT-DELTA-7319",
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "provider_base_url": "https://www.rightapi.ai/codex/v1",
+  "runtime": {
+    "branch": "master",
+    "commit_sha": "5ab35c7a2a1a6ec28262ca882d6aca6de8cc7996",
+    "working_tree_dirty": false
+  },
+  "variants": {
+    "deterministic": {
+      "analysis": {
+        "compaction_count": 2,
+        "compactions": [
+          {
+            "covered_events": 11,
+            "local_context_tokens": 23962,
+            "mode": "runtime_summary",
+            "retained_events": 8,
+            "retained_tokens": 7726,
+            "summary_tokens": 493,
+            "trigger_context_tokens": 31018,
+            "trigger_threshold_tokens": 23808
+          },
+          {
+            "covered_events": 9,
+            "local_context_tokens": 28686,
+            "mode": "runtime_summary",
+            "retained_events": 10,
+            "retained_tokens": 7840,
+            "summary_tokens": 989,
+            "trigger_context_tokens": 31742,
+            "trigger_threshold_tokens": 23808
+          }
+        ],
+        "evidence_read_paths": [
+          "evidence/segment_01.md",
+          "evidence/segment_02.md",
+          "evidence/segment_03.md",
+          "evidence/segment_04.md",
+          "evidence/segment_05.md",
+          "evidence/segment_06.md",
+          "evidence/segment_07.md",
+          "evidence/segment_08.md",
+          "evidence/segment_09.md",
+          "evidence/segment_10.md",
+          "evidence/segment_11.md",
+          "evidence/segment_12.md"
+        ],
+        "max_single_request_input_tokens": 29804,
+        "model_request_count": 18,
+        "provider_session_reset_count": 2,
+        "resume_count": 0,
+        "successful_mutation_count": 1,
+        "working_state": {
+          "constraints": [
+            "Read every listed evidence file exactly once in order.",
+            "Modify only src/normalizer.py.",
+            "Preserve the public API."
+          ],
+          "decisions": [
+            "normalize_label should strip leading and trailing whitespace, lowercase the value, split on all whitespace, and join words with one ASCII hyphen while preserving non-whitespace punctuation and using no dependency or regular expression."
+          ],
+          "goal": "Complete a controlled long-context coding task.\n\nFirst call update_working_state. Record these constraints: read every listed evidence\nfile exactly once in order, modify only src/normalizer.py, and preserve the public API.\nRecord a next step to read all evidence before editing.\n\nThen read every file below with one read_file call per file, using start=1 and end=200.\nDo not use Search, List, project memory, or delegation:\n- evidence/segment_01.md\n- evidence/segment_02.md\n- evidence/segment_03.md\n- evidence/segment_04.md\n- evidence/segment_05.md\n- evidence/segment_06.md\n- evidence/segment_07.md\n- evidence/segment_08.md\n- evidence/segment_09.md\n- evidence/segment_10.md\n- evidence/segment_11.md\n- evidence/segment_12.md\n\nAfter all evidence is read, call update_working_state again to record the evidence-backed\nnormalization decision and the concrete edit as the next step. Read src/normalizer.py, apply\nthe smallest exact patch, and call submit_final. The Runtime owns verification.\n\nThe first evidence file contains a FINAL_RESPONSE_TOKEN near its end. Do not copy that token into WorkingState or any tool argument. Preserve it only in conversational context, and include it verbatim in the final answer.\n",
+          "next_steps": [
+            "Read src/normalizer.py, apply the smallest exact patch, then submit completion."
+          ],
+          "schema_version": "run-working-state-v1"
+        }
+      },
+      "changed_paths": [
+        "src/normalizer.py"
+      ],
+      "checks": {
+        "compaction_triggered": true,
+        "critical_token_retained": false,
+        "evidence_read_once_in_order": true,
+        "hidden_verifier_passed": true,
+        "initial_failure_reproduced": true,
+        "patch_recorded": true,
+        "provider_session_reset": true,
+        "scope_valid": true,
+        "single_successful_mutation": true,
+        "token_not_in_working_state": true,
+        "visible_verifier_passed": true
+      },
+      "final_answer": "Updated [src/normalizer.py](/workspace/src/normalizer.py:1) with the required deterministic normalization: trim, lowercase, split on whitespace, and join with ASCII hyphens. The public API is unchanged.",
+      "passed_task": true,
+      "run_id": "run_20260822-162112-66836a",
+      "summary_calls": [],
+      "variant": "deterministic",
+      "wall_duration_ms": 135570
+    },
+    "semantic": {
+      "analysis": {
+        "compaction_count": 2,
+        "compactions": [
+          {
+            "covered_events": 11,
+            "local_context_tokens": 23964,
+            "mode": "semantic_six_section",
+            "retained_events": 8,
+            "retained_tokens": 7726,
+            "summary_tokens": 1054,
+            "trigger_context_tokens": 31057,
+            "trigger_threshold_tokens": 23808
+          },
+          {
+            "covered_events": 9,
+            "local_context_tokens": 29421,
+            "mode": "semantic_six_section",
+            "retained_events": 8,
+            "retained_tokens": 7730,
+            "summary_tokens": 1661,
+            "trigger_context_tokens": 32349,
+            "trigger_threshold_tokens": 23808
+          }
+        ],
+        "evidence_read_paths": [
+          "evidence/segment_01.md",
+          "evidence/segment_02.md",
+          "evidence/segment_03.md",
+          "evidence/segment_04.md",
+          "evidence/segment_05.md",
+          "evidence/segment_06.md",
+          "evidence/segment_07.md",
+          "evidence/segment_08.md",
+          "evidence/segment_09.md",
+          "evidence/segment_10.md",
+          "evidence/segment_11.md",
+          "evidence/segment_12.md"
+        ],
+        "max_single_request_input_tokens": 30411,
+        "model_request_count": 17,
+        "provider_session_reset_count": 2,
+        "resume_count": 0,
+        "successful_mutation_count": 1,
+        "working_state": {
+          "constraints": [
+            "Read every listed evidence file exactly once in the specified order.",
+            "Modify only src/normalizer.py.",
+            "Preserve the public API."
+          ],
+          "decisions": [
+            "Normalize labels by trimming boundary whitespace, lowercasing, splitting on whitespace, and joining terms with one ASCII hyphen; preserve non-whitespace punctuation and support spaces, tabs, and newlines without regex or dependencies."
+          ],
+          "goal": "Complete a controlled long-context coding task.\n\nFirst call update_working_state. Record these constraints: read every listed evidence\nfile exactly once in order, modify only src/normalizer.py, and preserve the public API.\nRecord a next step to read all evidence before editing.\n\nThen read every file below with one read_file call per file, using start=1 and end=200.\nDo not use Search, List, project memory, or delegation:\n- evidence/segment_01.md\n- evidence/segment_02.md\n- evidence/segment_03.md\n- evidence/segment_04.md\n- evidence/segment_05.md\n- evidence/segment_06.md\n- evidence/segment_07.md\n- evidence/segment_08.md\n- evidence/segment_09.md\n- evidence/segment_10.md\n- evidence/segment_11.md\n- evidence/segment_12.md\n\nAfter all evidence is read, call update_working_state again to record the evidence-backed\nnormalization decision and the concrete edit as the next step. Read src/normalizer.py, apply\nthe smallest exact patch, and call submit_final. The Runtime owns verification.\n\nThe first evidence file contains a FINAL_RESPONSE_TOKEN near its end. Do not copy that token into WorkingState or any tool argument. Preserve it only in conversational context, and include it verbatim in the final answer.\n",
+          "next_steps": [
+            "Read src/normalizer.py, then apply the smallest public-API-preserving normalization implementation."
+          ],
+          "schema_version": "run-working-state-v1"
+        }
+      },
+      "changed_paths": [
+        "src/normalizer.py"
+      ],
+      "checks": {
+        "compaction_triggered": true,
+        "critical_token_retained": true,
+        "evidence_read_once_in_order": true,
+        "hidden_verifier_passed": true,
+        "initial_failure_reproduced": true,
+        "patch_recorded": true,
+        "provider_session_reset": true,
+        "scope_valid": true,
+        "single_successful_mutation": true,
+        "token_not_in_working_state": true,
+        "visible_verifier_passed": true
+      },
+      "final_answer": "Implemented `normalize_label` in `src/normalizer.py` to trim boundary whitespace, lowercase input, and collapse whitespace runs (including tabs and newlines) into ASCII hyphens while preserving punctuation. ORBIT-DELTA-7319",
+      "passed_task": true,
+      "run_id": "run_20260822-162329-8c03b7",
+      "summary_calls": [
+        {
+          "brief": {
+            "constraints_preferences": [
+              "Canonical WorkingState schema_version: `run-working-state-v1`.",
+              "Read every listed evidence file exactly once, in the specified order, with one `read_file` call per file using `start=1` and `end=200`.",
+              "Do not use Search, List, project memory, or delegation while reading evidence.",
+              "Modify only `src/normalizer.py`.",
+              "Preserve the public API.",
+              "Do not edit until every evidence file has been read.",
+              "After all evidence is read, call `update_working_state` again to record the evidence-backed normalization decision and concrete edit as the next step.",
+              "The Runtime owns verification.",
+              "The literal marked `FINAL_RESPONSE_TOKEN` must not be copied into WorkingState or any tool argument; preserve it only in conversational context and include it verbatim in the final answer."
+            ],
+            "critical_context": [
+              "Canonical goal: Complete a controlled long-context coding task.",
+              "Canonical WorkingState already recorded constraints: `Read every listed evidence file exactly once in the specified order.`, `Modify only src/normalizer.py.`, and `Preserve the public API.`",
+              "Canonical WorkingState next step already recorded: `Read all evidence files before editing.`",
+              "Evidence read so far, exactly once and in order, each using `read_file` with `start=1` and `end=200`: `evidence/segment_01.md`, `evidence/segment_02.md`, `evidence/segment_03.md`, `evidence/segment_04.md`.",
+              "Evidence revisions read: `evidence/segment_01.md` = `sha256:d0446478a972669d960958e75f9737dd805b823eaf3cfae05e7cf6fa94aa756d`; `evidence/segment_02.md` = `sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884`; `evidence/segment_03.md` = `sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8`; `evidence/segment_04.md` = `sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5`.",
+              "Evidence facts: the only permitted production change is `src/normalizer.py`; leading and trailing whitespace must be discarded; every run of internal whitespace must become one ASCII hyphen; alphabetic characters must be normalized to lowercase.",
+              "FINAL_RESPONSE_TOKEN: ORBIT-DELTA-7319"
+            ],
+            "goal": "Complete the controlled long-context coding task from the canonical WorkingState: read all twelve evidence files exactly once in order, then record the evidence-backed normalization decision, make the smallest exact public-API-preserving patch only in `src/normalizer.py`, and submit the final response. The Runtime owns verification.",
+            "key_decisions": [
+              "No evidence-backed final normalization decision has been recorded yet because only segments 01 through 04 have been read; all twelve evidence files must be read before the required second `update_working_state` call.",
+              "Interim evidence indicates normalization must trim leading/trailing whitespace, convert each internal whitespace run to one ASCII hyphen, and lowercase alphabetic characters, subject to the remaining evidence files."
+            ],
+            "next_steps": [
+              "Read `evidence/segment_05.md` once with `read_file(start=1, end=200)`, then continue exactly once and in order through `evidence/segment_06.md`, `evidence/segment_07.md`, `evidence/segment_08.md`, `evidence/segment_09.md`, `evidence/segment_10.md`, `evidence/segment_11.md`, and `evidence/segment_12.md`.",
+              "Call `update_working_state` after all evidence is read, recording the complete evidence-backed normalization decision and the concrete edit as the next step.",
+              "Read `src/normalizer.py`, apply the smallest exact patch only to that path while preserving the public API, then call `submit_final` with the required final-response token verbatim."
+            ],
+            "progress": {
+              "blocked": [],
+              "done": [
+                "Called `update_working_state` first; the working-state update was accepted.",
+                "Recorded the three required constraints and the required next step in WorkingState.",
+                "Read `evidence/segment_01.md` through `evidence/segment_04.md` exactly once, in the required order, with the required bounds.",
+                "Preserved the required final-response token in conversational context rather than WorkingState or a tool argument."
+              ],
+              "in_progress": [
+                "Evidence collection is incomplete: 4 of 12 required files have been read.",
+                "No read of `src/normalizer.py`, patch, second `update_working_state`, verification, or `submit_final` is present in the historical execution data."
+              ]
+            }
+          },
+          "completion_metadata": {
+            "cached_tokens": 0,
+            "input_tokens": 19694,
+            "output_tokens": 1764,
+            "total_tokens": 21458,
+            "uncached_input_tokens": 19694
+          },
+          "duration_ms": 25383
+        },
+        {
+          "brief": {
+            "constraints_preferences": [
+              "Canonical WorkingState schema version is `run-working-state-v1`.",
+              "Read every listed evidence file exactly once in the specified order, with one `read_file` call per file using `start=1` and `end=200`.",
+              "Do not use Search, List, project memory, or delegation while reading evidence.",
+              "Modify only `src/normalizer.py`.",
+              "Preserve the public API, including the public function name and one-argument signature.",
+              "Do not edit until all twelve evidence files have been read.",
+              "After all evidence is read, call `update_working_state` again to record the evidence-backed normalization decision and concrete edit as the next step.",
+              "The Runtime owns verification.",
+              "Do not copy the `FINAL_RESPONSE_TOKEN` into WorkingState or any tool argument; preserve it only in conversational context and include it verbatim in the final answer.",
+              "Do not omit user-requested values, exact paths, literal identifiers, failed work, or pending work in subsequent compaction."
+            ],
+            "critical_context": [
+              "Canonical goal: Complete a controlled long-context coding task.",
+              "Canonical WorkingState goal requires first calling `update_working_state`, recording constraints and `Read all evidence files before editing.`, reading `evidence/segment_01.md` through `evidence/segment_12.md` exactly once and in order with `start=1` and `end=200`, then calling `update_working_state` again, reading `src/normalizer.py`, applying the smallest exact patch, and calling `submit_final`.",
+              "Canonical WorkingState constraints already recorded: `Read every listed evidence file exactly once in the specified order.`, `Modify only src/normalizer.py.`, and `Preserve the public API.`",
+              "Canonical WorkingState next step already recorded: `Read all evidence files before editing.`",
+              "The first `update_working_state` call was completed and accepted.",
+              "Evidence files read exactly once, in required order, all with `read_file(start=1, end=200)`: `evidence/segment_01.md`, `evidence/segment_02.md`, `evidence/segment_03.md`, `evidence/segment_04.md`, `evidence/segment_05.md`, `evidence/segment_06.md`, `evidence/segment_07.md`, `evidence/segment_08.md`.",
+              "Evidence revisions already recorded for segments 01-04: `evidence/segment_01.md` = `sha256:d0446478a972669d960958e75f9737dd805b823eaf3cfae05e7cf6fa94aa756d`; `evidence/segment_02.md` = `sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884`; `evidence/segment_03.md` = `sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8`; `evidence/segment_04.md` = `sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5`.",
+              "Evidence revisions for subsequent reads: `evidence/segment_05.md` = `sha256:946dcdb34ed2eade09e788f9f5b5cf8f2057b1b5008c51514f1db91650fe8e09`; `evidence/segment_06.md` = `sha256:4a28a0af75315c2c19a600ed8e667a8606b7eb20444bae56427108152d90fc0d`; `evidence/segment_07.md` = `sha256:bb9cab15f49d8e753f0e134e34ae640a50d7dff8de26a18ad3cd55c558de4e19`; `evidence/segment_08.md` = `sha256:a49f9f9b267d3aa6985a730300e487026950d07f4c9b249d198b8bb33ae9f5d0`.",
+              "Evidence facts read: discard leading and trailing whitespace; convert every run of internal whitespace to one ASCII hyphen; lowercase alphabetic characters; preserve existing non-whitespace punctuation including hyphens; a one-word label remains that word after lowercasing; introduce neither a dependency nor a regular expression; retain the public function name and one-argument signature.",
+              "No read of `src/normalizer.py`, no second `update_working_state`, no patch, no verification, and no `submit_final` appears in historical execution data.",
+              "FINAL_RESPONSE_TOKEN: ORBIT-DELTA-7319"
+            ],
+            "goal": "Complete the controlled long-context coding task: finish reading all required evidence in order, record the complete evidence-backed normalization decision, make the smallest exact public-API-preserving patch only in `src/normalizer.py`, and submit the final response containing the required token. The Runtime owns verification.",
+            "key_decisions": [
+              "Do not make or record the final normalization decision in WorkingState until `evidence/segment_09.md` through `evidence/segment_12.md` have each been read exactly once in order.",
+              "The interim evidence-backed normalization behavior is: trim leading/trailing whitespace, replace each internal whitespace run with exactly one ASCII hyphen, lowercase alphabetic characters, preserve all existing non-whitespace punctuation including hyphens, and keep one-word labels as their lowercased word.",
+              "The implementation must preserve the existing public function name and one-argument signature and must not add a dependency or use a regular expression.",
+              "The only permitted production edit path is `src/normalizer.py`."
+            ],
+            "next_steps": [
+              "Read `evidence/segment_09.md` once using `read_file(start=1, end=200)`.",
+              "Then read `evidence/segment_10.md`, `evidence/segment_11.md`, and `evidence/segment_12.md` exactly once each, in that order, each using `read_file(start=1, end=200)`.",
+              "Call `update_working_state` after all evidence is read, recording the complete evidence-backed normalization decision and the concrete `src/normalizer.py` edit as the next step; do not put `ORBIT-DELTA-7319` in that tool argument.",
+              "Read `src/normalizer.py`.",
+              "Apply the smallest exact patch only to `src/normalizer.py`, preserving its public function name and one-argument signature, without a new dependency or regular expression.",
+              "Call `submit_final`; include `ORBIT-DELTA-7319` verbatim in the final answer. Do not independently verify because the Runtime owns verification."
+            ],
+            "progress": {
+              "blocked": [],
+              "done": [
+                "Called and had accepted the required first `update_working_state` before evidence reads.",
+                "Recorded the three required WorkingState constraints and required next step.",
+                "Read `evidence/segment_01.md` through `evidence/segment_08.md` exactly once each, in required order and bounds.",
+                "Preserved the required final-response token in conversational context rather than WorkingState or tool arguments.",
+                "Collected evidence for trimming boundary whitespace, collapsing internal whitespace to ASCII hyphens, lowercasing, punctuation preservation, one-word labels, no regex/dependencies, and API stability."
+              ],
+              "in_progress": [
+                "Evidence collection: 8 of 12 files read; `evidence/segment_09.md` through `evidence/segment_12.md` remain.",
+                "No second `update_working_state`, `src/normalizer.py` read, edit, or `submit_final` yet."
+              ]
+            }
+          },
+          "completion_metadata": {
+            "cached_tokens": 0,
+            "input_tokens": 20692,
+            "output_tokens": 2548,
+            "total_tokens": 23241,
+            "uncached_input_tokens": 20692
+          },
+          "duration_ms": 37276
+        }
+      ],
+      "variant": "semantic",
+      "wall_duration_ms": 180070
+    }
+  }
+}

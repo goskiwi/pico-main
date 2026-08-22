@@ -330,6 +330,19 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
     assert instance.last_completion_metadata["uncached_input_tokens"] is None
 
 
+def test_openai_compatible_client_creates_fresh_isolated_session():
+    instance = client()
+    instance._action_input.append({"type": "prior"})
+
+    isolated = instance.new_isolated_client()
+
+    assert isolated is not instance
+    assert isolated.model == instance.model
+    assert isolated.base_url == instance.base_url
+    assert isolated.api_key == instance.api_key
+    assert isolated._action_input == []
+
+
 def test_official_prompt_cache_uses_key_without_model_specific_retention_parameter():
     instance = OpenAICompatibleModelClient(
         "gpt-5.6", "https://api.openai.com/v1", "secret", None, 3

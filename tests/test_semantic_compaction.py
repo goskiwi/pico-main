@@ -2,12 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from evals.semantic_compaction import (
+from pico import ModelAction, WorkingState
+from pico.compaction_brief import (
     SUMMARY_TOOL,
     CompactionBrief,
     SemanticBriefSummarizer,
 )
-from pico import ModelAction, WorkingState
 
 
 def valid_brief():

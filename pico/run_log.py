@@ -654,7 +654,7 @@ class RunLog:
         }
         return tuple(entry for entry in context if entry.event_id not in covered)
 
-    def compact(self, *, retain_tokens, token_counter):
+    def compact(self, *, retain_tokens, token_counter, summary_builder=None):
         active = list(self.active_events())
         units = []
         index = 0
@@ -687,7 +687,11 @@ class RunLog:
         compacted = tuple(item for unit in units[:cut] for item in unit)
         if not compacted:
             return None
-        summary = self._summary_text(compacted)
+        summary = (
+            summary_builder(compacted)
+            if summary_builder is not None
+            else self._summary_text(compacted)
+        )
         source = "\n".join(self._render_event(entry) for entry in compacted)
         if token_counter(summary) >= token_counter(source):
             return None

@@ -1,6 +1,13 @@
 import pytest
 
-from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico import (
+    FakeModelClient,
+    ModelAction,
+    Pico,
+    PicoConfig,
+    SessionStore,
+    WorkspaceContext,
+)
 from pico.context_manager import ContextBudgetExceeded, ContextManager
 from pico.contracts import ToolCall, ToolOutcome
 from pico.features.memory import WorkingState
@@ -288,6 +295,124 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
     projection = replay_events(run_log.events)
     assert projection.last_cursor.sequence == summary.sequence
     assert projection.kind_counts["compaction"] == 1
+
+
+def test_real_client_capability_uses_semantic_six_section_compaction(tmp_path):
+    brief = {
+        "goal": "inspect",
+        "constraints_preferences": [],
+        "progress": {"done": [], "in_progress": [], "blocked": []},
+        "key_decisions": [],
+        "next_steps": [],
+        "critical_context": ["keep literal"],
+    }
+
+    class SummaryClient:
+        def __init__(self):
+            self.last_completion_metadata = {"input_tokens": 10, "output_tokens": 5}
+
+        def complete_action(self, *_args, **_kwargs):
+            return ModelAction.tool("submit_compaction_brief", brief)
+
+    class SummaryCapableClient(FakeModelClient):
+        @staticmethod
+        def new_isolated_client():
+            return SummaryClient()
+
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = Pico(
+        SummaryCapableClient([]),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(approval_policy="auto", max_new_tokens=64),
+    )
+    state = TaskState.create("task_semantic", "inspect", run_id="run_semantic")
+    agent.run.task_state = state
+    run_log = new_run_log(agent, state)
+    run_log.append_user("inspect")
+    for index in range(5):
+        call = ToolCall(
+            "read_file",
+            {"path": "README.md", "start": 1, "end": 1},
+            f"semantic_{index}",
+        )
+        run_log.append_tool_call(call)
+        append_successful_result(
+            run_log,
+            call,
+            successful_outcome(call, "result " + "x " * 100),
+        )
+    agent.run.run_log = run_log
+
+    _, metadata = ContextManager(
+        agent,
+        total_budget=800,
+        section_budgets={
+            "prefix": 300,
+            "memory_catalog": 60,
+            "working_state": 100,
+            "history": 120,
+        },
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    ).build("continue")
+
+    summary = next(entry for entry in run_log.events if entry.kind == "compaction")
+    assert summary.content.startswith("## Goal")
+    assert "## Critical Context" in summary.content
+    assert metadata["compaction"]["mode"] == "semantic_six_section"
+    assert metadata["compaction"]["semantic_summary"]["status"] == "completed"
+
+
+def test_semantic_summary_failure_falls_back_to_deterministic_compaction(tmp_path):
+    class FailingSummarizer:
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def summarize(*_args, **_kwargs):
+            raise TimeoutError("planned summary timeout")
+
+    agent = build_agent(tmp_path)
+    state = TaskState.create("task_fallback", "inspect", run_id="run_fallback")
+    agent.run.task_state = state
+    run_log = new_run_log(agent, state)
+    run_log.append_user("inspect")
+    for index in range(5):
+        call = ToolCall(
+            "read_file",
+            {"path": "README.md", "start": 1, "end": 1},
+            f"fallback_{index}",
+        )
+        run_log.append_tool_call(call)
+        append_successful_result(
+            run_log,
+            call,
+            successful_outcome(call, "result " + "x " * 100),
+        )
+    agent.run.run_log = run_log
+    manager = ContextManager(
+        agent,
+        total_budget=800,
+        section_budgets={
+            "prefix": 300,
+            "memory_catalog": 60,
+            "working_state": 100,
+            "history": 120,
+        },
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    )
+    manager.semantic_summarizer = FailingSummarizer()
+
+    _, metadata = manager.build("continue")
+
+    summary = next(entry for entry in run_log.events if entry.kind == "compaction")
+    assert summary.content.startswith("Earlier run summary:")
+    assert metadata["compaction"]["mode"] == "runtime_summary"
+    semantic = metadata["compaction"]["semantic_summary"]
+    assert semantic["status"] == "fallback"
+    assert "planned summary timeout" in semantic["error"]
 
 
 def test_repeated_compaction_keeps_completed_tool_arguments(tmp_path):

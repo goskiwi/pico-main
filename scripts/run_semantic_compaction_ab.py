@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evals.semantic_compaction import SemanticBriefSummarizer, SemanticContextManager
 from pico import (
     OpenAICompatibleModelClient,
     Pico,
@@ -77,7 +76,6 @@ def model_client(model, base_url, api_key, temperature, timeout):
 def run_variant(args, variant, api_key, base_url):
     workspace = prepare_ab_workspace(args.workspace_root / variant)
     initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
-    summarizer = None
     agent = Pico(
         model_client=model_client(
             args.model, base_url, api_key, args.temperature, args.timeout
@@ -102,14 +100,9 @@ def run_variant(args, variant, api_key, base_url):
             DockerSandboxConfig(image=args.sandbox_image),
         ),
     )
-    if variant == "semantic":
-        summarizer = SemanticBriefSummarizer(
-            lambda: model_client(
-                args.model, base_url, api_key, args.temperature, args.timeout
-            ),
-            request_timeout=args.timeout,
-        )
-        agent.prompt.context = SemanticContextManager(agent, summarizer)
+    if variant == "deterministic":
+        agent.prompt.context.semantic_summarizer = None
+    summarizer = agent.prompt.context.semantic_summarizer
     started = time.monotonic()
     answer = agent.ask(ab_prompt())
     wall_duration_ms = int((time.monotonic() - started) * 1000)
