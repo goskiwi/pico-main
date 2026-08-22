@@ -42,6 +42,8 @@ artifacts/*
 !artifacts/triage-click-real.patch
 !artifacts/triage-packaging-real.json
 !artifacts/triage-packaging-real.patch
+!artifacts/triage-urllib3-real.json
+!artifacts/triage-urllib3-real.patch
 release/
 readme_intro_locked/
 output/

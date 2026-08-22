@@ -186,6 +186,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
 | Real Click Triage | 1/1 | `gpt-5.6-luna`；可见测试与停止后 Hidden Verifier 均通过，只修改 `src/click/utils.py` |
 | Real Packaging Triage | 1/1 | `gpt-5.6-luna`；6 个可见测试与 Hidden Verifier 均通过，Root Cause Top-1/Top-3 命中 |
+| Real urllib3 Triage | 1/1 | `gpt-5.6-luna`；16 个可见测试与 Hidden Verifier 均通过，3 个 Child 完成多文件修复 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
@@ -237,6 +238,12 @@ uv run python scripts/run_real_triage.py \
 `src/packaging/version.py`；可见测试、Hidden Verifier、Root Cause Top-1/Top-3 和范围检查
 全部通过。证据见 `artifacts/triage-packaging-real.json` 与
 `artifacts/triage-packaging-real.patch`。
+
+第三个真实案例 `urllib3_port_zero` 绑定 Runtime commit `40beeeb`。模型并行/依赖式使用
+3 个 Child，定位显式端口 `0` 被 truthiness 判断误当成缺省端口的问题，只修改
+`src/urllib3/poolmanager.py` 与 `src/urllib3/util/url.py`。修复后 16 个可见测试与 Hidden
+Verifier 全部通过，证据见 `artifacts/triage-urllib3-real.json` 与
+`artifacts/triage-urllib3-real.patch`。
 
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 

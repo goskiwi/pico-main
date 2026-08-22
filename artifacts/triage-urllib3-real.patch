@@ -1,0 +1,23 @@
+diff --git a/src/urllib3/poolmanager.py b/src/urllib3/poolmanager.py
+index b7248d2..935712b 100644
+--- a/src/urllib3/poolmanager.py
++++ b/src/urllib3/poolmanager.py
+@@ -311,3 +311,3 @@ class PoolManager(RequestMethods):
+         request_context["scheme"] = scheme or "http"
+-        if not port:
++        if port is None:
+             port = port_by_scheme.get(request_context["scheme"].lower(), 80)
+@@ -598,3 +598,3 @@ class ProxyManager(PoolManager):
+ 
+-        if not proxy.port:
++        if proxy.port is None:
+             port = port_by_scheme.get(proxy.scheme, 80)
+diff --git a/src/urllib3/util/url.py b/src/urllib3/util/url.py
+index 6d0c66a..3652938 100644
+--- a/src/urllib3/util/url.py
++++ b/src/urllib3/util/url.py
+@@ -158,3 +158,3 @@ class Url(
+             return None
+-        if self.port:
++        if self.port is not None:
+             return f"{self.host}:{self.port}"

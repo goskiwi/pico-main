@@ -1,0 +1,103 @@
+{
+  "artifact_type": "pico-triage-real-case",
+  "captured_at": "2026-08-22T11:18:46.130476+00:00",
+  "case": {
+    "failing_baseline_commit": "a26b12ab20f31ce8f0be8f5bfbe04cd78a9f51b1",
+    "id": "urllib3_port_zero",
+    "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
+    "source_repository": "https://github.com/urllib3/urllib3.git"
+  },
+  "checks": {
+    "changed_paths": [
+      "src/urllib3/poolmanager.py",
+      "src/urllib3/util/url.py"
+    ],
+    "forbidden_changes": [],
+    "hidden_verifier_passed": true,
+    "initial_failure_reproduced": true,
+    "out_of_scope_changes": [],
+    "patch_recorded": true,
+    "root_cause_top1": true,
+    "root_cause_top3": true,
+    "scope_valid": true,
+    "visible_test_passed": true
+  },
+  "metrics": {
+    "cached_tokens": 0,
+    "child_count": 3,
+    "executed_tool_count": 14,
+    "input_tokens": 236245,
+    "model_request_count": 15,
+    "output_tokens": 2080,
+    "run_duration_ms": 198184
+  },
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "report": {
+    "evidence": [
+      {
+        "claim": "Initial focused reproduction failed 4 tests and passed 12 tests, covering pool, proxy, and URL netloc handling for port 0.",
+        "kind": "test_result",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_M3W7DieNkWPp9ve7rWJhZefc"
+      },
+      {
+        "claim": "Independent source tracing identified the three failing truthiness checks and confirmed omitted-port defaults must remain intact.",
+        "kind": "source",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_rVgoXp0EQq2OmAZqlR5iwfbr"
+      },
+      {
+        "claim": "Required focused verification passes all 16 tests.",
+        "kind": "test_result",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_dZ9b8LcLlTNVSnO6OPIpsUdw"
+      },
+      {
+        "claim": "Final diff contains only three explicit None-check changes in the two allowed production files, and git diff --check passes.",
+        "kind": "other",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_1DZN7XfHqmOON5i8AYy77RYB"
+      }
+    ],
+    "executed_tool_count": 14,
+    "incident_id": "urllib3-port-zero-ci",
+    "patch": {
+      "changed_paths": [
+        "src/urllib3/poolmanager.py",
+        "src/urllib3/util/url.py"
+      ]
+    },
+    "repository_revision": "a26b12ab20f31ce8f0be8f5bfbe04cd78a9f51b1",
+    "reproduction": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
+      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            .FF..F......F...                                                         [100%]\n=================================== FAILURES ===================================\n_____________ TestPoolManager.test_connection_from_host_port_zero ______________\n\nself = <test.test_poolmanager.TestPoolManager object at 0xffff812d36b0>\n\n    def test_connection_from_host_port_zero(self) -> None:\n        p = PoolManager()\n        pool = p.connection_from_host(\"example.com\", port=0, scheme=\"http\")\n>       assert pool.port == 0\nE       assert 80 == 0\nE        +  where 80 = <urllib3.connectionpool.HTTPConnectionPool object at 0xffff8141f200>.port\n\ntest/test_poolmanager.py:476: AssertionError\n____________________ TestProxyManager.test_proxy_port_zero _____________________\n\nself = <test.test_proxymanager.TestProxyManager object at 0xffff812d0560>\n\n    def test_proxy_port_zero(self) -> None:\n        with ProxyManager(\"http://proxy:0\") as p:\n            assert p.proxy is not None\n>           assert p.proxy.port == 0\nE           AssertionError: assert 80 == 0\nE            +  where 80 = Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None).port\nE            +    where Url(scheme='http', auth=None, host='proxy', port=80, path=None, query=None, fragment=None) = <urllib3.poolmanager.ProxyManager object at 0xffff810c3d70>.proxy\n\ntest/test_proxymanager.py:56: AssertionError\n_________ TestUtil.test_netloc[http://google.com:0/mail-google.com:0] __________\n\nself = <test.test_util.TestUtil object at 0xffff810a5b20>\nurl = 'http://google.com:0/mail', expected_netloc = 'google.com:0'\n\n    @pytest.mark.parametrize(\"url, expected_netloc\", url_netloc_map)\n    def test_netloc(self, url: str, expected_netloc: str | None) -> None:\n>       asser\n...[truncated 1291 chars]",
+      "status": "reproduced",
+      "tool_call_id": "call_M3W7DieNkWPp9ve7rWJhZefc"
+    },
+    "root_cause": {
+      "files": [
+        "src/urllib3/poolmanager.py",
+        "src/urllib3/util/url.py"
+      ],
+      "summary": "Explicit port 0 was incorrectly treated as an omitted port by truthiness checks. PoolManager and ProxyManager replaced it with scheme defaults, while Url.netloc omitted the :0 suffix."
+    },
+    "run_id": "run_20260822-111525-09ba12",
+    "schema_version": "pico-triage-report",
+    "status": "fixed",
+    "verification": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider test/test_connectionpool.py::TestConnectionPool::test_same_host_port_zero test/test_poolmanager.py::TestPoolManager::test_connection_from_host_port_zero test/test_proxymanager.py::TestProxyManager::test_proxy_port_zero test/test_util.py::TestUtil::test_netloc",
+      "output": "................                                                         [100%]\n16 passed in 0.67s",
+      "status": "passed"
+    }
+  },
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "40beeebc16590231046074c5a73298c02cd8aa85",
+    "working_tree_dirty": false
+  }
+}
