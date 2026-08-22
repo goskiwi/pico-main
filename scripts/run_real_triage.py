@@ -176,6 +176,7 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--run-timeout-seconds", type=int, default=900)
     parser.add_argument("--sandbox-image", default="pico/official-public-tests:latest")
     parser.add_argument("--hidden-image", default="pico/real-oss-suite:latest")
     parser.add_argument("--max-tool-executions", type=int, default=40)
@@ -254,6 +255,7 @@ def main(argv=None):
         config=PicoConfig(
             approval_policy="auto",
             max_tool_executions=args.max_tool_executions,
+            run_timeout_seconds=args.run_timeout_seconds,
             sandbox_image=args.sandbox_image,
         ),
         subagent_model_client_factory=lambda _spec: model_client(),
@@ -305,6 +307,10 @@ def main(argv=None):
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime": runtime,
         "model": args.model,
+        "policy": {
+            "max_tool_executions": args.max_tool_executions,
+            "run_timeout_seconds": args.run_timeout_seconds,
+        },
         "case": {
             "id": args.task,
             "source_repository": real_task["source_repository"],
