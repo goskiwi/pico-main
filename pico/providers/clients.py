@@ -282,11 +282,9 @@ class OpenAICompatibleModelClient:
             method="POST",
         )
         attempts = 3
-        total_timeout = (
-            float(self.timeout)
-            if request_timeout is None
-            else float(request_timeout)
-        )
+        total_timeout = float(self.timeout)
+        if request_timeout is not None:
+            total_timeout = min(total_timeout, float(request_timeout))
         deadline = time.monotonic() + max(0.001, total_timeout)
 
         def retry_delay(attempt):

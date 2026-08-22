@@ -91,6 +91,11 @@ class CompletionController:
                 "verification_result",
                 verification or {"status": "skipped"},
             )
+        if verification and verification.get("status") == "infrastructure_error":
+            raise RuntimeError(
+                "Runtime verification infrastructure error: "
+                + str(verification.get("output", "verification unavailable"))
+            )
         if not verification or verification.get("status") != "passed":
             return fingerprint, (
                 "Runtime verification failed; inspect and repair before "

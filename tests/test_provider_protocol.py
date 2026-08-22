@@ -343,6 +343,25 @@ def test_openai_compatible_client_creates_fresh_isolated_session():
     assert isolated._action_input == []
 
 
+def test_remaining_run_time_only_caps_configured_provider_timeout():
+    instance = client()
+    observed = {}
+
+    def urlopen(_request, timeout):
+        observed["timeout"] = timeout
+        return final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        instance.complete_action(
+            "prompt",
+            32,
+            action_tools=TOOLS,
+            request_timeout=100,
+        )
+
+    assert observed["timeout"] <= instance.timeout
+
+
 def test_official_prompt_cache_uses_key_without_model_specific_retention_parameter():
     instance = OpenAICompatibleModelClient(
         "gpt-5.6", "https://api.openai.com/v1", "secret", None, 3

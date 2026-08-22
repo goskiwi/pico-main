@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -73,8 +72,9 @@ def model_client(model, base_url, api_key, temperature, timeout):
     )
 
 
-def run_variant(args, variant, api_key, base_url):
-    workspace = prepare_ab_workspace(args.workspace_root / variant)
+def run_variant(args, variant, api_key, base_url, run_group):
+    workspace = prepare_ab_workspace(args.workspace_root / run_group / variant)
+    print(f"[semantic-compaction] starting {variant}", file=sys.stderr, flush=True)
     initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
     agent = Pico(
         model_client=model_client(
@@ -132,7 +132,7 @@ def run_variant(args, variant, api_key, base_url):
         "scope_valid": changed_paths == [TARGET_PATH],
         "patch_recorded": bool(patch_text),
     }
-    return {
+    result = {
         "variant": variant,
         "run_id": agent.run.task_state.run_id,
         "wall_duration_ms": wall_duration_ms,
@@ -147,6 +147,20 @@ def run_variant(args, variant, api_key, base_url):
             if name != "critical_token_retained"
         ),
     }
+    print(
+        f"[semantic-compaction] completed {variant} in {wall_duration_ms} ms",
+        file=sys.stderr,
+        flush=True,
+    )
+    return result
+
+
+def write_artifact(path, artifact):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def main(argv=None):
@@ -154,7 +168,7 @@ def main(argv=None):
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--run-timeout-seconds", type=int, default=900)
     parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
     parser.add_argument(
@@ -178,10 +192,24 @@ def main(argv=None):
     base_url = args.base_url or provider_env(
         "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
     )
-    if args.workspace_root.exists():
-        shutil.rmtree(args.workspace_root)
-    baseline = run_variant(args, "deterministic", api_key, base_url)
-    semantic = run_variant(args, "semantic", api_key, base_url)
+    run_group = datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S")
+    baseline = run_variant(
+        args, "deterministic", api_key, base_url, run_group
+    )
+    partial = {
+        "artifact_type": "pico-semantic-compaction-ab",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": runtime,
+        "model": args.model,
+        "provider_base_url": base_url,
+        "critical_token": CRITICAL_TOKEN,
+        "run_group": run_group,
+        "variants": {"deterministic": baseline},
+        "comparison": {"status": "semantic_pending"},
+        "passed": False,
+    }
+    write_artifact(args.artifact, partial)
+    semantic = run_variant(args, "semantic", api_key, base_url, run_group)
     comparison = {
         "baseline_task_passed": baseline["passed_task"],
         "semantic_task_passed": semantic["passed_task"],
@@ -210,15 +238,12 @@ def main(argv=None):
         "model": args.model,
         "provider_base_url": base_url,
         "critical_token": CRITICAL_TOKEN,
+        "run_group": run_group,
         "variants": {"deterministic": baseline, "semantic": semantic},
         "comparison": comparison,
         "passed": passed,
     }
-    args.artifact.parent.mkdir(parents=True, exist_ok=True)
-    args.artifact.write_text(
-        json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_artifact(args.artifact, artifact)
     print(json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if passed else 1
 

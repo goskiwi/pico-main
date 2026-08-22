@@ -1,3 +1,5 @@
+import pytest
+
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
 from pico.contracts import ToolCall, ToolRunnerResult
@@ -113,6 +115,31 @@ def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
     ]
     assert len(verification_events) == 1
     assert verification_events[0].payload["status"] == "failed"
+
+
+def test_verifier_infrastructure_error_stops_instead_of_looping(tmp_path):
+    agent, _target = active_agent(tmp_path)
+    agent.run.evidence.effects.append(
+        {
+            "effect_scope": "workspace",
+            "affected_paths": ["subject.txt"],
+        }
+    )
+    agent.run_verification = lambda workspace_fingerprint: {
+        "status": "infrastructure_error",
+        "freshness": "current",
+        "workspace_fingerprint": workspace_fingerprint,
+        "output": "docker unavailable",
+    }
+
+    with pytest.raises(RuntimeError, match="docker unavailable"):
+        CompletionController(agent).assess("done")
+
+    events = [
+        entry for entry in agent.run.run_log.events
+        if entry.kind == "verification_result"
+    ]
+    assert len(events) == 1
 
 
 def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
