@@ -1,8 +1,8 @@
 {
   "artifact_type": "pico-triage-real-case",
-  "captured_at": "2026-08-22T12:17:41.064632+00:00",
+  "captured_at": "2026-08-22T12:37:28.543171+00:00",
   "case": {
-    "failing_baseline_commit": "3abef7afa6428bd9b19cd293cdaf780989b38d6c",
+    "failing_baseline_commit": "30e95fbcac8947b98273578c141204a31688afdb",
     "id": "packaging_non_string_version",
     "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
     "source_repository": "https://github.com/pypa/packaging.git"
@@ -22,54 +22,83 @@
     "visible_test_passed": true
   },
   "metrics": {
-    "cache_reporting_complete": true,
-    "cached_input_tokens": 104448,
     "child_count": 0,
-    "executed_tool_count": 9,
-    "gross_input_tokens": 146261,
-    "model_request_count": 10,
-    "output_tokens": 1730,
-    "run_duration_ms": 90059,
-    "uncached_input_tokens": 41813
+    "children": {
+      "cache_reporting_complete": false,
+      "cached_input_tokens": null,
+      "executed_tool_count": 0,
+      "gross_input_tokens": 0,
+      "max_duration_ms": 0,
+      "model_request_count": 0,
+      "output_tokens": 0,
+      "run_count": 0,
+      "sum_duration_ms": 0,
+      "uncached_input_tokens": null
+    },
+    "parent": {
+      "cache_reporting_complete": true,
+      "cached_input_tokens": 128640,
+      "executed_tool_count": 9,
+      "gross_input_tokens": 153538,
+      "max_duration_ms": 86177,
+      "model_request_count": 10,
+      "output_tokens": 1699,
+      "run_count": 1,
+      "sum_duration_ms": 86177,
+      "uncached_input_tokens": 24898
+    },
+    "total": {
+      "cache_reporting_complete": true,
+      "cached_input_tokens": 128640,
+      "executed_tool_count": 9,
+      "gross_input_tokens": 153538,
+      "max_duration_ms": 86177,
+      "model_request_count": 10,
+      "output_tokens": 1699,
+      "run_count": 1,
+      "sum_duration_ms": 86177,
+      "uncached_input_tokens": 24898
+    },
+    "wall_duration_ms": 86177
   },
   "model": "gpt-5.6-luna",
   "passed": true,
   "report": {
     "evidence": [
       {
-        "claim": "The required focused command reproduced six failures: five non-string Version inputs and one keyed None filter case.",
-        "kind": "stack_trace",
-        "line": null,
-        "path": "",
-        "tool_call_id": "call_8j4odKg9EYMNE9DeWzf9CMTT"
+        "claim": "The required focused command initially failed with 6 failures: five non-string Version inputs and one keyed None filter case.",
+        "kind": "test_result",
+        "line": 221,
+        "path": "tests/test_version.py",
+        "tool_call_id": "call_5T56AxyShHwFdsK7Jdfrp4J8"
       },
       {
-        "claim": "Version.__init__ called string operations before validating the input type.",
+        "claim": "Version.__init__ called _SIMPLE_VERSION_INDICATORS.issuperset, split, or regex.fullmatch directly on the input without a string type guard.",
         "kind": "source",
         "line": 413,
         "path": "src/packaging/version.py",
-        "tool_call_id": "call_y7I7Ct6xdUzZsbs9QaCPp5ye"
+        "tool_call_id": "call_9uRk1bXP5z9aXZ2RCdVNIsG1"
       },
       {
-        "claim": "coerce_version already converts InvalidVersion to None, and filter_by_ranges skips parsed None values.",
+        "claim": "coerce_version catches InvalidVersion and filter_by_ranges skips parsed values that are None, establishing the intended invalid-input behavior.",
         "kind": "source",
         "line": 323,
         "path": "src/packaging/_ranges.py",
-        "tool_call_id": "call_UJT7T2arUe9eCawVYmD5IVBV"
+        "tool_call_id": "call_ieC6xAZW0tzvzJgnuZXPYe6q"
       },
       {
-        "claim": "The required verification command passed: 6 passed in 1.42s.",
+        "claim": "The required focused verification command passes: 6 passed.",
         "kind": "test_result",
-        "line": null,
-        "path": "",
-        "tool_call_id": "call_o2p3acntgxBKQUO0XEMCoLkQ"
+        "line": 1,
+        "path": "tests/test_version.py",
+        "tool_call_id": "call_1fZDggBkOa6e3YUMriHYR1O6"
       },
       {
-        "claim": "git diff --check passed and the final diff only changes src/packaging/version.py.",
+        "claim": "git diff --check passed and only src/packaging/version.py is modified.",
         "kind": "other",
         "line": 413,
         "path": "src/packaging/version.py",
-        "tool_call_id": "call_dYnE0tbqnGOqGOZJUI3TBEjM"
+        "tool_call_id": "call_moZsjoSuiaedfHgqH76GHIap"
       }
     ],
     "executed_tool_count": 9,
@@ -79,31 +108,31 @@
         "src/packaging/version.py"
       ]
     },
-    "repository_revision": "3abef7afa6428bd9b19cd293cdaf780989b38d6c",
+    "repository_revision": "30e95fbcac8947b98273578c141204a31688afdb",
     "reproduction": {
       "command": "PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped",
-      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            FFFFFF                                                                   [100%]\n=================================== FAILURES ===================================\n_______ TestVersion.test_non_string_versions_raise_invalid_version[None] _______\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb90f50d0>\n        version    = None\nsrc/packaging/version.py:413: in __init__\n    if _SIMPLE_VERSION_INDICATORS.issuperset(version):\nE   TypeError: 'NoneType' object is not iterable\n        self       = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffffb92e3640>\n        version    = None\n________ TestVersion.test_non_string_versions_raise_invalid_version[1] _________\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb90f4e90>\n        version    = 1\nsrc/packaging/version.py:413: in __init__\n    if _SIMPLE_VERSION_INDICATORS.issuperset(version):\nE   TypeError: 'int' object is not iterable\n        self       = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffffaf344f40>\n        version    = 1\n_____ TestVersion.test_non_string_versions_raise_invalid_version[version2] _____\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb917ee70>\n        version    = ['1', '.', '0']\nsrc/packaging/version.py:415: in __init__\n    se\n...[truncated 3718 chars]",
+      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            FFFFFF                                                                   [100%]\n=================================== FAILURES ===================================\n_______ TestVersion.test_non_string_versions_raise_invalid_version[None] _______\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb27f75f0>\n        version    = None\nsrc/packaging/version.py:413: in __init__\n    if _SIMPLE_VERSION_INDICATORS.issuperset(version):\nE   TypeError: 'NoneType' object is not iterable\n        self       = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffffb29e3640>\n        version    = None\n________ TestVersion.test_non_string_versions_raise_invalid_version[1] _________\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb27f7aa0>\n        version    = 1\nsrc/packaging/version.py:413: in __init__\n    if _SIMPLE_VERSION_INDICATORS.issuperset(version):\nE   TypeError: 'int' object is not iterable\n        self       = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffffa8a60f40>\n        version    = 1\n_____ TestVersion.test_non_string_versions_raise_invalid_version[version2] _____\ntests/test_version.py:221: in test_non_string_versions_raise_invalid_version\n    Version(version)  # type: ignore[arg-type]\n        self       = <tests.test_version.TestVersion object at 0xffffb27f7500>\n        version    = ['1', '.', '0']\nsrc/packaging/version.py:415: in __init__\n    se\n...[truncated 3718 chars]",
       "status": "reproduced",
-      "tool_call_id": "call_8j4odKg9EYMNE9DeWzf9CMTT"
+      "tool_call_id": "call_5T56AxyShHwFdsK7Jdfrp4J8"
     },
     "root_cause": {
       "files": [
         "src/packaging/version.py"
       ],
-      "summary": "Version.__init__ assumed its argument was a string, causing TypeError or AttributeError for non-string inputs. This prevented coerce_version from returning None, so keyed filtering failed when the key returned None."
+      "summary": "Version.__init__ assumed all inputs were strings before validation, causing TypeError or AttributeError for non-string values. coerce_version already skips InvalidVersion results, so keyed None filtering failed only because Version(None) raised TypeError instead of InvalidVersion."
     },
-    "run_id": "run_20260822-121608-46d4a3",
+    "run_id": "run_20260822-123559-266501",
     "schema_version": "pico-triage-report",
     "status": "fixed",
     "verification": {
       "command": "PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped",
-      "output": "exit_code: 0\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            ......                                                                   [100%]\n6 passed in 1.42s\n            stderr:\n            (empty)",
+      "output": "exit_code: 0\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            ......                                                                   [100%]\n6 passed in 1.43s\n            stderr:\n            (empty)",
       "status": "passed"
     }
   },
   "runtime": {
     "branch": "luna",
-    "commit_sha": "733402675a51580bb9d867c2ce5e738583313bc8",
+    "commit_sha": "b149260a9cb550a8de933501b4768e272b8372ed",
     "working_tree_dirty": false
   }
 }
