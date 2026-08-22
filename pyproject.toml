@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["pico*"]
+include = ["pico*", "applications*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

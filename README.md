@@ -162,8 +162,9 @@ uv run pico run events <run_id> --cwd /path/to/repo
 
 ```bash
 uv run python scripts/run_evaluations.py
+uv run python scripts/run_triage_evaluation.py
 uv run pytest -q
-uv run ruff check pico tests scripts evals
+uv run ruff check pico applications tests scripts evals
 ```
 
 评测分为 native Harness regression、Context governance、Markdown Project Memory 和
@@ -171,7 +172,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 评测实现位于仓库顶层 `evals/`，不属于 `pyproject.toml` 打包的 `pico` Runtime。
 
 当前确定性 Artifact 为 `harness-regression.json`、`context-governance.json`、
-`project-memory.json` 与 `repo-map.json`。
+`project-memory.json`、`repo-map.json` 与 `triage-evaluation.json`。
 
 当前随仓库发布的证据：
 
@@ -182,9 +183,38 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
+| Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
+
+## Pico Triage
+
+`applications/triage` 是直接建立在 Pico Runtime 上的 CI 故障诊断应用层。它没有第二套
+Agent Loop、状态机、日志或 Patch 应用器：当前诊断计划复用 WorkingState，执行事实继续写入
+Pico Run Log，修复与验证复用现有 Tool、Subagent Worktree、PatchIntegrator 和 Completion Gate。
+
+输入 Case 是一个严格 JSON 对象，包含仓库、失败版本、失败命令和不可信 CI 日志：
+
+```json
+{
+  "incident_id": "login-timeout-ci",
+  "repository_root": "/path/to/repo",
+  "revision": "<commit>",
+  "failing_command": "python -m pytest -q tests/test_login.py",
+  "ci_log": "1 failed ...",
+  "constraints": ["Do not change the database schema"]
+}
+```
+
+运行：
+
+```bash
+uv run python scripts/run_triage.py case.json --output triage-report.json
+```
+
+最终 `TriageReport` 验证每条证据都引用当前 Run 中真实完成的 Tool Call；复现状态、修改路径、
+Verification 和工具步数由 Run Log 与 RunEvidence 确定性派生，而不是由模型自行声明。
 
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 

@@ -7,7 +7,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -125,8 +124,10 @@ class BenchmarkEvaluator:
 
     def run_task(self, task):
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        fixture = Path(tempfile.mkdtemp(prefix=task["id"] + "-", dir=self.workspace_root))
-        shutil.copytree(Path(task["fixture_repo"]), fixture, dirs_exist_ok=True)
+        fixture = self.workspace_root / task["id"]
+        if fixture.exists():
+            shutil.rmtree(fixture)
+        shutil.copytree(Path(task["fixture_repo"]), fixture)
         agent = Pico(
             model_client=BenchmarkModel(task),
             # Benchmark fixtures deliberately live under a parent workspace by
@@ -150,12 +151,11 @@ class BenchmarkEvaluator:
         state = agent.run.task_state
         within_budget = state.executed_tool_count <= int(task["step_budget"])
         passed = state.status == "completed" and within_budget and verified
-        run_dir = agent.dependencies.run_store.run_dir(state.run_id)
         return {
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,
             "executed_tool_count": state.executed_tool_count, "stop_reason": state.stop_reason, "answer": answer,
-            "fixture_copy": _portable_path(fixture), "run_dir": _portable_path(run_dir),
+            "fixture_copy": _portable_path(fixture),
             "failure_category": "" if passed else ("verifier_failed" if not verified else "runtime_failed"),
         }
 

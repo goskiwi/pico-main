@@ -37,6 +37,7 @@ artifacts/*
 !artifacts/harness-regression.json
 !artifacts/project-memory.json
 !artifacts/repo-map.json
+!artifacts/triage-evaluation.json
 release/
 readme_intro_locked/
 output/
