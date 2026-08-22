@@ -80,7 +80,7 @@ Tool Runners return structured `FailureInfo` through `ToolRunnerResult`; Runtime
 
 ## Context and compaction
 
-The model Context uses the configured provider window and includes every active context-bearing Run event. Compaction starts when usage crosses the window minus its output reserve, keeps a recent token budget without splitting Tool Call/Result transactions, and replaces an exact older prefix with a deterministic Runtime summary. A reported context overflow gets at most one compact-and-retry attempt. Original events remain in the Run Log.
+The model Context uses the configured provider window and includes every active context-bearing Run event. Compaction starts when usage crosses the window minus its output reserve and keeps a recent token budget without splitting Tool Call/Result transactions. OpenAI-compatible clients use an isolated model session to replace the exact older prefix with a strict six-section semantic brief: Goal, Constraints & Preferences, Progress, Key Decisions, Next Steps and Critical Context. The brief is derived context; WorkingState and Tool results remain authoritative. Invalid, failed or non-shrinking semantic summaries fall back to the deterministic Tool-transaction summary. A reported context overflow gets at most one compact-and-retry attempt. Original events remain in the Run Log.
 
 ## Resume
 

@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -91,3 +93,15 @@ def test_summarizer_uses_isolated_structured_model_request():
     assert "## Critical Context" in rendered
     assert "ORBIT-DELTA-7319" in rendered
     assert summarizer.calls[0]["completion_metadata"]["input_tokens"] == 100
+
+
+def test_published_semantic_compaction_ab_supports_core_decision():
+    artifact = json.loads(Path("artifacts/semantic-compaction-ab.json").read_text())
+
+    assert artifact["passed"] is True
+    comparison = artifact["comparison"]
+    assert comparison["baseline_task_passed"] is True
+    assert comparison["semantic_task_passed"] is True
+    assert comparison["baseline_critical_token_retained"] is False
+    assert comparison["semantic_critical_token_retained"] is True
+    assert comparison["semantic_summary_request_count"] >= 1

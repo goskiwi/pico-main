@@ -14,7 +14,7 @@ Session 只保存 `active_run_id`。副作用前 fsync `tool_started`，记录�
 
 ## 长上下文治理
 
-以配置的模型 Context Window 组装 RepoMap、WorkingState、Project Memory Catalog、完整活动 Run Log 和当前请求。预算先扣除序列化 Tool Schema；首次 fresh Provider usage 返回后，Runtime 还会记录实际 input 与已知 prompt/schema 之间的协议开销，供后续 fresh prompt 预留。最近一次 fresh Provider usage 是总上下文基准，其后的 Tool Result 使用本地 tokenizer 估算；超过保留输出空间后的阈值才触发 Compaction。Compaction 以完整 Tool Call/Result 批次为边界，摘要保留工具名、参数、状态、结果摘要和覆盖 Event ID；目标、约束、决定与下一步由独立 WorkingState 投影提供。Provider 明确报告 context overflow 时只 compact-and-retry 一次。原始 Run events 不删除。
+以配置的模型 Context Window 组装 RepoMap、WorkingState、Project Memory Catalog、完整活动 Run Log 和当前请求。预算先扣除序列化 Tool Schema；首次 fresh Provider usage 返回后，Runtime 还会记录实际 input 与已知 prompt/schema 之间的协议开销，供后续 fresh prompt 预留。最近一次 fresh Provider usage 是总上下文基准，其后的 Tool Result 使用本地 tokenizer 估算；超过保留输出空间后的阈值才触发 Compaction。Compaction 以完整 Tool Call/Result 批次为边界，使用独立模型 Session 生成 Goal、Constraints、Progress、Key Decisions、Next Steps 和 Critical Context 六段式语义投影；WorkingState 与 Tool Result 仍是权威来源，Summary 失败或不够短时回退确定性事务摘要。Provider 明确报告 context overflow 时只 compact-and-retry 一次。原始 Run events 不删除。
 
 ## 工具安全
 

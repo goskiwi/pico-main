@@ -68,7 +68,7 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 
 - 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用，最终回答也通过 `submit_final`。
 - Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；WorkingState、TaskState、RunEvidence 和运行统计由同一事件 reducer 实时投影并可重建。Workspace、Project Memory 和 Artifact 分别持有其当前内容事实。
-- 长上下文治理：Prompt 使用配置的模型 Context Window；预算包含各 section、序列化 Tool Schema，并在 fresh Provider usage 返回后纳入已观测的协议开销。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，更早事务的工具名、参数、状态和结果摘要会继续留在确定性投影中。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
+- 长上下文治理：Prompt 使用配置的模型 Context Window；预算包含各 section、序列化 Tool Schema，并在 fresh Provider usage 返回后纳入已观测的协议开销。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，并通过独立模型 Session 生成 Goal、Constraints、Progress、Key Decisions、Next Steps 和 Critical Context 六段式语义投影；WorkingState 与 Tool 事实仍为权威来源，Summary 超时、格式错误或不够短时回退确定性事务摘要。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
 - Workspace 新鲜度：工具 runner 以结构化结果声明精确影响路径；普通读取不扫描全仓，写入后只失效 Runtime Workspace revision。Completion/Verifier 才对完整 Workspace 内容做强制指纹扫描并绑定验证证据。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层状态：Run WorkingState 由 `user_message` 和 `update_working_state` Tool 事务投影，保存目标、约束、已确认决定和下一步；Session 只保存 `active_run_id`。跨任务 Project Memory 以 Markdown Card 为唯一事实源，写入来源由 Run ID 和 Tool Call ID 定位；生成的 `MEMORY.md` Catalog 会从 Card 自愈并有界地常驻上下文。主模型按可见描述显式调用 `memory_recall`，Runtime 在独立预算内返回最多五张完整 Card，所有 Recall Call/Result 都进入正常 RunLog 与模型计量。文件事实始终从 Workspace、搜索和 Run Log 获取。
@@ -190,6 +190,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
 | Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控 32k 窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier |
+| Semantic Compaction A/B | 1/1 | 同模型/Provider/任务下，确定性摘要丢失早期Literal，六段式摘要保留；两个变体均完成Patch与Hidden Verifier |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
@@ -207,6 +208,12 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 Decisions 与 Next Steps 仍在，模型只执行一次 Mutation，最终可见与停止后 Hidden Verifier
 均通过。该测试通过降低Runtime配置窗口来验证真实LLM续接，不冒充自然消耗272k上下文，
 也不代表已经验证跨进程Resume。
+
+六段式摘要进入Core前使用`artifacts/semantic-compaction-ab.json`做真实A/B。确定性基线
+耗时90.4秒并完成任务，但只记住`FINAL_RESPONSE_TOKEN`标签，丢失具体值；Semantic变体
+耗时140.6秒，经过2次独立Summary请求后在最终答案中准确保留早期Literal。语义收益的
+代价是约50.2秒额外Wall Time，以及Summary请求合计41,944 Input / 3,213 Output Token。
+该Brief只作为派生上下文，不能覆盖WorkingState或Tool Result；失败时确定性摘要接管。
 
 ## Pico Triage
 
