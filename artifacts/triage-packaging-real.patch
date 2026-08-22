@@ -1,14 +1,3 @@
-diff --git a/src/packaging/_ranges.py b/src/packaging/_ranges.py
-index 6ba3cee..2a4b7d0 100644
---- a/src/packaging/_ranges.py
-+++ b/src/packaging/_ranges.py
-@@ -322,3 +322,5 @@ def _base_dev0(version: Version) -> Version:
- 
--def coerce_version(version: Version | str) -> Version | None:
-+def coerce_version(version: Version | str | None) -> Version | None:
-+    if version is None:
-+        return None
-     if not isinstance(version, Version):
 diff --git a/src/packaging/version.py b/src/packaging/version.py
 index ee5aa48..87b155c 100644
 --- a/src/packaging/version.py
