@@ -1,3 +1,20 @@
+diff --git a/src/urllib3/connectionpool.py b/src/urllib3/connectionpool.py
+index 7e6f54c..7311b3e 100644
+--- a/src/urllib3/connectionpool.py
++++ b/src/urllib3/connectionpool.py
+@@ -584,5 +584,5 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
+         # Use explicit default port for comparison when none is given
+-        if self.port and not port:
++        if self.port is not None and port is None:
+             port = port_by_scheme.get(scheme)
+-        elif not self.port and port == port_by_scheme.get(scheme):
++        elif self.port is None and port == port_by_scheme.get(scheme):
+             port = None
+@@ -1141,3 +1141,3 @@ def connection_from_url(url: str, **kw: typing.Any) -> HTTPConnectionPool:
+     scheme = scheme or "http"
+-    port = port or port_by_scheme.get(scheme, 80)
++    port = port if port is not None else port_by_scheme.get(scheme, 80)
+     if scheme == "https":
 diff --git a/src/urllib3/poolmanager.py b/src/urllib3/poolmanager.py
 index b7248d2..935712b 100644
 --- a/src/urllib3/poolmanager.py
