@@ -166,6 +166,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
     assert {item["status"] for item in receipts} == {"completed"}
     assert len({item["child_run_id"] for item in receipts}) == 2
     assert all("delegate_tasks" not in client.action_tool_surfaces[0] for client in clients)
+    assert all("exact repository paths, line ranges" in client.prompts[0] for client in clients)
     assert "delegate_tasks" in parent.model_client.action_tool_surfaces[0]
 
 

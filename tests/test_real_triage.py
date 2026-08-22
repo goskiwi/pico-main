@@ -1,9 +1,14 @@
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
 from scripts.run_official_public_tests import load_manifest as load_official_manifest
-from scripts.run_real_triage import prepare_triage_workspace, visible_command
+from scripts.run_real_triage import (
+    prepare_triage_workspace,
+    usage_metrics,
+    visible_command,
+)
 
 TASK_ID = "click_empty_bytes_echo"
 
@@ -30,4 +35,41 @@ def test_real_triage_workspace_is_a_clean_failing_baseline(tmp_path):
     assert status == ""
     command = visible_command(official_task)
     assert command.startswith("PYTHONPATH=src python -m pytest")
+    assert "--tb=short" in command
     assert official_task["official_test_nodes"][0] in command
+
+
+def test_usage_metrics_separate_gross_cached_and_uncached_input():
+    turns = [
+        SimpleNamespace(
+            payload={
+                "completion_metadata": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "cached_tokens": 6,
+                }
+            }
+        ),
+        SimpleNamespace(
+            payload={
+                "completion_metadata": {
+                    "input_tokens": 20,
+                    "output_tokens": 3,
+                    "cached_tokens": 12,
+                }
+            }
+        ),
+    ]
+
+    assert usage_metrics(turns) == {
+        "gross_input_tokens": 30,
+        "cached_input_tokens": 18,
+        "uncached_input_tokens": 12,
+        "cache_reporting_complete": True,
+        "output_tokens": 5,
+    }
+    turns[1].payload["completion_metadata"]["cached_tokens"] = None
+    unknown = usage_metrics(turns)
+    assert unknown["cached_input_tokens"] is None
+    assert unknown["uncached_input_tokens"] is None
+    assert unknown["cache_reporting_complete"] is False

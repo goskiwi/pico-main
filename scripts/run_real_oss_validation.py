@@ -29,7 +29,7 @@ from pico.config import load_project_env, provider_env
 from pico.sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
-    parse_command_invocation,
+    shell_argv,
 )
 from scripts.materialize_real_oss import DEFAULT_MANIFEST, load_manifest, tree_digest
 
@@ -115,12 +115,11 @@ def run_verifier(root, task, sandbox_image):
     target.relative_to(Path(root).resolve())
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
-    argv, env = parse_command_invocation(task["verifier_command"])
     result = DockerSandbox(
         root,
         DockerSandboxConfig(image=sandbox_image),
     ).run(
-        argv, cwd=root, timeout=90, env=env
+        shell_argv(task["verifier_command"]), cwd=root, timeout=90, env={}
     )
     return {
         "ok": result.returncode == 0 and not result.stop_reason,

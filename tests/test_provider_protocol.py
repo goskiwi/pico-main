@@ -319,13 +319,15 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
         "output_tokens": 4,
         "total_tokens": 15,
         "cached_tokens": 7,
+        "uncached_input_tokens": 4,
     }
 
     instance = client()
     with patch("urllib.request.urlopen", return_value=final_response()):
         assert instance.complete_action("prompt", 32, action_tools=TOOLS).kind == "final"
     assert instance.last_completion_metadata["input_tokens"] is None
-    assert instance.last_completion_metadata["cached_tokens"] == 0
+    assert instance.last_completion_metadata["cached_tokens"] is None
+    assert instance.last_completion_metadata["uncached_input_tokens"] is None
 
 
 def test_official_prompt_cache_uses_key_without_model_specific_retention_parameter():

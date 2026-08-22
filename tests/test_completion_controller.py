@@ -1,5 +1,6 @@
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
+from pico.contracts import ToolCall, ToolRunnerResult
 from pico.run_log import RunLog
 from pico.task_state import TaskState
 
@@ -11,7 +12,7 @@ def active_agent(tmp_path):
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(verification_command="verify"),
+        config=PicoConfig(approval_policy="auto", verification_command="verify"),
     )
     state = TaskState.create("task_verify", "verify", run_id="run_verify")
     agent.run.task_state = state
@@ -112,3 +113,34 @@ def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
     ]
     assert len(verification_events) == 1
     assert verification_events[0].payload["status"] == "failed"
+
+
+def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
+    agent, _target = active_agent(tmp_path)
+    agent.run.evidence.effects.append(
+        {
+            "effect_scope": "workspace",
+            "affected_paths": ["subject.txt"],
+        }
+    )
+    agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
+        "exit_code: 0\nstdout:\n1 passed"
+    )
+    call = ToolCall(
+        "run_shell",
+        {"command": "verify", "timeout": 20},
+        "call_verify",
+    )
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+
+    outcome = agent.tools.run(call)
+    agent.run_verification = lambda _fingerprint: (_ for _ in ()).throw(
+        AssertionError("matching verification must not run twice")
+    )
+    assessment = CompletionController(agent).assess("done")
+
+    assert outcome.status == "success"
+    assert assessment.allowed is True
+    verification = agent.run.evidence.verifications[-1]
+    assert verification["source_tool_call_id"] == "call_verify"
+    assert verification["status"] == "passed"

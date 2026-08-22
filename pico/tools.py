@@ -23,7 +23,7 @@ from .contracts import FailureInfo, ToolRunnerResult
 from .features.memory import normalize_working_update
 from .mutations import file_revision
 from .project_memory import MEMORY_RECALL_MAX_CARDS
-from .sandbox import parse_command_invocation
+from .sandbox import shell_argv
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -147,7 +147,11 @@ BASE_TOOL_SPECS = {
     "run_shell": {
         "args_schema": RunShellArgs,
         "risky": True,
-        "description": "Run a shell command in the repo root.",
+        "description": (
+            "Run a POSIX shell command inside the Docker sandbox at the repo root. "
+            "Shell operators such as &&, pipes, redirects, environment assignments, "
+            "and cd are supported."
+        ),
     },
     "write_file": {
         "args_schema": WriteFileArgs,
@@ -160,8 +164,10 @@ BASE_TOOL_SPECS = {
         "risky": True,
         "workspace_mutating": True,
         "description": (
-            "Replace one exact text block in a file. old_text must contain only actual file "
-            "content: exclude read_file's file/revision headers and line-number prefixes."
+            "Replace one exact, unique text block in a file. Keep old_text as small as "
+            "possible while still unique; do not include large unchanged regions. old_text "
+            "must contain only actual file content: exclude read_file's file/revision headers "
+            "and line-number prefixes."
         ),
     },
     "update_working_state": {
@@ -571,12 +577,11 @@ def tool_run_shell(context, args):
     timeout = int(args.get("timeout", 20))
     if context.sandbox is None:
         raise RuntimeError("Docker sandbox is unavailable")
-    argv, command_env = parse_command_invocation(command)
     result = context.sandbox.run(
-        argv,
+        shell_argv(command),
         cwd=context.workspace_root,
         timeout=timeout,
-        env={**context.shell_env(), **command_env},
+        env=context.shell_env(),
         execution_context=context.execution_context(),
     )
     if result.cancelled:

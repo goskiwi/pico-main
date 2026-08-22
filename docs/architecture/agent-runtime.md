@@ -88,4 +88,4 @@ Session stores only `active_run_id`. On startup Pico opens that Run Log, repairs
 
 ## Completion
 
-Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. `pico run show` derives its summary directly from the Run Log.
+Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. A successful `run_shell` call whose command exactly matches the configured verifier is recorded against the current workspace fingerprint and reused by the Completion Gate. `pico run show` derives its summary directly from the Run Log.

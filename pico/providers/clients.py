@@ -98,12 +98,23 @@ def _extract_usage_cache_details(data):
     output_tokens = usage.get("output_tokens")
     input_details = usage.get("input_tokens_details")
     input_details = input_details if isinstance(input_details, dict) else {}
-    cached_tokens = int(input_details.get("cached_tokens") or 0)
+    raw_cached_tokens = input_details.get("cached_tokens")
+    cached_tokens = (
+        int(raw_cached_tokens)
+        if isinstance(raw_cached_tokens, (int, float))
+        else None
+    )
+    uncached_input_tokens = (
+        max(0, int(input_tokens) - cached_tokens)
+        if isinstance(input_tokens, (int, float)) and cached_tokens is not None
+        else None
+    )
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": usage.get("total_tokens"),
         "cached_tokens": cached_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
     }
 
 

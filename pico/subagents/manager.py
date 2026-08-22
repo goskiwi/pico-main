@@ -19,6 +19,17 @@ from .worktree import (
     require_clean_repository,
 )
 
+EXPLORE_HANDOFF = """
+
+Return a concise handoff for the parent Agent. Include:
+- Findings: evidence-backed conclusions only.
+- Evidence: exact repository paths, line ranges, and the smallest critical snippets.
+- Unknowns: anything not established by tools.
+- Recommended next step: the smallest useful follow-up.
+The parent has not seen your tool transcript, so make the handoff sufficient without
+asking it to repeat the whole investigation.
+""".rstrip()
+
 EXPLORE_TOOLS = (
     "list_files",
     "read_file",
@@ -325,6 +336,8 @@ class SubagentManager:
     def _run_record(self, run_id, records, record):
         child = self._build_child(run_id, record)
         prompt = record.spec.prompt + self._dependency_context(run_id, records, record)
+        if record.spec.kind == "explore":
+            prompt += EXPLORE_HANDOFF
         child_error = None
         try:
             child.ask(prompt)

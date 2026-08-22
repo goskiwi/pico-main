@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from .sandbox import parse_command_invocation
+from .sandbox import shell_argv
 
 
 def changed_python_syntax_issues(agent):
@@ -57,12 +57,11 @@ def verify_workspace(
         "output": "",
     }
     try:
-        argv, command_env = parse_command_invocation(command)
         result = sandbox.run(
-            argv,
+            shell_argv(command),
             cwd=root,
             timeout=int(timeout_seconds),
-            env=command_env,
+            env={},
             execution_context=execution_context,
         )
         record["exit_code"] = result.returncode

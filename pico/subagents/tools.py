@@ -41,7 +41,8 @@ def build_tool_registry(manager):
             "description": (
                 "Delegate a bounded DAG of explore or implement tasks to independent Pico "
                 "children. Declare semantic dependencies explicitly. Explore tasks are read-only; "
-                "implement tasks require exact allowed_write_paths and run in isolated worktrees."
+                "their final response is a structured evidence handoff rather than a transcript. "
+                "Implement tasks require exact allowed_write_paths and run in isolated worktrees."
             ),
             "run": lambda args: _delegate(manager, args),
         },

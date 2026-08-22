@@ -20,7 +20,7 @@ from applications.triage import TriageCase, TriageWorkflow
 from pico import OpenAICompatibleModelClient, PicoConfig
 from pico.config import load_project_env, provider_env
 from pico.run_store import RunStore
-from pico.sandbox import DockerSandbox, DockerSandboxConfig, parse_command_invocation
+from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
 from scripts.run_official_public_tests import apply_patch, expected_failure
 from scripts.run_official_public_tests import load_manifest as load_official_manifest
@@ -70,15 +70,14 @@ def prepare_triage_workspace(workspace, real_task, official_task):
 
 def visible_command(official_task):
     nodes = " ".join(shlex.quote(item) for item in official_task["official_test_nodes"])
-    return f"PYTHONPATH=src python -m pytest -q -p no:cacheprovider {nodes}"
+    return f"PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider {nodes}"
 
 
 def run_visible_test(workspace, image, command):
-    argv, env = parse_command_invocation(command)
     result = DockerSandbox(
         workspace,
         DockerSandboxConfig(image=image),
-    ).run(argv, cwd=workspace, timeout=120, env=env)
+    ).run(shell_argv(command), cwd=workspace, timeout=120, env={})
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
         "exit_code": result.returncode,
@@ -94,12 +93,6 @@ def collect_run_metrics(workspace, report):
     projection = store.replay(report.run_id)
     turns = [entry for entry in events if entry.kind == "turn_metrics"]
 
-    def total(field):
-        return sum(
-            int(entry.payload.get("completion_metadata", {}).get(field) or 0)
-            for entry in turns
-        )
-
     child_count = sum(
         len(entry.args.get("tasks", ()))
         for entry in events
@@ -109,10 +102,31 @@ def collect_run_metrics(workspace, report):
         "run_duration_ms": projection.run_duration_ms,
         "model_request_count": projection.model_request_count,
         "executed_tool_count": projection.executed_tool_count,
-        "input_tokens": total("input_tokens"),
-        "output_tokens": total("output_tokens"),
-        "cached_tokens": total("cached_tokens"),
+        **usage_metrics(turns),
         "child_count": child_count,
+    }
+
+
+def usage_metrics(turns):
+    completions = [
+        entry.payload.get("completion_metadata", {}) for entry in turns
+    ]
+    gross = sum(int(item.get("input_tokens") or 0) for item in completions)
+    output = sum(int(item.get("output_tokens") or 0) for item in completions)
+    cache_complete = bool(completions) and all(
+        isinstance(item.get("cached_tokens"), int) for item in completions
+    )
+    cached = (
+        sum(int(item["cached_tokens"]) for item in completions)
+        if cache_complete
+        else None
+    )
+    return {
+        "gross_input_tokens": gross,
+        "cached_input_tokens": cached,
+        "uncached_input_tokens": gross - cached if cached is not None else None,
+        "cache_reporting_complete": cache_complete,
+        "output_tokens": output,
     }
 
 

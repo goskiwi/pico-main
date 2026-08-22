@@ -45,8 +45,12 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         workspace_fingerprint="current-workspace",
     )
 
-    assert recorded["argv"] == ("python", "-m", "pytest", "-q")
-    assert recorded["env"] == {"MODE": "test"}
+    assert recorded["argv"] == (
+        "/bin/sh",
+        "-c",
+        "MODE=test python -m pytest -q",
+    )
+    assert recorded["env"] == {}
     assert recorded["timeout"] == 600
     assert result == {
         "command": "MODE=test python -m pytest -q",

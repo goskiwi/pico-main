@@ -65,6 +65,8 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
         "write_file", "patch_file", "update_working_state", "memory_recall",
         "memory_store", "memory_forget",
     }
+    assert "&&" in tools["run_shell"]["description"]
+    assert "as small as possible" in tools["patch_file"]["description"]
 
 
 def test_search_returns_workspace_relative_paths(tmp_path):

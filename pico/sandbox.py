@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import os
 import queue
-import re
-import shlex
 import shutil
 import subprocess
 import threading
@@ -38,19 +36,12 @@ HOST_ENV_DENYLIST = {
     "USER",
 }
 
-_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
-
-
-def parse_command_invocation(command):
-    """Split a trusted command once into direct argv and explicit environment."""
-    parts = shlex.split(str(command or ""))
-    command_env = {}
-    while parts and _ENV_ASSIGNMENT_RE.fullmatch(parts[0]):
-        name, value = parts.pop(0).split("=", 1)
-        command_env[name] = value
-    if not parts:
-        raise ValueError("command must contain an executable")
-    return tuple(parts), command_env
+def shell_argv(command):
+    """Build an in-container POSIX shell invocation for one command string."""
+    command = str(command or "").strip()
+    if not command:
+        raise ValueError("shell command must not be empty")
+    return "/bin/sh", "-c", command
 
 
 class SandboxError(RuntimeError):

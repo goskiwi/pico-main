@@ -115,6 +115,32 @@ class ToolExecutor:
             )
         )
 
+    @staticmethod
+    def _record_matching_verification(agent, call, outcome, result_entry):
+        configured = str(agent.config.verification_command or "").strip()
+        command = str(call.args.get("command", "")).strip()
+        if (
+            result_entry is None
+            or call.name != "run_shell"
+            or outcome.status != "success"
+            or not configured
+            or command != configured
+        ):
+            return
+        fingerprint = agent.workspace.content_fingerprint(force=True)
+        agent.emit_event(
+            "verification_result",
+            {
+                "command": command,
+                "status": "passed",
+                "freshness": "current",
+                "workspace_fingerprint": fingerprint,
+                "exit_code": 0,
+                "output": outcome.content[-4000:],
+                "source_tool_call_id": call.call_id,
+            },
+        )
+
     @classmethod
     def _call_state(cls, agent, name, args):
         paths = []
@@ -316,7 +342,8 @@ class ToolExecutor:
             agent.prompt.refresh(force=True)
             if agent.workspace.revision == revision_before_refresh:
                 agent.workspace.mark_changed()
-        self._record_tool_result(agent, outcome)
+        result_entry = self._record_tool_result(agent, outcome)
+        self._record_matching_verification(agent, call, outcome, result_entry)
         result_key = (
             str(run_id),
             call_hash,

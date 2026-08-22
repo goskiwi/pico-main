@@ -75,7 +75,7 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 - 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；重复调用检测；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
 - 最小 Shell 环境：未配置时使用默认白名单；显式空白名单保持为空，仅由 Shell 边界补充运行必需的 `PWD`/`PATH`。
 - 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
-- 隔离执行：`run_shell` 强制进入临时 Docker 容器；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
+- 隔离执行：`run_shell` 在临时 Docker 容器内通过 POSIX Shell 执行，支持 `&&`、管道、重定向、环境变量与 `cd`；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 崩溃恢复：Session 只保存 `active_run_id`。副作用前先 fsync `tool_started` 及精确潜在影响路径/before revision；结果完成后 fsync `tool_result`。恢复时若二者不配对，只检查声明路径并生成 interrupted error/partial，绝不盲目重放。最后一条未完成 JSONL 尾巴可截断，中间损坏直接报错。
 - 恢复配置：模型、预算、超时、Verifier、工具表面和权限策略均使用续跑时的当前配置，不冻结为 Resume identity。
 - 完成证据：观察、修改和结构化 verifier 结果写入 RunEvidence；变更 Python 先做 AST 校验，Workspace 变更需通过绑定当前内容指纹的 Runtime verifier，未解决 partial/unknown 状态禁止成功结束。
@@ -87,7 +87,8 @@ Parent 通过两个原生工具编排独立 Pico Child：
 - `delegate_tasks`：提交显式依赖 DAG；无依赖任务最多三个并行执行。
 - `apply_task_patches`：由独立 `PatchIntegrator` 在临时 Integration Worktree 中按拓扑顺序检查并应用 Patch，验证通过且 Parent HEAD/工作区未变化后再写回原工作区。
 
-Explore Child 共享同一源码快照但只有只读工具。Implement Child 使用独立 Git
+Explore Child 共享同一源码快照但只有只读工具，并以包含精确路径、行号和关键片段的
+证据交接替代完整工具历史。Implement Child 使用独立 Git
 Worktree、独立 Model Client、Session、Run Log 和 Artifact namespace；
 写操作在 ToolExecutor 准入阶段受精确文件白名单限制，任务结束后再以实际 Git Diff
 复核一次。无依赖且写文件重叠的实现任务会在规划阶段被拒绝；有依赖的实现任务会把
@@ -134,6 +135,8 @@ uv run pico run events <run_id> --cwd /path/to/repo
 ```
 
 `--verify-command ""` 可显式关闭自动 verifier。若未提供，Python/Node 项目会按仓库文件自动选择默认命令。
+模型通过 `run_shell` 成功执行完全相同的验证命令时，Runtime 会把结果绑定到当前 Workspace
+指纹，Completion Gate 直接复用，不再重复执行。
 
 `--max-new-tokens` 默认值为 `1024`。它传给 Responses API 的 `max_output_tokens`，统计 reasoning tokens、
 可见文本和 function-call arguments 的总输出，而不只是最终展示文本。

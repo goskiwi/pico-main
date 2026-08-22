@@ -5,7 +5,7 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceConte
 from pico.sandbox import (
     DockerSandbox,
     SandboxResult,
-    parse_command_invocation,
+    shell_argv,
 )
 
 
@@ -68,7 +68,7 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
     assert write_gitignore.status == "success"
 
 
-def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
+def test_shell_runs_inside_docker_and_env_is_filtered(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
     with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LANG": "C"}, clear=True):
@@ -77,7 +77,7 @@ def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
         )
     assert outcome.status == "success"
     argv, options = sandbox.calls[0]
-    assert argv == ("python", "-c", "print(1)")
+    assert argv == ("/bin/sh", "-c", "python -c 'print(1)'")
     assert "OPENAI_API_KEY" not in options["env"]
     assert options["timeout"] == 3
 
@@ -99,10 +99,9 @@ def test_shell_failure_is_structured_before_tool_executor_classification(tmp_pat
     assert outcome.failure.detail == "command exited with 7"
 
 
-def test_shell_parser_does_not_invoke_a_host_shell():
-    argv, env = parse_command_invocation("MODE=test python -m pytest -q")
-    assert argv == ("python", "-m", "pytest", "-q")
-    assert env == {"MODE": "test"}
+def test_shell_argv_preserves_compound_command_for_container_shell():
+    command = "MODE=test python -m pytest -q && git diff --check"
+    assert shell_argv(command) == ("/bin/sh", "-c", command)
 
 
 def test_approval_denial_prevents_sandbox_start(tmp_path):
