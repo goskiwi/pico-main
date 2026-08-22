@@ -84,6 +84,10 @@ class SubagentManager:
 
     def _register_specs(self, run_id, specs):
         records = self._records(run_id)
+        if len({spec.kind for spec in specs}) > 1:
+            raise ValueError(
+                "one delegation must contain only explore tasks or only implement tasks"
+            )
         validate_graph(records, specs)
         reused = set()
         for spec in specs:

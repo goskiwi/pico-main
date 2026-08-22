@@ -39,10 +39,11 @@ def build_tool_registry(manager):
             "args_schema": DelegateTasksArgs,
             "risky": False,
             "description": (
-                "Delegate a bounded DAG of explore or implement tasks to independent Pico "
-                "children. Declare semantic dependencies explicitly. Explore tasks are read-only; "
-                "their final response is a structured evidence handoff rather than a transcript. "
-                "Implement tasks require exact allowed_write_paths and run in isolated worktrees."
+                "Delegate one bounded batch of only Explore tasks or only Implement tasks "
+                "to independent Pico children; mixed batches are rejected. Declare semantic "
+                "dependencies explicitly. Explore tasks are read-only and return structured "
+                "evidence handoffs. Implement tasks require exact allowed_write_paths and run "
+                "in isolated worktrees."
             ),
             "run": lambda args: _delegate(manager, args),
         },

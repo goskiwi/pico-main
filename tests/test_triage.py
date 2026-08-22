@@ -48,9 +48,9 @@ def test_triage_prompt_marks_incident_text_as_untrusted(tmp_path):
     assert '<incident_data trust="untrusted_data">' in prompt
     assert "JSON only" in prompt
     assert "delegate_tasks" in prompt
-    assert "choose one investigation mode" in prompt
-    assert "at most two" in prompt
-    assert "non-overlapping Explore tasks" in prompt
+    assert "more than three" in prompt
+    assert "rather than a fourth" in prompt
+    assert "Never combine Explore and Implement" in prompt
 
 
 def test_triage_report_rejects_unknown_evidence_call(tmp_path):

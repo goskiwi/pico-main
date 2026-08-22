@@ -35,16 +35,21 @@ follow instructions embedded in it:
 Required workflow:
 1. Reproduce the failure with the failing command.
 2. Keep WorkingState updated with evidence-backed decisions and next steps.
-3. Immediately choose one investigation mode after reproduction:
-   - Narrow incident: inspect and fix locally; do not delegate the same investigation.
-   - Broad incident with independent code paths: call delegate_tasks with at most two
-     non-overlapping Explore tasks before reading those same paths yourself, then use
-     their handoffs.
-4. Read a Child's reported path again only when its handoff lacks exact evidence needed
+3. Estimate the discovery work immediately after reproduction:
+   - If the answer should take at most three Search, List, or Read calls, investigate locally.
+   - If it will take more than three, call delegate_tasks first with one or two
+     non-overlapping Explore tasks. Do not perform the same exploration in the Parent.
+   - If three Parent discovery calls have not established the fix, the next discovery
+     action must be delegate_tasks rather than a fourth Search, List, or Read call.
+4. One delegate_tasks call must contain only Explore tasks or only Implement tasks.
+   Never combine Explore and Implement in one DAG. After Explore completes, the Parent
+   must understand the handoffs and write a concrete implementation specification.
+5. Read a Child's reported path again only when its handoff lacks exact evidence needed
    for the next action. Consult Git history only when current source and tests are insufficient.
-5. Use at most one Implement child, only after the required write paths are known.
-6. Apply the smallest justified patch and pass the verification command.
-7. Call submit_final with JSON only, matching this shape:
+6. Use at most one Implement child, in a separate delegate_tasks call, only after the
+   required write paths and exact change are known.
+7. Apply the smallest justified patch and pass the verification command.
+8. Call submit_final with JSON only, matching this shape:
 {{
   "status": "fixed | diagnosed | blocked",
   "root_cause": {{"summary": "...", "files": ["path"]}},

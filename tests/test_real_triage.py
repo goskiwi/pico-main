@@ -6,6 +6,7 @@ from scripts.materialize_real_oss import load_manifest as load_real_manifest
 from scripts.run_official_public_tests import load_manifest as load_official_manifest
 from scripts.run_real_triage import (
     prepare_triage_workspace,
+    summarize_runs,
     usage_metrics,
     visible_command,
 )
@@ -73,3 +74,36 @@ def test_usage_metrics_separate_gross_cached_and_uncached_input():
     assert unknown["cached_input_tokens"] is None
     assert unknown["uncached_input_tokens"] is None
     assert unknown["cache_reporting_complete"] is False
+
+
+def test_run_summary_aggregates_parent_and_child_usage():
+    turns = [
+        SimpleNamespace(
+            kind="turn_metrics",
+            payload={
+                "completion_metadata": {
+                    "input_tokens": 30,
+                    "output_tokens": 4,
+                    "cached_tokens": 20,
+                }
+            },
+        )
+    ]
+    projection = SimpleNamespace(
+        model_request_count=1,
+        executed_tool_count=2,
+        run_duration_ms=50,
+    )
+
+    assert summarize_runs(((turns, projection), (turns, projection))) == {
+        "run_count": 2,
+        "model_request_count": 2,
+        "executed_tool_count": 4,
+        "sum_duration_ms": 100,
+        "max_duration_ms": 50,
+        "gross_input_tokens": 60,
+        "cached_input_tokens": 40,
+        "uncached_input_tokens": 20,
+        "cache_reporting_complete": True,
+        "output_tokens": 8,
+    }

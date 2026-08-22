@@ -91,19 +91,51 @@ def collect_run_metrics(workspace, report):
     store = RunStore(Path(workspace) / ".pico" / "runs")
     events = store.read_events(report.run_id)
     projection = store.replay(report.run_id)
-    turns = [entry for entry in events if entry.kind == "turn_metrics"]
-
-    child_count = sum(
-        len(entry.args.get("tasks", ()))
-        for entry in events
-        if entry.kind == "assistant_tool_call" and entry.name == "delegate_tasks"
-    )
+    parent_run = (events, projection)
+    child_runs = load_child_runs(workspace, report.run_id)
     return {
-        "run_duration_ms": projection.run_duration_ms,
-        "model_request_count": projection.model_request_count,
-        "executed_tool_count": projection.executed_tool_count,
+        "wall_duration_ms": projection.run_duration_ms,
+        "child_count": len(child_runs),
+        "parent": summarize_runs((parent_run,)),
+        "children": summarize_runs(child_runs),
+        "total": summarize_runs((parent_run, *child_runs)),
+    }
+
+
+def load_child_runs(workspace, parent_run_id):
+    root = (
+        Path(workspace)
+        / ".pico"
+        / "runs"
+        / parent_run_id
+        / "subagents"
+    )
+    runs = []
+    for path in sorted(root.glob("*/runs/*/events.jsonl")):
+        run_id = path.parent.name
+        store = RunStore(path.parent.parent)
+        events = store.read_events(run_id)
+        runs.append((events, store.replay(run_id)))
+    return tuple(runs)
+
+
+def summarize_runs(runs):
+    runs = tuple(runs)
+    events = [entry for run_events, _projection in runs for entry in run_events]
+    projections = [projection for _events, projection in runs]
+    durations = [projection.run_duration_ms for projection in projections]
+    turns = [entry for entry in events if entry.kind == "turn_metrics"]
+    return {
+        "run_count": len(runs),
+        "model_request_count": sum(
+            projection.model_request_count for projection in projections
+        ),
+        "executed_tool_count": sum(
+            projection.executed_tool_count for projection in projections
+        ),
+        "sum_duration_ms": sum(durations),
+        "max_duration_ms": max(durations, default=0),
         **usage_metrics(turns),
-        "child_count": child_count,
     }
 
 

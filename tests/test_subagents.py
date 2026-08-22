@@ -179,6 +179,78 @@ def test_delegate_tool_schema_is_strict_at_nested_task_level():
     assert task_schema["additionalProperties"] is False
 
 
+def test_one_delegation_cannot_mix_explore_and_implement_tasks(tmp_path):
+    root = repository(tmp_path)
+    parent = build_parent(
+        root,
+        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
+    )
+
+    with pytest.raises(ValueError, match="only explore tasks or only implement tasks"):
+        parent.dependencies.subagents.delegate(
+            (
+                SubtaskSpec(
+                    task_id="explore-first",
+                    kind="explore",
+                    prompt="inspect",
+                ),
+                SubtaskSpec(
+                    task_id="implement-after",
+                    kind="implement",
+                    prompt="implement",
+                    depends_on=("explore-first",),
+                    allowed_write_paths=("feature.py",),
+                ),
+            )
+        )
+
+
+def test_explore_handoff_feeds_separate_implement_delegation(tmp_path):
+    root = repository(tmp_path)
+    clients = {}
+
+    def child_factory(spec):
+        if spec.kind == "explore":
+            client = FakeModelClient([ModelAction.final("change feature.py line 1")])
+        else:
+            client = FakeModelClient(
+                [
+                    ModelAction.tool(
+                        "write_file",
+                        {
+                            "path": "feature.py",
+                            "content": "implemented\n",
+                            "expected_revision": "absent",
+                        },
+                    ),
+                    ModelAction.final("implemented handoff"),
+                ]
+            )
+        clients[spec.task_id] = client
+        return client
+
+    parent = build_parent(root, child_factory)
+    explore = SubtaskSpec(
+        task_id="explore-feature",
+        kind="explore",
+        prompt="inspect feature",
+    )
+    implement = SubtaskSpec(
+        task_id="implement-feature",
+        kind="implement",
+        prompt="implement the synthesized specification",
+        depends_on=("explore-feature",),
+        allowed_write_paths=("feature.py",),
+    )
+
+    first = parent.dependencies.subagents.delegate((explore,))
+    second = parent.dependencies.subagents.delegate((implement,))
+
+    assert first["tasks"][0]["status"] == "completed"
+    assert second["tasks"][0]["status"] == "completed"
+    assert "change feature.py line 1" in clients["implement-feature"].prompts[0]
+
+
 def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):
     root = repository(tmp_path)
     started = []
