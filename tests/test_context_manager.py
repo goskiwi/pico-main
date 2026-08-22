@@ -298,7 +298,7 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
 
 
 def test_real_client_capability_uses_semantic_six_section_compaction(tmp_path):
-    brief = {
+    summary = {
         "goal": "inspect",
         "constraints_preferences": [],
         "progress": {"done": [], "in_progress": [], "blocked": []},
@@ -312,7 +312,7 @@ def test_real_client_capability_uses_semantic_six_section_compaction(tmp_path):
             self.last_completion_metadata = {"input_tokens": 10, "output_tokens": 5}
 
         def complete_action(self, *_args, **_kwargs):
-            return ModelAction.tool("submit_compaction_brief", brief)
+            return ModelAction.tool("submit_compaction_summary", summary)
 
     class SummaryCapableClient(FakeModelClient):
         @staticmethod

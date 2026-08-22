@@ -213,7 +213,7 @@ Decisions 与 Next Steps 仍在，模型只执行一次 Mutation，最终可见�
 耗时90.4秒并完成任务，但只记住`FINAL_RESPONSE_TOKEN`标签，丢失具体值；Semantic变体
 耗时140.6秒，经过2次独立Summary请求后在最终答案中准确保留早期Literal。语义收益的
 代价是约50.2秒额外Wall Time，以及Summary请求合计41,944 Input / 3,213 Output Token。
-该Brief只作为派生上下文，不能覆盖WorkingState或Tool Result；失败时确定性摘要接管。
+该Summary只作为派生上下文，不能覆盖WorkingState或Tool Result；失败时确定性摘要接管。
 
 ## Pico Triage
 

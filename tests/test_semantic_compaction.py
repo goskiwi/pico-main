@@ -5,14 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 from pico import ModelAction, WorkingState
-from pico.compaction_brief import (
+from pico.compaction_summary import (
     SUMMARY_TOOL,
-    CompactionBrief,
-    SemanticBriefSummarizer,
+    CompactionSummarizer,
+    CompactionSummary,
 )
 
 
-def valid_brief():
+def valid_summary():
     return {
         "goal": "Fix normalization",
         "constraints_preferences": ["Modify one file"],
@@ -27,8 +27,8 @@ def valid_brief():
     }
 
 
-def test_semantic_brief_requires_and_renders_all_six_sections():
-    rendered = CompactionBrief.from_dict(valid_brief()).render()
+def test_semantic_summary_requires_and_renders_all_six_sections():
+    rendered = CompactionSummary.from_dict(valid_summary()).render()
 
     assert rendered.count("\n## ") == 5
     for heading in (
@@ -43,16 +43,16 @@ def test_semantic_brief_requires_and_renders_all_six_sections():
     assert "ORBIT-DELTA-7319" in rendered
 
 
-def test_semantic_brief_rejects_missing_or_extra_fields():
-    missing = valid_brief()
+def test_semantic_summary_rejects_missing_or_extra_fields():
+    missing = valid_summary()
     missing.pop("critical_context")
     with pytest.raises(ValueError, match="invalid fields"):
-        CompactionBrief.from_dict(missing)
+        CompactionSummary.from_dict(missing)
 
-    extra = valid_brief()
+    extra = valid_summary()
     extra["notes"] = []
     with pytest.raises(ValueError, match="invalid fields"):
-        CompactionBrief.from_dict(extra)
+        CompactionSummary.from_dict(extra)
 
 
 def test_summary_tool_schema_is_strict_and_complete():
@@ -75,9 +75,9 @@ def test_summarizer_uses_isolated_structured_model_request():
             assert "FINAL_RESPONSE_TOKEN" in prompt
             assert max_new_tokens == 2048
             assert action_tools == [SUMMARY_TOOL]
-            return ModelAction.tool("submit_compaction_brief", valid_brief())
+            return ModelAction.tool("submit_compaction_summary", valid_summary())
 
-    summarizer = SemanticBriefSummarizer(SummaryClient)
+    summarizer = CompactionSummarizer(SummaryClient)
     event = SimpleNamespace(
         kind="tool_result",
         name="read_file",

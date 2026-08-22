@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import tiktoken
 
-from .compaction_brief import SemanticBriefSummarizer
+from .compaction_summary import CompactionSummarizer
 from .features.memory import WorkingState
 
 DEFAULT_SECTION_BUDGETS = {
@@ -119,7 +119,7 @@ class ContextManager:
         self._last_history_metadata = {}
         isolated_client = getattr(agent.model_client, "new_isolated_client", None)
         self.semantic_summarizer = (
-            SemanticBriefSummarizer(isolated_client)
+            CompactionSummarizer(isolated_client)
             if callable(isolated_client)
             else None
         )
