@@ -22,7 +22,7 @@ from pico.config import load_project_env, provider_env
 from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, parse_command_invocation
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
-from scripts.run_official_public_tests import apply_patch
+from scripts.run_official_public_tests import apply_patch, expected_failure
 from scripts.run_official_public_tests import load_manifest as load_official_manifest
 from scripts.run_real_oss_validation import (
     FORBIDDEN_CHANGE_GLOBS,
@@ -123,7 +123,7 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
+    parser.add_argument("--sandbox-image", default="pico/official-public-tests:latest")
     parser.add_argument("--hidden-image", default="pico/real-oss-suite:latest")
     parser.add_argument("--max-tool-executions", type=int, default=40)
     parser.add_argument(
@@ -173,12 +173,18 @@ def main(argv=None):
     )
     if real_task is None or official_task is None:
         raise ValueError(f"unknown Real Triage task: {args.task}")
+    if official_task["pre_fix_expected"] != "fail":
+        raise ValueError(
+            f"{args.task} has no discriminative visible Official Test"
+        )
     command = visible_command(official_task)
     baseline_sha = prepare_triage_workspace(args.workspace, real_task, official_task)
     before = file_snapshot(args.workspace)
     initial = run_visible_test(args.workspace, args.sandbox_image, command)
-    if initial["ok"]:
-        raise RuntimeError(f"{args.task} visible CI test did not fail before Triage")
+    if not expected_failure(initial):
+        raise RuntimeError(
+            f"{args.task} visible CI test did not fail discriminatively before Triage"
+        )
 
     def model_client():
         return OpenAICompatibleModelClient(
