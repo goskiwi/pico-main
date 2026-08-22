@@ -14,18 +14,6 @@
       "tree_digest": "sha256:8133ee39a152318379272ff5d79fd32a58d3f7f71a38dd32e18dc10f7fb70fe2"
     },
     {
-      "source_commit": "b97e13cc74d8a45dca260d4037edd7d1f5094042",
-      "source_repository": "https://github.com/pallets/werkzeug.git",
-      "task_id": "werkzeug_float_url_notation",
-      "tree_digest": "sha256:f275f91e252eb865ee8505e8fba7abe6b28e2fdd7bda67ae65a469c8cb2c01b7"
-    },
-    {
-      "source_commit": "767b23617628419ae3709ccfb02f9602ae9fe51f",
-      "source_repository": "https://github.com/pallets/jinja.git",
-      "task_id": "jinja_overlay_async_default",
-      "tree_digest": "sha256:b8418596097cd5c99be8e2be5da1c578ad106e8d4fb97900a8bc3890dcaf1e55"
-    },
-    {
       "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
       "source_repository": "https://github.com/urllib3/urllib3.git",
       "task_id": "urllib3_port_zero",

@@ -23,6 +23,7 @@ from pico import (
 )
 from pico.config import load_project_env, provider_env
 from pico.sandbox import DockerSandbox, DockerSandboxConfig
+from scripts.real_case_support import git_metadata, require_clean_runtime
 from scripts.run_real_compaction import (
     EVIDENCE_COUNT,
     HIDDEN_COMMAND,
@@ -34,7 +35,6 @@ from scripts.run_real_compaction import (
     prepare_workspace,
     run_command,
 )
-from scripts.run_real_oss_validation import git_metadata, require_clean_runtime
 
 CRITICAL_TOKEN = "ORBIT-DELTA-7319"
 

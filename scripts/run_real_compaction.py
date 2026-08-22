@@ -24,7 +24,7 @@ from pico import (
 )
 from pico.config import load_project_env, provider_env
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
-from scripts.run_real_oss_validation import git_metadata, require_clean_runtime
+from scripts.real_case_support import git_metadata, require_clean_runtime
 
 EVIDENCE_COUNT = 12
 TARGET_PATH = "src/normalizer.py"

@@ -1,13 +1,14 @@
 {
   "schema_version": "official-public-tests-v2",
   "real_oss_manifest": "validation/real_oss_suite.json",
-  "real_oss_suite_artifact": "artifacts/real-oss-suite-v2.json",
   "tasks": [
     {
       "id": "click_empty_bytes_echo",
       "official_test_patch": "validation/official_public_tests/click_empty_bytes_echo.patch",
       "pre_fix_expected": "fail",
-      "official_test_nodes": ["tests/test_utils.py::test_echo_custom_file"]
+      "official_test_nodes": [
+        "tests/test_utils.py::test_echo_custom_file"
+      ]
     },
     {
       "id": "packaging_non_string_version",
@@ -17,18 +18,6 @@
         "tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version",
         "tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped"
       ]
-    },
-    {
-      "id": "werkzeug_float_url_notation",
-      "official_test_patch": "validation/official_public_tests/werkzeug_float_url_notation.patch",
-      "pre_fix_expected": "fail",
-      "official_test_nodes": ["tests/test_routing.py::test_float_no_scientific"]
-    },
-    {
-      "id": "jinja_overlay_async_default",
-      "official_test_patch": "validation/official_public_tests/jinja_overlay_async_default.patch",
-      "pre_fix_expected": "pass",
-      "official_test_nodes": ["tests/test_api.py::test_overlay_enable_async"]
     },
     {
       "id": "urllib3_port_zero",

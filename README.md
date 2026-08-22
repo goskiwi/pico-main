@@ -192,14 +192,11 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控 32k 窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier |
 | Semantic Compaction A/B | 1/1 | 同模型/Provider/任务下，确定性摘要丢失早期Literal，六段式摘要保留；两个变体均完成Patch与Hidden Verifier |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
-| RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
+| RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
 | Real Click Triage | 1/1 | `gpt-5.6-luna`；可见测试与停止后 Hidden Verifier 均通过，只修改 `src/click/utils.py` |
 | Real Packaging Triage | 1/1 | `gpt-5.6-luna`；6 个可见测试与 Hidden Verifier 均通过，Root Cause Top-1/Top-3 命中 |
 | Real urllib3 Triage | 1/1 | `gpt-5.6-luna`；Explore → Parent 合成 → Implement → Patch 集成完成两文件修复，Hidden Verifier 通过 |
-| Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
-| Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
-| Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
 
 真实 Compaction Artifact 见 `artifacts/real-compaction.json` 与
 `artifacts/real-compaction.patch`。模型按顺序各读取一次 12 份证据，最大单次 Input 为
@@ -284,21 +281,15 @@ Child 使总 Tool 达到 27 个、Total Uncached 达到 247.0k，Wall Time 为 3
 Worktree、Patch 集成和 Verifier 链路端到端可用，同时也如实显示父子型编排保护 Parent
 上下文但不保证降低总成本或延迟。
 
-旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
-
-五仓库冻结任务集可以从精确上游 commit 重新物化并运行：
+三个真实Triage Fixture可以从精确上游Commit重新物化：
 
 ```bash
 uv run python scripts/materialize_real_oss.py --replace
 docker build -f docker/real-oss-suite.Dockerfile -t pico/real-oss-suite:latest .
-uv run python scripts/run_real_oss_suite.py --model gpt-5.6-luna
 docker build -f docker/official-public-tests.Dockerfile -t pico/official-public-tests:latest .
-uv run python scripts/run_official_public_tests.py
 ```
 
-Real OSS runner 强制要求 clean worktree，并把 Runtime commit、manifest/verifier/reference-patch digest、fixture tree digest、Docker image ID 和统一工具预算写入证据。Preflight 必须证明每个 hidden verifier 在 pre-fix fixture 上失败，并在应用绑定上游修复提交的 reference patch 后通过。完整五题模型运行不复用旧结果，也不选择性重跑任务失败。
-
-官方公开测试 runner 使用冻结的上游 test-only patch 和完整 fix SHA：pre-fix、官方 reference patch、Agent patch 使用同一测试节点。四题官方测试在 pre-fix 上失败；Jinja 官方测试在 pre-fix 上也会通过，因此明确标为非区分性，独立 hidden verifier 负责覆盖 async parent 无参数 overlay 的遗漏。结果见 `artifacts/official-public-tests-v1.{json,md}`。
+`run_real_triage.py`强制要求clean worktree，在Agent运行前证明公开回归测试失败，停止后再运行Hidden Verifier，并把Runtime commit、上游commit、Patch范围及Parent/Child/Total成本写入当前三份真实证据。
 
 面试展示顺序见 [`docs/review-pack/interview-demo.md`](docs/review-pack/interview-demo.md)。
 

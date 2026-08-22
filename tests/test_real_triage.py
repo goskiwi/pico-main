@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
-from scripts.run_official_public_tests import load_manifest as load_official_manifest
+from scripts.official_test_support import load_manifest as load_official_manifest
 from scripts.run_real_triage import (
     prepare_triage_workspace,
     summarize_runs,

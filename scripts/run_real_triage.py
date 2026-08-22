@@ -22,9 +22,9 @@ from pico.config import load_project_env, provider_env
 from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
-from scripts.run_official_public_tests import apply_patch, expected_failure
-from scripts.run_official_public_tests import load_manifest as load_official_manifest
-from scripts.run_real_oss_validation import (
+from scripts.official_test_support import apply_patch, expected_failure
+from scripts.official_test_support import load_manifest as load_official_manifest
+from scripts.real_case_support import (
     FORBIDDEN_CHANGE_GLOBS,
     changed_paths,
     file_snapshot,

@@ -125,9 +125,8 @@ Catalog 常驻 Prompt，主模型按描述显式调用 `memory_recall`，Card �
 ### 4. RepoMap
 
 RepoMap 使用 tree-sitter 提取 Python Symbol 和静态 Call/Import/Inheritance/Test Edges，
-再用 lexical personalization + PageRank 在 Token Budget 内输出任务相关签名。固定模型
-AUTO/OFF 历史对照显示自动注入减少约 17% 工具步和输入 Token；该结果绑定实验所列的
-Runtime commit，不冒充当前工作树的模型成绩。
+再用 lexical personalization + PageRank 在 Token Budget 内输出任务相关签名。当前
+确定性评测验证任务命中、图关系和预算边界，不宣称通用模型收益。
 
 ### 5. 多 Agent 附录
 
@@ -161,8 +160,7 @@ WorkingState 是当前 Run 的计划白板；Project Memory 是跨 Session 的�
 ### 为什么 Memory 显式 Recall，而 RepoMap 自动注入？
 
 Memory Catalog 已提供语义标题，模型能判断是否需要正文；显式 Recall 让调用和成本进入
-正常 RunLog。RepoMap 的 AUTO/OFF 对照显示模型在没有地图时通常先 list/search，而不会
-主动请求地图，因此保留自动注入。
+正常 RunLog。RepoMap 是有界的小型仓库导航投影，因此由Runtime自动注入。
 
 ### 多 Agent 为什么需要 Worktree？
 
@@ -177,6 +175,6 @@ Mailbox、跨进程 Child 调度恢复和通用 MCP/Skills 都明确不在范围
 ## 证据边界
 
 - 当前确定性证据：pytest、Native Harness、Context v5、Project Memory v2、RepoMap v1。
-- 历史付费模型证据：RepoMap AUTO/OFF、Real OSS v2、Official Public Tests；必须同时说明
+- 当前真实模型证据：三个Triage案例与Semantic Compaction A/B；必须同时说明
   它们绑定的 Runtime commit/fixture/model，不宣称是当前未提交工作树的实时成绩。
 - Docker 隔离、可选网络和模型后端仍是环境信任边界。

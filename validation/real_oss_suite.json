@@ -1,78 +1,76 @@
 {
   "schema_version": "real-oss-suite-v3",
-  "name": "pico-real-oss-five-repo-suite",
+  "name": "pico-real-triage-three-repo-suite",
   "tool_budget": 40,
   "tasks": [
     {
       "id": "click_empty_bytes_echo",
       "prompt": "Fix click.echo for empty bytes or bytearray values. With newline output enabled, an empty binary value written to a binary file must remain binary and write a binary newline instead of raising TypeError. Preserve existing text behavior, modify only production Python files, and run a focused test.",
       "fixture_repo": "artifacts/real-oss-fixtures/click_empty_bytes_echo",
-      "required_change_globs": ["src/click/**/*.py"],
-      "allowed_change_globs": ["src/click/**/*.py"],
+      "required_change_globs": [
+        "src/click/**/*.py"
+      ],
+      "allowed_change_globs": [
+        "src/click/**/*.py"
+      ],
       "verifier_file": "validation/verifiers/real_oss/click_empty_bytes_echo/test_hidden.py",
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pallets/click.git",
       "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
       "reference_fix_commit": "4d3db84b251518e97299a38a5ca4bab3d01873a2",
       "reference_patch": "validation/reference_patches/click_empty_bytes_echo.patch",
-      "expected_files": ["src/click/utils.py", "tests/test_utils.py"]
+      "expected_files": [
+        "src/click/utils.py",
+        "tests/test_utils.py"
+      ]
     },
     {
       "id": "packaging_non_string_version",
       "prompt": "Fix packaging.version.Version so non-string inputs consistently raise InvalidVersion. SpecifierSet.filter with a key that returns None must skip that item and continue. Preserve valid parsing, modify only production Python files, and run focused tests.",
       "fixture_repo": "artifacts/real-oss-fixtures/packaging_non_string_version",
-      "required_change_globs": ["src/packaging/**/*.py"],
-      "allowed_change_globs": ["src/packaging/**/*.py"],
+      "required_change_globs": [
+        "src/packaging/**/*.py"
+      ],
+      "allowed_change_globs": [
+        "src/packaging/**/*.py"
+      ],
       "verifier_file": "validation/verifiers/real_oss/packaging_non_string_version/test_hidden.py",
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pypa/packaging.git",
       "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
       "reference_fix_commit": "d3e7f5d96da0c27103324cb9fb349b54e753a877",
       "reference_patch": "validation/reference_patches/packaging_non_string_version.patch",
-      "expected_files": ["src/packaging/version.py", "tests/test_version.py", "tests/test_specifiers.py"]
-    },
-    {
-      "id": "werkzeug_float_url_notation",
-      "prompt": "Fix Werkzeug's float URL converter so building a URL for a small finite float never emits scientific notation. Preserve numeric constraints and finite decimal behavior, modify only production Python files, and run a focused test.",
-      "fixture_repo": "artifacts/real-oss-fixtures/werkzeug_float_url_notation",
-      "required_change_globs": ["src/werkzeug/**/*.py"],
-      "allowed_change_globs": ["src/werkzeug/**/*.py"],
-      "verifier_file": "validation/verifiers/real_oss/werkzeug_float_url_notation/test_hidden.py",
-      "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
-      "source_repository": "https://github.com/pallets/werkzeug.git",
-      "source_commit": "b97e13cc74d8a45dca260d4037edd7d1f5094042",
-      "reference_fix_commit": "f88164a271dd3e86a3241389ddc5c53eca4b9e4a",
-      "reference_patch": "validation/reference_patches/werkzeug_float_url_notation.patch",
-      "expected_files": ["src/werkzeug/routing/converters.py", "tests/test_routing.py"]
-    },
-    {
-      "id": "jinja_overlay_async_default",
-      "prompt": "Fix Jinja Environment.overlay so it preserves the parent environment's async setting unless enable_async is explicitly supplied. Explicit overrides must still work. Modify only production Python files and run a focused test.",
-      "fixture_repo": "artifacts/real-oss-fixtures/jinja_overlay_async_default",
-      "required_change_globs": ["src/jinja2/**/*.py"],
-      "allowed_change_globs": ["src/jinja2/**/*.py"],
-      "verifier_file": "validation/verifiers/real_oss/jinja_overlay_async_default/test_hidden.py",
-      "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
-      "source_repository": "https://github.com/pallets/jinja.git",
-      "source_commit": "767b23617628419ae3709ccfb02f9602ae9fe51f",
-      "reference_fix_commit": "e45bc745a76b7aa573e68888bf49ecef70001815",
-      "reference_patch": "validation/reference_patches/jinja_overlay_async_default.patch",
-      "expected_files": ["src/jinja2/environment.py", "tests/test_api.py"]
+      "expected_files": [
+        "src/packaging/version.py",
+        "tests/test_version.py",
+        "tests/test_specifiers.py"
+      ]
     },
     {
       "id": "urllib3_port_zero",
       "prompt": "Fix urllib3 handling of an explicitly supplied port 0. It must remain distinct from an omitted port across URL rendering, pool selection, host comparison, and proxy configuration. Preserve absent-port defaults, modify only production Python files, and run focused tests.",
       "fixture_repo": "artifacts/real-oss-fixtures/urllib3_port_zero",
-      "required_change_globs": ["src/urllib3/**/*.py"],
-      "allowed_change_globs": ["src/urllib3/**/*.py"],
+      "required_change_globs": [
+        "src/urllib3/**/*.py"
+      ],
+      "allowed_change_globs": [
+        "src/urllib3/**/*.py"
+      ],
       "verifier_file": "validation/verifiers/real_oss/urllib3_port_zero/test_hidden.py",
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/urllib3/urllib3.git",
       "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
       "reference_fix_commit": "f5cf122346141b187cca0db6e6445297d336b610",
       "reference_patch": "validation/reference_patches/urllib3_port_zero.patch",
-      "expected_files": ["src/urllib3/connectionpool.py", "src/urllib3/poolmanager.py", "src/urllib3/util/url.py", "test/test_connectionpool.py"],
-      "generated_files": {"src/urllib3/_version.py": "__version__ = \"2.5.0.dev0\"\n"}
+      "expected_files": [
+        "src/urllib3/connectionpool.py",
+        "src/urllib3/poolmanager.py",
+        "src/urllib3/util/url.py",
+        "test/test_connectionpool.py"
+      ],
+      "generated_files": {
+        "src/urllib3/_version.py": "__version__ = \"2.5.0.dev0\"\n"
+      }
     }
   ]
 }
