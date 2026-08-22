@@ -13,6 +13,8 @@ from pico import (
 )
 from pico.contracts import ToolCall
 from pico.providers.clients import OpenAICompatibleModelClient, _action_from_response
+from pico.run_log import RunLog
+from pico.task_state import TaskState
 
 
 def build_agent(tmp_path, outputs, **kwargs):
@@ -37,6 +39,26 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
     ]
     assert "Read hello" in agent.run.task_state.working_state.render_panel()
     assert agent.run.task_state.status == "completed"
+    assert agent.dependencies.run_store is not None
+    assert not hasattr(agent, "services")
+
+
+def test_emit_event_requires_one_consistent_active_run(tmp_path):
+    agent = build_agent(tmp_path, [])
+    with pytest.raises(RuntimeError, match="active TaskState and RunLog"):
+        agent.emit_event("model_requested")
+
+    agent.run.task_state = TaskState.create(
+        "task_active", "Inspect", run_id="run_active"
+    )
+    agent.run.run_log = RunLog(
+        "run_other",
+        "task_active",
+        agent.session.data["id"],
+        agent.dependencies.run_store,
+    )
+    with pytest.raises(RuntimeError, match="different Runs"):
+        agent.emit_event("model_requested")
 
 
 def test_working_state_tool_is_durable_and_replayable(tmp_path):
@@ -61,9 +83,8 @@ def test_working_state_tool_is_durable_and_replayable(tmp_path):
     assert state.constraints == ("Keep Python 3.10 compatibility",)
     assert state.decisions == ("The timeout is in token refresh",)
     assert state.next_steps == ("Add a concurrent refresh test",)
-    replayed = agent.services.run_store.replay(agent.run.task_state.run_id)
+    replayed = agent.dependencies.run_store.replay(agent.run.task_state.run_id)
     assert replayed.working_state.to_dict() == state.to_dict()
-    assert agent.build_report(agent.run.task_state)["working_state"] == state.to_dict()
 
 
 def test_rejected_working_state_update_does_not_change_projection(tmp_path):
@@ -215,8 +236,8 @@ def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path)
 
     assert agent.ask("new task") == "new answer"
     assert agent.run.task_state.run_id != old_run_id
-    assert agent.run.task_state.user_request == "new task"
-    old_projection = agent.services.run_store.replay(old_run_id)
+    assert agent.run.task_state.working_state.goal == "new task"
+    old_projection = agent.dependencies.run_store.replay(old_run_id)
     assert old_projection.terminal is True
     assert old_projection.stop_reason == "user_reset"
 
@@ -237,7 +258,7 @@ def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monke
     assert agent.run.task_state.status == "stopped"
     assert agent.run.task_state.stop_reason == "user_reset"
     assert (
-        agent.services.run_store.replay(agent.run.task_state.run_id).task_state()
+        agent.dependencies.run_store.replay(agent.run.task_state.run_id).task_state()
         == agent.run.task_state.to_dict()
     )
 
@@ -260,7 +281,7 @@ def test_terminal_run_closes_execution_when_session_pointer_save_fails(
 
     assert agent.run.task_state.status == "completed"
     assert agent.run.execution_context is None
-    assert agent.services.run_store.replay(agent.run.task_state.run_id).terminal
+    assert agent.dependencies.run_store.replay(agent.run.task_state.run_id).terminal
 
 
 def test_custom_prompt_prefix_rebuilds_its_cache_hash(tmp_path):
@@ -272,5 +293,4 @@ def test_custom_prompt_prefix_rebuilds_its_cache_hash(tmp_path):
 
     assert "custom interview rules" in prompt
     assert agent.prompt.prefix_state.content_hash != original_hash
-    assert metadata["prefix_hash"] == agent.prompt.prefix_state.content_hash
     assert metadata["prompt_cache_key"] == agent.prompt.prefix_state.content_hash

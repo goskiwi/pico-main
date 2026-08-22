@@ -50,7 +50,6 @@ def test_task_state_accepts_explicit_consistent_states():
     assert running.status == "running"
     assert running.model_request_count == 1
     assert running.executed_tool_count == 1
-    assert running.last_executed_tool == "read_file"
 
     running.apply_event(
         event(
@@ -67,6 +66,11 @@ def test_task_state_accepts_explicit_consistent_states():
     assert running.status == "completed"
     assert running.stop_reason == "final_answer_returned"
     assert running.final_answer == "Done."
+
+
+def test_task_state_requires_runtime_owned_run_id():
+    with pytest.raises(TypeError, match="run_id"):
+        TaskState.create("task", "Inspect")
 
 
 def test_live_task_state_matches_run_log_replay():
@@ -92,7 +96,6 @@ def test_live_task_state_matches_run_log_replay():
             {
                 "tool_call_id": "call_read",
                 "tool_name": "read_file",
-                "tool_call_hash": "hash_read",
                 "risky": False,
                 "effect_scope": "none",
                 "potential_effects": [],
@@ -134,6 +137,16 @@ def test_live_task_state_matches_run_log_replay():
                 "run_id": "run",
                 "task_id": "task",
                 "working_state": working_state(),
+                "status": "failed",
+                "stop_reason": "model_error",
+            },
+            "invalid task status",
+        ),
+        (
+            {
+                "run_id": "run",
+                "task_id": "task",
+                "working_state": working_state(),
                 "status": "running",
                 "stop_reason": "model_error",
             },
@@ -149,16 +162,6 @@ def test_live_task_state_matches_run_log_replay():
                 "final_answer": "",
             },
             "completed task requires final_answer",
-        ),
-        (
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "working_state": working_state(),
-                "executed_tool_count": 1,
-                "last_executed_tool": "",
-            },
-            "executed tools require last_executed_tool",
         ),
         (
             {

@@ -11,14 +11,13 @@ from .artifacts import ArtifactStore
 from .evidence import RunEvidence
 from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
-from .projections import build_run_report
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_log import RunEvent, RunLog, replay_events
+from .run_log import RunLog, replay_events
 from .run_store import RunStore
 from .runtime_config import PicoConfig
+from .runtime_dependencies import RuntimeDependencies
 from .runtime_recovery import RESUME_NONE, RESUME_READY, RuntimeRecovery
-from .runtime_services import RuntimeServices
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .sandbox import DockerSandbox, DockerSandboxConfig
@@ -32,7 +31,7 @@ __all__ = ["Pico", "PicoConfig", "SessionStore"]
 
 
 class Pico:
-    """Coordinate model, state, prompt, tools, and long-lived services."""
+    """Coordinate model, state, prompt, tools, and long-lived dependencies."""
 
     def __init__(
         self,
@@ -83,7 +82,7 @@ class Pico:
                 ),
             )
 
-        self.services = RuntimeServices(
+        self.dependencies = RuntimeDependencies(
             run_store=effective_run_store,
             artifacts=artifacts,
             project_memory=project_memory,
@@ -96,7 +95,7 @@ class Pico:
         if subagent_model_client_factory is not None:
             from .subagents import SubagentManager
 
-            self.services.subagents = SubagentManager(
+            self.dependencies.subagents = SubagentManager(
                 self,
                 subagent_model_client_factory,
                 max_workers=self.config.subagent_max_workers,
@@ -108,19 +107,14 @@ class Pico:
         self.session.save()
         self.recovery.evaluate()
 
-    def detected_secret_env_summary(self):
-        return securitylib.detected_secret_env_summary(
-            secret_env_names=self.config.secret_env_names
-        )
-
     def redact_text(self, text):
         return securitylib.redact_text(
             text,
             secret_env_names=self.config.secret_env_names,
         )
 
-    def redact_artifact(self, value, key=None):
-        return securitylib.redact_artifact(
+    def redact_value(self, value, key=None):
+        return securitylib.redact_value(
             value,
             key=key,
             secret_env_names=self.config.secret_env_names,
@@ -129,34 +123,17 @@ class Pico:
     def shell_env(self):
         return securitylib.shell_env(
             allowlist=self.config.shell_env_allowlist,
-            root=self.workspace.root,
         )
 
-    def emit_event(self, task_state, event_type, payload=None):
-        payload = self.redact_artifact(payload or {})
-        if task_state is None:
-            return RunEvent(
-                event_id="manual:event:000001",
-                sequence=1,
-                run_id="manual",
-                task_id="manual",
-                session_id=self.session.data["id"],
-                kind=event_type,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                payload=payload,
-            )
-        run_id = task_state.run_id if task_state is not None else "manual"
-        task_id = task_state.task_id if task_state is not None else "manual"
-        if self.run.run_log is not None and self.run.run_log.run_id == run_id:
-            entry = self.run.run_log.append(event_type, payload)
-        else:
-            entry = self.services.run_store.append_event(
-                run_id,
-                task_id,
-                self.session.data["id"],
-                event_type,
-                payload,
-            )
+    def emit_event(self, event_type, payload=None):
+        task_state = self.run.task_state
+        run_log = self.run.run_log
+        if task_state is None or run_log is None:
+            raise RuntimeError("Run event requires an active TaskState and RunLog")
+        if task_state.run_id != run_log.run_id:
+            raise RuntimeError("active TaskState and RunLog belong to different Runs")
+        payload = self.redact_value(payload or {})
+        entry = run_log.append(event_type, payload)
         return self.apply_run_event(entry)
 
     def apply_run_event(self, entry):
@@ -165,20 +142,6 @@ class Pico:
             task_state.apply_event(entry)
             self.run.evidence.apply_event(entry)
 
-        recovery = getattr(self, "recovery", None)
-        projection = recovery.state.get("projection") if recovery is not None else None
-        if (
-            projection is not None
-            and projection.run_id == entry.run_id
-        ):
-            expected_sequence = projection.last_cursor.sequence + 1
-            if entry.sequence == expected_sequence:
-                projection.apply(entry)
-            elif entry.sequence > expected_sequence:
-                raise RuntimeError(
-                    "Run projection skipped an event: "
-                    f"expected sequence {expected_sequence}, got {entry.sequence}"
-                )
         return entry
 
     def run_verification(self, workspace_fingerprint):
@@ -207,11 +170,6 @@ class Pico:
             + uuid.uuid4().hex[:6]
         )
 
-    def build_report(self, task_state):
-        return build_run_report(
-            events=self.services.run_store.read_events(task_state.run_id),
-        )
-
     def reset(self):
         run_log = self.run.run_log
         task_state = self.run.task_state
@@ -224,7 +182,7 @@ class Pico:
                     first.run_id,
                     first.task_id,
                     first.session_id,
-                    self.services.run_store,
+                    self.dependencies.run_store,
                     events,
                 )
                 projection = recovery_state.get("projection") or replay_events(events)

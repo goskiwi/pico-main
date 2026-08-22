@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evals.evaluator import run_harness_regression_v3
+from evals.evaluator import run_harness_regression
 from evals.gates import evaluation_failures
 from evals.metrics import (
     run_context_governance_evaluation,
@@ -21,7 +21,7 @@ from evals.metrics import (
 
 def main():
     results = {
-        "harness": run_harness_regression_v3(),
+        "harness": run_harness_regression(),
         "context": run_context_governance_evaluation(),
         "project_memory": run_project_memory_evaluation(),
         "repo_map": run_repo_map_evaluation(),

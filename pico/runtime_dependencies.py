@@ -1,4 +1,4 @@
-"""Long-lived services owned by a Pico runtime."""
+"""Long-lived dependencies owned by a Pico runtime."""
 
 from __future__ import annotations
 
@@ -18,18 +18,18 @@ if TYPE_CHECKING:
     from .subagents import SubagentManager
 
 
-class SandboxService(Protocol):
+class SandboxRunner(Protocol):
     def run(self, argv, **kwargs): ...
 
 
 @dataclass(slots=True)
-class RuntimeServices:
+class RuntimeDependencies:
     run_store: RunStore
     artifacts: ArtifactStore
     project_memory: ProjectMemoryStore
     mutations: WorkspaceMutationService
-    sandbox: SandboxService
-    sandbox_factory: Callable[[Path], SandboxService]
+    sandbox: SandboxRunner
+    sandbox_factory: Callable[[Path], SandboxRunner]
     repo_map: RepoMap
     subagents: SubagentManager | None = None
     parent_cancellation_token: CancellationToken | None = None

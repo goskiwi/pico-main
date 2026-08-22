@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,6 +14,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
 FIXTURE_ROOT = (ROOT / "artifacts" / "real-oss-fixtures").resolve()
+FULL_SHA = re.compile(r"^[a-f0-9]{40}$")
+REQUIRED_TASK_FIELDS = {
+    "id",
+    "prompt",
+    "fixture_repo",
+    "required_change_globs",
+    "allowed_change_globs",
+    "verifier_file",
+    "verifier_command",
+    "source_repository",
+    "source_commit",
+    "reference_fix_commit",
+    "reference_patch",
+    "expected_files",
+}
 
 
 def run_git(args, cwd=None):
@@ -38,7 +54,7 @@ def tree_digest(root):
 
 def load_manifest(path=DEFAULT_MANIFEST):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v2":
+    if payload.get("schema_version") != "real-oss-suite-v3":
         raise ValueError("unsupported Real OSS suite schema")
     if int(payload.get("tool_budget", 0)) < 1:
         raise ValueError("Real OSS suite requires one positive uniform tool_budget")
@@ -48,6 +64,12 @@ def load_manifest(path=DEFAULT_MANIFEST):
     ids = [str(task.get("id", "")) for task in tasks]
     if any(not task_id for task_id in ids) or len(ids) != len(set(ids)):
         raise ValueError("Real OSS task ids must be unique and non-empty")
+    for task in tasks:
+        if not isinstance(task, dict) or REQUIRED_TASK_FIELDS - set(task):
+            raise ValueError("Real OSS task is missing required fields")
+        for field in ("source_commit", "reference_fix_commit"):
+            if not FULL_SHA.fullmatch(str(task[field])):
+                raise ValueError(f"Real OSS task {field} must be a full commit SHA")
     return payload
 
 

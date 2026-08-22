@@ -160,7 +160,7 @@ def build_agent(args):
     # 这里是 CLI 到 runtime 的装配点：
     # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型和 session。
     workspace = WorkspaceContext.build(args.cwd)
-    load_project_env(workspace.repo_root)
+    load_project_env(workspace.repo_root, boundary=workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)
@@ -202,6 +202,7 @@ def build_agent(args):
 
 
 def build_arg_parser():
+    defaults = PicoConfig()
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
@@ -231,7 +232,7 @@ def build_arg_parser():
     parser.add_argument(
         "--approval",
         choices=("ask", "auto", "never"),
-        default="ask",
+        default=defaults.approval_policy,
         help="Approval policy for risky tools.",
     )
     parser.add_argument(
@@ -241,45 +242,58 @@ def build_arg_parser():
         default=[],
         help=(
             "Extra environment variable names to treat as secrets for "
-            "event/report redaction."
+            "event/artifact redaction."
         ),
     )
     parser.add_argument(
         "--max-tool-executions",
         type=int,
-        default=None,
+        default=defaults.max_tool_executions,
         help="Optional maximum executed tool calls per request; unset means no tool limit.",
     )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=1024,
+        default=defaults.max_new_tokens,
         help=(
             "Maximum total model output tokens per action, including reasoning "
             "tokens, visible text, and function-call arguments."
         ),
     )
-    parser.add_argument("--run-timeout", type=int, default=600, help="Whole-run deadline in seconds.")
+    parser.add_argument(
+        "--run-timeout",
+        type=int,
+        default=defaults.run_timeout_seconds,
+        help="Whole-run deadline in seconds.",
+    )
     parser.add_argument(
         "--provider-context-limit",
         type=int,
-        default=272000,
+        default=defaults.provider_context_limit_tokens,
         help="Model context window used for prompt budgeting, compaction, and Responses rotation.",
     )
     parser.add_argument(
         "--compaction-reserve-tokens",
         type=int,
-        default=16384,
+        default=defaults.compaction_reserve_tokens,
         help="Context tokens reserved before automatic Run Log compaction.",
     )
     parser.add_argument(
         "--compaction-keep-recent-tokens",
         type=int,
-        default=20000,
+        default=defaults.compaction_keep_recent_tokens,
         help="Approximate recent Run Log tokens retained after compaction.",
     )
-    parser.add_argument("--sandbox-image", default="pico/sandbox:latest", help="Docker image for run_shell.")
-    parser.add_argument("--verify-command", default=None, help="Runtime verifier; auto-detected when omitted, empty disables it.")
+    parser.add_argument(
+        "--sandbox-image",
+        default=defaults.sandbox_image,
+        help="Docker image for run_shell.",
+    )
+    parser.add_argument(
+        "--verify-command",
+        default=defaults.verification_command,
+        help="Runtime verifier; auto-detected when omitted, empty disables it.",
+    )
     parser.add_argument(
         "--temperature", type=float, default=0.2, help="Sampling temperature."
     )

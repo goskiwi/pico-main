@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import locale
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
 
-from evals.provenance import evaluation_snapshot_id, runtime_snapshot_id
 from pico.contracts import ModelAction
 from pico.runtime import Pico, PicoConfig
 from pico.session_store import SessionStore
@@ -94,17 +90,6 @@ def load_benchmark(path):
     return data
 
 
-def _fixture_digest(tasks):
-    digest = hashlib.sha256()
-    for task in tasks:
-        root = Path(task["fixture_repo"])
-        for path in sorted(root.rglob("*")):
-            if path.is_file():
-                digest.update(path.relative_to(root).as_posix().encode())
-                digest.update(path.read_bytes())
-    return "sha256:" + digest.hexdigest()
-
-
 def _portable_path(path):
     resolved = Path(path).resolve()
     try:
@@ -129,7 +114,7 @@ def summarize_rows(rows):
 
 class BenchmarkEvaluator:
     def __init__(self, benchmark_path=Path("benchmarks/coding_tasks.json"),
-                 artifact_path=Path("artifacts/harness-regression-v3.json"),
+                 artifact_path=Path("artifacts/harness-regression.json"),
                  workspace_root=Path(".pico/evals")):
         self.benchmark_path = Path(benchmark_path)
         self.artifact_path = Path(artifact_path)
@@ -165,7 +150,7 @@ class BenchmarkEvaluator:
         state = agent.run.task_state
         within_budget = state.executed_tool_count <= int(task["step_budget"])
         passed = state.status == "completed" and within_budget and verified
-        run_dir = agent.services.run_store.run_dir(state.run_id)
+        run_dir = agent.dependencies.run_store.run_dir(state.run_id)
         return {
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,
@@ -178,23 +163,14 @@ class BenchmarkEvaluator:
         benchmark = self.load()
         rows = [self.run_task(task) for task in benchmark["tasks"]]
         artifact = {
-            "schema_version": 3,
-            "artifact_type": "harness-regression-v3",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "runtime_snapshot_id": runtime_snapshot_id(),
-            "evaluation_snapshot_id": evaluation_snapshot_id(),
+            "artifact_type": "harness-regression",
             "summary": summarize_rows(rows),
             "rows": rows,
-            "reproducibility": {
-                "model_name": "BenchmarkModel", "model_version": "native-functions-v1",
-                "fixture_snapshot_id": _fixture_digest(benchmark["tasks"]),
-                "locale": locale.getlocale()[0] or "unknown",
-            },
         }
         self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return artifact
 
 
-def run_harness_regression_v3(**kwargs):
+def run_harness_regression(**kwargs):
     return BenchmarkEvaluator(**kwargs).run()

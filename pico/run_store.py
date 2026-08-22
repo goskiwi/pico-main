@@ -4,35 +4,45 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .run_log import RunCursor, RunEvent, replay_events, validate_run_events
 
+RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 
 def _run_id(value):
-    return str(value.run_id) if hasattr(value, "run_id") else str(value)
+    run_id = str(value.run_id) if hasattr(value, "run_id") else str(value)
+    if not RUN_ID.fullmatch(run_id):
+        raise ValueError("invalid run id")
+    return run_id
 
 
 class RunStore:
     def __init__(self, root):
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._cursors: dict[str, RunCursor] = {}
 
     def run_dir(self, run_id):
-        return self.root / _run_id(run_id)
+        directory = self.root / _run_id(run_id)
+        if directory.is_symlink():
+            raise ValueError("run directory must not be a symlink")
+        return directory
 
     def events_path(self, run_id):
-        return self.run_dir(run_id) / "events.jsonl"
+        path = self.run_dir(run_id) / "events.jsonl"
+        if path.is_symlink():
+            raise ValueError("Run Log must not be a symlink")
+        return path
 
     def artifact_dir(self, run_id):
-        return self.run_dir(run_id) / "artifacts"
-
-    def start_run(self, task_state):
-        directory = self.run_dir(task_state)
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        path = self.run_dir(run_id) / "artifacts"
+        if path.is_symlink():
+            raise ValueError("artifact directory must not be a symlink")
+        return path
 
     def has_events(self, run_id):
         return self.events_path(run_id).is_file()
@@ -141,8 +151,9 @@ class RunStore:
     def find_active_run(self, session_id):
         if not self.root.exists():
             return "", (), None
-        for directory in sorted(self.root.iterdir(), key=lambda item: item.name, reverse=True):
-            if not directory.is_dir():
+        candidates = []
+        for directory in self.root.iterdir():
+            if directory.is_symlink() or not directory.is_dir():
                 continue
             try:
                 events = self.read_events(directory.name)
@@ -152,43 +163,18 @@ class RunStore:
                 continue
             projection = replay_events(events)
             if not projection.terminal:
-                return directory.name, tuple(events), projection
+                candidates.append(
+                    (
+                        events[-1].timestamp,
+                        directory.name,
+                        tuple(events),
+                        projection,
+                    )
+                )
+        if candidates:
+            _timestamp, run_id, events, projection = max(
+                candidates,
+                key=lambda item: (item[0], item[1]),
+            )
+            return run_id, events, projection
         return "", (), None
-
-    def session_summaries(self, session_id, *, exclude_run_id="", limit=8):
-        from .evidence import RunEvidence
-
-        rows = []
-        directories = self.root.iterdir() if self.root.exists() else ()
-        for directory in directories:
-            if not directory.is_dir() or directory.name == str(exclude_run_id):
-                continue
-            try:
-                events = self.read_events(directory.name)
-            except (OSError, ValueError):
-                continue
-            if not events or events[0].session_id != str(session_id):
-                continue
-            projection = replay_events(events)
-            if not projection.terminal:
-                continue
-            evidence = RunEvidence.from_events(events)
-            verification_status = (
-                str(evidence.verifications[-1].get("status", "unknown"))
-                if evidence.verifications
-                else "not_run"
-            )
-            rows.append(
-                {
-                    "role": "run_summary",
-                    "run_id": projection.run_id,
-                    "request": projection.user_request,
-                    "content": projection.final_answer,
-                    "changed_paths": evidence.changed_paths,
-                    "verification_status": verification_status,
-                    "stop_reason": projection.stop_reason,
-                    "created_at": events[-1].timestamp,
-                }
-            )
-        rows.sort(key=lambda item: (item["created_at"], item["run_id"]))
-        return rows[-max(0, int(limit)) :]

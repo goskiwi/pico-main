@@ -1,4 +1,4 @@
-"""Security and redaction helpers for runtime artifacts."""
+"""Security and redaction helpers for runtime values."""
 
 import os
 
@@ -12,7 +12,7 @@ def _normalized_secret_names(secret_env_names):
 
 def looks_sensitive_env_name(name):
     upper = str(name).upper()
-    return any(upper == marker or upper.endswith((marker, f"_{marker}")) for marker in SENSITIVE_ENV_NAME_MARKERS)
+    return any(upper.endswith(marker) for marker in SENSITIVE_ENV_NAME_MARKERS)
 
 
 def is_secret_env_name(name, secret_env_names=None):
@@ -31,14 +31,6 @@ def detected_secret_env_items(env=None, secret_env_names=None):
     return items
 
 
-def detected_secret_env_summary(env=None, secret_env_names=None):
-    names = [name for name, _ in detected_secret_env_items(env=env, secret_env_names=secret_env_names)]
-    return {
-        "secret_env_count": len(names),
-        "secret_env_names": names,
-    }
-
-
 def redact_text(text, env=None, secret_env_names=None):
     text = str(text)
     for _, value in sorted(
@@ -50,31 +42,27 @@ def redact_text(text, env=None, secret_env_names=None):
     return text
 
 
-def redact_artifact(value, key=None, env=None, secret_env_names=None):
+def redact_value(value, key=None, env=None, secret_env_names=None):
     if key and is_secret_env_name(key, secret_env_names=secret_env_names):
         return REDACTED_VALUE
     if isinstance(value, dict):
         return {
-            str(item_key): redact_artifact(item_value, key=item_key, env=env, secret_env_names=secret_env_names)
+            str(item_key): redact_value(item_value, key=item_key, env=env, secret_env_names=secret_env_names)
             for item_key, item_value in value.items()
         }
     if isinstance(value, list):
-        return [redact_artifact(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
+        return [redact_value(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
     if isinstance(value, tuple):
-        return [redact_artifact(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
+        return [redact_value(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
     if isinstance(value, str):
         return redact_text(value, env=env, secret_env_names=secret_env_names)
     return value
 
 
-def shell_env(env=None, allowlist=(), root="."):
+def shell_env(env=None, allowlist=()):
     env = os.environ if env is None else env
-    filtered = {
+    return {
         name: env[name]
         for name in allowlist
         if name in env
     }
-    filtered["PWD"] = str(root)
-    if "PATH" not in filtered and env.get("PATH"):
-        filtered["PATH"] = env["PATH"]
-    return filtered

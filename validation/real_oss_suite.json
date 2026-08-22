@@ -1,5 +1,5 @@
 {
-  "schema_version": "real-oss-suite-v2",
+  "schema_version": "real-oss-suite-v3",
   "name": "pico-real-oss-five-repo-suite",
   "tool_budget": 40,
   "tasks": [
@@ -13,7 +13,7 @@
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pallets/click.git",
       "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
-      "reference_fix_commit": "4d3db84",
+      "reference_fix_commit": "4d3db84b251518e97299a38a5ca4bab3d01873a2",
       "reference_patch": "validation/reference_patches/click_empty_bytes_echo.patch",
       "expected_files": ["src/click/utils.py", "tests/test_utils.py"]
     },
@@ -27,7 +27,7 @@
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pypa/packaging.git",
       "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
-      "reference_fix_commit": "d3e7f5d",
+      "reference_fix_commit": "d3e7f5d96da0c27103324cb9fb349b54e753a877",
       "reference_patch": "validation/reference_patches/packaging_non_string_version.patch",
       "expected_files": ["src/packaging/version.py", "tests/test_version.py", "tests/test_specifiers.py"]
     },
@@ -41,7 +41,7 @@
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pallets/werkzeug.git",
       "source_commit": "b97e13cc74d8a45dca260d4037edd7d1f5094042",
-      "reference_fix_commit": "f88164a2",
+      "reference_fix_commit": "f88164a271dd3e86a3241389ddc5c53eca4b9e4a",
       "reference_patch": "validation/reference_patches/werkzeug_float_url_notation.patch",
       "expected_files": ["src/werkzeug/routing/converters.py", "tests/test_routing.py"]
     },
@@ -55,7 +55,7 @@
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/pallets/jinja.git",
       "source_commit": "767b23617628419ae3709ccfb02f9602ae9fe51f",
-      "reference_fix_commit": "e45bc74",
+      "reference_fix_commit": "e45bc745a76b7aa573e68888bf49ecef70001815",
       "reference_patch": "validation/reference_patches/jinja_overlay_async_default.patch",
       "expected_files": ["src/jinja2/environment.py", "tests/test_api.py"]
     },
@@ -69,7 +69,7 @@
       "verifier_command": "PYTHONPATH=src python -m pytest -q -c /dev/null -p no:cacheprovider .pico_hidden_verifier/test_hidden.py",
       "source_repository": "https://github.com/urllib3/urllib3.git",
       "source_commit": "f4e4bc31f40f8c94c6a1f1685df28f97ff48c305",
-      "reference_fix_commit": "f5cf1223",
+      "reference_fix_commit": "f5cf122346141b187cca0db6e6445297d336b610",
       "reference_patch": "validation/reference_patches/urllib3_port_zero.patch",
       "expected_files": ["src/urllib3/connectionpool.py", "src/urllib3/poolmanager.py", "src/urllib3/util/url.py", "test/test_connectionpool.py"],
       "generated_files": {"src/urllib3/_version.py": "__version__ = \"2.5.0.dev0\"\n"}

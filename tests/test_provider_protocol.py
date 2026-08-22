@@ -101,6 +101,19 @@ def test_responses_payload_uses_total_output_token_budget():
     assert captured["max_output_tokens"] == 1024
 
 
+def test_openai_adapter_estimates_serialized_tool_schema_tokens():
+    serialized = json.dumps(
+        TOOLS,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    estimated = client().estimate_action_tool_tokens(TOOLS, lambda text: len(text))
+
+    assert estimated == len(serialized)
+
+
 def test_action_session_requires_output_or_explicit_reset():
     instance = client()
     with patch("urllib.request.urlopen", return_value=tool_response()):
@@ -127,16 +140,22 @@ def test_transient_http_status_is_retried(status):
     sleep.assert_called_once_with(0.5)
 
 
-def test_non_transient_http_status_is_not_retried_and_body_is_reported():
+def test_non_transient_http_status_is_not_retried_or_echoed():
     error = urllib.error.HTTPError(
-        "https://example.test/v1/responses", 400, "bad", {}, io.BytesIO(b"bad schema")
+        "https://example.test/v1/responses",
+        400,
+        "bad",
+        {},
+        io.BytesIO(b"provider echoed secret"),
     )
     with (
         patch("urllib.request.urlopen", side_effect=error) as request,
-        pytest.raises(RuntimeError, match=r"HTTP 400: bad schema"),
+        pytest.raises(RuntimeError, match=r"HTTP 400") as raised,
     ):
         client().complete_action("prompt", 32, action_tools=TOOLS)
     assert request.call_count == 1
+    assert "provider echoed secret" not in str(raised.value)
+    assert "secret" not in str(raised.value)
 
 
 def test_timeout_is_retried_then_normalized_without_leaking_api_key():
@@ -201,17 +220,49 @@ def test_invalid_json_response_shape_has_normalized_provider_error(body):
         client().complete_action("prompt", 32, action_tools=TOOLS)
 
 
-def test_sse_text_when_tool_is_required_becomes_invalid_action():
+def test_malformed_response_output_has_normalized_provider_error():
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(json.dumps({"output": [42]})),
+        ),
+        pytest.raises(RuntimeError, match="malformed response output"),
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+
+def test_sse_provider_error_is_not_treated_as_model_output():
+    event = {
+        "type": "response.failed",
+        "response": {"error": {"message": "provider secret detail"}},
+    }
+    body = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "text/event-stream"),
+        ),
+        pytest.raises(RuntimeError, match="backend returned an error") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert "provider secret detail" not in str(raised.value)
+
+
+def test_sse_text_without_response_object_is_rejected():
     body = (
         'data: {"type":"response.output_text.delta","delta":"not a tool"}\n\n'
         "data: [DONE]\n"
     )
-    with patch(
-        "urllib.request.urlopen", return_value=Response(body, "text/event-stream")
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "text/event-stream"),
+        ),
+        pytest.raises(RuntimeError, match="did not contain a response object"),
     ):
-        action = client().complete_action("prompt", 32, action_tools=TOOLS)
-    assert action.kind == "invalid"
-    assert action.error == "invalid_function_call_count"
+        client().complete_action("prompt", 32, action_tools=TOOLS)
 
 
 def test_incomplete_max_token_response_reports_output_truncation():
@@ -225,32 +276,31 @@ def test_incomplete_max_token_response_reports_output_truncation():
     )
 
     assert action.kind == "invalid"
-    assert action.error == "model_output_truncated"
     assert "one concise function call" in action.content
 
 
 @pytest.mark.parametrize(
-    ("output", "error"),
+    ("output", "message"),
     [
-        ([], "invalid_function_call_count"),
+        ([], "exactly one function call"),
         ([
             {"type": "function_call", "name": "read_file", "call_id": "a", "arguments": {}},
             {"type": "function_call", "name": "read_file", "call_id": "b", "arguments": {}},
-        ], "invalid_function_call_count"),
+        ], "exactly one function call"),
         ([{"type": "function_call", "name": "delete_world", "call_id": "a", "arguments": {}}],
-         "unknown_function_call"),
+         "unknown function call"),
         ([{"type": "function_call", "name": "read_file", "call_id": "a", "arguments": "{"}],
-         "malformed_function_arguments"),
+         "malformed JSON arguments"),
         ([{"type": "function_call", "name": "read_file", "call_id": "a", "arguments": []}],
-         "invalid_function_arguments"),
+         "arguments must be an object"),
         ([{"type": "function_call", "name": "read_file", "arguments": {}}],
-         "missing_function_call_id"),
+         "missing a call id"),
     ],
 )
-def test_invalid_function_call_shapes_are_invalid_actions(output, error):
+def test_invalid_function_call_shapes_are_invalid_actions(output, message):
     action = _action_from_response({"output": output}, TOOLS)
     assert action.kind == "invalid"
-    assert action.error == error
+    assert message in action.content
 
 
 def test_usage_and_cache_metadata_are_optional_and_normalized():
@@ -265,13 +315,10 @@ def test_usage_and_cache_metadata_are_optional_and_normalized():
     with patch("urllib.request.urlopen", return_value=final_response(usage=usage)):
         assert instance.complete_action("prompt", 32, action_tools=TOOLS).kind == "final"
     assert instance.last_completion_metadata == {
-        "prompt_cache_supported": False,
-        "prompt_cache_key": None,
         "input_tokens": 11,
         "output_tokens": 4,
         "total_tokens": 15,
         "cached_tokens": 7,
-        "cache_hit": True,
     }
 
     instance = client()
@@ -302,3 +349,23 @@ def test_official_prompt_cache_uses_key_without_model_specific_retention_paramet
     assert captured["prompt_cache_key"] == "stable-prefix"
     assert "prompt_cache_retention" not in captured
     assert "prompt_cache_options" not in captured
+
+
+@pytest.mark.parametrize(
+    ("base_url", "supported"),
+    [
+        ("https://api.openai.com/v1", True),
+        ("https://www.right.codes/codex/v1", True),
+        ("https://openai.com.evil.example/v1", False),
+    ],
+)
+def test_prompt_cache_support_uses_hostname_boundaries(base_url, supported):
+    instance = OpenAICompatibleModelClient(
+        "gpt-test",
+        base_url,
+        "secret",
+        None,
+        3,
+    )
+
+    assert instance.supports_prompt_cache is supported

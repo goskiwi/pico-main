@@ -36,21 +36,11 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert answer == "Done."
     assert agent.run.task_state.status == "completed"
 
-    report = agent.build_report(agent.run.task_state)
-    assert "task_state" not in report
-    assert "project_memory" not in report
-    assert "redacted_env" not in report
-    assert report["run_summary"]["kind_counts"]["assistant_final"] == 1
-    assert report["run_summary"]["stop_reason"] == "final_answer_returned"
-    agent.run.evidence.observations.append({"tool": "invented"})
-    rebuilt = agent.build_report(agent.run.task_state)
-    assert rebuilt == report
-
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
     tool_entry = next(entry for entry in entries if entry.kind == "tool_result")
     outcome = tool_entry.payload["outcome"]
-    assert outcome["artifact"]["artifact_id"]
+    assert outcome["artifact"] == {}
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
@@ -91,7 +81,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert agent.model_client.recorded_action_results[0][0] == "tool"
     assert "alpha" in agent.model_client.recorded_action_results[0][1]
     turns = [
-        entry for entry in agent.services.run_store.read_events(agent.run.task_state)
+        entry for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
         if entry.kind == "turn_metrics"
     ]
     assert [entry.payload["prompt_reused"] for entry in turns] == [False, True]
@@ -112,7 +102,7 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
             action = super().complete_action(*args, **kwargs)
             self.request_count += 1
             self.last_completion_metadata = (
-                {"input_tokens": 6800, "output_tokens": 300}
+                {"input_tokens": 6500, "output_tokens": 300}
                 if self.request_count == 1
                 else {"input_tokens": 1000, "output_tokens": 50}
             )
@@ -144,7 +134,7 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
     assert client.prompts[0] != client.prompts[1]
     assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     resets = [
         entry for entry in entries if entry.kind == "provider_session_reset"
     ]
@@ -152,11 +142,11 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
     reset = resets[0]
     assert reset.payload == {
         "reason": "next_input_threshold",
-        "input_tokens": 6800,
+        "input_tokens": 6500,
         "output_tokens": 300,
         "tool_result_tokens": 200,
-        "estimated_next_total": 8324,
-        "provider_context_tokens": 7300,
+        "estimated_next_total": 8024,
+        "provider_context_tokens": 7000,
         "tool_call_id": reset.payload["tool_call_id"],
     }
     turns = [
@@ -166,8 +156,12 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
         entry.payload["prompt_reused"] for entry in turns
     ] == [False, False, True]
     assert len({
-        entry.payload["prompt_metadata"]["prefix_hash"] for entry in turns
+        entry.payload["prompt_metadata"]["prompt_cache_key"] for entry in turns
     }) == 1
+    first_prompt = turns[0].payload["prompt_metadata"]
+    observed_overhead = 6500 - first_prompt["prompt_tokens"]
+    assert first_prompt["observed_provider_overhead_tokens"] == observed_overhead
+    assert turns[1].payload["prompt_metadata"]["provider_overhead_tokens"] == observed_overhead
 
 
 def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
@@ -205,7 +199,7 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
 
     assert agent.ask("Inspect hello") == "Done without reset."
     assert client.prompts[0] == client.prompts[1]
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     assert not any(
         entry.kind == "provider_session_reset" for entry in entries
     )
@@ -246,7 +240,7 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
     )
 
     assert agent.ask("Inspect hello") == "Done after guided reset."
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     reset = next(
         entry for entry in entries if entry.kind == "provider_session_reset"
     )
@@ -300,7 +294,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
     )
 
     assert agent.ask("Read both files and finish") == "Recovered after compaction."
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     assert sum(entry.kind == "compaction" for entry in entries) == 1
     resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
     assert [entry.payload["reason"] for entry in resets] == [
@@ -347,7 +341,7 @@ def test_default_loop_has_no_tool_execution_limit(tmp_path):
     assert agent.run.task_state.executed_tool_count == 7
 
 
-def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
+def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     (tmp_path / "hello.txt").write_text("unique-tool-output\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
@@ -362,9 +356,11 @@ def test_next_run_receives_summary_without_prior_tool_transcript(tmp_path):
     assert agent.ask("Summarize the prior run") == "Second run completed."
 
     second_run_prompt = agent.model_client.prompts[2]
-    assert "[prior/run_summary] request: Inspect hello.txt" in second_run_prompt
-    assert "result: First run completed." in second_run_prompt
-    assert "[prior/tool" not in second_run_prompt
+    assert "Inspect hello.txt" not in second_run_prompt
+    assert "First run completed." not in second_run_prompt
+    assert "unique-tool-output" not in second_run_prompt
+    assert "Current run events:\n- empty" in second_run_prompt
+    assert second_run_prompt.endswith("Current user request:\nSummarize the prior run")
     assert agent.session.data["active_run_id"] == ""
 
 
@@ -385,7 +381,7 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     assert agent.run.task_state.executed_tool_count == 1
     finished_tools = [
         entry.payload["tool_name"]
-        for entry in agent.services.run_store.read_events(agent.run.task_state)
+        for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
         if entry.kind == "tool_result"
         and entry.payload["outcome"]["execution_state"] != "not_started"
     ]
@@ -411,7 +407,7 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     assert agent.run.task_state.model_request_count == 3
     results = [
         entry
-        for entry in agent.services.run_store.read_events(agent.run.task_state)
+        for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
         if entry.kind == "tool_result"
     ]
     assert sum(entry.payload["outcome"]["status"] == "rejected" for entry in results) == 1
@@ -429,7 +425,7 @@ def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
             ModelAction.final("staging"),
         ],
     )
-    agent.services.project_memory.store(
+    agent.dependencies.project_memory.store(
         action="create",
         filename="project_deploy.md",
         name="Deploy target",
@@ -438,11 +434,10 @@ def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
         content="deploy target is staging",
         why="Deploy commands require the correct environment.",
         how_to_apply="Use staging unless the user overrides it.",
-        source_session_id=agent.session.data["id"],
         source_run_id="bootstrap",
     )
     assert agent.ask("What is the deploy target?") == "staging"
-    entries = agent.services.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
     recall_call = next(
         entry
         for entry in entries
@@ -469,7 +464,7 @@ def test_memory_recall_rejects_unavailable_filenames(tmp_path):
             ModelAction.final("Done."),
         ],
     )
-    agent.services.project_memory.store(
+    agent.dependencies.project_memory.store(
         action="create",
         filename="project_available.md",
         name="Available",
@@ -478,7 +473,6 @@ def test_memory_recall_rejects_unavailable_filenames(tmp_path):
         content="available",
         why="test",
         how_to_apply="test",
-        source_session_id=agent.session.data["id"],
         source_run_id="bootstrap",
     )
     assert agent.ask("Inspect memory") == "Done."

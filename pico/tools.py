@@ -23,7 +23,7 @@ from .contracts import FailureInfo, ToolRunnerResult
 from .features.memory import normalize_working_update
 from .mutations import file_revision
 from .project_memory import MEMORY_RECALL_MAX_CARDS
-from .sandbox import SandboxProfile, parse_command_invocation
+from .sandbox import parse_command_invocation
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -187,8 +187,8 @@ BASE_TOOL_SPECS = {
         "args_schema": MemoryStoreArgs,
         "risky": True,
         "description": (
-            "Create or update one explicit Markdown project-memory card. Runtime adds trusted "
-            "provenance; do not invent source dates, event IDs, or provenance claims in content."
+            "Create or update one explicit Markdown project-memory card. Runtime adds source "
+            "Run and Tool Call provenance; do not put provenance claims in memory content."
         ),
     },
     "memory_forget": {
@@ -578,47 +578,40 @@ def tool_run_shell(context, args):
         timeout=timeout,
         env={**context.shell_env(), **command_env},
         execution_context=context.execution_context(),
-        profile=SandboxProfile.INSPECT,
     )
     if result.cancelled:
         failure = FailureInfo(
             "command_cancelled",
-            "cancellation",
             result.stop_reason or "command cancelled",
             False,
         )
     elif result.timed_out:
         failure = FailureInfo(
             "command_timeout",
-            "timeout",
             result.stop_reason or "command timed out",
             True,
         )
     elif result.output_limited:
         failure = FailureInfo(
             "command_output_limit",
-            "resource_limit",
             result.stop_reason or "command exceeded the output limit",
             False,
         )
     elif result.killed:
         failure = FailureInfo(
             "command_killed",
-            "execution",
             result.stop_reason or "command was killed",
             False,
         )
     elif result.returncode is None:
         failure = FailureInfo(
             "command_result_missing",
-            "execution",
             result.stop_reason or "command did not report an exit code",
             True,
         )
     elif result.returncode != 0:
         failure = FailureInfo(
             "command_failed",
-            "command",
             f"command exited with {result.returncode}",
             True,
         )
@@ -628,10 +621,10 @@ def tool_run_shell(context, args):
         textwrap.dedent(
             f"""\
             exit_code: {result.returncode if result.returncode is not None else -1}
-            sandbox: docker (profile=inspect, network=none, read_only_rootfs=true, read_only_workspace=true)
+            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)
             stop_reason: {result.stop_reason or "none"}
             cleanup_state: {result.cleanup_state}
-            output_truncated: {result.output_truncated}
+            output_limited: {result.output_limited}
             stdout:
             {result.stdout.strip() or "(empty)"}
             stderr:
@@ -697,9 +690,7 @@ def tool_memory_store(context, args):
         content=args["content"],
         why=args.get("why", ""),
         how_to_apply=args.get("how_to_apply", ""),
-        source_session_id=context.session_id,
         source_run_id=context.run_id(),
-        source_event_ids=context.source_event_ids(),
         source_tool_call_id=context.tool_call_id(),
         expires_at=args.get("expires_at", ""),
     )
@@ -719,8 +710,7 @@ def tool_memory_store(context, args):
     )
 
 
-def tool_update_working_state(context, args):
-    context.working_state().updated(args)
+def tool_update_working_state(_context, _args):
     return ToolRunnerResult("working state update accepted")
 
 

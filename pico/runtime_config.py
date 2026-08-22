@@ -8,19 +8,10 @@ from typing import Any
 from .workspace import normalize_relative_file
 
 DEFAULT_SHELL_ENV_ALLOWLIST = (
-    "HOME",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
-    "LOGNAME",
-    "PATH",
-    "PWD",
-    "SHELL",
     "TERM",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "USER",
 )
 def _allowed_tools(value):
     if value is None:

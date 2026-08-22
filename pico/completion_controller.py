@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .run_lifecycle import AgentLoopState
 from .verification import changed_python_syntax_issues
 
 if TYPE_CHECKING:
@@ -16,8 +15,7 @@ if TYPE_CHECKING:
 class CompletionResult:
     final_answer: str | None = None
     status: str = ""
-    reason: str = ""
-    model_instruction: str = ""
+    instruction: str = ""
 
     @property
     def allowed(self):
@@ -28,30 +26,27 @@ class CompletionController:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def assess(self, loop_state: AgentLoopState, final: str) -> CompletionResult:
+    def assess(self, final: str) -> CompletionResult:
         blocker = self._static_blocker()
         if blocker:
-            status, model_instruction = blocker
+            status, instruction = blocker
             return CompletionResult(
                 status=status,
-                reason=model_instruction,
-                model_instruction=model_instruction,
+                instruction=instruction,
             )
 
-        fingerprint, verification_guidance = self._ensure_verification(loop_state)
+        fingerprint, verification_guidance = self._ensure_verification()
         if verification_guidance:
             return CompletionResult(
                 status="verification_failed",
-                reason=verification_guidance,
-                model_instruction=verification_guidance,
+                instruction=verification_guidance,
             )
 
         decision = self.runtime.run.evidence.assess_completion(fingerprint)
         if not decision.allowed:
             return CompletionResult(
                 status=decision.status,
-                reason=decision.reason,
-                model_instruction=(
+                instruction=(
                     f"Runtime completion gate: {decision.reason}. "
                     "Inspect or repair before returning a final answer."
                 ),
@@ -61,8 +56,8 @@ class CompletionController:
     def _static_blocker(self):
         runtime = self.runtime
         subtask_issue = (
-            runtime.services.subagents.completion_issue()
-            if runtime.services.subagents is not None
+            runtime.dependencies.subagents.completion_issue()
+            if runtime.dependencies.subagents is not None
             else ""
         )
         if subtask_issue:
@@ -75,7 +70,7 @@ class CompletionController:
             )
         return None
 
-    def _ensure_verification(self, loop_state):
+    def _ensure_verification(self):
         runtime = self.runtime
         unresolved = runtime.run.evidence.unresolved_effects()
         workspace_unresolved = any(
@@ -91,14 +86,8 @@ class CompletionController:
         fingerprint = runtime.workspace.content_fingerprint(force=True)
         verification = runtime.run.evidence.current_verification(fingerprint)
         if verification is None:
-            runtime.emit_event(
-                loop_state.task_state,
-                "verification_started",
-                {"command": runtime.config.verification_command},
-            )
             verification = runtime.run_verification(fingerprint)
             runtime.emit_event(
-                loop_state.task_state,
                 "verification_result",
                 verification or {"status": "skipped"},
             )

@@ -3,12 +3,13 @@
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.client import IncompleteRead, RemoteDisconnected
 
 from ..contracts import ModelAction
 
-OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
+OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
 
 
 class FakeModelClient:
@@ -24,6 +25,10 @@ class FakeModelClient:
 
     def reset_action_session(self):
         self.recorded_action_results = []
+
+    @staticmethod
+    def estimate_action_tool_tokens(_action_tools, _token_counter):
+        return 0
 
     def record_action_result(self, action, result):
         self.recorded_action_results.append((action.kind, str(result)))
@@ -53,20 +58,6 @@ def _normalize_versioned_base_url(base_url):
     return base
 
 
-def _extract_openai_text(data):
-    if data.get("output_text"):
-        return data["output_text"]
-
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if isinstance(content, dict):
-                text = content.get("text")
-                if text:
-                    return text
-
-    return ""
-
-
 def _iter_sse_events(body_text):
     for line in body_text.splitlines():
         line = line.strip()
@@ -83,56 +74,36 @@ def _iter_sse_events(body_text):
             yield event
 
 
-def _completed_sse_result(event, response):
-    event_type = event.get("type", "")
-    if event_type == "response.output_text.done":
-        text = event.get("text")
-        if isinstance(text, str) and text:
-            return text, response or {}
-    if event_type == "response.completed" and response:
-        text = _extract_openai_text(response)
-        return (text, response) if text else ("", {})
-    text = _extract_openai_text(event)
-    return (text, event) if text else ("", {})
-
-
 def _extract_openai_response_from_sse(body_text):
     last_response = None
-    deltas = []
     for event in _iter_sse_events(body_text):
         response = event.get("response")
         if isinstance(response, dict):
             last_response = response
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        text, response_data = _completed_sse_result(event, response)
-        if text:
-            return text, response_data
-    if deltas:
-        return "".join(deltas), last_response or {}
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response), last_response
-    return "", {}
+        if event.get("type") in {
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        } and isinstance(response, dict):
+            return response
+    return last_response
 
 
 def _extract_usage_cache_details(data):
     # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
     # 让 Runtime event/report 不需要关心传输细节。
-    usage = data.get("usage") or {}
+    usage = data.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
-    input_details = usage.get("input_tokens_details") or {}
+    input_details = usage.get("input_tokens_details")
+    input_details = input_details if isinstance(input_details, dict) else {}
     cached_tokens = int(input_details.get("cached_tokens") or 0)
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": usage.get("total_tokens"),
         "cached_tokens": cached_tokens,
-        "cache_hit": cached_tokens > 0,
     }
 
 
@@ -142,29 +113,30 @@ def _action_from_response(data, action_tools):
         reason = str(details.get("reason", ""))
         if reason == "max_output_tokens":
             return ModelAction.invalid(
-                (
-                    "The model response reached max_output_tokens before "
-                    "producing one complete function call. Return exactly "
-                    "one concise function call."
-                ),
-                error="model_output_truncated",
+                "The model response reached max_output_tokens before "
+                "producing one complete function call. Return exactly "
+                "one concise function call."
             )
+    output = data.get("output")
+    if not isinstance(output, list) or any(
+        not isinstance(item, dict) for item in output
+    ):
+        return ModelAction.invalid(
+            "provider returned malformed response output"
+        )
     allowed = {str(item["name"]) for item in action_tools}
     calls = [
-        item for item in data.get("output", [])
-        if isinstance(item, dict) and item.get("type") == "function_call"
+        item for item in output if item.get("type") == "function_call"
     ]
     if len(calls) != 1:
         return ModelAction.invalid(
-            f"expected exactly one function call, received {len(calls)}",
-            error="invalid_function_call_count",
+            f"expected exactly one function call, received {len(calls)}"
         )
     call = calls[0]
     name = str(call.get("name", "")).strip()
     if name not in allowed:
         return ModelAction.invalid(
-            f"unknown function call: {name or '<missing>'}",
-            error="unknown_function_call",
+            f"unknown function call: {name or '<missing>'}"
         )
     arguments = call.get("arguments", {})
     if isinstance(arguments, str):
@@ -172,27 +144,23 @@ def _action_from_response(data, action_tools):
             arguments = json.loads(arguments)
         except json.JSONDecodeError:
             return ModelAction.invalid(
-                f"function {name} returned malformed JSON arguments",
-                error="malformed_function_arguments",
+                f"function {name} returned malformed JSON arguments"
             )
     if not isinstance(arguments, dict):
         return ModelAction.invalid(
-            f"function {name} arguments must be an object",
-            error="invalid_function_arguments",
+            f"function {name} arguments must be an object"
         )
     if name == "submit_final":
         answer = arguments.get("answer")
         if set(arguments) != {"answer"} or not isinstance(answer, str) or not answer.strip():
             return ModelAction.invalid(
-                "submit_final requires one non-empty string answer",
-                error="invalid_final_answer",
+                "submit_final requires one non-empty string answer"
             )
         return ModelAction.final(answer)
     call_id = str(call.get("call_id") or "")
     if not call_id:
         return ModelAction.invalid(
-            f"function {name} is missing a call id",
-            error="missing_function_call_id",
+            f"function {name} is missing a call id"
         )
     return ModelAction.tool(name, arguments, call_id=call_id)
 
@@ -206,18 +174,30 @@ class OpenAICompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
-        # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
-        # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
+        hostname = (
+            urllib.parse.urlparse(self.base_url).hostname or ""
+        ).lower().rstrip(".")
         self.supports_prompt_cache = any(
-            host in self.base_url for host in ("openai.com", "right.codes")
+            hostname == domain or hostname.endswith("." + domain)
+            for domain in ("openai.com", "right.codes")
         )
+        self.backend_hostname = hostname or "unknown"
         self.last_completion_metadata = {}
-        self._last_response_data = {}
         self.reset_action_session()
 
     def reset_action_session(self):
         self._action_input = []
         self._pending_call_ids = []
+
+    @staticmethod
+    def estimate_action_tool_tokens(action_tools, token_counter):
+        serialized = json.dumps(
+            list(action_tools or ()),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return int(token_counter(serialized))
 
     def record_action_result(self, action, result):
         result = str(result)
@@ -241,7 +221,6 @@ class OpenAICompatibleModelClient:
 
     def _build_payload(
         self,
-        prompt,
         max_new_tokens,
         *,
         prompt_cache_key,
@@ -250,25 +229,15 @@ class OpenAICompatibleModelClient:
     ):
         payload = {
             "model": self.model,
-            "input": list(input_items) if input_items is not None else [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": prompt}],
-                }
-            ],
+            "input": list(input_items),
             "max_output_tokens": max_new_tokens,
             "stream": False,
             "store": False,
             "include": ["reasoning.encrypted_content"],
+            "tools": list(action_tools),
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
         }
-        if action_tools is not None:
-            payload.update(
-                {
-                    "tools": list(action_tools),
-                    "tool_choice": "required",
-                    "parallel_tool_calls": False,
-                }
-            )
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         if self.supports_prompt_cache and prompt_cache_key:
@@ -313,7 +282,7 @@ class OpenAICompatibleModelClient:
             if remaining <= 0:
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible backend before the request deadline.\n"
-                    f"Base URL: {self.base_url}\n"
+                    f"Backend host: {self.backend_hostname}\n"
                     f"Model: {self.model}"
                 )
             effective_timeout = min(float(self.timeout), remaining)
@@ -323,12 +292,13 @@ class OpenAICompatibleModelClient:
                     response_headers = getattr(response, "headers", {}) or {}
                     return body_text, response_headers.get("Content-Type", "")
             except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
                 transient = exc.code in {408, 429} or exc.code >= 500
                 if transient and attempt < attempts - 1 and retry_delay(attempt):
                     continue
                 raise RuntimeError(
-                    f"OpenAI-compatible request failed with HTTP {exc.code}: {body}"
+                    f"OpenAI-compatible request failed with HTTP {exc.code}.\n"
+                    f"Backend host: {self.backend_hostname}\n"
+                    f"Model: {self.model}"
                 ) from exc
             except (
                 urllib.error.URLError,
@@ -340,7 +310,7 @@ class OpenAICompatibleModelClient:
                     continue
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
+                    f"Backend host: {self.backend_hostname}\n"
                     f"Model: {self.model}"
                 ) from exc
         raise RuntimeError("OpenAI-compatible request exhausted retries")
@@ -350,72 +320,33 @@ class OpenAICompatibleModelClient:
         if content_type.startswith("text/event-stream") or body_text.lstrip().startswith(
             "data:"
         ):
-            text, response_data = _extract_openai_response_from_sse(body_text)
-            return text, response_data, True
-        try:
-            response_data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "OpenAI-compatible error: backend returned non-JSON "
-                "content that could not be parsed"
-            ) from exc
+            response_data = _extract_openai_response_from_sse(body_text)
+            if response_data is None:
+                raise RuntimeError(
+                    "OpenAI-compatible error: SSE did not contain a response object"
+                )
+        else:
+            try:
+                response_data = json.loads(body_text)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    "OpenAI-compatible error: backend returned non-JSON "
+                    "content that could not be parsed"
+                ) from exc
         if not isinstance(response_data, dict):
             raise RuntimeError(  # noqa: TRY004 - provider protocol failure
                 "OpenAI-compatible error: backend returned a non-object JSON response"
             )
         if response_data.get("error"):
-            raise RuntimeError(f"OpenAI-compatible error: {response_data['error']}")
-        return _extract_openai_text(response_data), response_data, False
-
-    def _record_response(self, response_data, prompt_cache_key):
-        if not response_data:
-            return
-        self._last_response_data = response_data
-        self.last_completion_metadata = {
-            "prompt_cache_supported": self.supports_prompt_cache,
-            "prompt_cache_key": prompt_cache_key,
-            **_extract_usage_cache_details(response_data),
-        }
-
-    def complete(
-        self, prompt, max_new_tokens, prompt_cache_key=None,
-        action_tools=None, input_items=None, request_timeout=None,
-    ):
-        """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
-
-        为什么存在：
-        runtime 不应该知道 HTTP 细节、SSE 细节、usage 字段长什么样，
-        更不应该自己去判断 prompt cache 参数要不要带。这个函数把这些后端
-        细节都包起来，对上层暴露统一的 `complete()` 行为。
-
-        输入 / 输出：
-        - 输入：完整 prompt、最大输出 token，以及可选的 prompt cache 参数
-        - 输出：模型最终文本；同时把 usage / cached_tokens 等元数据写进
-          `self.last_completion_metadata`
-
-        在 agent 链路里的位置：
-        它位于 `Pico.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
-        落到 provider API 的地方。
-        """
-        self.last_completion_metadata = {}
-        self._last_response_data = {}
-        payload = self._build_payload(
-            prompt,
-            max_new_tokens,
-            prompt_cache_key=prompt_cache_key,
-            action_tools=action_tools,
-            input_items=input_items,
-        )
-        body_text, content_type = self._request_with_retry(payload, request_timeout)
-        text, data, streamed = self._decode_response(body_text, content_type)
-        self._record_response(data, prompt_cache_key)
-        if action_tools is not None:
-            return _action_from_response(data, action_tools)
-        if text or not streamed:
-            return text
-        raise RuntimeError(
-            "OpenAI-compatible error: could not extract text from event stream response"
-        )
+            raise RuntimeError("OpenAI-compatible error: backend returned an error")
+        output = response_data.get("output")
+        if not isinstance(output, list) or any(
+            not isinstance(item, dict) for item in output
+        ):
+            raise RuntimeError(
+                "OpenAI-compatible error: malformed response output"
+            )
+        return response_data
 
     def complete_action(
         self, prompt, max_new_tokens, *, action_tools,
@@ -430,21 +361,23 @@ class OpenAICompatibleModelClient:
             )
         if self._pending_call_ids:
             raise RuntimeError("pending Responses function call has no recorded output")
-        action = self.complete(
-            prompt,
+        self.last_completion_metadata = {}
+        payload = self._build_payload(
             max_new_tokens,
             prompt_cache_key=prompt_cache_key,
             action_tools=action_tools,
             input_items=self._action_input,
-            request_timeout=request_timeout,
         )
-        output = self._last_response_data.get("output", [])
-        if isinstance(output, list):
-            self._action_input.extend(item for item in output if isinstance(item, dict))
-            self._pending_call_ids = [
-                str(item.get("call_id") or "")
-                for item in output
-                if item.get("type") == "function_call"
-                and str(item.get("call_id") or "")
-            ]
+        body_text, content_type = self._request_with_retry(payload, request_timeout)
+        response_data = self._decode_response(body_text, content_type)
+        self.last_completion_metadata = _extract_usage_cache_details(response_data)
+        action = _action_from_response(response_data, action_tools)
+        output = response_data["output"]
+        self._action_input.extend(output)
+        self._pending_call_ids = [
+            str(item.get("call_id") or "")
+            for item in output
+            if item.get("type") == "function_call"
+            and str(item.get("call_id") or "")
+        ]
         return action

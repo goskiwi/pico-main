@@ -12,9 +12,7 @@ class ToolContext:
     shell_env_provider: Callable[[], dict]
     project_memory: object | None = None
     artifact_store: object | None = None
-    session_id: str = ""
     run_id_provider: Callable[[], str] | None = None
-    source_event_ids_provider: Callable[[], tuple[str, ...]] | None = None
     tool_call_id_provider: Callable[[], str] | None = None
     working_state_provider: Callable[[], object | None] | None = None
     token_counter_provider: Callable[[str], int] | None = None
@@ -30,9 +28,6 @@ class ToolContext:
 
     def run_id(self):
         return self.run_id_provider() if self.run_id_provider else ""
-
-    def source_event_ids(self):
-        return self.source_event_ids_provider() if self.source_event_ids_provider else ()
 
     def tool_call_id(self):
         return self.tool_call_id_provider() if self.tool_call_id_provider else ""

@@ -13,6 +13,7 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.evidence import RunEvidence
 from pico.mutations import file_revision
 
 
@@ -50,19 +51,19 @@ def main():
             SessionStore(root / ".pico/sessions"),
             config=PicoConfig(approval_policy="auto", verification_command=""),
         )
-        agent.services.project_memory.store(
+        agent.dependencies.project_memory.store(
             action="create",
             filename="reference_safe_edit.md",
             name="Safe local edit procedure",
             description="How to make one revision-bound local text edit.",
             memory_type="reference",
             content="Read the target revision before applying one exact patch.",
-            source_session_id=agent.session.data["id"],
             source_run_id="bootstrap",
         )
         answer = agent.ask("Read sample.txt and replace alpha with beta.")
-        report = agent.build_report(agent.run.task_state)
-        events = agent.services.run_store.read_events(agent.run.task_state.run_id)
+        events = agent.dependencies.run_store.read_events(agent.run.task_state.run_id)
+        projection = agent.dependencies.run_store.replay(agent.run.task_state.run_id)
+        evidence = RunEvidence.from_events(events)
         turns = [entry for entry in events if entry.kind == "turn_metrics"]
         recall_calls = [
             entry
@@ -96,8 +97,8 @@ def main():
             ],
             "context_generation": agent.run.run_log.generation,
             "run_log_schema": events[0].to_dict()["schema_version"],
-            "evidence_effects": report["evidence"]["effects"],
-            "working_state": report["working_state"],
+            "evidence_effects": evidence.effects,
+            "working_state": projection.working_state.to_dict(),
             "memory_recalls": [
                 {
                     "filenames": call.args["filenames"],
@@ -125,10 +126,8 @@ def main():
                 for call in tool_calls
             ],
             "run_event_count": len(events),
-            "pending_operations": agent.services.run_store.replay(
-                agent.run.task_state.run_id
-            ).summary()["pending_operations"],
-            "run_dir": str(agent.services.run_store.run_dir(agent.run.task_state)),
+            "pending_operations": projection.summary()["pending_operations"],
+            "run_dir": str(agent.dependencies.run_store.run_dir(agent.run.task_state)),
         }, indent=2, ensure_ascii=False))
 
 

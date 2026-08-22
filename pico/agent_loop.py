@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -16,7 +15,6 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ModelTurn:
     action: Any
-    prompt_metadata: dict[str, Any]
     provider_input_tokens: int | None
     provider_output_tokens: int | None
     provider_total_tokens: int | None
@@ -57,7 +55,6 @@ class AgentLoop:
         agent = self.agent
         prompt, prompt_metadata = self._prepare_prompt(loop_state)
         agent.emit_event(
-            loop_state.task_state,
             "model_requested",
             {
                 "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
@@ -72,7 +69,6 @@ class AgentLoop:
         loop_state.overflow_recovery_attempted = False
         return ModelTurn(
             action=action,
-            prompt_metadata=prompt_metadata,
             provider_input_tokens=provider_input_tokens,
             provider_output_tokens=provider_output_tokens,
             provider_total_tokens=provider_total_tokens,
@@ -85,6 +81,7 @@ class AgentLoop:
             prompt, prompt_metadata = agent.prompt.build(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
+                provider_overhead_tokens=loop_state.provider_overhead_tokens,
             )
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
@@ -92,7 +89,6 @@ class AgentLoop:
             prompt, original_metadata = loop_state.prompt_snapshot
             prompt_metadata = dict(original_metadata)
         prompt_metadata["prompt_reused"] = prompt_reused
-        prompt_metadata["provider_session_active"] = prompt_reused
         return prompt, prompt_metadata
 
     def _request_action(self, loop_state, prompt, prompt_metadata):
@@ -109,10 +105,10 @@ class AgentLoop:
                 if tool["name"] == "submit_final"
             ]
             if agent.config.max_tool_executions is not None
-            and loop_state.task_state.executed_tool_count >= agent.config.max_tool_executions
+            and agent.run.task_state.executed_tool_count
+            >= agent.config.max_tool_executions
             else agent.tools.action_schemas
         )
-        model_started_at = time.monotonic()
         action = agent.model_client.complete_action(
             prompt,
             agent.config.max_new_tokens,
@@ -123,33 +119,54 @@ class AgentLoop:
         completion_metadata = dict(
             getattr(agent.model_client, "last_completion_metadata", {}) or {}
         )
+        self._observe_provider_overhead(
+            loop_state,
+            prompt_metadata,
+            completion_metadata,
+        )
         persisted_prompt_metadata = self._persisted_prompt_metadata(prompt_metadata)
         agent.emit_event(
-            loop_state.task_state,
             "turn_metrics",
             {
-                "kind": action.kind,
-                "tool_call_id": action.tool_call.call_id if action.tool_call else "",
                 "completion_metadata": completion_metadata,
                 "prompt_metadata": persisted_prompt_metadata,
                 "prompt_reused": bool(prompt_metadata.get("prompt_reused")),
-                "duration_ms": int((time.monotonic() - model_started_at) * 1000),
             },
         )
         return action, completion_metadata
 
     @staticmethod
+    def _observe_provider_overhead(
+        loop_state,
+        prompt_metadata,
+        completion_metadata,
+    ):
+        if prompt_metadata.get("prompt_reused"):
+            return
+        input_tokens = completion_metadata.get("input_tokens")
+        if not isinstance(input_tokens, int) or input_tokens < 0:
+            return
+        known_input_tokens = int(prompt_metadata.get("prompt_tokens") or 0) + int(
+            prompt_metadata.get("tool_schema_tokens") or 0
+        )
+        observed = max(0, input_tokens - known_input_tokens)
+        loop_state.provider_overhead_tokens = observed
+        prompt_metadata["observed_provider_overhead_tokens"] = observed
+
+    @staticmethod
     def _persisted_prompt_metadata(prompt_metadata):
         if not prompt_metadata.get("prompt_reused"):
-            return dict(prompt_metadata)
+            persisted = dict(prompt_metadata)
+            persisted.pop("prompt_reused", None)
+            return persisted
         keys = (
-            "governance_version",
-            "prompt_reused",
-            "provider_session_active",
             "prompt_cache_key",
-            "prefix_hash",
             "run_log_generation",
             "provider_context_tokens",
+            "tool_schema_tokens",
+            "provider_overhead_tokens",
+            "estimated_input_tokens",
+            "observed_provider_overhead_tokens",
         )
         return {key: prompt_metadata.get(key) for key in keys}
 
@@ -195,7 +212,6 @@ class AgentLoop:
             loop_state.prompt_snapshot = None
             loop_state.provider_context_tokens = context_tokens
             agent.emit_event(
-                loop_state.task_state,
                 "provider_session_reset",
                 {
                     "reason": "next_input_threshold",
@@ -239,7 +255,6 @@ class AgentLoop:
         )
         self.agent.model_client.reset_action_session()
         self.agent.emit_event(
-            loop_state.task_state,
             "provider_session_reset",
             {
                 "reason": "context_overflow_retry",
@@ -253,12 +268,13 @@ class AgentLoop:
         agent = self.agent
         if (
             agent.config.max_tool_executions is not None
-            and loop_state.task_state.executed_tool_count >= agent.config.max_tool_executions
+            and agent.run.task_state.executed_tool_count
+            >= agent.config.max_tool_executions
         ):
             return "tool_execution_limit"
         loop_state.invalid_output_count = 0
         call = turn.action.tool_call
-        agent.apply_run_event(loop_state.run_log.append_tool_call(call))
+        agent.apply_run_event(agent.run.run_log.append_tool_call(call))
         outcome = agent.tools.run(call)
 
         model_instruction = self._append_budget_instruction(loop_state)
@@ -277,7 +293,8 @@ class AgentLoop:
         agent = self.agent
         if (
             agent.config.max_tool_executions is None
-            or loop_state.task_state.executed_tool_count < agent.config.max_tool_executions
+            or agent.run.task_state.executed_tool_count
+            < agent.config.max_tool_executions
         ):
             return ""
         budget_instruction = (
@@ -285,14 +302,14 @@ class AgentLoop:
             "use submit_final now with the available evidence."
         )
         agent.apply_run_event(
-            loop_state.run_log.append_model_instruction(budget_instruction)
+            agent.run.run_log.append_model_instruction(budget_instruction)
         )
         return budget_instruction
 
     def _handle_invalid_output(self, loop_state, turn):
         loop_state.invalid_output_count += 1
         self.agent.apply_run_event(
-            loop_state.run_log.append_model_instruction(turn.action.content)
+            self.agent.run.run_log.append_model_instruction(turn.action.content)
         )
         self._continue_provider(loop_state, turn, turn.action.content)
         if loop_state.invalid_output_count >= 8:
@@ -300,15 +317,14 @@ class AgentLoop:
         return ""
 
     def _handle_final_action(self, loop_state, turn):
-        assessment = self.completion.assess(loop_state, turn.action.content.strip())
+        assessment = self.completion.assess(turn.action.content.strip())
         if assessment.allowed:
             return assessment.final_answer
         self._block_completion(
             loop_state,
             turn,
             assessment.status,
-            assessment.reason,
-            assessment.model_instruction,
+            assessment.instruction,
         )
         return None
 
@@ -317,15 +333,13 @@ class AgentLoop:
         loop_state,
         turn,
         status,
-        event_reason,
-        model_instruction,
+        instruction,
     ):
         self.agent.apply_run_event(
-            loop_state.run_log.append_model_instruction(model_instruction)
+            self.agent.run.run_log.append_model_instruction(instruction)
         )
         self.agent.emit_event(
-            loop_state.task_state,
             "completion_blocked",
-            {"status": status, "reason": event_reason},
+            {"status": status, "reason": instruction},
         )
-        self._continue_provider(loop_state, turn, model_instruction)
+        self._continue_provider(loop_state, turn, instruction)

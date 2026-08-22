@@ -13,7 +13,6 @@ def changed_outcome():
         content="patched",
         affected_paths=("src/app.py",),
         effect_scope="workspace",
-        artifact={"artifact_id": "artifact_1"},
     )
 
 
@@ -45,7 +44,8 @@ def test_live_and_run_log_recovery_build_identical_evidence():
     live.apply_event(run_event)
     restored = RunEvidence.from_events([run_event])
 
-    assert restored.to_dict() == live.to_dict()
+    assert restored.effects == live.effects
+    assert restored.verifications == live.verifications
 
 
 def test_workspace_fact_invalidates_current_verification():
@@ -54,7 +54,6 @@ def test_workspace_fact_invalidates_current_verification():
         event(
             "verification_result",
             {
-                "verification_id": "verify_1",
                 "status": "passed",
                 "freshness": "current",
                 "workspace_fingerprint": "workspace-before",
@@ -76,7 +75,6 @@ def test_workspace_fact_invalidates_current_verification():
     )
 
     assert evidence.verifications[0]["freshness"] == "stale"
-    assert evidence.verifications[0]["invalidated_by"] == "call_1"
 
 
 def effect(call_id, status, side_effect_state, paths, scope="workspace"):
@@ -104,7 +102,6 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
     assert repaired.assess_completion("").allowed is True
 
     verification = {
-        "verification_id": "verify_workspace",
         "status": "passed",
         "freshness": "current",
         "workspace_fingerprint": "workspace-current",

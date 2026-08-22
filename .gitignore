@@ -33,8 +33,10 @@ tmp/
 .pico/
 .mini-pico/
 artifacts/*
-!artifacts/context-governance-v5.json
-!artifacts/project-memory-v2.json
+!artifacts/context-governance.json
+!artifacts/harness-regression.json
+!artifacts/project-memory.json
+!artifacts/repo-map.json
 release/
 readme_intro_locked/
 output/

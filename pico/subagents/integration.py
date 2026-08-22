@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
 from pathlib import Path
 
 from ..execution import ExecutionContext
@@ -12,31 +11,19 @@ from ..workspace import clip
 from .dag import implementation_order
 from .worktree import (
     GitWorktree,
+    GitWorktreeError,
     apply_patch,
     require_clean_repository,
 )
 
 
 class PatchIntegrator:
-    def __init__(
-        self,
-        *,
-        parent,
-        parent_run_id: Callable[[], str],
-        records: Callable[[str], dict],
-        outcome_status: Callable[[str, object], str],
-        child_projection: Callable[[str, object], object],
-        release_worktree: Callable[[str, str], object],
-    ):
-        self.parent = parent
-        self.parent_run_id = parent_run_id
-        self.records = records
-        self.outcome_status = outcome_status
-        self.child_projection = child_projection
-        self.release_worktree = release_worktree
+    def __init__(self, manager):
+        self.manager = manager
+        self.parent = manager.parent
 
     def verify_record_receipt(self, run_id, record):
-        projection = self.child_projection(run_id, record)
+        projection = self.manager._child_projection(run_id, record)
         if projection.status != "completed":
             raise ValueError(
                 f"subtask child run did not complete: {record.spec.task_id}"
@@ -57,14 +44,13 @@ class PatchIntegrator:
         if not command:
             raise ValueError("patch integration requires a verification command")
         execution = ExecutionContext.standalone(
-            owner="subtask_integration_verifier",
-            max_seconds=min(120, self.parent.config.run_timeout_seconds),
+            max_seconds=self.parent.config.run_timeout_seconds,
         )
         workspace_fingerprint = hashlib.sha256(worktree.patch()).hexdigest()
         verification = verify_workspace(
             root=worktree.path,
             command=command,
-            sandbox=self.parent.services.sandbox_factory(worktree.path),
+            sandbox=self.parent.dependencies.sandbox_factory(worktree.path),
             timeout_seconds=self.parent.config.run_timeout_seconds,
             redact_text=self.parent.redact_text,
             fingerprint_provider=lambda: hashlib.sha256(worktree.patch()).hexdigest(),
@@ -79,9 +65,17 @@ class PatchIntegrator:
             )
         return verification
 
+    def _require_parent_base(self, base_sha, phase):
+        try:
+            current = require_clean_repository(self.parent.workspace.root)
+        except GitWorktreeError as exc:
+            raise ValueError(f"parent workspace changed {phase}") from exc
+        if current != base_sha:
+            raise ValueError(f"parent workspace changed {phase}")
+
     def apply(self, task_ids):
-        run_id = self.parent_run_id()
-        records = self.records(run_id)
+        run_id = self.manager._parent_run_id()
+        records = self.manager._records(run_id)
         for task_id in task_ids:
             if task_id not in records:
                 raise ValueError(f"unknown subtask: {task_id}")
@@ -89,10 +83,7 @@ class PatchIntegrator:
                 raise ValueError(f"subtask is not an implementation: {task_id}")
         order = implementation_order(records, tuple(task_ids))
         selected = [records[task_id] for task_id in order]
-        if any(
-            self.outcome_status(run_id, record) != "completed"
-            for record in selected
-        ):
+        if any(record.status != "completed" for record in selected):
             raise ValueError("all implementation subtasks must be completed")
         if any(record.applied for record in selected):
             raise ValueError("implementation subtask was already integrated")
@@ -102,8 +93,20 @@ class PatchIntegrator:
         if len(base_shas) != 1:
             raise ValueError("implementation patches do not share one base revision")
         base_sha = next(iter(base_shas))
-        if require_clean_repository(self.parent.workspace.root) != base_sha:
-            raise ValueError("parent workspace changed after implementation delegation")
+        outstanding = {
+            task_id
+            for task_id, record in records.items()
+            if record.spec.kind == "implement"
+            and record.base_sha == base_sha
+            and record.status == "completed"
+            and not record.applied
+        }
+        if set(order) != outstanding:
+            raise ValueError(
+                "apply all completed patches together: "
+                + ", ".join(sorted(outstanding))
+            )
+        self._require_parent_base(base_sha, "after implementation delegation")
 
         integration = GitWorktree(self.parent.workspace.root, base_sha, "integration")
         try:
@@ -118,15 +121,14 @@ class PatchIntegrator:
             aggregate = integration.patch()
             if not aggregate:
                 raise ValueError("integrated subtasks produced no aggregate patch")
-            if require_clean_repository(self.parent.workspace.root) != base_sha:
-                raise ValueError("parent workspace changed during patch verification")
+            self._require_parent_base(base_sha, "during patch verification")
             apply_patch(self.parent.workspace.root, aggregate)
         finally:
             integration.cleanup()
 
         for record in selected:
             record.applied = True
-            handle = self.release_worktree(run_id, record.spec.task_id)
+            handle = self.manager._release_worktree(run_id, record.spec.task_id)
             if handle is not None:
                 handle.cleanup()
         return {

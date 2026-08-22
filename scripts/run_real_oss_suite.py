@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.materialize_real_oss import load_manifest
 from scripts.run_real_oss_validation import (
     DEFAULT_MANIFEST,
     git_metadata,
@@ -23,20 +25,11 @@ from scripts.run_real_oss_validation import (
 )
 
 
-def load_task_ids(path):
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v2":
-        raise ValueError("unsupported Real OSS suite schema")
-    return [task["id"] for task in payload["tasks"]]
-
-
 def retryable_infrastructure_error(error):
     text = str(error)
     return (
         "Could not reach the OpenAI-compatible backend" in text
-        or "HTTP 408:" in text
-        or "HTTP 429:" in text
-        or any(f"HTTP {status}:" in text for status in range(500, 600))
+        or re.search(r"HTTP (?:408|429|5\d\d)\b", text) is not None
     )
 
 
@@ -115,10 +108,11 @@ def main(argv=None):
 
     runtime = git_metadata()
     require_clean_runtime(runtime)
+    manifest = load_manifest(args.manifest)
     results = []
     task_root = ROOT / "artifacts" / "real-oss-suite-v2"
     prepare_task_root(task_root)
-    for task_id in load_task_ids(args.manifest):
+    for task_id in (task["id"] for task in manifest["tasks"]):
         print(f"{task_id}: running", flush=True)
         task_artifact = task_root / f"{task_id}.json"
         task_args = SimpleNamespace(
@@ -167,7 +161,7 @@ def main(argv=None):
         "model": args.model,
         "tool_budget": (
             args.max_tool_executions
-            or json.loads(args.manifest.read_text(encoding="utf-8"))["tool_budget"]
+            or manifest["tool_budget"]
         ),
         "summary": {"total": len(results), "passed": passed, "failed": len(results) - passed},
         "tasks": results,

@@ -4,7 +4,6 @@ from unittest.mock import patch
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.sandbox import (
     DockerSandbox,
-    SandboxProfile,
     SandboxResult,
     parse_command_invocation,
 )
@@ -37,6 +36,38 @@ def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     assert agent.tools.run("read_file", {"path": "link"}).status == "rejected"
 
 
+def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("internal\n", encoding="utf-8")
+    agent = build_agent(tmp_path)
+
+    read_git = agent.tools.run(
+        "read_file",
+        {"path": ".git/config", "start": 1, "end": 10},
+    )
+    write_pico = agent.tools.run(
+        "write_file",
+        {
+            "path": ".pico/injected.txt",
+            "content": "injected\n",
+            "expected_revision": "absent",
+        },
+    )
+    write_gitignore = agent.tools.run(
+        "write_file",
+        {
+            "path": ".gitignore",
+            "content": ".pico/\n",
+            "expected_revision": "absent",
+        },
+    )
+
+    assert read_git.status == "rejected"
+    assert write_pico.status == "rejected"
+    assert not (tmp_path / ".pico" / "injected.txt").exists()
+    assert write_gitignore.status == "success"
+
+
 def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
@@ -49,7 +80,6 @@ def test_shell_is_direct_argv_in_docker_and_env_is_filtered(tmp_path):
     assert argv == ("python", "-c", "print(1)")
     assert "OPENAI_API_KEY" not in options["env"]
     assert options["timeout"] == 3
-    assert options["profile"] == SandboxProfile.INSPECT
 
 
 def test_shell_failure_is_structured_before_tool_executor_classification(tmp_path):
@@ -84,7 +114,7 @@ def test_approval_denial_prevents_sandbox_start(tmp_path):
     assert sandbox.calls == []
 
 
-def test_docker_profiles_mount_workspace_read_only(tmp_path):
+def test_docker_mounts_workspace_read_only(tmp_path):
     (tmp_path / "src").mkdir()
     sandbox = DockerSandbox(tmp_path, docker_binary="docker")
     args = sandbox._docker_args(
@@ -92,7 +122,6 @@ def test_docker_profiles_mount_workspace_read_only(tmp_path):
         container_cwd="/workspace",
         argv=("pytest", "-q"),
         env={},
-        profile=SandboxProfile.VERIFY,
     )
     mount = args[args.index("--mount") + 1]
     assert "target=/workspace,readonly" in mount
@@ -109,7 +138,6 @@ def test_explicit_pythonpath_is_not_overwritten(tmp_path):
         container_cwd="/workspace",
         argv=("python", "-c", "pass"),
         env={"PYTHONPATH": "/workspace/custom"},
-        profile=SandboxProfile.INSPECT,
     )
 
     assert "PYTHONPATH=/workspace/custom" in args

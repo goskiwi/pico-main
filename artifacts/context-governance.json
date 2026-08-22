@@ -1,0 +1,47 @@
+{
+  "artifact_type": "context-governance",
+  "rows": [
+    {
+      "compaction_committed": true,
+      "governed_tokens": 643,
+      "original_events_preserved": true,
+      "raw_tokens": 4284,
+      "request_preserved": true,
+      "size": 2000,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 643,
+      "original_events_preserved": true,
+      "raw_tokens": 12284,
+      "request_preserved": true,
+      "size": 6000,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    },
+    {
+      "compaction_committed": true,
+      "governed_tokens": 643,
+      "original_events_preserved": true,
+      "raw_tokens": 24284,
+      "request_preserved": true,
+      "size": 12000,
+      "tool_transactions_intact": true,
+      "within_budget": true,
+      "working_state_preserved": true
+    }
+  ],
+  "summary": {
+    "compaction_commit_rate": 1.0,
+    "current_request_preserved_rate": 1.0,
+    "mean_token_reduction": 12974.333333333334,
+    "original_event_preservation_rate": 1.0,
+    "tool_transaction_integrity_rate": 1.0,
+    "within_budget_rate": 1.0,
+    "working_state_preservation_rate": 1.0
+  }
+}

@@ -1,3 +1,6 @@
+import os
+from unittest.mock import patch
+
 import pytest
 
 from pico import (
@@ -34,7 +37,6 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     assert outcome.status == "success"
     assert outcome.execution_state == "completed"
     assert outcome.side_effect_state == "none"
-    assert outcome.rejected_at == ""
     assert set(outcome.to_dict()) == {
         "tool_call_id",
         "tool_name",
@@ -45,14 +47,10 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
         "failure",
         "affected_paths",
         "effect_scope",
-        "duration_ms",
         "artifact",
-        "output_truncated",
-        "rejected_at",
     }
-    artifact = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
-    assert artifact.read_text(encoding="utf-8") == outcome.content
-    assert agent.services.artifacts.verify("manual", outcome.artifact_id)["sha256"]
+    assert outcome.artifact == {}
+    assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
 
 
 def test_rejected_call_never_enters_execution(tmp_path):
@@ -63,21 +61,94 @@ def test_rejected_call_never_enters_execution(tmp_path):
     assert outcome.status == "rejected"
     assert outcome.execution_state == "not_started"
     assert outcome.failure.code == "unknown_tool"
-    assert outcome.rejected_at == "registry"
 
 
-def test_artifact_integrity_verification_detects_tampering(tmp_path):
+def test_artifact_rejects_old_schema_and_detects_tampering(tmp_path):
     agent = build_agent(tmp_path)
+    agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
+        "large output\n" * 2000
+    )
     outcome = agent.tools.run(ToolCall("list_files", {}, "call_artifact"))
-    path = tmp_path / ".pico" / "runs" / "manual" / "artifacts" / f"{outcome.artifact_id}.txt"
-    path.write_text("tampered", encoding="utf-8")
+    root = tmp_path / ".pico" / "runs" / "manual" / "artifacts"
+    descriptor_path = root / f"{outcome.artifact_id}.json"
+    descriptor = descriptor_path.read_text(encoding="utf-8")
+    descriptor_path.write_text(
+        descriptor.replace("artifact-v2", "artifact-v1"), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unsupported artifact schema"):
+        agent.dependencies.artifacts.read_slice(
+            "manual", outcome.artifact_id, 0, 8192
+        )
 
-    try:
-        agent.services.artifacts.verify("manual", outcome.artifact_id)
-    except ValueError as exc:
-        assert "digest mismatch" in str(exc)
-    else:
-        raise AssertionError("tampered artifact was accepted")
+    descriptor_path.write_text(descriptor, encoding="utf-8")
+    (root / f"{outcome.artifact_id}.txt").write_text(
+        "tampered", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="digest mismatch"):
+        agent.dependencies.artifacts.read_slice(
+            "manual", outcome.artifact_id, 0, 8192
+        )
+
+
+def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path):
+    secret = "tool-output-secret-value-987654"
+    (tmp_path / "secret.txt").write_text(secret + "\n", encoding="utf-8")
+    client = FakeModelClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "secret.txt", "start": 1, "end": 1},
+            ),
+            ModelAction.final("Done."),
+        ]
+    )
+
+    with patch.dict(os.environ, {"CUSTOM_SECRET_NAME": secret}):
+        agent = Pico(
+            client,
+            WorkspaceContext.build(tmp_path),
+            SessionStore(tmp_path / ".pico" / "sessions"),
+            config=PicoConfig(
+                approval_policy="auto",
+                verification_command="",
+                secret_env_names=frozenset({"CUSTOM_SECRET_NAME"}),
+            ),
+        )
+        assert agent.ask("Read secret.txt") == "Done."
+        provider_result = client.recorded_action_results[0][1]
+        event = next(
+            item for item in agent.run.run_log.events if item.kind == "tool_result"
+        )
+        persisted = event.payload["outcome"]["content"]
+
+        def fail_with_secret(_args):
+            raise RuntimeError(secret)
+
+        agent.tools.registry["list_files"]["run"] = fail_with_secret
+        failed = agent.tools.run(ToolCall("list_files", {}, "call_secret_failure"))
+
+        agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
+            (secret + "\n") * 2000
+        )
+        large = agent.tools.run(ToolCall("list_files", {}, "call_secret_artifact"))
+        artifact_path = (
+            tmp_path
+            / ".pico"
+            / "runs"
+            / agent.run.task_state.run_id
+            / "artifacts"
+            / f"{large.artifact_id}.txt"
+        )
+        artifact_content = artifact_path.read_text(encoding="utf-8")
+
+    assert secret not in provider_result
+    assert secret not in persisted
+    assert secret not in failed.content
+    assert secret not in failed.failure.detail
+    assert secret not in artifact_content
+    assert "<redacted>" in provider_result
+    assert "<redacted>" in persisted
+    assert "<redacted>" in artifact_content
 
 
 def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
@@ -102,7 +173,10 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     assert "read_artifact" in outcome.content
     assert outcome.artifact_id in outcome.content
     assert "full-artifact-tail" in artifact.read_text(encoding="utf-8")
-    assert agent.services.artifacts.verify("manual", outcome.artifact_id)["size_bytes"] > 16000
+    page = agent.dependencies.artifacts.read_slice(
+        "manual", outcome.artifact_id, 0, 8192
+    )
+    assert page["descriptor"]["size_bytes"] > 16000
 
 
 def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
@@ -131,7 +205,7 @@ def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
     failed_agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
         "command display format changed",
         failure=FailureInfo(
-            "command_failed", "command", "command exited with 7", True
+            "command_failed", "command exited with 7", True
         ),
     )
 
@@ -169,7 +243,7 @@ def test_tool_outcome_rejects_impossible_execution_states():
 
 
 def test_tool_outcome_requires_consistent_effect_facts():
-    failure = FailureInfo("tool_partial_success", "execution", "partial", False)
+    failure = FailureInfo("tool_partial_success", "partial", False)
 
     with pytest.raises(ValueError, match="known side effects require affected paths"):
         ToolOutcome(
@@ -213,7 +287,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         state.run_id,
         state.task_id,
         agent.session.data["id"],
-        agent.services.run_store,
+        agent.dependencies.run_store,
     )
     run_log.append_user("Remember the release command")
     call = ToolCall(
@@ -235,7 +309,6 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
     verification = run_log.append(
         "verification_result",
         {
-            "verification_id": "verify_current",
             "status": "passed",
             "freshness": "current",
             "workspace_fingerprint": "workspace_current",
@@ -246,7 +319,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
 
     outcome = agent.tools.run(call)
 
-    card = agent.services.project_memory.recall("project_release_command.md")
+    card = agent.dependencies.project_memory.recall("project_release_command.md")
     assert outcome.status == "success"
     assert outcome.side_effect_state == "changed"
     assert outcome.effect_scope == "project_memory"
@@ -254,10 +327,12 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
     assert agent.run.evidence.changed_paths == []
     assert (
         ".pico/memory/cards/project_release_command.md"
-        in agent.run.evidence.control_changed_paths
+        in agent.run.evidence.effects[-1]["affected_paths"]
     )
+    assert agent.run.evidence.effects[-1]["effect_scope"] == "project_memory"
     assert agent.run.evidence.verifications[0]["freshness"] == "current"
-    assert card.source_event_ids == (source.event_id,)
+    assert source.call_id == call.call_id
+    assert card.source_run_id == state.run_id
     assert card.source_tool_call_id == call.call_id
 
 
@@ -275,6 +350,57 @@ def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
     assert repeated.failure.code == "repeated_identical_call"
     assert after_change.status == "success"
     assert "changed" in after_change.content
+
+
+def test_unrelated_workspace_change_does_not_unlock_same_file_read(tmp_path):
+    agent = build_agent(tmp_path)
+    read_args = {"path": "README.md", "start": 1, "end": 1}
+
+    first = agent.tools.run(ToolCall("read_file", read_args, "call_read_before"))
+    changed = agent.tools.run(
+        ToolCall(
+            "write_file",
+            {
+                "path": "unrelated.txt",
+                "content": "new file\n",
+                "expected_revision": "absent",
+            },
+            "call_write_unrelated",
+        )
+    )
+    repeated = agent.tools.run(ToolCall("read_file", read_args, "call_read_after"))
+
+    assert first.status == "success"
+    assert changed.status == "success"
+    assert repeated.status == "rejected"
+    assert repeated.failure.code == "repeated_identical_call"
+
+
+def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
+    agent = build_agent(tmp_path)
+    executions = []
+    agent.tools.registry["run_shell"]["run"] = lambda _args: (
+        executions.append(1) or ToolRunnerResult("exit_code: 0")
+    )
+    shell_args = {"command": "true", "timeout": 20}
+
+    first = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_before"))
+    agent.tools.run(
+        ToolCall(
+            "write_file",
+            {
+                "path": "changed.txt",
+                "content": "changed\n",
+                "expected_revision": "absent",
+            },
+            "call_write_between_shells",
+        )
+    )
+    second = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_after"))
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert len(executions) == 2
 
 
 def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
@@ -368,6 +494,35 @@ def test_workspace_mutation_records_exact_path_without_scanning(tmp_path, monkey
 
     assert scans == 0
     assert outcome.affected_paths == ("created.txt",)
+    assert agent.workspace.revision == 1
+
+
+def test_workspace_mutation_increments_revision_once_when_refresh_detects_change(
+    tmp_path,
+    monkeypatch,
+):
+    agent = build_agent(tmp_path)
+
+    def changed_refresh(*, force=False):
+        if force:
+            agent.workspace.mark_changed()
+        return force
+
+    monkeypatch.setattr(agent.workspace, "refresh", changed_refresh)
+
+    outcome = agent.tools.run(
+        ToolCall(
+            "write_file",
+            {
+                "path": "created.txt",
+                "content": "created\n",
+                "expected_revision": "absent",
+            },
+            "write_refresh_change",
+        )
+    )
+
+    assert outcome.status == "success"
     assert agent.workspace.revision == 1
 
 

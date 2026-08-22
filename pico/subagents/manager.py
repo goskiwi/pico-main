@@ -16,7 +16,6 @@ from .integration import PatchIntegrator
 from .worktree import (
     GitWorktree,
     GitWorktreeError,
-    current_head,
     require_clean_repository,
 )
 
@@ -48,14 +47,7 @@ class SubagentManager:
             raise ValueError("subagent max_workers must be between 1 and 3")
         self._records_by_run: dict[str, dict[str, SubtaskRecord]] = {}
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
-        self.integration = PatchIntegrator(
-            parent=self.parent,
-            parent_run_id=self._parent_run_id,
-            records=self._records,
-            outcome_status=self._outcome_status,
-            child_projection=self._child_projection,
-            release_worktree=self._release_worktree,
-        )
+        self.integration = PatchIntegrator(self)
         atexit.register(self.cleanup)
 
     def _parent_run_id(self):
@@ -63,7 +55,7 @@ class SubagentManager:
         return str(state.run_id if state is not None else "manual")
 
     def _run_root(self, run_id):
-        return self.parent.services.run_store.run_dir(run_id) / "subagents"
+        return self.parent.dependencies.run_store.run_dir(run_id) / "subagents"
 
     def _records(self, run_id):
         return self._records_by_run.setdefault(run_id, {})
@@ -76,49 +68,42 @@ class SubagentManager:
             existing = records.get(spec.task_id)
             if (
                 existing is not None
-                and self._outcome_status(run_id, existing) == "completed"
+                and existing.status == "completed"
             ):
                 self.integration.verify_record_receipt(run_id, existing)
                 reused.add(spec.task_id)
 
-        requires_clean = any(
-            spec.task_id not in reused and spec.kind == "implement" for spec in specs
-        )
-        base_sha = self._delegation_base_sha(requires_clean)
-        for spec in specs:
-            if spec.task_id not in records:
-                records[spec.task_id] = SubtaskRecord(spec=spec)
         implementations = [
-            records[spec.task_id]
+            spec
             for spec in specs
             if spec.task_id not in reused and spec.kind == "implement"
         ]
-        for record in implementations:
-            record.base_sha = base_sha
+        if implementations and not str(
+            self.parent.config.verification_command or ""
+        ).strip():
+            raise ValueError("implementation subtasks require a verification command")
+        base_sha = (
+            require_clean_repository(self.parent.workspace.root)
+            if implementations
+            else ""
+        )
         for spec in specs:
-            record = records[spec.task_id]
-            if not record.base_sha:
-                record.base_sha = base_sha
+            if spec.task_id not in records:
+                records[spec.task_id] = SubtaskRecord(spec=spec)
+        for spec in implementations:
+            records[spec.task_id].base_sha = base_sha
         return records, reused
-
-    def _delegation_base_sha(self, requires_clean):
-        if requires_clean:
-            return require_clean_repository(self.parent.workspace.root)
-        try:
-            return current_head(self.parent.workspace.root)
-        except GitWorktreeError:
-            return self.parent.workspace.context.fingerprint()
 
     def _ready_tasks(self, run_id, records, target_ids):
         completed_ids = {
             task_id
             for task_id, record in records.items()
-            if self._outcome_status(run_id, record) == "completed"
+            if record.status == "completed"
         }
         failed_ids = {
             task_id
             for task_id, record in records.items()
-            if self._outcome_status(run_id, record) in {"failed", "blocked"}
+            if record.status in {"failed", "blocked"}
         }
         return ready_task_ids(
             records,
@@ -127,14 +112,12 @@ class SubagentManager:
             failed_ids=failed_ids,
         )
 
-    def _block_pending_tasks(self, run_id, records, target_ids):
-        del run_id
+    def _block_pending_tasks(self, records, target_ids):
         for task_id in target_ids:
             record = records[task_id]
             if record.status == "pending":
                 record.status = "blocked"
                 record.error = "no runnable dependency path remains"
-        return records
 
     def _prepare_batch(self, run_id, records, ready):
         batch = []
@@ -151,7 +134,8 @@ class SubagentManager:
                 record.error = self.parent.redact_text(
                     f"{type(exc).__name__}: {exc}"
                 )
-        return records, batch
+                self._discard_worktree(run_id, task_id)
+        return batch
 
     def _run_batch(self, pool, run_id, records, batch):
         futures = {
@@ -168,31 +152,31 @@ class SubagentManager:
                 record.error = self.parent.redact_text(
                     f"{type(exc).__name__}: {exc}"
                 )
-        return records
+            if records[task_id].status == "failed":
+                self._discard_worktree(run_id, task_id)
 
     def _schedule_targets(self, pool, run_id, records, target_ids):
         while any(records[item].status == "pending" for item in target_ids):
             ready = self._ready_tasks(run_id, records, target_ids)
             if not ready:
-                records = self._block_pending_tasks(run_id, records, target_ids)
+                self._block_pending_tasks(records, target_ids)
                 break
-            records, batch = self._prepare_batch(run_id, records, ready)
+            batch = self._prepare_batch(run_id, records, ready)
             if batch:
-                records = self._run_batch(pool, run_id, records, batch)
-        return records
+                self._run_batch(pool, run_id, records, batch)
 
     def delegate(self, specs: tuple[SubtaskSpec, ...]):
         run_id = self._parent_run_id()
         records, reused = self._register_specs(run_id, specs)
         target_ids = {spec.task_id for spec in specs if spec.task_id not in reused}
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            records = self._schedule_targets(pool, run_id, records, target_ids)
+            self._schedule_targets(pool, run_id, records, target_ids)
         receipts = []
         for spec in specs:
             receipt = self._receipt(run_id, records[spec.task_id])
             receipt["reused"] = spec.task_id in reused
             receipts.append(receipt)
-        return {"parent_run_id": run_id, "tasks": receipts}
+        return {"tasks": receipts}
 
     def _prepare_worktree(self, run_id, records, record):
         key = (run_id, record.spec.task_id)
@@ -209,7 +193,7 @@ class SubagentManager:
         ):
             dependency = records[dependency_id]
             if (
-                self._outcome_status(run_id, dependency) != "completed"
+                dependency.status != "completed"
                 or not dependency.patch_path
             ):
                 handle.cleanup()
@@ -229,6 +213,11 @@ class SubagentManager:
     def _release_worktree(self, run_id, task_id):
         return self._worktrees.pop((run_id, task_id), None)
 
+    def _discard_worktree(self, run_id, task_id):
+        handle = self._release_worktree(run_id, task_id)
+        if handle is not None:
+            handle.cleanup()
+
     def _child_run_store(self, run_id, record):
         return RunStore(self._task_root(run_id, record.spec.task_id) / "runs")
 
@@ -241,35 +230,25 @@ class SubagentManager:
             raise ValueError(f"subtask Run Log is missing: {record.spec.task_id}")
         return replay_events(entries)
 
-    def _outcome_status(self, run_id, record):
-        if record.status == "finished":
-            projection = self._child_projection(run_id, record)
-            return "completed" if projection.status == "completed" else "failed"
-        return record.status
-
     def _receipt(self, run_id, record):
         projection = (
             self._child_projection(run_id, record)
             if record.child_run_id
             else None
         )
-        status = self._outcome_status(run_id, record)
         error = record.error
         if not error and projection is not None and projection.status != "completed":
             error = projection.stop_reason or projection.status
         return {
             "task_id": record.spec.task_id,
             "kind": record.spec.kind,
-            "status": status,
+            "status": record.status,
             "depends_on": list(record.spec.depends_on),
             "child_run_id": record.child_run_id,
-            "base_sha": record.base_sha,
             "result": self.parent.redact_text(
                 projection.final_answer if projection is not None else ""
             ),
             "changed_paths": list(record.changed_paths),
-            "patch_path": record.patch_path,
-            "patch_sha256": record.patch_sha256,
             "error": error,
             "applied": record.applied,
         }
@@ -320,7 +299,7 @@ class SubagentManager:
             session_store=session_store,
             run_store=RunStore(task_root / "runs"),
             config=config,
-            sandbox=self.parent.services.sandbox_factory(workspace_root),
+            sandbox=self.parent.dependencies.sandbox_factory(workspace_root),
             project_memory_root=task_root / "memory",
             parent_cancellation_token=(
                 self.parent.run.execution_context.token
@@ -355,7 +334,7 @@ class SubagentManager:
         projection = None
         if state is not None:
             record.child_run_id = state.run_id
-            projection = child.services.run_store.replay(state.run_id)
+            projection = child.dependencies.run_store.replay(state.run_id)
 
         if record.spec.kind == "implement":
             handle = self._worktrees[(run_id, record.spec.task_id)]
@@ -372,9 +351,13 @@ class SubagentManager:
                 return record
         if child_error is not None:
             raise child_error
-        if projection is None or projection.status != "completed":
-            record.status = "finished"
-            record.error = ""
+        if projection is None:
+            record.status = "failed"
+            record.error = "child run did not produce a replayable result"
+            return record
+        if projection.status != "completed":
+            record.status = "failed"
+            record.error = projection.stop_reason or projection.status
             return record
 
         if record.spec.kind == "implement":
@@ -383,7 +366,7 @@ class SubagentManager:
             digest = handle.write_patch(patch_path)
             record.patch_path = str(patch_path.resolve())
             record.patch_sha256 = digest
-        record.status = "finished"
+        record.status = "completed"
         record.error = ""
         return record
 
@@ -401,7 +384,7 @@ class SubagentManager:
             task_id
             for task_id, record in records.items()
             if record.spec.kind == "implement"
-            and self._outcome_status(run_id, record) == "completed"
+            and record.status == "completed"
             and not record.applied
         )
         if unapplied:

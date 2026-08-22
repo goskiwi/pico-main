@@ -25,7 +25,7 @@ def _write_python_repo(root):
         encoding="utf-8",
     )
     (root / "tests" / "test_services.py").write_text(
-        "from app.services import UserService\n\n"
+        "from app.dependencies import UserService\n\n"
         "def test_create_user_saves_once():\n"
         "    assert UserService().create_user()\n",
         encoding="utf-8",
@@ -47,7 +47,6 @@ def test_repo_map_ranks_cross_file_implementation_and_test_relations(tmp_path):
     assert "test_create_user_saves_once" in result.text
     assert result.details["parsed_files"] == 4
     assert result.details["graph_edges"] > 0
-    assert result.details["index_revision"].startswith("sha256:")
 
 
 def test_repo_map_budget_excludes_generated_and_unrelated_components(tmp_path):
@@ -80,6 +79,10 @@ def test_token_clipping_uses_the_real_tokenizer_limit():
 
     assert count_tokens(text) == len(encoding.encode(text, disallowed_special=()))
     assert count_tokens(_token_clip(text, 20)) <= 20
+    external_counter = lambda value: len(str(value)) * 2
+    assert external_counter(
+        _token_clip(text, 20, token_counter=external_counter)
+    ) <= 20
 
 
 def test_repo_map_cache_invalidates_only_changed_and_deleted_files(tmp_path):
@@ -104,7 +107,6 @@ def test_repo_map_cache_invalidates_only_changed_and_deleted_files(tmp_path):
     assert changed.cache_hits == 3
     assert changed.cache_misses == 1
     assert any(symbol.name == "delete_user" for symbol in changed.symbols.values())
-    assert changed.index_revision != first.index_revision
 
     (tmp_path / "app" / "models.py").unlink()
     deleted = repo_map.refresh()
@@ -145,7 +147,7 @@ def test_repo_map_skips_python_symlinks(tmp_path):
     assert snapshot.skipped_files >= 1
 
 
-def test_repo_map_reports_degraded_state_when_file_limit_truncates_scan(
+def test_repo_map_reports_when_file_limit_truncates_scan(
     tmp_path,
     monkeypatch,
 ):
@@ -158,6 +160,5 @@ def test_repo_map_reports_degraded_state_when_file_limit_truncates_scan(
 
     snapshot = RepoMap(Path(tmp_path)).refresh()
 
-    assert snapshot.index_state == "degraded"
     assert snapshot.scan_truncated is True
     assert snapshot.parsed_files == 1

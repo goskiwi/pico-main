@@ -2,7 +2,7 @@ from pico.security import (
     REDACTED_VALUE,
     detected_secret_env_items,
     looks_sensitive_env_name,
-    redact_artifact,
+    redact_value,
     shell_env,
 )
 
@@ -26,13 +26,13 @@ def test_detected_secret_env_items_include_configured_and_sensitive_names():
     assert items == [("CUSTOM_SECRET_NAME", "custom-value"), ("OPENAI_API_KEY", "api-value")]
 
 
-def test_redact_artifact_recurses_through_values_and_secret_keys():
+def test_redact_value_recurses_through_values_and_secret_keys():
     artifact = {
         "OPENAI_API_KEY": "api-value",
         "payload": ["api-value", {"nested": "custom-value"}],
     }
 
-    redacted = redact_artifact(
+    redacted = redact_value(
         artifact,
         env={"OPENAI_API_KEY": "api-value", "CUSTOM_SECRET_NAME": "custom-value"},
         secret_env_names={"CUSTOM_SECRET_NAME"},
@@ -42,9 +42,9 @@ def test_redact_artifact_recurses_through_values_and_secret_keys():
     assert redacted["payload"] == [REDACTED_VALUE, {"nested": REDACTED_VALUE}]
 
 
-def test_shell_env_uses_allowlist_and_sets_pwd_with_path_fallback(tmp_path):
+def test_shell_env_uses_only_the_explicit_allowlist():
     env = {"PATH": "/usr/bin", "HOME": "/home/user", "SECRET": "nope"}
 
-    filtered = shell_env(env=env, allowlist=("HOME",), root=tmp_path)
+    filtered = shell_env(env=env, allowlist=("HOME",))
 
-    assert filtered == {"HOME": "/home/user", "PWD": str(tmp_path), "PATH": "/usr/bin"}
+    assert filtered == {"HOME": "/home/user"}

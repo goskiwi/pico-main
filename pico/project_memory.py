@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .persistence import atomic_replace_bytes
 
-PROJECT_MEMORY_SCHEMA_VERSION = "pico-markdown-project-memory-v4"
+PROJECT_MEMORY_SCHEMA_VERSION = "pico-markdown-project-memory-v5"
 MEMORY_INDEX_SCHEMA_VERSION = "pico-markdown-memory-index"
 MEMORY_TYPES = frozenset({"user", "feedback", "project", "reference"})
 MEMORY_FILENAME_PATTERN_TEXT = (
@@ -32,14 +32,11 @@ _FRONTMATTER_FIELDS = (
     "name",
     "description",
     "memory_type",
-    "source_session_id",
     "source_run_id",
-    "source_event_ids",
     "source_tool_call_id",
     "created_at",
     "updated_at",
     "expires_at",
-    "version",
 )
 
 
@@ -112,14 +109,11 @@ class MemoryCard:
     content: str
     why: str
     how_to_apply: str
-    source_session_id: str
     source_run_id: str
-    source_event_ids: tuple[str, ...]
     source_tool_call_id: str
     created_at: str
     updated_at: str
     expires_at: str
-    version: int
 
     def __post_init__(self):
         validate_memory_filename(self.filename)
@@ -134,47 +128,14 @@ class MemoryCard:
             _clean_text(self.how_to_apply, field="how_to_apply", maximum=500)
         elif self.why or self.how_to_apply:
             raise ValueError("user/reference memory must not contain why/how_to_apply")
-        if any(not isinstance(item, str) or not item for item in self.source_event_ids):
-            raise ValueError("memory source_event_ids must be non-empty strings")
-        if len(set(self.source_event_ids)) != len(self.source_event_ids):
-            raise ValueError("memory source_event_ids must be unique")
         _canonical_timestamp(self.created_at, field="created_at")
         _canonical_timestamp(self.updated_at, field="updated_at")
         if normalize_expires_at(self.expires_at) != self.expires_at:
             raise ValueError("memory expires_at is not canonical")
-        if int(self.version) < 1:
-            raise ValueError("memory version must be positive")
 
     @property
     def expired(self):
         return _is_expired(self.expires_at)
-
-    @property
-    def age_days(self):
-        updated = datetime.fromisoformat(self.updated_at)
-        return max(0, (datetime.now(timezone.utc) - updated).days)
-
-    def to_dict(self):
-        return {
-            "schema_version": PROJECT_MEMORY_SCHEMA_VERSION,
-            "filename": self.filename,
-            "name": self.name,
-            "description": self.description,
-            "memory_type": self.memory_type,
-            "content": self.content,
-            "why": self.why,
-            "how_to_apply": self.how_to_apply,
-            "source_session_id": self.source_session_id,
-            "source_run_id": self.source_run_id,
-            "source_event_ids": list(self.source_event_ids),
-            "source_tool_call_id": self.source_tool_call_id,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "expires_at": self.expires_at,
-            "version": int(self.version),
-            "expired": self.expired,
-            "age_days": self.age_days,
-        }
 
     def render_body(self):
         if self.memory_type not in {"feedback", "project"}:
@@ -191,14 +152,11 @@ def _frontmatter(card):
         "name": card.name,
         "description": card.description,
         "memory_type": card.memory_type,
-        "source_session_id": card.source_session_id,
         "source_run_id": card.source_run_id,
-        "source_event_ids": list(card.source_event_ids),
         "source_tool_call_id": card.source_tool_call_id,
         "created_at": card.created_at,
         "updated_at": card.updated_at,
         "expires_at": card.expires_at,
-        "version": int(card.version),
     }
     lines = ["---"]
     for field in _FRONTMATTER_FIELDS:
@@ -227,7 +185,7 @@ def _parse_markdown(filename, text):
             metadata[field] = json.loads(raw.strip())
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid memory frontmatter value: {filename}") from exc
-    if tuple(metadata) != _FRONTMATTER_FIELDS:
+    if set(metadata) != set(_FRONTMATTER_FIELDS):
         raise ValueError(f"invalid memory frontmatter schema: {filename}")
     if metadata["schema_version"] != PROJECT_MEMORY_SCHEMA_VERSION:
         raise ValueError(f"unsupported memory schema: {filename}")
@@ -251,14 +209,11 @@ def _parse_markdown(filename, text):
         content=content.strip(),
         why=why.strip(),
         how_to_apply=how_to_apply.strip(),
-        source_session_id=str(metadata["source_session_id"]),
         source_run_id=str(metadata["source_run_id"]),
-        source_event_ids=tuple(metadata["source_event_ids"]),
         source_tool_call_id=str(metadata["source_tool_call_id"]),
         created_at=str(metadata["created_at"]),
         updated_at=str(metadata["updated_at"]),
         expires_at=str(metadata["expires_at"]),
-        version=int(metadata["version"]),
     )
 
 
@@ -273,10 +228,18 @@ class ProjectMemoryStore:
         self.cards_root = self.root / "cards"
         self.index_path = self.root / "MEMORY.md"
         self._lock = threading.RLock()
+        self._validate_storage_paths()
         self.cards_root.mkdir(parents=True, exist_ok=True)
         self.rebuild_index()
 
+    def _validate_storage_paths(self):
+        if self.cards_root.is_symlink():
+            raise ValueError("project memory cards path must not be a symlink")
+        if self.index_path.is_symlink():
+            raise ValueError("project memory index must not be a symlink")
+
     def _path(self, filename):
+        self._validate_storage_paths()
         filename = validate_memory_filename(filename)
         path = self.cards_root / filename
         if path.is_symlink():
@@ -298,6 +261,7 @@ class ProjectMemoryStore:
         return card
 
     def list_cards(self, *, include_expired=False):
+        self._validate_storage_paths()
         cards = []
         for path in sorted(self.cards_root.glob("*.md")):
             if path.is_symlink():
@@ -308,16 +272,13 @@ class ProjectMemoryStore:
         cards.sort(key=lambda card: (card.updated_at, card.filename), reverse=True)
         return cards
 
-    def count(self):
-        return len(self.list_cards())
-
     def index_text(self):
-        if not self.index_path.is_file():
-            self.rebuild_index()
+        self.rebuild_index()
         return self.index_path.read_text(encoding="utf-8")
 
     def rebuild_index(self):
         with self._lock:
+            self._validate_storage_paths()
             header = [
                 "# Project Memory",
                 "",
@@ -350,7 +311,13 @@ class ProjectMemoryStore:
                         "WARNING: index truncated; newer memory metadata is shown first.",
                     ]
                 )
-            self._atomic_write(self.index_path, "\n".join(lines).rstrip() + "\n")
+            content = "\n".join(lines).rstrip() + "\n"
+            if (
+                self.index_path.is_file()
+                and self.index_path.read_text(encoding="utf-8") == content
+            ):
+                return self.index_path
+            self._atomic_write(self.index_path, content)
             return self.index_path
 
     def store(
@@ -364,9 +331,7 @@ class ProjectMemoryStore:
         content,
         why="",
         how_to_apply="",
-        source_session_id,
         source_run_id,
-        source_event_ids=(),
         source_tool_call_id="",
         expires_at="",
     ):
@@ -390,13 +355,6 @@ class ProjectMemoryStore:
         elif why or how_to_apply:
             raise ValueError("user/reference memory must not contain why/how_to_apply")
         expires_at = normalize_expires_at(expires_at)
-        source_event_ids = tuple(
-            dict.fromkeys(
-                str(item).strip()
-                for item in source_event_ids
-                if str(item).strip()
-            )
-        )
         path = self._path(filename)
         with self._lock:
             existing = self.recall(filename, include_expired=True)
@@ -425,14 +383,11 @@ class ProjectMemoryStore:
                 content=content,
                 why=why,
                 how_to_apply=how_to_apply,
-                source_session_id=str(source_session_id or ""),
                 source_run_id=str(source_run_id or ""),
-                source_event_ids=source_event_ids,
                 source_tool_call_id=str(source_tool_call_id or ""),
                 created_at=existing.created_at if existing else timestamp,
                 updated_at=timestamp,
                 expires_at=expires_at,
-                version=(existing.version + 1) if existing else 1,
             )
             self._atomic_write(path, _frontmatter(card))
             self.rebuild_index()
@@ -486,10 +441,6 @@ class ProjectMemoryStore:
             f"description: {card.description}",
             f"updated_at: {card.updated_at}",
         ]
-        if card.age_days >= 2:
-            lines.append(
-                f"WARNING: saved {card.age_days} days ago; verify it against current evidence before acting."
-            )
         lines.extend(["", card.render_body()])
         return lines
 

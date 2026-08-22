@@ -133,21 +133,43 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
         ToolCall("list_files", {"path": "."}, "call_source")
     )
 
-    page = agent.tools.run(
-        ToolCall(
-            "read_artifact",
-            {"artifact_id": original.artifact_id, "offset": 119 * 91, "max_bytes": 8192},
-            "call_artifact_page",
-        )
+    artifact_path = (
+        tmp_path
+        / ".pico"
+        / "runs"
+        / "manual"
+        / "artifacts"
+        / f"{original.artifact_id}.txt"
     )
+    content_reads = []
+    original_read_bytes = Path.read_bytes
 
+    def counted_read_bytes(path):
+        if path == artifact_path:
+            content_reads.append(path)
+        return original_read_bytes(path)
+
+    with patch.object(Path, "read_bytes", counted_read_bytes):
+        page = agent.tools.run(
+            ToolCall(
+                "read_artifact",
+                {
+                    "artifact_id": original.artifact_id,
+                    "offset": 119 * 91,
+                    "max_bytes": 8192,
+                },
+                "call_artifact_page",
+            )
+        )
+
+    assert content_reads == [artifact_path]
     assert "bytes 10829-" in page.content
     assert "line-0119" in page.content
     assert "line-0179" in page.content
     assert "line-0118" not in page.content
 
-    other = agent.services.artifacts.write_tool_output(
-        "other-run", "call_other", "read_file", "secret\n"
+    other = agent.dependencies.artifacts.write_tool_output(
+        "other-run", "call_other", "secret\n"
     )
     rejected = agent.tools.run(
         ToolCall(
@@ -183,3 +205,20 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
             context,
             {"path": "sample.txt", "old_text": "external", "new_text": "lost", "expected_revision": revision},
         )
+
+
+def test_noop_mutations_do_not_replace_the_file(tmp_path, monkeypatch):
+    path = tmp_path / "same.txt"
+    path.write_text("same\n", encoding="utf-8")
+    service = WorkspaceMutationService(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "_atomic_replace",
+        lambda target, payload: calls.append((target, payload)),
+    )
+    revision = file_revision(path)
+
+    assert service.write(path, "same\n", revision) == (revision, revision)
+    assert service.patch(path, "same", "same", revision) == (revision, revision)
+    assert calls == []

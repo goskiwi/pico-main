@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evals.provenance import runtime_snapshot_id
 from pico import (
     OpenAICompatibleModelClient,
     Pico,
@@ -30,11 +29,10 @@ from pico.config import load_project_env, provider_env
 from pico.sandbox import (
     DockerSandbox,
     DockerSandboxConfig,
-    SandboxProfile,
     parse_command_invocation,
 )
+from scripts.materialize_real_oss import DEFAULT_MANIFEST, load_manifest, tree_digest
 
-DEFAULT_MANIFEST = ROOT / "validation" / "real_oss_suite.json"
 ALLOWED_TOOLS = (
     "list_files",
     "read_file",
@@ -53,21 +51,11 @@ FORBIDDEN_CHANGE_GLOBS = (
 
 
 def load_task(path, task_id):
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "real-oss-suite-v2":
-        raise ValueError("unsupported Real OSS suite schema")
-    tasks = payload.get("tasks")
-    if not isinstance(tasks, list):
-        raise TypeError("Real OSS suite requires tasks")
+    payload = load_manifest(path)
+    tasks = payload["tasks"]
     task = next((item for item in tasks if item.get("id") == task_id), None)
-    required = {
-        "id", "prompt", "fixture_repo", "required_change_globs",
-        "allowed_change_globs", "verifier_file", "verifier_command",
-        "source_repository", "source_commit", "reference_fix_commit",
-        "reference_patch", "expected_files",
-    }
-    if not isinstance(task, dict) or required - set(task):
-        raise ValueError(f"Real OSS task missing fields: {sorted(required - set(task or {}))}")
+    if task is None:
+        raise ValueError(f"unknown Real OSS task: {task_id}")
     task = dict(task)
     task["tool_budget"] = int(payload.get("tool_budget", 0))
     if task["tool_budget"] < 1:
@@ -90,17 +78,6 @@ def file_snapshot(root):
 
 def file_digest(path):
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
-
-def tree_digest(root):
-    root = Path(root)
-    digest = hashlib.sha256()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return "sha256:" + digest.hexdigest()
 
 
 def docker_image_id(image):
@@ -143,7 +120,7 @@ def run_verifier(root, task, sandbox_image):
         root,
         DockerSandboxConfig(image=sandbox_image),
     ).run(
-        argv, cwd=root, timeout=90, env=env, profile=SandboxProfile.VERIFY
+        argv, cwd=root, timeout=90, env=env
     )
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
@@ -220,7 +197,7 @@ def run_validation(args):
         )
     runtime_metadata = git_metadata()
     require_clean_runtime(runtime_metadata)
-    load_project_env(ROOT)
+    load_project_env(ROOT, boundary=ROOT)
     model = args.model or provider_env("PICO_OPENAI_MODEL", "gpt-5.4")
     base_url = args.base_url or provider_env(
         "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
@@ -287,7 +264,7 @@ def run_validation(args):
     }
     verifier = run_verifier(workspace, task, args.sandbox_image)
     try:
-        events = agent.services.run_store.read_events(agent.run.task_state.run_id)
+        events = agent.dependencies.run_store.read_events(agent.run.task_state.run_id)
         run_log = {"ok": True, "event_count": len(events), "errors": []}
     except Exception as exc:  # noqa: BLE001 - audit failures are evidence
         run_log = {"ok": False, "event_count": 0, "errors": [str(exc)]}
@@ -304,7 +281,6 @@ def run_validation(args):
         "schema_version": "real-oss-validation-v3",
         "artifact_type": "real-oss-validation",
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "runtime_snapshot_id": runtime_snapshot_id(),
         "runtime": runtime_metadata,
         "model": model,
         "task": {

@@ -1,12 +1,10 @@
 {
-  "artifact_type": "repo-map-v1",
+  "artifact_type": "repo-map",
   "details": {
     "cache_hits": 0,
     "cache_misses": 1,
     "graph_edges": 6,
     "graph_nodes": 3,
-    "index_revision": "sha256:2186d8cb88fbb1cdb318be8a52480b876b5cbaa9c8b49900be7f57f4fa41d20b",
-    "index_state": "fresh",
     "parse_error_files": 0,
     "parsed_files": 1,
     "query": "where is config loaded",
@@ -41,14 +39,10 @@
         "score": 0.303992
       }
     ],
-    "semantic_backend": "python-tree-sitter-static",
     "skipped_files": 0,
     "truncated": false
   },
-  "evaluation_snapshot_id": "sha256:147bad77e7446f2b71e29c38da9dbd454d79e104c5907adf7667b42ee67508e1",
-  "runtime_snapshot_id": "sha256:8e94bf9990feb9ac4a765aa1266f396bdcd601d878fa703cc72e44075264aae2",
   "summary": {
-    "index_revision_bound": true,
     "query_hit": true,
     "within_budget": true
   }

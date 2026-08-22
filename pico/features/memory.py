@@ -125,13 +125,6 @@ class WorkingState:
             next_steps=tuple(value["next_steps"]),
         )
 
-    @classmethod
-    def from_events(cls, events):
-        state = cls()
-        for event in events:
-            state.apply_event(event)
-        return state
-
     def to_dict(self):
         return {
             "schema_version": WORKING_STATE_SCHEMA_VERSION,

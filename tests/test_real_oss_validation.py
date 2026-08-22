@@ -80,8 +80,9 @@ def test_provider_continuation_requires_a_reused_prompt_turn():
 
 def test_suite_retries_only_provider_infrastructure_errors():
     assert SUITE_MODULE.retryable_infrastructure_error(
-        RuntimeError("OpenAI-compatible request failed with HTTP 503: unavailable")
+        RuntimeError("OpenAI-compatible request failed with HTTP 503.")
     )
+    assert SUITE_MODULE.retryable_infrastructure_error(RuntimeError("HTTP 429"))
     assert SUITE_MODULE.retryable_infrastructure_error(
         RuntimeError("Could not reach the OpenAI-compatible backend")
     )

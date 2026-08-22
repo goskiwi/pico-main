@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 
 import tiktoken
@@ -63,10 +61,8 @@ class Tokenizer:
     def __init__(self, model=""):
         try:
             self.encoding = tiktoken.encoding_for_model(str(model or ""))
-            self.model_mapping_known = True
         except KeyError:
             self.encoding = tiktoken.get_encoding("o200k_base")
-            self.model_mapping_known = False
 
     def count(self, text):
         return len(self.encoding.encode(str(text or ""), disallowed_special=()))
@@ -82,7 +78,7 @@ class Tokenizer:
 
 
 class ContextManager:
-    """Compile stable rules, memory, prior Runs, current Run Log and request."""
+    """Compile stable rules, memory, current Run Log and request."""
 
     def __init__(
         self,
@@ -121,10 +117,24 @@ class ContextManager:
         self.tokenizer = Tokenizer(model)
         self._last_history_metadata = {}
 
-    def build(self, user_message, *, provider_context_tokens=None):
+    def build(
+        self,
+        user_message,
+        *,
+        provider_context_tokens=None,
+        provider_overhead_tokens=0,
+    ):
         request = f"Current user request:\n{user_message!s}"
         output_reserve = int(self.agent.config.max_new_tokens)
-        if self.tokenizer.count(request) + output_reserve >= self.total_budget:
+        tool_schema_tokens = self._tool_schema_tokens()
+        provider_overhead_tokens = max(0, int(provider_overhead_tokens or 0))
+        request_overhead_tokens = tool_schema_tokens + provider_overhead_tokens
+        if (
+            self.tokenizer.count(request)
+            + output_reserve
+            + request_overhead_tokens
+            >= self.total_budget
+        ):
             raise ContextBudgetExceeded("current request and output reservation exceed the model budget")
 
         raw = {
@@ -138,10 +148,11 @@ class ContextManager:
         compaction_metadata = self._compact_run_log_if_needed(
             raw,
             provider_context_tokens=provider_context_tokens,
+            request_overhead_tokens=request_overhead_tokens,
         )
         if compaction_metadata is not None:
             raw["history"] = self._history_text(user_message)
-        available = self.total_budget - output_reserve
+        available = self.total_budget - output_reserve - request_overhead_tokens
         budgets, allocation = self._allocate_budgets(raw, available)
         rendered = self._render(raw, budgets)
         prompt = self._assemble(rendered)
@@ -189,22 +200,21 @@ class ContextManager:
             }
             for key, value in rendered.items()
         }
+        prompt_tokens = self.tokenizer.count(prompt)
+        estimated_input_tokens = prompt_tokens + request_overhead_tokens
         metadata = {
-            "governance_version": "context-governance-v5",
-            "prompt_tokens": self.tokenizer.count(prompt),
-            "input_limit_tokens": self.total_budget,
+            "prompt_tokens": prompt_tokens,
+            "tool_schema_tokens": tool_schema_tokens,
+            "provider_overhead_tokens": provider_overhead_tokens,
+            "estimated_input_tokens": estimated_input_tokens,
             "reserved_output_tokens": output_reserve,
-            "within_budget": self.tokenizer.count(prompt) + output_reserve <= self.total_budget,
+            "within_budget": estimated_input_tokens + output_reserve <= self.total_budget,
             "tokenizer": self.tokenizer.encoding.name,
-            "model_mapping_known": self.tokenizer.model_mapping_known,
             "section_order": list(SECTION_ORDER),
-            "section_budgets": {**budgets, "current_request": None},
             "sections": sections,
             "budget_allocation": allocation,
             "budget_reductions": reductions,
-            "reduction_order": list(self.reduction_order),
             "history_projection": dict(self._last_history_metadata),
-            "current_request": {"text": str(user_message), "tokens": self.tokenizer.count(str(user_message))},
             "run_log_generation": int(
                 getattr(self.agent.run.run_log, "generation", 0)
             ),
@@ -212,6 +222,24 @@ class ContextManager:
             "provider_context_tokens": provider_context_tokens,
         }
         return prompt, metadata
+
+    def _tool_schema_tokens(self):
+        estimator = getattr(
+            self.agent.model_client,
+            "estimate_action_tool_tokens",
+            None,
+        )
+        if estimator is None:
+            return 0
+        return max(
+            0,
+            int(
+                estimator(
+                    self.agent.tools.action_schemas,
+                    self.tokenizer.count,
+                )
+            ),
+        )
 
     def _allocate_budgets(self, raw, available):
         sections = tuple(self.section_budgets)
@@ -293,9 +321,7 @@ class ContextManager:
         return "\n\n".join(rendered[section].rendered for section in SECTION_ORDER).strip()
 
     def _prefix_text(self):
-        text = str(self.agent.prompt.prefix)
-        recovery = str(self.agent.recovery.render() or "").strip()
-        return text + ("\n\n" + recovery if recovery else "")
+        return str(self.agent.prompt.prefix)
 
     def _working_state_text(self, current_request):
         task_state = self.agent.run.task_state
@@ -309,10 +335,10 @@ class ContextManager:
         )
 
     def _memory_catalog_text(self):
-        return str(self.agent.services.project_memory.index_text())
+        return str(self.agent.dependencies.project_memory.index_text())
 
     def _repo_map_text(self, query):
-        repo_map = self.agent.services.repo_map
+        repo_map = self.agent.dependencies.repo_map
         if repo_map is None:
             return "Repository map:\n- unavailable"
         result = repo_map.render(
@@ -323,69 +349,30 @@ class ContextManager:
         )
         return result.text
 
-    @staticmethod
-    def _query_tokens(query):
-        return set(re.findall(r"[A-Za-z0-9_./-]+|[\u4e00-\u9fff]", str(query).lower()))
-
-    def _rank_prior_history(self, history, query, recent_limit=4, relevant_limit=4):
-        if len(history) <= recent_limit:
-            return history
-        query_tokens = self._query_tokens(query)
-        selected = set(range(len(history) - recent_limit, len(history)))
-        scored = []
-        for index, item in enumerate(history[:-recent_limit]):
-            text = " ".join(
-                [str(item.get("content", "")), str(item.get("name", "")), json.dumps(item.get("args", {}), sort_keys=True)]
-            )
-            overlap = len(query_tokens & self._query_tokens(text))
-            if overlap:
-                scored.append((overlap, index))
-        selected.update(index for _, index in sorted(scored, reverse=True)[:relevant_limit])
-        return [item for index, item in enumerate(history) if index in selected]
-
     def _history_text(self, current_request):
         run_log = self.agent.run.run_log
-        current_run_id = str(getattr(run_log, "run_id", ""))
-        prior = self.agent.services.run_store.session_summaries(
-            self.agent.session.data["id"],
-            exclude_run_id=current_run_id,
+        if run_log is None:
+            self._last_history_metadata = {
+                "active_count": 0,
+                "selected_count": 0,
+                "omitted_count": 0,
+                "artifact_references": 0,
+            }
+            return "Current run events:\n- empty"
+        history, metadata = run_log.render_projection(
+            current_request,
+            exclude_user_content=current_request,
         )
-        selected_prior = self._rank_prior_history(prior, current_request)
-        prior_lines = ["Prior session context:"]
-        for item in selected_prior:
-            content = str(item.get("content", ""))
-            if item.get("role") == "run_summary":
-                changed = ", ".join(item.get("changed_paths", [])) or "none"
-                content = (
-                    f"request: {item.get('request', '')}"
-                    f" | result: {content}"
-                    f" | changed: {changed}"
-                    f" | verification: {item.get('verification_status', 'unknown')}"
-                    f" | stop: {item.get('stop_reason', '')}"
-                )
-            prior_lines.append(
-                f"[prior/{item.get('role', '')}] {self.tokenizer.clip(content, 220)}"
-            )
-        if len(prior_lines) == 1:
-            prior_lines.append("- empty")
-        run_log_metadata = {"active_count": 0, "selected_count": 0, "omitted_count": 0, "artifact_references": 0}
-        if run_log is not None:
-            run_log_text, run_log_metadata = run_log.render_projection(
-                current_request,
-                exclude_user_content=current_request,
-            )
-            lines = [run_log_text, "", *prior_lines]
-        else:
-            lines = prior_lines
-        self._last_history_metadata = {
-            "source": "run_log_plus_prior_runs" if run_log is not None else "prior_runs_only",
-            "prior_total_count": len(prior),
-            "prior_selected_count": len(selected_prior),
-            "run_log": run_log_metadata,
-        }
-        return "\n".join(lines)
+        self._last_history_metadata = metadata
+        return history
 
-    def _compact_run_log_if_needed(self, raw, *, provider_context_tokens=None):
+    def _compact_run_log_if_needed(
+        self,
+        raw,
+        *,
+        provider_context_tokens=None,
+        request_overhead_tokens=0,
+    ):
         run_log = self.agent.run.run_log
         if run_log is None or run_log.pending_call_id():
             return
@@ -393,6 +380,7 @@ class ContextManager:
         local_context_tokens = (
             sum(self.tokenizer.count(text) for text in raw.values())
             + separator_tokens
+            + max(0, int(request_overhead_tokens or 0))
         )
         context_tokens = max(
             local_context_tokens,

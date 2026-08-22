@@ -26,7 +26,7 @@ def new_run_log(agent, state):
         state.run_id,
         state.task_id,
         agent.session.data["id"],
-        agent.services.run_store,
+        agent.dependencies.run_store,
     )
 
 
@@ -37,7 +37,7 @@ def set_working_state(agent, goal, **overrides):
     return state
 
 
-def successful_outcome(call, content, *, artifact=None, output_truncated=False):
+def successful_outcome(call, content, *, artifact=None):
     return ToolOutcome(
         tool_call_id=call.call_id,
         tool_name=call.name,
@@ -46,14 +46,12 @@ def successful_outcome(call, content, *, artifact=None, output_truncated=False):
         side_effect_state="none",
         content=content,
         artifact=dict(artifact or {}),
-        output_truncated=output_truncated,
     )
 
 
 def append_successful_result(run_log, call, outcome):
     run_log.append_tool_started(
         call,
-        tool_call_hash=f"hash_{call.call_id}",
         risky=False,
         effect_scope="none",
         potential_effects=[],
@@ -78,6 +76,32 @@ def test_context_uses_token_budgets_and_preserves_request(tmp_path):
         "history",
         "current_request",
     ]
+
+
+def test_context_budget_reserves_known_provider_request_overhead(tmp_path):
+    class ToolAwareClient(FakeModelClient):
+        @staticmethod
+        def estimate_action_tool_tokens(_action_tools, _token_counter):
+            return 120
+
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = Pico(
+        ToolAwareClient([]),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(max_new_tokens=64),
+    )
+
+    _prompt, metadata = ContextManager(agent, total_budget=1200).build(
+        "Inspect the repository",
+        provider_overhead_tokens=80,
+    )
+
+    assert metadata["tool_schema_tokens"] == 120
+    assert metadata["provider_overhead_tokens"] == 80
+    assert metadata["estimated_input_tokens"] == metadata["prompt_tokens"] + 200
+    assert metadata["estimated_input_tokens"] + 64 <= 1200
+    assert metadata["within_budget"] is True
 
 
 def test_priority_reduction_is_recorded_in_tokens(tmp_path):
@@ -127,7 +151,6 @@ def test_default_compaction_threshold_uses_exact_reserve(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_default_threshold", "inspect", run_id="run_default_threshold")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(12):
@@ -156,7 +179,6 @@ def test_default_compaction_threshold_uses_exact_reserve(tmp_path):
 def test_small_run_log_is_not_compacted_by_event_count(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_small", "inspect", run_id="run_small")
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(12):
@@ -188,7 +210,6 @@ def test_provider_usage_can_trigger_compaction_when_local_prompt_is_under_limit(
     agent = build_agent(tmp_path)
     state = TaskState.create("task_provider_usage", "inspect", run_id="run_provider_usage")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(5):
@@ -214,7 +235,6 @@ def test_provider_usage_can_trigger_compaction_when_local_prompt_is_under_limit(
 def test_runtime_preserves_context_beyond_the_old_eight_thousand_token_cap(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_large", "inspect", run_id="run_large")
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     run_log.append_model_instruction("context " * 9000 + "END-OF-LARGE-CONTEXT")
@@ -231,7 +251,6 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
     agent = build_agent(tmp_path)
     state = TaskState.create("task_test", "inspect", run_id="run_test")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(5):
@@ -241,8 +260,6 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
             run_log, call, successful_outcome(call, "result " + "x " * 100)
         )
     agent.run.run_log = run_log
-    agent.recovery.state["projection"] = replay_events(run_log.events)
-    cursor_before = agent.recovery.state["projection"].last_cursor.sequence
 
     _, metadata = ContextManager(
         agent,
@@ -260,20 +277,58 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
     summary = next(entry for entry in run_log.events if entry.kind == "compaction")
     assert run_log.generation == 2
     assert summary.content.startswith("Earlier run summary:")
+    assert (
+        '- Tool transaction: read_file {"end": 1, "path": "README.md", '
+        '"start": 1} -> success'
+    ) in summary.content
     assert "- Goal:" not in summary.content
     assert len(run_log.active_events()) < len(run_log.events)
     assert metadata["run_log_generation"] == 2
     assert metadata["compaction"]["mode"] == "runtime_summary"
-    projection = agent.recovery.state["projection"]
-    assert projection.last_cursor.sequence == cursor_before + 1
+    projection = replay_events(run_log.events)
+    assert projection.last_cursor.sequence == summary.sequence
     assert projection.kind_counts["compaction"] == 1
+
+
+def test_repeated_compaction_keeps_completed_tool_arguments(tmp_path):
+    agent = build_agent(tmp_path)
+    state = TaskState.create("task_steps", "read files", run_id="run_steps")
+    agent.run.task_state = state
+    run_log = new_run_log(agent, state)
+    run_log.append_user("read files")
+    agent.run.run_log = run_log
+    manager = ContextManager(
+        agent,
+        total_budget=10_000,
+        compaction_reserve_tokens=2_000,
+        compaction_keep_recent_tokens=100,
+    )
+
+    paths = [f"noise_{label}.txt" for label in "abcde"]
+    for index, path in enumerate(paths):
+        call = ToolCall(
+            "read_file",
+            {"path": path, "start": 1, "end": 700},
+            f"call_step_{index}",
+        )
+        run_log.append_tool_call(call)
+        append_successful_result(
+            run_log,
+            call,
+            successful_outcome(call, "irrelevant payload " + "x " * 1000),
+        )
+        manager.build("continue", provider_context_tokens=9_500)
+
+    history = manager._history_text("continue")
+
+    assert run_log.generation > 2
+    assert all(path in history for path in paths)
 
 
 def test_current_run_session_events_are_not_duplicated_with_run_log(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_dedupe", "inspect", run_id="run_dedupe")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     call = ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_dedupe")
@@ -287,18 +342,16 @@ def test_current_run_session_events_are_not_duplicated_with_run_log(tmp_path):
 
     assert prompt.count("unique-current-run-result") == 1
     assert prompt.count("Current user request:\ninspect") == 1
-    assert metadata["history_projection"]["prior_total_count"] == 0
-    assert "current_run_duplicates_avoided" not in metadata["history_projection"]
-    assert metadata["history_projection"]["source"] == "run_log_plus_prior_runs"
+    assert metadata["history_projection"]["active_count"] == 3
+    assert metadata["history_projection"]["selected_count"] == 2
 
 
 def test_working_state_projection_replaces_successful_update_transcript(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_working", "Fix login timeout", run_id="run_working")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
-    run_log.append_user(state.user_request)
+    run_log.append_user(state.working_state.goal)
     agent.run.run_log = run_log
     update = {
         "add_constraints": ["Do not change the database schema"],
@@ -326,9 +379,8 @@ def test_rejected_working_state_update_remains_in_history(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_working", "Inspect", run_id="run_working")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
-    run_log.append_user(state.user_request)
+    run_log.append_user(state.working_state.goal)
     agent.run.run_log = run_log
     call = ToolCall(
         "update_working_state",
@@ -352,15 +404,10 @@ def test_shared_budget_lends_unused_tokens_to_history(tmp_path):
     agent.prompt.prefix = "short rules"
     state = set_working_state(agent, "short")
     state.working_state.render_panel = lambda **_kwargs: "Memory:\n- short"
-    for index in range(8):
-        state = TaskState.create(
-            f"task_history_{index}",
-            f"request-{index}",
-            run_id=f"run_history_{index}",
-        )
-        run_log = new_run_log(agent, state)
-        run_log.append_user(state.user_request)
-        run_log.append_final(f"history-{index} " + "long-context " * 80)
+    run_log = new_run_log(agent, state)
+    run_log.append_user(state.working_state.goal)
+    run_log.append_final("long-context " * 160)
+    agent.run.run_log = run_log
     manager = ContextManager(
         agent,
         total_budget=600,
@@ -389,7 +436,7 @@ def test_shared_budget_lends_unused_tokens_to_history(tmp_path):
 def test_memory_catalog_does_not_automatically_load_card_bodies(tmp_path):
     agent = build_agent(tmp_path)
     set_working_state(agent, "unique-working-goal")
-    agent.services.project_memory.store(
+    agent.dependencies.project_memory.store(
         action="create",
         filename="project_selected.md",
         name="Selected convention",
@@ -398,7 +445,6 @@ def test_memory_catalog_does_not_automatically_load_card_bodies(tmp_path):
         content="PRIVATE-CARD-BODY",
         why="It is stable across tasks.",
         how_to_apply="Recall it only for a matching task.",
-        source_session_id=agent.session.data["id"],
         source_run_id="bootstrap",
     )
     manager = ContextManager(
@@ -431,7 +477,6 @@ def test_memory_catalog_does_not_automatically_load_card_bodies(tmp_path):
 def test_bounded_tool_result_uses_executor_projection_without_second_truncation(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_bounded", "inspect", run_id="run_bounded")
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     call = ToolCall("read_file", {"path": "large.log"}, "call_bounded")
@@ -450,21 +495,18 @@ def test_bounded_tool_result_uses_executor_projection_without_second_truncation(
                 "artifact_id": "tool_call_bounded_deadbeef",
                 "size_bytes": 12000,
             },
-            output_truncated=True,
         )
     )
 
-    assert entry.content_tier == "artifact_reference"
     assert entry.content == bounded
-    assert entry.original_size_bytes == 12000
     assert entry.artifact_id == "tool_call_bounded_deadbeef"
+    assert entry.payload["outcome"]["artifact"]["size_bytes"] == 12000
 
 
 def test_pending_tool_call_prevents_compaction_and_summary_request(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_pending", "continue", run_id="run_pending")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(5):
@@ -500,19 +542,17 @@ def test_pending_tool_call_prevents_compaction_and_summary_request(tmp_path):
 def test_restore_reconciles_interrupted_operation_without_replay(tmp_path):
     agent = build_agent(tmp_path)
     state = TaskState.create("task_crash", "edit", run_id="run_crash")
-    agent.services.run_store.start_run(state)
     run_log = new_run_log(agent, state)
     run_log.append_user("edit")
     call = ToolCall("patch_file", {"path": "README.md"}, "call_crash")
     run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,
-        tool_call_hash="hash_crash",
         risky=True,
         effect_scope="workspace",
         potential_effects=[],
     )
-    restored = RunLog.restore(state.run_id, agent.services.run_store)
+    restored = RunLog.restore(state.run_id, agent.dependencies.run_store)
     agent.run.task_state = state
     agent.run.run_log = restored
     restored.reconcile_interrupted(agent)

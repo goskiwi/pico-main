@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import stat
@@ -16,15 +14,14 @@ import tiktoken
 import tree_sitter_python
 from tree_sitter import Language, Parser
 
-from .config import (
-    REPO_MAP_DAMPING,
-    REPO_MAP_MAX_FILE_BYTES,
-    REPO_MAP_MAX_FILES,
-    REPO_MAP_PAGE_RANK_ITERATIONS,
-    REPO_MAP_SCAN_MAX_ENTRIES,
-    REPO_MAP_SCAN_TIMEOUT_SECONDS,
-)
 from .workspace import IGNORED_PATH_NAMES
+
+REPO_MAP_MAX_FILES = 2000
+REPO_MAP_MAX_FILE_BYTES = 512_000
+REPO_MAP_SCAN_MAX_ENTRIES = 20_000
+REPO_MAP_SCAN_TIMEOUT_SECONDS = 2.0
+REPO_MAP_PAGE_RANK_ITERATIONS = 32
+REPO_MAP_DAMPING = 0.85
 
 _TOKEN_ENCODING = tiktoken.get_encoding("o200k_base")
 
@@ -38,8 +35,15 @@ def _token_clip(text, token_budget, *, token_counter=count_tokens):
     budget = max(0, int(token_budget))
     if token_counter(text) <= budget:
         return text
-    tokens = _TOKEN_ENCODING.encode(text, disallowed_special=())[:budget]
-    return _TOKEN_ENCODING.decode(tokens).rstrip()
+    low = 0
+    high = len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if token_counter(text[:middle]) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip()
 
 
 PYTHON_LANGUAGE = Language(tree_sitter_python.language())
@@ -205,9 +209,6 @@ class ParsedFile:
 class RepoSnapshot:
     symbols: dict[str, Symbol]
     edges: dict[str, dict[str, float]]
-    index_revision: str
-    index_state: str
-    semantic_backend: str
     scan_truncated: bool
     parsed_files: int
     skipped_files: int
@@ -325,9 +326,6 @@ class RepoMapQuery:
             "query": self.query,
             "graph_nodes": len(self.snapshot.symbols),
             "graph_edges": self.snapshot.edge_count,
-            "index_revision": self.snapshot.index_revision,
-            "index_state": self.snapshot.index_state,
-            "semantic_backend": self.snapshot.semantic_backend,
             "scan_truncated": self.snapshot.scan_truncated,
             "parsed_files": self.snapshot.parsed_files,
             "skipped_files": self.snapshot.skipped_files,
@@ -464,9 +462,6 @@ class RepoMap:
             return RepoSnapshot(
                 symbols=cached_snapshot.symbols,
                 edges=cached_snapshot.edges,
-                index_revision=cached_snapshot.index_revision,
-                index_state="degraded" if scan_truncated else cached_snapshot.index_state,
-                semantic_backend=cached_snapshot.semantic_backend,
                 scan_truncated=scan_truncated,
                 parsed_files=len(parsed_files),
                 skipped_files=skipped_files,
@@ -486,20 +481,9 @@ class RepoMap:
             for reference in parsed.references
         ]
         edges = _resolve_graph(symbols, references)
-        revision_payload = [
-            [path, *self._file_cache[path].fingerprint]
-            for path in sorted(active_paths)
-            if path in self._file_cache
-        ]
-        index_revision = "sha256:" + hashlib.sha256(
-            json.dumps(revision_payload, separators=(",", ":")).encode()
-        ).hexdigest()
         snapshot = RepoSnapshot(
             symbols=symbols,
             edges=edges,
-            index_revision=index_revision,
-            index_state="degraded" if scan_truncated else "fresh",
-            semantic_backend="python-tree-sitter-static",
             scan_truncated=scan_truncated,
             parsed_files=len(parsed_files),
             skipped_files=skipped_files,

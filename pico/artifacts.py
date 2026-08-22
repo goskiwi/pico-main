@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from .persistence import write_once_bytes
-from .workspace import now
 
 ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
 
@@ -15,7 +14,7 @@ class ArtifactStore:
         self.run_store = run_store
         self.redactor = redactor
 
-    def write_tool_output(self, run_id, call_id, tool_name, content):
+    def write_tool_output(self, run_id, call_id, content):
         safe_content = str(self.redactor(str(content)))
         digest = hashlib.sha256(safe_content.encode("utf-8")).hexdigest()
         artifact_id = f"tool_{call_id}_{digest[:10]}"
@@ -24,15 +23,10 @@ class ArtifactStore:
         content_path = root / f"{artifact_id}.txt"
         descriptor_path = root / f"{artifact_id}.json"
         descriptor = {
-            "schema_version": "artifact-v1",
+            "schema_version": "artifact-v2",
             "artifact_id": artifact_id,
-            "kind": "tool_output",
-            "tool_call_id": str(call_id),
-            "tool_name": str(tool_name),
             "sha256": digest,
             "size_bytes": len(safe_content.encode("utf-8")),
-            "created_at": now(),
-            "content_file": content_path.name,
         }
         self._write_once(content_path, safe_content)
         self._write_once(
@@ -41,34 +35,34 @@ class ArtifactStore:
         )
         return descriptor
 
-    def verify(self, run_id, artifact_id):
+    def _read_verified(self, run_id, artifact_id):
         root = self.run_store.artifact_dir(run_id).resolve()
         descriptor_path = (root / f"{artifact_id}.json").resolve()
         if descriptor_path.parent != root or not descriptor_path.exists():
             raise ValueError("artifact descriptor is missing")
         descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-        if descriptor.get("schema_version") != "artifact-v1":
+        if descriptor.get("schema_version") != "artifact-v2":
             raise ValueError("unsupported artifact schema")
         if descriptor.get("artifact_id") != str(artifact_id):
             raise ValueError("artifact id mismatch")
-        content_path = (root / str(descriptor.get("content_file", ""))).resolve()
+        content_path = (root / f"{artifact_id}.txt").resolve()
         if content_path.parent != root or not content_path.exists():
             raise ValueError("artifact content is missing")
-        content = content_path.read_text(encoding="utf-8")
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        data = content_path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
         if digest != descriptor.get("sha256"):
             raise ValueError("artifact digest mismatch")
-        if len(content.encode("utf-8")) != int(descriptor.get("size_bytes", -1)):
+        if len(data) != int(descriptor.get("size_bytes", -1)):
             raise ValueError("artifact size mismatch")
-        return descriptor
+        return descriptor, data
 
     def read_slice(self, run_id, artifact_id, offset, max_bytes):
-        descriptor = self.verify(run_id, artifact_id)
-        root = self.run_store.artifact_dir(run_id).resolve()
-        content_path = (root / descriptor["content_file"]).resolve()
-        data = content_path.read_bytes()
+        descriptor, data = self._read_verified(run_id, artifact_id)
         offset = int(offset)
-        max_bytes = min(int(max_bytes), ARTIFACT_PAGE_MAX_BYTES)
+        max_bytes = int(max_bytes)
+        if max_bytes < 1:
+            raise ValueError("artifact page size must be positive")
+        max_bytes = min(max_bytes, ARTIFACT_PAGE_MAX_BYTES)
         if offset < 0 or offset > len(data):
             raise ValueError(f"artifact offset {offset} is outside output ({len(data)} bytes)")
         while offset < len(data) and (data[offset] & 0xC0) == 0x80:

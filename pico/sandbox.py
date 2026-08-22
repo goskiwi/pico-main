@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 
 from .execution import ExecutionBudget, ExecutionContext
@@ -42,17 +41,6 @@ HOST_ENV_DENYLIST = {
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 
 
-class SandboxProfile(str, Enum):
-    """Runtime-owned execution profiles; neither permits persistent shell writes."""
-
-    INSPECT = "inspect"
-    VERIFY = "verify"
-
-    @property
-    def workspace_read_only(self):
-        return True
-
-
 def parse_command_invocation(command):
     """Split a trusted command once into direct argv and explicit environment."""
     parts = shlex.split(str(command or ""))
@@ -66,20 +54,15 @@ def parse_command_invocation(command):
 
 
 class SandboxError(RuntimeError):
-    """Base error with stable audit metadata."""
-
-    code = "sandbox_failed"
-    security_event_type = "sandbox_failure"
+    pass
 
 
 class SandboxUnavailableError(SandboxError):
-    code = "sandbox_unavailable"
-    security_event_type = "sandbox_unavailable"
+    pass
 
 
 class SandboxImageMissingError(SandboxError):
-    code = "sandbox_image_missing"
-    security_event_type = "sandbox_image_missing"
+    pass
 
 
 @dataclass(frozen=True)
@@ -93,10 +76,6 @@ class SandboxResult:
     cleanup_state: str = "not_required"
     stop_reason: str = ""
     output_limited: bool = False
-    output_truncated: bool = False
-    observed_output_bytes: int = 0
-    max_output_bytes: int = 0
-    retained_output_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -141,8 +120,6 @@ class _CaptureState:
 
 class DockerSandbox:
     """Run commands in an ephemeral, resource-limited Docker container."""
-
-    backend = "docker"
 
     def __init__(self, workspace_root, config=None, docker_binary=None):
         self.workspace_root = Path(workspace_root).resolve()
@@ -194,15 +171,13 @@ class DockerSandbox:
         timeout,
         env=None,
         execution_context=None,
-        profile=SandboxProfile.INSPECT,
     ):
         self.ensure_ready()
-        profile = SandboxProfile(profile)
         argv = tuple(str(item) for item in argv)
         if not argv or any(not item for item in argv):
             raise ValueError("sandbox argv must contain a non-empty executable")
         context = execution_context or ExecutionContext.standalone(
-            owner="docker_sandbox", max_seconds=timeout
+            max_seconds=timeout
         )
         effective_timeout = context.bounded_timeout(timeout)
         cwd = Path(cwd).resolve()
@@ -218,14 +193,11 @@ class DockerSandbox:
             container_cwd=container_cwd,
             argv=argv,
             env=env or {},
-            profile=profile,
         )
         command_deadline = time.monotonic() + effective_timeout
         budget = ExecutionBudget(
             deadline=min(command_deadline, context.deadline),
             max_output_bytes=self.config.max_output_bytes,
-            max_processes=self.config.pids_limit,
-            memory_limit=self.config.memory,
         )
         try:
             process = subprocess.Popen(
@@ -235,7 +207,6 @@ class DockerSandbox:
             )
         except OSError as exc:
             raise SandboxUnavailableError(f"Could not start Docker sandbox: {exc}") from exc
-        context.transition("running")
         return self._capture_process(
             process,
             container_name=container_name,
@@ -252,16 +223,6 @@ class DockerSandbox:
         if not normalized:
             normalized = uuid.uuid4().hex
         return "pico-" + normalized[-24:]
-
-    def cleanup_execution(self, execution_id):
-        """Remove a deterministic orphan container before recovery continues."""
-        container_name = self.container_name_for_execution(execution_id)
-        cleanup_state, killed = self._stop_container(container_name)
-        return {
-            "container_name": container_name,
-            "cleanup_state": cleanup_state,
-            "killed": bool(killed),
-        }
 
     def _capture_process(self, process, *, container_name, context, budget):
         # Pipe readers must never be able to outrun the Runtime and accumulate
@@ -281,13 +242,12 @@ class DockerSandbox:
             self._interrupt_capture(
                 process,
                 container_name=container_name,
-                context=context,
                 state=state,
             )
             raise
         finally:
             self._finish_readers(state)
-        return self._capture_result(process, context, budget, state)
+        return self._capture_result(process, budget, state)
 
     def _start_capture(self, process):
         state = _CaptureState()
@@ -333,9 +293,7 @@ class DockerSandbox:
                 self._stop_capture_process(
                     process,
                     container_name=container_name,
-                    context=context,
                     state=state,
-                    reason=state.stop_reason,
                 )
 
     @staticmethod
@@ -375,15 +333,11 @@ class DockerSandbox:
         process,
         *,
         container_name,
-        context,
         state,
-        reason,
     ):
         if state.cleanup_state != "not_required":
             return
-        context.transition(
-            "stop_requested", cleanup_state="pending", stop_reason=reason
-        )
+        state.cleanup_state = "pending"
         state.cleanup_state, state.killed = self._stop_container(container_name)
         try:
             process.wait(timeout=5)
@@ -392,25 +346,12 @@ class DockerSandbox:
             process.wait()
             state.killed = True
 
-    def _interrupt_capture(self, process, *, container_name, context, state):
-        interrupted_reason = context.token.reason or "host_interrupted"
+    def _interrupt_capture(self, process, *, container_name, state):
         state.stop_readers.set()
         self._stop_capture_process(
             process,
             container_name=container_name,
-            context=context,
             state=state,
-            reason=interrupted_reason,
-        )
-        terminal_state = (
-            "killed"
-            if state.killed or not context.token.requested
-            else "cancelled"
-        )
-        context.transition(
-            terminal_state,
-            cleanup_state=state.cleanup_state,
-            stop_reason=interrupted_reason,
         )
 
     @staticmethod
@@ -420,17 +361,12 @@ class DockerSandbox:
             thread.join(timeout=1)
 
     @staticmethod
-    def _capture_result(process, context, budget, state):
+    def _capture_result(process, budget, state):
         stdout = state.retained["stdout"].decode("utf-8", errors="replace")
         stderr = state.retained["stderr"].decode("utf-8", errors="replace")
         if state.stop_reason:
             terminal_state = "killed" if state.killed or state.output_limited else (
                 "cancelled" if state.cancelled else "timed_out"
-            )
-            context.transition(
-                terminal_state,
-                cleanup_state=state.cleanup_state,
-                stop_reason=state.stop_reason,
             )
             message = (
                 f"sandbox command {terminal_state}: {state.stop_reason}; "
@@ -448,12 +384,6 @@ class DockerSandbox:
             cleanup_state=state.cleanup_state,
             stop_reason=state.stop_reason,
             output_limited=state.output_limited,
-            output_truncated=state.observed > budget.max_output_bytes,
-            observed_output_bytes=state.observed,
-            max_output_bytes=budget.max_output_bytes,
-            retained_output_bytes=sum(
-                len(value) for value in state.retained.values()
-            ),
         )
 
     def _stop_container(self, container_name):
@@ -483,7 +413,7 @@ class DockerSandbox:
                 return "failed", True
         return "completed", killed
 
-    def _docker_args(self, *, container_name, container_cwd, argv, env, profile):
+    def _docker_args(self, *, container_name, container_cwd, argv, env):
         args = [
             self.docker_binary,
             "run",
@@ -512,7 +442,7 @@ class DockerSandbox:
             "--mount",
             (
                 f"type=bind,source={self.workspace_root},target={CONTAINER_WORKSPACE}"
-                + (",readonly" if profile.workspace_read_only else "")
+                ",readonly"
             ),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=128m",

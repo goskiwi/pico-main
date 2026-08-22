@@ -1,7 +1,5 @@
 {
-  "artifact_type": "project-memory-v2",
-  "evaluation_snapshot_id": "sha256:147bad77e7446f2b71e29c38da9dbd454d79e104c5907adf7667b42ee67508e1",
-  "runtime_snapshot_id": "sha256:8e94bf9990feb9ac4a765aa1266f396bdcd601d878fa703cc72e44075264aae2",
+  "artifact_type": "project-memory",
   "summary": {
     "catalog_generated": true,
     "markdown_source_of_truth": true,

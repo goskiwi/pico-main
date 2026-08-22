@@ -5,12 +5,6 @@ import re
 from pathlib import Path
 
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-REPO_MAP_MAX_FILES = 2000
-REPO_MAP_MAX_FILE_BYTES = 512_000
-REPO_MAP_SCAN_MAX_ENTRIES = 20_000
-REPO_MAP_SCAN_TIMEOUT_SECONDS = 2.0
-REPO_MAP_PAGE_RANK_ITERATIONS = 32
-REPO_MAP_DAMPING = 0.85
 
 
 def _strip_quotes(value):
@@ -27,7 +21,7 @@ def _parse_env_line(line):
     if line.startswith("export "):
         line = line[len("export "):].strip()
     if "=" not in line:
-        raise ValueError(f"invalid .env line: {line}")
+        raise ValueError("invalid .env syntax")
     name, value = line.split("=", 1)
     name = name.strip()
     if not ENV_KEY_PATTERN.match(name):
@@ -35,20 +29,33 @@ def _parse_env_line(line):
     return name, _strip_quotes(value)
 
 
-def find_project_env(start):
+def find_project_env(start, *, boundary=None):
     current = Path(start).resolve()
     if current.is_file():
         current = current.parent
+    boundary = Path(boundary).resolve() if boundary is not None else None
+    if boundary is not None:
+        try:
+            current.relative_to(boundary)
+        except ValueError as exc:
+            raise ValueError("project env search starts outside its boundary") from exc
+    search_paths = []
     for path in (current, *current.parents):
+        search_paths.append(path)
+        if boundary is not None and path == boundary:
+            break
+    for path in search_paths:
         for name in (".env.local", ".env"):
             env_path = path / name
+            if env_path.is_symlink():
+                raise ValueError(f"{name} must not be a symlink")
             if env_path.is_file():
                 return env_path
     return None
 
 
-def load_project_env(start, override=True):
-    selected = find_project_env(start)
+def load_project_env(start, *, boundary=None, override=False):
+    selected = find_project_env(start, boundary=boundary)
     if selected is None:
         return {}
     env_paths = [selected]
@@ -58,14 +65,25 @@ def load_project_env(start, override=True):
         env_paths = [sibling, local]
     loaded = {}
     for env_path in env_paths:
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            parsed = _parse_env_line(line)
+        if env_path.is_symlink():
+            raise ValueError(f"{env_path.name} must not be a symlink")
+        for number, line in enumerate(
+            env_path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            try:
+                parsed = _parse_env_line(line)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{exc} at {env_path.name}:{number}"
+                ) from exc
             if parsed is None:
                 continue
             name, value = parsed
             loaded[name] = value
-            if override or name not in os.environ:
-                os.environ[name] = value
+    for name, value in loaded.items():
+        if override or name not in os.environ:
+            os.environ[name] = value
     return loaded
 
 

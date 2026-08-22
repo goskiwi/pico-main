@@ -24,10 +24,10 @@ class ToolManager:
 
     def _build_registry(self):
         tools = toolkit.build_tool_registry(self.context())
-        if self.runtime.services.subagents is not None:
+        if self.runtime.dependencies.subagents is not None:
             from .subagents.tools import build_tool_registry
 
-            tools.update(build_tool_registry(self.runtime.services.subagents))
+            tools.update(build_tool_registry(self.runtime.dependencies.subagents))
         return tools
 
     def _apply_allowlist(self, tools):
@@ -51,7 +51,7 @@ class ToolManager:
             validated = tool["args_schema"].model_validate(args or {}).model_dump()
         allowed_paths = runtime.config.allowed_write_paths
         if name in {"write_file", "patch_file"} and allowed_paths is not None:
-            target = runtime.workspace.resolve_path(validated["path"])
+            target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
             if relative not in set(allowed_paths):
                 raise ValueError(f"write path outside allowed scope: {relative}")
@@ -60,28 +60,15 @@ class ToolManager:
     def context(self):
         runtime = self.runtime
 
-        def pending_call_event_ids():
-            run_log = runtime.run.run_log
-            if run_log is None:
-                return ()
-            call_id = run_log.pending_call_id()
-            return tuple(
-                entry.event_id
-                for entry in run_log.events
-                if entry.kind == "assistant_tool_call" and entry.call_id == call_id
-            )
-
         return ToolContext(
             workspace_root=runtime.workspace.root,
-            path_resolver=runtime.workspace.resolve_path,
+            path_resolver=runtime.workspace.resolve_tool_path,
             shell_env_provider=runtime.shell_env,
-            project_memory=runtime.services.project_memory,
-            artifact_store=runtime.services.artifacts,
-            session_id=runtime.session.data["id"],
+            project_memory=runtime.dependencies.project_memory,
+            artifact_store=runtime.dependencies.artifacts,
             run_id_provider=lambda: str(
                 getattr(runtime.run.task_state, "run_id", "") or "manual"
             ),
-            source_event_ids_provider=pending_call_event_ids,
             tool_call_id_provider=lambda: (
                 runtime.run.run_log.pending_call_id()
                 if runtime.run.run_log is not None
@@ -95,10 +82,10 @@ class ToolManager:
             token_counter_provider=lambda text: runtime.prompt.context.tokenizer.count(
                 text
             ),
-            mutation_service=runtime.services.mutations,
-            sandbox=runtime.services.sandbox,
+            mutation_service=runtime.dependencies.mutations,
+            sandbox=runtime.dependencies.sandbox,
             execution_context_provider=lambda: (
-                runtime.run.execution_context.child(owner="run_shell")
+                runtime.run.execution_context.child()
                 if runtime.run.execution_context is not None
                 else None
             ),

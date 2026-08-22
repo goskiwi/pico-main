@@ -63,4 +63,4 @@ def test_source_snapshot_digest_ignores_runtime_artifacts(tmp_path):
 
 def test_manifest_json_is_strictly_parseable():
     payload = json.loads(Path("validation/official_public_tests.json").read_text())
-    assert payload["schema_version"] == "official-public-tests-v1"
+    assert payload["schema_version"] == "official-public-tests-v2"

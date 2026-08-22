@@ -10,7 +10,7 @@ from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
 from .features.memory import WorkingState
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState, apply_task_event
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v6"
+RUN_LOG_SCHEMA_VERSION = "run-log-v8"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -30,7 +30,6 @@ RUN_EVENT_KINDS = frozenset(
         "turn_metrics",
         "completion_blocked",
         "tool_started",
-        "verification_started",
         "verification_result",
         "provider_session_reset",
         "run_stopped",
@@ -65,7 +64,6 @@ def _validate_tool_started_payload(kind, payload):
         {
             "tool_call_id",
             "tool_name",
-            "tool_call_hash",
             "risky",
             "effect_scope",
             "potential_effects",
@@ -209,6 +207,20 @@ def _clip(text, limit=320):
     return value if len(value) <= limit else value[: limit - 2].rstrip() + " …"
 
 
+def _summary_args(args, limit=360):
+    """Keep operation identity without copying large mutation bodies."""
+    bounded = {}
+    for key, value in sorted(dict(args or {}).items()):
+        if key in {"content", "old_text", "new_text"}:
+            bounded[key] = f"<{len(str(value))} chars>"
+        else:
+            bounded[key] = value
+    return _clip(
+        json.dumps(bounded, ensure_ascii=False, sort_keys=True),
+        limit,
+    )
+
+
 @dataclass(frozen=True)
 class RunEvent:
     event_id: str
@@ -328,17 +340,6 @@ class RunEvent:
         return str(artifact.get("artifact_id", ""))
 
     @property
-    def content_tier(self):
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        return "artifact_reference" if outcome.get("output_truncated") else "inline"
-
-    @property
-    def original_size_bytes(self):
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        artifact = dict(outcome.get("artifact", {}) or {})
-        return int(artifact.get("size_bytes", len(self.content.encode("utf-8"))))
-
-    @property
     def covered_event_ids(self):
         return tuple(str(item) for item in self.payload.get("covered_event_ids", []))
 
@@ -364,12 +365,11 @@ class RunReplayState:
     run_duration_ms: int = 0
     model_request_count: int = 0
     executed_tool_count: int = 0
-    last_executed_tool: str = ""
     kind_counts: dict[str, int] = field(default_factory=dict)
     tool_counts: dict[str, int] = field(default_factory=dict)
     outcome_counts: dict[str, int] = field(default_factory=dict)
     verification_counts: dict[str, int] = field(default_factory=dict)
-    operations: dict[str, dict] = field(default_factory=dict)
+    pending_operations: set[str] = field(default_factory=set)
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
     def apply(self, entry):
@@ -379,15 +379,15 @@ class RunReplayState:
         self.session_id = entry.session_id or self.session_id
         self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
         self.last_cursor = RunCursor(entry.sequence, entry.event_id)
-        if kind == "tool_started":
-            call_id = str(payload.get("tool_call_id", ""))
+        if kind == "assistant_tool_call":
+            call_id = entry.call_id
             if call_id:
-                self.operations[call_id] = {"state": "started", **payload}
+                self.pending_operations.add(call_id)
         elif kind == "tool_result":
             outcome = dict(payload.get("outcome", {}) or {})
             call_id = str(payload.get("tool_call_id", "") or outcome.get("tool_call_id", ""))
             if call_id:
-                self.operations[call_id] = {"state": "finished", **payload}
+                self.pending_operations.discard(call_id)
             tool_name = str(outcome.get("tool_name", payload.get("tool_name", "")))
             status = str(outcome.get("status", "unknown"))
             if tool_name and outcome.get("execution_state") != "not_started":
@@ -404,10 +404,6 @@ class RunReplayState:
     def terminal(self):
         return self.status in {"completed", "stopped"}
 
-    @property
-    def user_request(self):
-        return self.working_state.goal
-
     def task_state(self):
         return TaskState.from_dict(
             {
@@ -417,7 +413,6 @@ class RunReplayState:
                 "status": self.status,
                 "executed_tool_count": self.executed_tool_count,
                 "model_request_count": self.model_request_count,
-                "last_executed_tool": self.last_executed_tool,
                 "stop_reason": self.stop_reason,
                 "final_answer": self.final_answer,
             }
@@ -432,11 +427,7 @@ class RunReplayState:
             "tool_counts": dict(sorted(self.tool_counts.items())),
             "outcome_counts": dict(sorted(self.outcome_counts.items())),
             "verification_counts": dict(sorted(self.verification_counts.items())),
-            "pending_operations": sorted(
-                call_id
-                for call_id, item in self.operations.items()
-                if item.get("state") != "finished"
-            ),
+            "pending_operations": sorted(self.pending_operations),
             "run_cursor": self.last_cursor.to_dict(),
         }
 
@@ -505,7 +496,6 @@ class RunLog:
         self,
         call,
         *,
-        tool_call_hash,
         risky,
         effect_scope,
         potential_effects,
@@ -515,7 +505,6 @@ class RunLog:
             {
                 "tool_call_id": call.call_id,
                 "tool_name": call.name,
-                "tool_call_hash": str(tool_call_hash),
                 "risky": bool(risky),
                 "effect_scope": str(effect_scope),
                 "potential_effects": list(potential_effects),
@@ -601,7 +590,7 @@ class RunLog:
                 execution_state="not_started",
                 side_effect_state="none",
                 content=detail,
-                failure=FailureInfo("operation_not_started", "recovery", detail, True),
+                failure=FailureInfo("operation_not_started", detail, True),
             )
         else:
             potential = list(started.payload.get("potential_effects", []))
@@ -629,7 +618,7 @@ class RunLog:
                 side_effect_state="partial" if changed else ("unknown" if unknown else "none"),
                 content=detail,
                 failure=FailureInfo(
-                    "operation_interrupted", "recovery", detail, not uncertain
+                    "operation_interrupted", detail, not uncertain
                 ),
                 affected_paths=tuple(changed),
                 effect_scope=effect_scope if changed or unknown else "none",
@@ -735,19 +724,38 @@ class RunLog:
 
     def _summary_text(self, events):
         lines = ["Earlier run summary:"]
-        for entry in events:
+        index = 0
+        while index < len(events):
+            entry = events[index]
             if entry.kind == "model_instruction":
                 lines.append(f"- Instruction: {_clip(entry.content)}")
-            elif entry.kind == "tool_result" and not (
+                index += 1
+                continue
+            if entry.kind == "compaction":
+                lines.extend(
+                    line
+                    for line in entry.content.splitlines()
+                    if line.startswith("- ")
+                )
+                index += 1
+                continue
+            if entry.kind != "assistant_tool_call":
+                index += 1
+                continue
+            if index + 1 >= len(events):
+                raise RuntimeError("Run Log compaction received an incomplete tool batch")
+            result = events[index + 1]
+            if result.kind != "tool_result" or result.call_id != entry.call_id:
+                raise RuntimeError("Run Log compaction received a mismatched tool batch")
+            if not (
                 entry.name == "update_working_state"
-                and entry.outcome_status == "success"
+                and result.outcome_status == "success"
             ):
                 lines.append(
-                    f"- {entry.name} [{entry.outcome_status}]: "
-                    f"{_clip(entry.content)}"
+                    f"- Tool transaction: {entry.name} {_summary_args(entry.args)} "
+                    f"-> {result.outcome_status}; result: {_clip(result.content, 240)}"
                 )
-            elif entry.kind == "compaction":
-                lines.append(f"- {_clip(entry.content, 1200)}")
+            index += 2
         return "\n".join(lines)
 
     @staticmethod

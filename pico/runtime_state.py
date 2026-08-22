@@ -10,12 +10,9 @@ from .task_state import TaskState
 
 @dataclass(slots=True)
 class ActiveRunState:
-    """Run-scoped state kept separate from long-lived runtime services."""
+    """Run-scoped state kept separate from long-lived runtime dependencies."""
 
     task_state: TaskState | None = None
     execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
     evidence: RunEvidence = field(default_factory=RunEvidence)
-
-    def begin_request(self) -> None:
-        self.evidence = RunEvidence()

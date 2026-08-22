@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -55,9 +56,10 @@ class SubtaskSpec(StrictModel):
         return self
 
 
-class SubtaskRecord(StrictModel):
+@dataclass
+class SubtaskRecord:
     spec: SubtaskSpec
-    status: Literal["pending", "running", "finished", "failed", "blocked"] = (
+    status: Literal["pending", "running", "completed", "failed", "blocked"] = (
         "pending"
     )
     child_run_id: str = ""

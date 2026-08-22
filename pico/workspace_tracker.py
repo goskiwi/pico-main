@@ -10,12 +10,14 @@ from pathlib import Path
 from .mutations import file_revision
 from .workspace import IGNORED_PATH_NAMES, WorkspaceContext
 
+TOOL_INTERNAL_PATH_NAMES = frozenset({".git", ".pico"})
+
 
 class WorkspaceTracker:
     def __init__(self, workspace: WorkspaceContext):
         self.context = workspace
-        self.root = Path(workspace.repo_root)
-        self.invocation_cwd = Path(workspace.cwd)
+        self.root = Path(workspace.repo_root).resolve()
+        self.invocation_cwd = Path(workspace.cwd).resolve()
         self._snapshot_cache: dict[str, str] | None = None
         self._content_fingerprint_cache: str | None = None
         self._revision = 0
@@ -48,7 +50,7 @@ class WorkspaceTracker:
             self.invocation_cwd,
             repo_root_override=self.root,
         )
-        changed = refreshed.fingerprint() != self.context.fingerprint()
+        changed = refreshed.state() != self.context.state()
         if changed:
             self.mark_changed()
         if force or changed:
@@ -63,6 +65,8 @@ class WorkspaceTracker:
             except ValueError:
                 continue
             if any(part in IGNORED_PATH_NAMES for part in relative_parts):
+                continue
+            if path.is_symlink():
                 continue
             if not path.is_file():
                 continue
@@ -97,4 +101,11 @@ class WorkspaceTracker:
         resolved = path.resolve()
         if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
             raise ValueError(f"path escapes workspace: {raw_path}")
+        return resolved
+
+    def resolve_tool_path(self, raw_path):
+        resolved = self.resolve_path(raw_path)
+        relative = resolved.relative_to(self.root)
+        if any(part in TOOL_INTERNAL_PATH_NAMES for part in relative.parts):
+            raise ValueError(f"tool path targets internal workspace state: {raw_path}")
         return resolved

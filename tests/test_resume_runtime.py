@@ -10,7 +10,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.run_log import RunLog
-from pico.runtime_recovery import RESUME_READY
+from pico.runtime_recovery import RESUME_NONE, RESUME_READY
 from pico.task_state import TaskState
 
 
@@ -25,12 +25,11 @@ def build_interrupted_run(tmp_path, *, config=None):
     )
     state = TaskState.create("task_interrupted", "Inspect", run_id="run_interrupted")
     agent.run.task_state = state
-    agent.services.run_store.start_run(state)
     run_log = RunLog(
         state.run_id,
         state.task_id,
         agent.session.data["id"],
-        agent.services.run_store,
+        agent.dependencies.run_store,
     )
     run_log.append_user("Inspect")
     agent.run.run_log = run_log
@@ -44,7 +43,7 @@ def resume_agent(agent, store, outputs, *, config=None):
         WorkspaceContext.build(agent.workspace.root),
         store,
         session=store.load(agent.session.data["id"]),
-        run_store=agent.services.run_store,
+        run_store=agent.dependencies.run_store,
         config=config or PicoConfig(approval_policy="auto", verification_command=""),
     )
 
@@ -56,7 +55,7 @@ def test_active_run_log_restores_same_run(tmp_path):
     agent.tools.run(call)
     agent.session.set_active_run("")
 
-    run_store = agent.services.run_store
+    run_store = agent.dependencies.run_store
     original_read_events = run_store.read_events
     read_count = 0
 
@@ -72,10 +71,16 @@ def test_active_run_log_restores_same_run(tmp_path):
     assert resumed.recovery.state["status"] == RESUME_READY
     assert resumed.ask("Continue") == "Recovered."
     assert resumed.run.task_state.run_id == state.run_id
-    assert resumed.run.task_state.user_request == "Inspect"
+    assert resumed.run.task_state.working_state.goal == "Inspect"
     assert "Inspect" in resumed.run.task_state.working_state.render_panel()
     assert "Continue" not in resumed.run.task_state.working_state.render_panel()
     assert read_count == 2
+    assert resumed.recovery.state == {
+        "status": RESUME_NONE,
+        "active_run_id": "",
+        "projection": None,
+        "events": (),
+    }
 
 
 def test_structured_working_state_is_restored_from_tool_events(tmp_path):
@@ -96,7 +101,7 @@ def test_structured_working_state_is_restored_from_tool_events(tmp_path):
 
     assert resumed.ask("Continue") == "Recovered."
     working = resumed.run.task_state.working_state
-    assert working.goal == state.user_request
+    assert working.goal == state.working_state.goal
     assert working.constraints == ("Do not change the database schema",)
     assert working.decisions == ("The failure is in token refresh",)
     assert working.next_steps == ("Add a concurrent refresh test",)
@@ -116,7 +121,7 @@ def test_new_run_writes_user_event_before_session_pointer(tmp_path, monkeypatch)
     def fail_active_pointer(run_id):
         nonlocal captured_run_id
         captured_run_id = str(run_id)
-        events = agent.services.run_store.read_events(captured_run_id)
+        events = agent.dependencies.run_store.read_events(captured_run_id)
         assert [event.kind for event in events] == ["user_message"]
         raise OSError("session pointer failed")
 
@@ -210,7 +215,6 @@ def test_started_tool_with_unchanged_exact_path_recovers_as_error(tmp_path):
     run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,
-        tool_call_hash="hash_unchanged",
         risky=True,
         effect_scope="workspace",
         potential_effects=[{"path": "x.txt", "before_state": "absent"}],
@@ -233,7 +237,6 @@ def test_started_tool_with_changed_exact_path_recovers_as_partial(tmp_path):
     run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,
-        tool_call_hash="hash_changed",
         risky=True,
         effect_scope="workspace",
         potential_effects=[{"path": "x.txt", "before_state": "absent"}],
@@ -243,9 +246,9 @@ def test_started_tool_with_changed_exact_path_recovers_as_partial(tmp_path):
     resumed = resume_agent(agent, store, [])
     resumed.recovery.evaluate()
     state_run_id = "run_interrupted"
-    restored = RunLog.restore(state_run_id, resumed.services.run_store)
+    restored = RunLog.restore(state_run_id, resumed.dependencies.run_store)
     resumed.run.task_state = TaskState.from_dict(
-        resumed.services.run_store.replay(state_run_id).task_state()
+        resumed.dependencies.run_store.replay(state_run_id).task_state()
     )
     resumed.run.run_log = restored
     restored.reconcile_interrupted(resumed)

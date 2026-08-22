@@ -5,7 +5,7 @@
 Pico 不是聊天 UI，而是 Coding Model 外围的本地 Runtime。模型每轮只能提出一个
 `ModelAction`；Runtime 负责 Context、工具准入、副作用、持久化、崩溃恢复、验证和
 最终完成权。每个 Run 的过程事实只写入一条 append-only RunLog，WorkingState、
-TaskState、Evidence 和 Report 都能由它重建。
+TaskState、Evidence 和运行统计都能由它重建。
 
 ```text
 User request
@@ -145,7 +145,7 @@ Worktree 中执行并返回 Patch receipt。PatchIntegrator 在独立 Integratio
 
 ### 为什么不用 Checkpoint 快照？
 
-快照会与 Tool 结果、Evidence 和 Report 形成多份可变状态。Pico 保存原始事件并按需投影；
+快照会与 Tool 结果、Evidence 和运行统计形成多份可变状态。Pico 保存原始事件并按需投影；
 Compaction 只改变模型 Context，不删除审计事实。
 
 ### 为什么模型没有最终完成权？

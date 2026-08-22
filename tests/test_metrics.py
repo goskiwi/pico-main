@@ -11,7 +11,6 @@ from evals.metrics import (
 def test_context_governance_evaluation_uses_real_runtime(tmp_path):
     artifact = run_context_governance_evaluation(
         tmp_path / "context.json",
-        repetitions=1,
     )
     assert artifact["summary"]["within_budget_rate"] == 1.0
     assert artifact["summary"]["current_request_preserved_rate"] == 1.0
@@ -20,7 +19,7 @@ def test_context_governance_evaluation_uses_real_runtime(tmp_path):
     assert artifact["summary"]["tool_transaction_integrity_rate"] == 1.0
     assert artifact["summary"]["original_event_preservation_rate"] == 1.0
     assert artifact["summary"]["working_state_preservation_rate"] == 1.0
-    assert artifact["runtime_snapshot_id"].startswith("sha256:")
+    assert len(artifact["rows"]) == 3
 
 
 def test_project_memory_and_repo_map_evaluations(tmp_path):
@@ -30,7 +29,6 @@ def test_project_memory_and_repo_map_evaluations(tmp_path):
     assert repo["summary"] == {
         "query_hit": True,
         "within_budget": True,
-        "index_revision_bound": True,
     }
 
 
@@ -45,7 +43,7 @@ def test_runtime_report_uses_replayable_artifacts(tmp_path):
         "verifier_pass_rate": 1.0,
         "within_budget_rate": 1.0,
     }}))
-    run_context_governance_evaluation(context, repetitions=1)
+    run_context_governance_evaluation(context)
     run_project_memory_evaluation(project)
     run_repo_map_evaluation(repo)
     report_path = tmp_path / "report.md"

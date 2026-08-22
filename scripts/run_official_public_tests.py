@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from evals.provenance import runtime_snapshot_id
-from pico.sandbox import DockerSandbox, DockerSandboxConfig, SandboxProfile
-from pico.verification import parse_verification_output
+from evals.pytest_output import parse_pytest_output
+from pico.sandbox import DockerSandbox, DockerSandboxConfig
+from scripts.materialize_real_oss import load_manifest as load_real_oss_manifest
 from scripts.run_real_oss_validation import (
     changed_paths,
     docker_image_id,
@@ -35,17 +35,10 @@ DEFAULT_MANIFEST = ROOT / "validation" / "official_public_tests.json"
 DEFAULT_ARTIFACT = ROOT / "artifacts" / "official-public-tests-v1.json"
 DEFAULT_REPORT = ROOT / "artifacts" / "official-public-tests-v1.md"
 ALLOWED_TEST_PREFIXES = ("test/", "tests/")
-FULL_SHA = re.compile(r"^[a-f0-9]{40}$")
 PATCH_HEADER = re.compile(r"^diff --git a/(.+) b/(.+)$", re.MULTILINE)
 
 REQUIRED_TASK_FIELDS = {
     "id",
-    "source_repository",
-    "source_commit",
-    "official_fix_commit",
-    "fixture_repo",
-    "agent_workspace",
-    "reference_patch",
     "official_test_patch",
     "official_test_nodes",
     "pre_fix_expected",
@@ -54,7 +47,7 @@ REQUIRED_TASK_FIELDS = {
 
 def load_manifest(path=DEFAULT_MANIFEST):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "official-public-tests-v1":
+    if payload.get("schema_version") != "official-public-tests-v2":
         raise ValueError("unsupported official public-test manifest schema")
     if set(payload) != {
         "schema_version", "real_oss_manifest", "real_oss_suite_artifact", "tasks"
@@ -63,22 +56,34 @@ def load_manifest(path=DEFAULT_MANIFEST):
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("official public-test manifest requires tasks")
+    real_manifest = load_real_oss_manifest(ROOT / payload["real_oss_manifest"])
+    real_by_id = {task["id"]: task for task in real_manifest["tasks"]}
     ids = set()
+    merged_tasks = []
     for task in tasks:
-        if not isinstance(task, dict) or REQUIRED_TASK_FIELDS - set(task):
-            raise ValueError("official public-test task is missing required fields")
+        if not isinstance(task, dict) or set(task) != REQUIRED_TASK_FIELDS:
+            raise ValueError("official public-test task has invalid fields")
         if task["id"] in ids:
             raise ValueError("official public-test task ids must be unique")
         ids.add(task["id"])
-        if not FULL_SHA.fullmatch(task["source_commit"]):
-            raise ValueError(f"invalid source commit for {task['id']}")
-        if not FULL_SHA.fullmatch(task["official_fix_commit"]):
-            raise ValueError(f"invalid official fix commit for {task['id']}")
+        real_task = real_by_id.get(task["id"])
+        if real_task is None:
+            raise ValueError(f"unknown Real OSS task: {task['id']}")
         if not task["official_test_nodes"]:
             raise ValueError(f"official test nodes are required for {task['id']}")
         if task["pre_fix_expected"] not in {"fail", "pass"}:
             raise ValueError(f"invalid pre-fix expectation for {task['id']}")
-    return payload
+        merged_tasks.append(
+            {
+                **real_task,
+                **task,
+                "official_fix_commit": real_task["reference_fix_commit"],
+                "agent_workspace": (
+                    f"artifacts/real-oss-workspaces/{task['id']}/current"
+                ),
+            }
+        )
+    return {**payload, "tasks": merged_tasks}
 
 
 def test_patch_paths(path):
@@ -129,10 +134,9 @@ def run_pytest(workspace, nodes, image):
         command,
         cwd=workspace,
         timeout=120,
-        profile=SandboxProfile.VERIFY,
     )
     output = "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
-    details = parse_verification_output("python -m pytest -q", output, result.returncode)
+    details = parse_pytest_output(output)
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
         "exit_code": result.returncode,
@@ -160,9 +164,9 @@ def suite_results_by_id(path):
     rows = {item["task"]["id"]: item for item in artifact.get("tasks", [])}
     if not rows or not all(item["result"]["passed"] for item in rows.values()):
         raise ValueError("official tests require a fully passing Real OSS suite")
-    snapshots = {item.get("runtime_snapshot_id") for item in rows.values()}
-    if snapshots != {runtime_snapshot_id()}:
-        raise ValueError("Real OSS suite runtime snapshot is stale")
+    current_commit = git_metadata()["commit_sha"]
+    if artifact.get("runtime", {}).get("commit_sha") != current_commit:
+        raise ValueError("Real OSS suite Runtime commit is stale")
     return artifact, rows
 
 
@@ -270,18 +274,11 @@ def main(argv=None):
     runtime = git_metadata()
     require_clean_runtime(runtime)
     manifest = load_manifest(args.manifest)
-    real_manifest = json.loads((ROOT / manifest["real_oss_manifest"]).read_text(encoding="utf-8"))
-    real_by_id = {task["id"]: task for task in real_manifest["tasks"]}
     suite_path = ROOT / manifest["real_oss_suite_artifact"]
     suite, suite_rows = suite_results_by_id(suite_path)
 
     tasks = []
     for task in manifest["tasks"]:
-        real_task = real_by_id.get(task["id"])
-        if not real_task or real_task["source_commit"] != task["source_commit"]:
-            raise ValueError(f"official test task does not match Real OSS manifest: {task['id']}")
-        if not task["official_fix_commit"].startswith(real_task["reference_fix_commit"]):
-            raise ValueError(f"official fix commit mismatch: {task['id']}")
         row = run_task(task, suite_rows[task["id"]], args.image)
         tasks.append(row)
         print(
@@ -297,7 +294,6 @@ def main(argv=None):
         "artifact_type": "official-public-tests",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime": runtime,
-        "runtime_snapshot_id": runtime_snapshot_id(),
         "manifest_sha256": file_digest(args.manifest),
         "real_oss_suite_artifact_sha256": file_digest(suite_path),
         "real_oss_suite_runtime": suite["runtime"],

@@ -1,6 +1,6 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process facts. WorkingState, TaskState, RunEvidence, Context, and Report are projections; Workspace, Project Memory, and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process facts. WorkingState, TaskState, RunEvidence, Context, and run statistics are projections; Workspace, Project Memory, and Artifact stores remain authoritative for their current content.
 
 ```text
 User request
@@ -21,7 +21,7 @@ User request
 
 | State | Durable owner | Projection/cache |
 |---|---|---|
-| Current Run facts | `runs/<run_id>/events.jsonl` | WorkingState, TaskState, Evidence, Context, Report |
+| Current Run facts | `runs/<run_id>/events.jsonl` | WorkingState, TaskState, Evidence, Context, run statistics |
 | Active Run pointer | Session `active_run_id` | RuntimeRecovery state |
 | Current task working state | `user_message` plus successful `update_working_state` Tool transactions | Goal, constraints, decisions, and next steps prompt section |
 | Project memory catalog | Generated `MEMORY.md` | Bounded resident section |
@@ -29,7 +29,7 @@ User request
 | Large redacted output | Artifact files | Run Log artifact reference |
 | Child receipts | Child Run Logs and Patch files | In-process Subagent DAG state |
 
-`task_state.json`, `context.jsonl`, `report.json` and Checkpoint snapshots do not exist.
+`task_state.json`, `context.jsonl` and Checkpoint snapshots do not exist.
 
 ## Run events
 
@@ -44,7 +44,7 @@ tool_started
 tool_result
 model_instruction
 provider_session_reset
-verification_started / verification_result
+verification_result
 compaction
 completion_blocked
 assistant_final / run_stopped
@@ -88,4 +88,4 @@ Session stores only `active_run_id`. On startup Pico opens that Run Log, repairs
 
 ## Completion
 
-Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. Reports are generated on demand from the Run Log and cannot diverge from persisted Run facts.
+Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. `pico run show` derives its summary directly from the Run Log.

@@ -78,7 +78,6 @@ class ModelAction:
     kind: str
     tool_call: ToolCall | None = None
     content: str = ""
-    error: str = ""
 
     def __post_init__(self):
         if self.kind not in ACTION_KINDS:
@@ -100,39 +99,36 @@ class ModelAction:
         return cls("final", content=content)
 
     @classmethod
-    def invalid(cls, content: str, *, error: str = "invalid_model_action"):
-        return cls("invalid", content=str(content), error=str(error))
+    def invalid(cls, content: str):
+        return cls("invalid", content=str(content))
 
 
 @dataclass(frozen=True)
 class FailureInfo:
     code: str
-    category: str
     detail: str = ""
     retryable: bool = False
 
     def __post_init__(self):
-        if not self.code or not self.category:
-            raise ValueError("failure information requires code and category")
+        if not self.code:
+            raise ValueError("failure information requires a code")
 
     def to_dict(self):
         return {
             "code": self.code,
-            "category": self.category,
             "detail": self.detail,
             "retryable": self.retryable,
         }
 
     @classmethod
     def from_dict(cls, value):
-        expected = {"code", "category", "detail", "retryable"}
+        expected = {"code", "detail", "retryable"}
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid failure information")
         if not isinstance(value["retryable"], bool):
             raise TypeError("failure retryable must be boolean")
         return cls(
             code=str(value["code"]),
-            category=str(value["category"]),
             detail=str(value["detail"]),
             retryable=value["retryable"],
         )
@@ -151,10 +147,7 @@ class ToolOutcome:
     failure: FailureInfo | None = None
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
-    duration_ms: int = 0
     artifact: dict[str, Any] = field(default_factory=dict)
-    output_truncated: bool = False
-    rejected_at: str = ""
 
     def __post_init__(self):
         if self.status not in TOOL_STATUSES:
@@ -173,8 +166,6 @@ class ToolOutcome:
             raise ValueError(f"{self.status} outcome requires failure information")
         if self.status == "success" and self.failure is not None:
             raise ValueError("successful outcome cannot contain failure information")
-        if self.status == "rejected" and not self.rejected_at:
-            raise ValueError("rejected outcome requires rejected_at")
         _validate_effect_facts(
             self.side_effect_state, self.affected_paths, self.effect_scope
         )
@@ -194,10 +185,7 @@ class ToolOutcome:
             "failure": self.failure.to_dict() if self.failure else None,
             "affected_paths": list(self.affected_paths),
             "effect_scope": self.effect_scope,
-            "duration_ms": self.duration_ms,
             "artifact": dict(self.artifact),
-            "output_truncated": bool(self.output_truncated),
-            "rejected_at": self.rejected_at,
         }
 
     @classmethod
@@ -212,10 +200,7 @@ class ToolOutcome:
             "failure",
             "affected_paths",
             "effect_scope",
-            "duration_ms",
             "artifact",
-            "output_truncated",
-            "rejected_at",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid ToolOutcome")
@@ -223,8 +208,6 @@ class ToolOutcome:
             value["artifact"], dict
         ):
             raise TypeError("ToolOutcome collection fields have invalid types")
-        if not isinstance(value["output_truncated"], bool):
-            raise TypeError("ToolOutcome boolean fields have invalid types")
         failure = value["failure"]
         return cls(
             tool_call_id=str(value["tool_call_id"]),
@@ -236,8 +219,5 @@ class ToolOutcome:
             failure=FailureInfo.from_dict(failure) if failure is not None else None,
             affected_paths=tuple(str(item) for item in value["affected_paths"]),
             effect_scope=str(value["effect_scope"]),
-            duration_ms=int(value["duration_ms"]),
             artifact=dict(value["artifact"]),
-            output_truncated=value["output_truncated"],
-            rejected_at=str(value["rejected_at"]),
         )

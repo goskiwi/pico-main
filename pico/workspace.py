@@ -4,15 +4,10 @@
 这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
 """
 
-import hashlib
-import json
 import subprocess
 import textwrap
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-MAX_TOOL_OUTPUT = 4000
-MAX_HISTORY = 12000
 # 这些文件最可能直接影响 agent 的行动方式。
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -29,11 +24,7 @@ def normalize_relative_file(value: str) -> str:
     return path.as_posix()
 
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def clip(text, limit=MAX_TOOL_OUTPUT):
+def clip(text, limit):
     text = str(text)
     if len(text) <= limit:
         return text
@@ -90,12 +81,19 @@ class WorkspaceContext:
         for base in (repo_root, cwd):
             for name in DOC_NAMES:
                 path = base / name
-                if not path.exists():
+                if not path.is_file() or path.is_symlink():
                     continue
-                key = str(path.relative_to(repo_root))
+                resolved = path.resolve()
+                try:
+                    key = resolved.relative_to(repo_root).as_posix()
+                except ValueError:
+                    continue
                 if key in docs:
                     continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
+                docs[key] = clip(
+                    resolved.read_text(encoding="utf-8", errors="replace"),
+                    1200,
+                )
 
         default_branch = git(
             ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main"
@@ -105,7 +103,20 @@ class WorkspaceContext:
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
             default_branch=default_branch,
-            git_status=clip(git(["status", "--short"], "clean") or "clean", 1500),
+            git_status=clip(
+                git(
+                    [
+                        "status",
+                        "--short",
+                        "--",
+                        ":(exclude,top).pico",
+                        ":(exclude,top).pico/**",
+                    ],
+                    "clean",
+                )
+                or "clean",
+                1500,
+            ),
             recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
             project_docs=docs,
         )
@@ -136,10 +147,8 @@ class WorkspaceContext:
             """
         ).strip()
 
-    def fingerprint(self):
-        # 这个指纹用来判断仓库状态是否发生了足够大的变化，
-        # 从而决定是否需要重建缓存中的 prompt prefix。
-        payload = {
+    def state(self):
+        return {
             "cwd": self.cwd,
             "repo_root": self.repo_root,
             "branch": self.branch,
@@ -148,4 +157,3 @@ class WorkspaceContext:
             "recent_commits": list(self.recent_commits),
             "project_docs": dict(self.project_docs),
         }
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()

@@ -1,35 +1,58 @@
-from pico.verification import parse_verification_output
+from evals.pytest_output import parse_pytest_output
+from pico.sandbox import SandboxResult
+from pico.verification import verify_workspace
 
 
-def test_pytest_output_is_structured_and_stably_signed():
+def test_pytest_output_is_structured():
     output = """collected 4 items
 tests/test_a.py ...F
 FAILED tests/test_a.py::test_four - AssertionError
 1 failed, 3 passed in 0.21s
 """
 
-    first = parse_verification_output("python -m pytest -q", output, 1)
-    second = parse_verification_output("python -m pytest -q", output.replace("0.21s", "1.91s"), 1)
+    first = parse_pytest_output(output)
 
-    assert first["verifier"] == "pytest"
     assert first["collected"] == 4
     assert first["passed"] == 3
     assert first["failed"] == 1
     assert first["failed_tests"] == ["tests/test_a.py::test_four"]
-    assert first["failure_signature"] == second["failure_signature"]
-
-
-def test_successful_verification_has_no_failure_signature():
-    result = parse_verification_output("python -m pytest -q", "2 passed in 0.10s", 0)
-    assert result["passed"] == 2
-    assert result["failure_signature"] == ""
 
 
 def test_double_quiet_pytest_progress_is_counted():
-    result = parse_verification_output(
-        "python -m pytest -q",
-        "..                                                                       [100%]",
-        0,
+    result = parse_pytest_output(
+        "..                                                                       [100%]"
     )
     assert result["collected"] == 2
     assert result["passed"] == 2
+
+
+def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_path):
+    recorded = {}
+
+    class Sandbox:
+        def run(self, argv, **kwargs):
+            recorded["argv"] = argv
+            recorded.update(kwargs)
+            return SandboxResult(returncode=0, stdout="2 passed")
+
+    result = verify_workspace(
+        root=tmp_path,
+        command="MODE=test python -m pytest -q",
+        sandbox=Sandbox(),
+        timeout_seconds=600,
+        redact_text=str,
+        fingerprint_provider=lambda: "current-workspace",
+        workspace_fingerprint="current-workspace",
+    )
+
+    assert recorded["argv"] == ("python", "-m", "pytest", "-q")
+    assert recorded["env"] == {"MODE": "test"}
+    assert recorded["timeout"] == 600
+    assert result == {
+        "command": "MODE=test python -m pytest -q",
+        "status": "passed",
+        "freshness": "current",
+        "workspace_fingerprint": "current-workspace",
+        "exit_code": 0,
+        "output": "2 passed",
+    }

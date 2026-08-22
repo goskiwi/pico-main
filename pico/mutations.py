@@ -32,9 +32,6 @@ def file_revision(path: Path) -> str:
 class RevisionConflict(RuntimeError):
     def __init__(self, path, expected, actual):
         super().__init__(f"revision conflict for {path}: expected {expected}, actual {actual}; read the file again")
-        self.path = str(path)
-        self.expected_revision = str(expected)
-        self.actual_revision = str(actual)
 
 
 def _workspace_lock(root: Path):
@@ -72,8 +69,10 @@ class WorkspaceMutationService:
             actual = file_revision(target)
             if actual != expected_revision:
                 raise RevisionConflict(target.relative_to(self.root), expected_revision, actual)
-            self._atomic_replace(target, payload)
-        return actual, content_revision(payload)
+            after = content_revision(payload)
+            if actual != after:
+                self._atomic_replace(target, payload)
+        return actual, after
 
     def patch(self, path, old_text, new_text, expected_revision):
         target = self._target(path)
@@ -90,5 +89,7 @@ class WorkspaceMutationService:
                 raise ValueError(f"old_text must occur exactly once, found {count}")
             payload = text.replace(str(old_text), str(new_text), 1).encode("utf-8")
             self._check_payload(payload)
-            self._atomic_replace(target, payload)
-        return actual, content_revision(payload)
+            after = content_revision(payload)
+            if actual != after:
+                self._atomic_replace(target, payload)
+        return actual, after

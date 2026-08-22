@@ -68,10 +68,6 @@ def require_clean_repository(root):
     return _git(root, "rev-parse", "HEAD").decode("utf-8").strip()
 
 
-def current_head(root):
-    return _git(root, "rev-parse", "HEAD").decode("utf-8").strip()
-
-
 def repository_changed_paths(root):
     tracked = _git(root, "diff", "--name-only", "-z", "HEAD")
     untracked = _git(
@@ -105,14 +101,18 @@ class GitWorktree:
             return self.path
         self.container_root = Path(tempfile.mkdtemp(prefix="pico-subagent-"))
         self.path = self.container_root / self.label
-        _git(
-            self.repository_root,
-            "worktree",
-            "add",
-            "--detach",
-            str(self.path),
-            self.base_sha,
-        )
+        try:
+            _git(
+                self.repository_root,
+                "worktree",
+                "add",
+                "--detach",
+                str(self.path),
+                self.base_sha,
+            )
+        except Exception:
+            self.cleanup()
+            raise
         return self.path
 
     def apply_patch(self, patch):
@@ -174,7 +174,7 @@ class GitWorktree:
         if self.path is not None and self.path.exists():
             try:
                 _git(self.repository_root, "worktree", "remove", "--force", str(self.path))
-            except GitWorktreeError:
+            except (GitWorktreeError, OSError):
                 pass
         if self.container_root is not None:
             shutil.rmtree(self.container_root, ignore_errors=True)

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from pico.sandbox import DockerSandbox, SandboxProfile
+from pico.sandbox import DockerSandbox
 
 pytestmark = pytest.mark.docker
 
@@ -30,7 +30,6 @@ def test_real_docker_sandbox_enforces_runtime_boundaries(tmp_path):
         ),
         cwd=tmp_path,
         timeout=20,
-        profile=SandboxProfile.INSPECT,
     )
     assert inspect.returncode == 0
     assert inspect.stdout.splitlines() == ["public", ""]
@@ -40,7 +39,6 @@ def test_real_docker_sandbox_enforces_runtime_boundaries(tmp_path):
         ("python", "-c", "from pathlib import Path; Path('escape.txt').write_text('x')"),
         cwd=tmp_path,
         timeout=20,
-        profile=SandboxProfile.INSPECT,
     )
     assert write_attempt.returncode != 0
     assert not (tmp_path / "escape.txt").exists()
@@ -53,7 +51,6 @@ def test_real_docker_sandbox_enforces_runtime_boundaries(tmp_path):
         ),
         cwd=tmp_path,
         timeout=20,
-        profile=SandboxProfile.INSPECT,
     )
     assert network_attempt.returncode != 0
 
@@ -73,7 +70,6 @@ def test_real_docker_prefers_workspace_src_over_installed_packages(tmp_path):
         ),
         cwd=tmp_path,
         timeout=20,
-        profile=SandboxProfile.INSPECT,
     )
 
     assert result.returncode == 0

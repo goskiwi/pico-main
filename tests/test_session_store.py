@@ -10,7 +10,6 @@ def session(session_id, active_run_id=""):
     return {
         "schema_version": SESSION_SCHEMA_VERSION,
         "id": session_id,
-        "created_at": "2026-04-07T10:00:00+00:00",
         "workspace_root": "/workspace",
         "active_run_id": active_run_id,
     }
@@ -38,10 +37,20 @@ def test_session_store_latest_is_none_when_empty(tmp_path):
 
 def test_session_store_rejects_old_schema_and_unsafe_id(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
+    old = session("session_old")
+    old["schema_version"] = "session-v10"
+    old["created_at"] = "2026-04-07T10:00:00+00:00"
     with pytest.raises(ValueError, match="schema"):
-        store.save({"id": "old"})
+        store.save(old)
     with pytest.raises(ValueError, match="session id"):
         store.path("../escape")
+
+
+def test_session_store_rejects_unsafe_active_run_id(tmp_path):
+    store = SessionStore(tmp_path / ".pico" / "sessions")
+
+    with pytest.raises(ValueError, match="invalid session active_run_id"):
+        store.save(session("session_unsafe", "../../outside"))
 
 
 def test_runtime_session_commits_copy_only_after_persistence(tmp_path, monkeypatch):

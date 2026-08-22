@@ -17,7 +17,7 @@ User request
   -> Registry / Surface / Schema / Policy / Approval
   -> Docker tool execution or revision-bound atomic mutation
   -> fsynced tool_started -> ToolOutcome/tool_result
-  -> Run Log projections: WorkingState / Context / TaskState / Evidence / Report
+  -> Run Log projections: WorkingState / Context / TaskState / Evidence / stats
   -> structured runtime verification -> Completion Gate
 ```
 
@@ -33,7 +33,7 @@ Pico
   workspace      路径边界、工作区快照和内容指纹
   session        Session 身份与 active_run_id 指针
   run            当前或最近一次 Run 的可变状态
-  services       Store、Sandbox、RepoMap 和 Subagents
+  dependencies   Store、Sandbox、RepoMap 和 Subagents
   tools          工具 Registry、模型 Surface、准入与执行
   recovery       active_run_id 与 Run Log tail 恢复
   prompt         Prefix、ContextManager 和相关记忆选择
@@ -67,12 +67,12 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 核心实现：
 
 - 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用，最终回答也通过 `submit_final`。
-- Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；WorkingState、TaskState、RunEvidence 和 Report 由同一事件 reducer 实时投影并可重建。Workspace、Project Memory 和 Artifact 分别持有其当前内容事实。
-- 长上下文治理：Prompt 使用配置的模型 Context Window；本地 tokenizer 为各 section 分配预算。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，并把更早前缀投影成一段确定性运行摘要。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
+- Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；WorkingState、TaskState、RunEvidence 和运行统计由同一事件 reducer 实时投影并可重建。Workspace、Project Memory 和 Artifact 分别持有其当前内容事实。
+- 长上下文治理：Prompt 使用配置的模型 Context Window；预算包含各 section、序列化 Tool Schema，并在 fresh Provider usage 返回后纳入已观测的协议开销。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，更早事务的工具名、参数、状态和结果摘要会继续留在确定性投影中。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
 - Workspace 新鲜度：工具 runner 以结构化结果声明精确影响路径；普通读取不扫描全仓，写入后只失效 Runtime Workspace revision。Completion/Verifier 才对完整 Workspace 内容做强制指纹扫描并绑定验证证据。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
-- 分层状态：Run WorkingState 由 `user_message` 和 `update_working_state` Tool 事务投影，保存目标、约束、已确认决定和下一步；Session 只保存 `active_run_id`。跨任务 Project Memory 以 Markdown Card 为唯一事实源。受限的 `MEMORY.md` Catalog 常驻上下文；主模型按可见描述显式调用 `memory_recall`，Runtime 在独立预算内返回最多五张完整 Card，所有 Recall Call/Result 都进入正常 RunLog 与模型计量。文件事实始终从 Workspace、搜索和 Run Log 获取。
-- 安全工具：路径锚定 Workspace；重复调用检测；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
+- 分层状态：Run WorkingState 由 `user_message` 和 `update_working_state` Tool 事务投影，保存目标、约束、已确认决定和下一步；Session 只保存 `active_run_id`。跨任务 Project Memory 以 Markdown Card 为唯一事实源，写入来源由 Run ID 和 Tool Call ID 定位；生成的 `MEMORY.md` Catalog 会从 Card 自愈并有界地常驻上下文。主模型按可见描述显式调用 `memory_recall`，Runtime 在独立预算内返回最多五张完整 Card，所有 Recall Call/Result 都进入正常 RunLog 与模型计量。文件事实始终从 Workspace、搜索和 Run Log 获取。
+- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；重复调用检测；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
 - 最小 Shell 环境：未配置时使用默认白名单；显式空白名单保持为空，仅由 Shell 边界补充运行必需的 `PWD`/`PATH`。
 - 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
 - 隔离执行：`run_shell` 强制进入临时 Docker 容器；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
@@ -163,15 +163,15 @@ uv run pico run events <run_id> --cwd /path/to/repo
 ```bash
 uv run python scripts/run_evaluations.py
 uv run pytest -q
-uv run ruff check pico tests scripts
+uv run ruff check pico tests scripts evals
 ```
 
 评测分为 native Harness regression、Context governance、Markdown Project Memory 和
 RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 评测实现位于仓库顶层 `evals/`，不属于 `pyproject.toml` 打包的 `pico` Runtime。
 
-当前确定性 Artifact 为 `harness-regression-v3.json`、`context-governance-v5.json`、
-`project-memory-v2.json` 与 `repo-map-v1.json`；每份均记录 Runtime/Evaluation snapshot ID。
+当前确定性 Artifact 为 `harness-regression.json`、`context-governance.json`、
+`project-memory.json` 与 `repo-map.json`。
 
 当前随仓库发布的证据：
 
@@ -179,9 +179,9 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 |---|---:|---|
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
-| Context governance v5 | 9/9 | 真实 ContextManager/RunLog Compaction；预算、事务、原事件与 WorkingState 均保持 |
-| Project Memory v2 | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
-| RepoMap v1 | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
+| Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
+| Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
+| RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
@@ -198,7 +198,7 @@ docker build -f docker/official-public-tests.Dockerfile -t pico/official-public-
 uv run python scripts/run_official_public_tests.py
 ```
 
-Real OSS runner 强制要求 clean worktree，并把 Runtime snapshot、manifest/verifier/reference-patch digest、fixture tree digest、Docker image ID 和统一工具预算写入证据。Preflight 必须证明每个 hidden verifier 在 pre-fix fixture 上失败，并在应用绑定上游修复提交的 reference patch 后通过。完整五题模型运行不复用旧结果，也不选择性重跑任务失败。
+Real OSS runner 强制要求 clean worktree，并把 Runtime commit、manifest/verifier/reference-patch digest、fixture tree digest、Docker image ID 和统一工具预算写入证据。Preflight 必须证明每个 hidden verifier 在 pre-fix fixture 上失败，并在应用绑定上游修复提交的 reference patch 后通过。完整五题模型运行不复用旧结果，也不选择性重跑任务失败。
 
 官方公开测试 runner 使用冻结的上游 test-only patch 和完整 fix SHA：pre-fix、官方 reference patch、Agent patch 使用同一测试节点。四题官方测试在 pre-fix 上失败；Jinja 官方测试在 pre-fix 上也会通过，因此明确标为非区分性，独立 hidden verifier 负责覆盖 async parent 无参数 overlay 的遗漏。结果见 `artifacts/official-public-tests-v1.{json,md}`。
 
