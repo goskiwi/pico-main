@@ -273,6 +273,7 @@ class AgentLoop:
         ):
             return "tool_execution_limit"
         loop_state.invalid_output_count = 0
+        loop_state.completion_block_count = 0
         call = turn.action.tool_call
         agent.apply_run_event(agent.run.run_log.append_tool_call(call))
         outcome = agent.tools.run(call)
@@ -342,4 +343,8 @@ class AgentLoop:
             "completion_blocked",
             {"status": status, "reason": instruction},
         )
+        loop_state.completion_block_count += 1
+        if loop_state.completion_block_count >= 3:
+            loop_state.execution_stop = "completion_block_limit"
+            return
         self._continue_provider(loop_state, turn, instruction)

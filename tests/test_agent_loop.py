@@ -7,6 +7,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.agent_loop import AgentLoop
+from pico.sandbox import SandboxResult
 
 
 def build_agent(tmp_path, outputs):
@@ -63,6 +64,46 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
     )
     assert agent.run.task_state.stop_reason == "invalid_output_limit"
     assert agent.run.task_state.model_request_count == 8
+
+
+def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
+    class FailingSandbox:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return SandboxResult(returncode=1, stderr="assertion failed")
+
+    client = FakeModelClient(
+        [
+            ModelAction.tool(
+                "write_file",
+                {
+                    "path": "subject.txt",
+                    "content": "changed\n",
+                    "expected_revision": "absent",
+                },
+            ),
+            ModelAction.final("done"),
+            ModelAction.final("done"),
+            ModelAction.final("done"),
+        ]
+    )
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="verify",
+        ),
+        sandbox=FailingSandbox(),
+    )
+
+    answer = agent.ask("Create subject.txt")
+
+    assert answer == "Stopped after repeated rejected completion attempts."
+    assert agent.run.task_state.stop_reason == "completion_block_limit"
+    events = agent.dependencies.run_store.read_events(agent.run.task_state)
+    assert sum(entry.kind == "completion_blocked" for entry in events) == 3
 
 
 def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):

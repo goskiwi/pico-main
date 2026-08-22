@@ -125,6 +125,7 @@ def run_command(workspace, image, command):
     ).run(shell_argv(command), cwd=workspace, timeout=120, env={})
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
+        "infrastructure_error": result.infrastructure_error,
         "exit_code": result.returncode,
         "stdout": result.stdout[-4000:],
         "stderr": result.stderr[-4000:],
@@ -210,6 +211,8 @@ def main(argv=None):
     )
     workspace = prepare_workspace(args.workspace)
     initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
+    if initial["infrastructure_error"]:
+        raise RuntimeError("controlled baseline sandbox could not start")
     if initial["ok"]:
         raise RuntimeError("controlled baseline must fail before the Agent runs")
 

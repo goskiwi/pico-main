@@ -5,6 +5,7 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceConte
 from pico.sandbox import (
     DockerSandbox,
     SandboxResult,
+    docker_exit_is_infrastructure,
     shell_argv,
 )
 
@@ -102,6 +103,11 @@ def test_shell_failure_is_structured_before_tool_executor_classification(tmp_pat
 def test_shell_argv_preserves_compound_command_for_container_shell():
     command = "MODE=test python -m pytest -q && git diff --check"
     assert shell_argv(command) == ("/bin/sh", "-c", command)
+
+
+def test_docker_exit_125_is_classified_as_infrastructure_failure():
+    assert docker_exit_is_infrastructure(125) is True
+    assert docker_exit_is_infrastructure(1) is False
 
 
 def test_approval_denial_prevents_sandbox_start(tmp_path):

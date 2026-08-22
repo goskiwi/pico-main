@@ -60,3 +60,28 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         "exit_code": 0,
         "output": "2 passed",
     }
+
+
+def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
+    class Sandbox:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            return SandboxResult(
+                returncode=125,
+                stderr="invalid mount config",
+                infrastructure_error=True,
+            )
+
+    result = verify_workspace(
+        root=tmp_path,
+        command="python -m pytest -q",
+        sandbox=Sandbox(),
+        timeout_seconds=60,
+        redact_text=str,
+        fingerprint_provider=lambda: "current-workspace",
+        workspace_fingerprint="current-workspace",
+    )
+
+    assert result["status"] == "infrastructure_error"
+    assert result["exit_code"] == 125
+    assert "invalid mount config" in result["output"]

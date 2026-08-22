@@ -25,6 +25,7 @@ class AgentLoopState:
     provider_overhead_tokens: int = 0
     overflow_recovery_attempted: bool = False
     invalid_output_count: int = 0
+    completion_block_count: int = 0
     execution_stop: str = ""
 
 
@@ -169,6 +170,9 @@ class RunLifecycle:
                 "valid tool call or final answer."
             )
             stop_reason = "invalid_output_limit"
+        elif stop == "completion_block_limit":
+            final = "Stopped after repeated rejected completion attempts."
+            stop_reason = "completion_block_limit"
         elif stop:
             final = f"Stopped because execution was interrupted: {stop}."
             stop_reason = stop

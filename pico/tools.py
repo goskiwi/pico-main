@@ -584,7 +584,13 @@ def tool_run_shell(context, args):
         env=context.shell_env(),
         execution_context=context.execution_context(),
     )
-    if result.cancelled:
+    if result.infrastructure_error:
+        failure = FailureInfo(
+            "sandbox_infrastructure_error",
+            result.stderr.strip() or "Docker could not start the sandbox",
+            False,
+        )
+    elif result.cancelled:
         failure = FailureInfo(
             "command_cancelled",
             result.stop_reason or "command cancelled",

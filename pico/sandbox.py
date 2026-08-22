@@ -44,6 +44,11 @@ def shell_argv(command):
     return "/bin/sh", "-c", command
 
 
+def docker_exit_is_infrastructure(returncode):
+    """Docker reserves exit 125 for failures before the container command starts."""
+    return int(returncode) == 125
+
+
 class SandboxError(RuntimeError):
     pass
 
@@ -67,6 +72,7 @@ class SandboxResult:
     cleanup_state: str = "not_required"
     stop_reason: str = ""
     output_limited: bool = False
+    infrastructure_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -365,6 +371,7 @@ class DockerSandbox:
             )
             stderr = "\n".join(part for part in (stderr.strip(), message) if part)
 
+        returncode = int(process.returncode or 0)
         return SandboxResult(
             returncode=None if state.stop_reason else int(process.returncode or 0),
             stdout=stdout,
@@ -375,6 +382,10 @@ class DockerSandbox:
             cleanup_state=state.cleanup_state,
             stop_reason=state.stop_reason,
             output_limited=state.output_limited,
+            infrastructure_error=bool(
+                not state.stop_reason
+                and docker_exit_is_infrastructure(returncode)
+            ),
         )
 
     def _stop_container(self, container_name):

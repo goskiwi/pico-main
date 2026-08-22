@@ -73,9 +73,15 @@ def model_client(model, base_url, api_key, temperature, timeout):
 
 
 def run_variant(args, variant, api_key, base_url, run_group):
-    workspace = prepare_ab_workspace(args.workspace_root / run_group / variant)
+    workspace = prepare_ab_workspace(
+        args.workspace_root / f"semantic-compaction-{run_group}-{variant}"
+    )
     print(f"[semantic-compaction] starting {variant}", file=sys.stderr, flush=True)
     initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
+    if initial["infrastructure_error"]:
+        raise RuntimeError(f"{variant} baseline sandbox could not start")
+    if initial["ok"]:
+        raise RuntimeError(f"{variant} baseline must fail before the Agent runs")
     agent = Pico(
         model_client=model_client(
             args.model, base_url, api_key, args.temperature, args.timeout
@@ -174,7 +180,7 @@ def main(argv=None):
     parser.add_argument(
         "--workspace-root",
         type=Path,
-        default=ROOT / "artifacts" / "semantic-compaction-workspaces",
+        default=ROOT / "artifacts",
     )
     parser.add_argument(
         "--artifact",

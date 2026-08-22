@@ -68,7 +68,14 @@ def verify_workspace(
         record["output"] = redact_text(
             "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
         )[:4000]
-        record["status"] = "passed" if result.returncode == 0 and not result.stop_reason else "failed"
+        if result.infrastructure_error:
+            record["status"] = "infrastructure_error"
+        else:
+            record["status"] = (
+                "passed"
+                if result.returncode == 0 and not result.stop_reason
+                else "failed"
+            )
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
         record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     after = fingerprint_provider()
