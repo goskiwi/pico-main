@@ -55,4 +55,7 @@ Required workflow:
 }}
 
 Every evidence item must reference a real completed Tool Call from this Run.
+If the provider's exact Call IDs are not visible, use call_1, call_2, and so on
+to reference completed Tool Calls in chronological order; the application will
+resolve those ordinals to the durable Provider Call IDs.
 Do not include Markdown fences around the final JSON."""

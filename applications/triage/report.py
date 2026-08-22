@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,27 +115,51 @@ def _reproduction(case, calls, results):
     )
 
 
+def _resolve_evidence(items, ordered_calls, results):
+    completed_call_ids = {
+        entry.call_id for entry in ordered_calls if entry.call_id in results
+    }
+    resolved = []
+    unknown = []
+    for item in items:
+        call_id = item.tool_call_id
+        if call_id not in completed_call_ids:
+            ordinal = re.fullmatch(r"call_(\d+)", call_id)
+            index = int(ordinal.group(1)) - 1 if ordinal else -1
+            if not 0 <= index < len(ordered_calls):
+                unknown.append(call_id)
+                continue
+            candidate = ordered_calls[index].call_id
+            if candidate not in completed_call_ids:
+                unknown.append(call_id)
+                continue
+            call_id = candidate
+        resolved.append(item.model_copy(update={"tool_call_id": call_id}))
+    if unknown:
+        raise ValueError(
+            "Triage evidence references unknown Tool Calls: "
+            + ", ".join(sorted(set(unknown)))
+        )
+    return tuple(resolved)
+
+
 def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
     events = tuple(events)
     diagnosis = _parse_diagnosis(answer)
+    ordered_calls = [
+        entry for entry in events if entry.kind == "assistant_tool_call"
+    ]
     calls = {
-        entry.call_id: entry
-        for entry in events
-        if entry.kind == "assistant_tool_call"
+        entry.call_id: entry for entry in ordered_calls
     }
     results = {
         entry.call_id: entry for entry in events if entry.kind == "tool_result"
     }
-    completed_call_ids = set(calls) & set(results)
-    unknown = sorted(
-        {
-            item.tool_call_id
-            for item in diagnosis.evidence
-            if item.tool_call_id not in completed_call_ids
-        }
+    evidence_items = _resolve_evidence(
+        diagnosis.evidence,
+        ordered_calls,
+        results,
     )
-    if unknown:
-        raise ValueError("Triage evidence references unknown Tool Calls: " + ", ".join(unknown))
 
     run_evidence = RunEvidence.from_events(events)
     verification_event = next(
@@ -167,7 +192,7 @@ def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
         run_id=projection.run_id,
         status=diagnosis.status,
         root_cause=diagnosis.root_cause,
-        evidence=diagnosis.evidence,
+        evidence=evidence_items,
         reproduction=reproduction,
         patch=PatchResult(changed_paths=changed_paths),
         verification=verification,

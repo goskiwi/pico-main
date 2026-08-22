@@ -8,6 +8,9 @@ from applications.triage.report import build_triage_report
 from evals.triage import run_triage_evaluation
 from evals.triage.evaluator import EvalCase, HostEvaluationSandbox, ScriptedTriageModel
 from pico import PicoConfig
+from pico.contracts import ToolCall, ToolOutcome
+from pico.run_log import RunLog
+from pico.run_store import RunStore
 
 
 def test_triage_case_resolves_repository_relative_to_case_file(tmp_path):
@@ -72,6 +75,56 @@ def test_triage_report_rejects_unknown_evidence_call(tmp_path):
 
     with pytest.raises(ValueError, match="unknown Tool Calls"):
         build_triage_report(case, answer, ())
+
+
+def test_triage_report_resolves_ordinal_call_references(tmp_path):
+    case = TriageCase(
+        incident_id="ci-ordinal",
+        repository_root=tmp_path,
+        failing_command="pytest -q",
+        ci_log="failed",
+    )
+    store = RunStore(tmp_path / ".pico" / "runs")
+    run_log = RunLog("run", "task", "session", store)
+    run_log.append_user("diagnose")
+    call = ToolCall("read_file", {"path": "src/app.py"}, "call_provider_real")
+    run_log.append_tool_call(call)
+    run_log.append_tool_started(
+        call,
+        risky=False,
+        effect_scope="none",
+        potential_effects=[],
+    )
+    run_log.append_tool_result(
+        ToolOutcome(
+            tool_call_id=call.call_id,
+            tool_name=call.name,
+            status="success",
+            execution_state="completed",
+            side_effect_state="none",
+            content="source",
+        ),
+        workspace_revision=0,
+    )
+    answer = json.dumps(
+        {
+            "status": "blocked",
+            "root_cause": {"summary": "source inspected", "files": ["src/app.py"]},
+            "evidence": [
+                {
+                    "kind": "source",
+                    "claim": "source inspected",
+                    "tool_call_id": "call_1",
+                    "path": "src/app.py",
+                    "line": 1,
+                }
+            ],
+        }
+    )
+
+    report = build_triage_report(case, answer, run_log.events)
+
+    assert report.evidence[0].tool_call_id == "call_provider_real"
 
 
 def test_triage_evaluation_runs_three_end_to_end_cases(tmp_path):
