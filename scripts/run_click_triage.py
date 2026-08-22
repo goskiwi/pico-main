@@ -180,7 +180,7 @@ def main(argv=None):
     hidden = run_verifier(args.workspace, real_task, args.hidden_image)
     after = file_snapshot(args.workspace)
     changed = changed_paths(before, after)
-    patch_text = _git(args.workspace, "diff", "--binary", "HEAD")
+    patch_text = _git(args.workspace, "diff", "--binary", "--unified=1", "HEAD")
     forbidden = [path for path in changed if matches(path, FORBIDDEN_CHANGE_GLOBS)]
     out_of_scope = [
         path for path in changed if not matches(path, real_task["allowed_change_globs"])
