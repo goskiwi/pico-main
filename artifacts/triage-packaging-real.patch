@@ -1,0 +1,10 @@
+diff --git a/src/packaging/version.py b/src/packaging/version.py
+index ee5aa48..87b155c 100644
+--- a/src/packaging/version.py
++++ b/src/packaging/version.py
+@@ -412,2 +412,5 @@ class Version(_BaseVersion):
+         """
++        if not isinstance(version, str):
++            raise InvalidVersion(f"Invalid version: {version!r}")
++
+         if _SIMPLE_VERSION_INDICATORS.issuperset(version):

@@ -185,6 +185,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
 | Real Click Triage | 1/1 | `gpt-5.6-luna`；可见测试与停止后 Hidden Verifier 均通过，只修改 `src/click/utils.py` |
+| Real Packaging Triage | 1/1 | `gpt-5.6-luna`；6 个可见测试与 Hidden Verifier 均通过，Root Cause Top-1/Top-3 命中 |
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
@@ -230,6 +231,12 @@ uv run python scripts/run_real_triage.py \
 空 bytes 被错误替换为文本空字符串的问题；复现、可见测试、Hidden Verifier 和修改范围检查全部通过。
 结构化证据见 `artifacts/triage-click-real.json`，实际 Patch 见
 `artifacts/triage-click-real.patch`。
+
+第二个真实案例 `packaging_non_string_version` 绑定 Runtime commit `a66c105`。模型复现 6 个
+非字符串版本失败，用 12 个 Tool Call 定位 `Version.__init__` 的字符串类型假设，只修改
+`src/packaging/version.py`；可见测试、Hidden Verifier、Root Cause Top-1/Top-3 和范围检查
+全部通过。证据见 `artifacts/triage-packaging-real.json` 与
+`artifacts/triage-packaging-real.patch`。
 
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 

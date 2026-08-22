@@ -40,6 +40,8 @@ artifacts/*
 !artifacts/triage-evaluation.json
 !artifacts/triage-click-real.json
 !artifacts/triage-click-real.patch
+!artifacts/triage-packaging-real.json
+!artifacts/triage-packaging-real.patch
 release/
 readme_intro_locked/
 output/

@@ -1,0 +1,100 @@
+{
+  "artifact_type": "pico-triage-real-case",
+  "captured_at": "2026-08-22T11:12:26.588895+00:00",
+  "case": {
+    "failing_baseline_commit": "d04b29b6ad39f152dd75ae5ee14113a35c61f066",
+    "id": "packaging_non_string_version",
+    "source_commit": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
+    "source_repository": "https://github.com/pypa/packaging.git"
+  },
+  "checks": {
+    "changed_paths": [
+      "src/packaging/version.py"
+    ],
+    "forbidden_changes": [],
+    "hidden_verifier_passed": true,
+    "initial_failure_reproduced": true,
+    "out_of_scope_changes": [],
+    "patch_recorded": true,
+    "root_cause_top1": true,
+    "root_cause_top3": true,
+    "scope_valid": true,
+    "visible_test_passed": true
+  },
+  "metrics": {
+    "cached_tokens": 31616,
+    "child_count": 0,
+    "executed_tool_count": 12,
+    "input_tokens": 226079,
+    "model_request_count": 13,
+    "output_tokens": 3125,
+    "run_duration_ms": 113380
+  },
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "report": {
+    "evidence": [
+      {
+        "claim": "The required focused verification command passed: 6 tests passed.",
+        "kind": "test_result",
+        "line": null,
+        "path": "",
+        "tool_call_id": "call_NAw2yh48HITTPRqRlRNbyrS3"
+      },
+      {
+        "claim": "The reproduced CI command showed TypeError/AttributeError for None, integers, sequences, and bytes, plus a keyed filter failure on None.",
+        "kind": "stack_trace",
+        "line": 413,
+        "path": "src/packaging/version.py",
+        "tool_call_id": "call_uB6CJM6Z94QFMUNZLwumEkbD"
+      },
+      {
+        "claim": "coerce_version already catches InvalidVersion and returns None; adding an early non-string InvalidVersion guard preserves the existing skip behavior for filters.",
+        "kind": "source",
+        "line": 323,
+        "path": "src/packaging/_ranges.py",
+        "tool_call_id": "call_AA8EbGBgDt55U2LPaC7oAtLT"
+      },
+      {
+        "claim": "Added an early isinstance(version, str) check that raises InvalidVersion before string-specific parsing.",
+        "kind": "source",
+        "line": 413,
+        "path": "src/packaging/version.py",
+        "tool_call_id": "call_r9b0hq8RJN6VRng1tqB8Jger"
+      }
+    ],
+    "executed_tool_count": 12,
+    "incident_id": "packaging-non-string-version-ci",
+    "patch": {
+      "changed_paths": [
+        "src/packaging/version.py"
+      ]
+    },
+    "repository_revision": "d04b29b6ad39f152dd75ae5ee14113a35c61f066",
+    "reproduction": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped",
+      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            FFFFFF                                                                   [100%]\n=================================== FAILURES ===================================\n_______ TestVersion.test_non_string_versions_raise_invalid_version[None] _______\n\nself = <tests.test_version.TestVersion object at 0xffff879fe090>, version = None\n\n    @pytest.mark.parametrize(\"version\", [None, 1, [\"1\", \".\", \"0\"], (\"1\",), b\"1.0\"])\n    def test_non_string_versions_raise_invalid_version(self, version: object) -> None:\n        with pytest.raises(InvalidVersion):\n>           Version(version)  # type: ignore[arg-type]\n\nself       = <tests.test_version.TestVersion object at 0xffff879fe090>\nversion    = None\n\ntests/test_version.py:221: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffff87bef5e0>\nversion = None\n\n    def __init__(self, version: str) -> None:\n        \"\"\"Initialize a Version object.\n\n        :param version:\n            The string representation of a version which will be parsed and normalized\n            before use.\n        :raises InvalidVersion:\n            If the ``version`` does not conform to PEP 440 in any way then this\n            exception will be raised.\n        \"\"\"\n>       if _SIMPLE_VERSION_INDICATORS.issuperset(version):\nE       TypeError: 'NoneType' object is not iterable\n\nself       = <[AttributeError(\"'Version' object has no attribute '_release'\") raised in repr()] Version object at 0xffff87bef5e0>\nversion    = None\n\nsrc/packaging/version.py:413: TypeError\n________ TestVersion.test_non_string_versions_raise_invalid_version[1] _________\n\nself = <tests.test_version.TestVersion object at 0xffff\n...[truncated 9967 chars]",
+      "status": "reproduced",
+      "tool_call_id": "call_uB6CJM6Z94QFMUNZLwumEkbD"
+    },
+    "root_cause": {
+      "files": [
+        "src/packaging/version.py"
+      ],
+      "summary": "Version.__init__ performed string-only operations on non-string inputs, leaking TypeError or AttributeError instead of InvalidVersion. This also prevented _ranges.coerce_version from returning None, so keyed filtering propagated None rather than skipping it."
+    },
+    "run_id": "run_20260822-111030-406b09",
+    "schema_version": "pico-triage-report",
+    "status": "fixed",
+    "verification": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests/test_version.py::TestVersion::test_non_string_versions_raise_invalid_version tests/test_specifiers.py::test_filter_keyed_none_version_is_skipped",
+      "output": "......                                                                   [100%]\n6 passed in 1.44s",
+      "status": "passed"
+    }
+  },
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "a66c105034ec62477f5d12781df4942d4dec7ea5",
+    "working_tree_dirty": false
+  }
+}
