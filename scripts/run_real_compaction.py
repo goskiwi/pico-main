@@ -153,6 +153,13 @@ def analyze_run(events, task_state):
         and entry.outcome_status == "success"
         and entry.side_effect_state == "changed"
     ]
+    evidence_read_paths = [
+        entry.args.get("path")
+        for entry in events
+        if entry.kind == "assistant_tool_call"
+        and entry.name == "read_file"
+        and str(entry.args.get("path", "")).startswith("evidence/")
+    ]
     state = task_state.working_state
     return {
         "model_request_count": len(turns),
@@ -161,6 +168,7 @@ def analyze_run(events, task_state):
         "provider_session_reset_count": kinds.count("provider_session_reset"),
         "resume_count": kinds.count("run_resumed"),
         "successful_mutation_count": len(successful_mutations),
+        "evidence_read_paths": evidence_read_paths,
         "compactions": compaction_turns,
         "working_state": state.to_dict(),
     }
@@ -251,6 +259,11 @@ def main(argv=None):
             and analysis["working_state"]["decisions"]
             and analysis["working_state"]["next_steps"]
         ),
+        "evidence_read_once_in_order": analysis["evidence_read_paths"]
+        == [
+            f"evidence/segment_{index:02d}.md"
+            for index in range(1, EVIDENCE_COUNT + 1)
+        ],
         "single_successful_mutation": analysis["successful_mutation_count"] == 1,
         "visible_verifier_passed": visible["ok"],
         "hidden_verifier_passed": hidden["ok"],

@@ -1,0 +1,100 @@
+{
+  "analysis": {
+    "compaction_count": 1,
+    "compactions": [
+      {
+        "covered_events": 13,
+        "local_context_tokens": 25773,
+        "mode": "runtime_summary",
+        "retained_events": 8,
+        "retained_tokens": 7732,
+        "summary_tokens": 624,
+        "trigger_context_tokens": 33662,
+        "trigger_threshold_tokens": 23808
+      }
+    ],
+    "evidence_read_paths": [
+      "evidence/segment_01.md",
+      "evidence/segment_02.md",
+      "evidence/segment_03.md",
+      "evidence/segment_04.md",
+      "evidence/segment_05.md",
+      "evidence/segment_06.md",
+      "evidence/segment_07.md",
+      "evidence/segment_08.md",
+      "evidence/segment_09.md",
+      "evidence/segment_10.md",
+      "evidence/segment_11.md",
+      "evidence/segment_12.md"
+    ],
+    "max_single_request_input_tokens": 31713,
+    "model_request_count": 17,
+    "provider_session_reset_count": 1,
+    "resume_count": 0,
+    "successful_mutation_count": 1,
+    "working_state": {
+      "constraints": [
+        "Read every listed evidence file exactly once in the specified order.",
+        "Modify only src/normalizer.py.",
+        "Preserve the public API."
+      ],
+      "decisions": [
+        "Normalize labels by stripping outer whitespace, lowercasing, splitting on arbitrary whitespace, and joining tokens with ASCII hyphens; this preserves non-whitespace punctuation and handles tabs/newlines without dependencies or regular expressions."
+      ],
+      "goal": "Complete a controlled long-context coding task.\n\nFirst call update_working_state. Record these constraints: read every listed evidence\nfile exactly once in order, modify only src/normalizer.py, and preserve the public API.\nRecord a next step to read all evidence before editing.\n\nThen read every file below with one read_file call per file, using start=1 and end=200.\nDo not use Search, List, project memory, or delegation:\n- evidence/segment_01.md\n- evidence/segment_02.md\n- evidence/segment_03.md\n- evidence/segment_04.md\n- evidence/segment_05.md\n- evidence/segment_06.md\n- evidence/segment_07.md\n- evidence/segment_08.md\n- evidence/segment_09.md\n- evidence/segment_10.md\n- evidence/segment_11.md\n- evidence/segment_12.md\n\nAfter all evidence is read, call update_working_state again to record the evidence-backed\nnormalization decision and the concrete edit as the next step. Read src/normalizer.py, apply\nthe smallest exact patch, and call submit_final. The Runtime owns verification.\n",
+      "next_steps": [
+        "Read src/normalizer.py and replace its implementation with the specified strip/lower/split/join normalization."
+      ],
+      "schema_version": "run-working-state-v1"
+    }
+  },
+  "artifact_type": "pico-real-compaction",
+  "captured_at": "2026-08-22T16:02:56.378714+00:00",
+  "changed_paths": [
+    "src/normalizer.py"
+  ],
+  "checks": {
+    "compaction_triggered": true,
+    "evidence_read_once_in_order": true,
+    "hidden_verifier_passed": true,
+    "initial_failure_reproduced": true,
+    "patch_recorded": true,
+    "provider_session_reset": true,
+    "scope_valid": true,
+    "single_successful_mutation": true,
+    "visible_verifier_passed": true,
+    "working_state_preserved": true
+  },
+  "final_answer": "Updated `src/normalizer.py` so `normalize_label(value: str) -> str` strips outer whitespace, lowercases text, and converts internal whitespace runs (including tabs and newlines) to ASCII hyphens while preserving punctuation. The Runtime verifier will run on completion.",
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "policy": {
+    "compaction_keep_recent_tokens": 8000,
+    "compaction_reserve_tokens": 8192,
+    "provider_base_url": "https://www.rightapi.ai/codex/v1",
+    "provider_context_limit_tokens": 32000,
+    "run_timeout_seconds": 900
+  },
+  "run_id": "run_20260822-160132-d5278f",
+  "runtime": {
+    "branch": "master",
+    "commit_sha": "08d89505c7b13f1e0c2355c5c3adef7eabf3f59b",
+    "working_tree_dirty": false
+  },
+  "verification": {
+    "hidden": {
+      "exit_code": 0,
+      "ok": true,
+      "stderr": "",
+      "stdout": "",
+      "stop_reason": ""
+    },
+    "visible": {
+      "exit_code": 0,
+      "ok": true,
+      "stderr": "",
+      "stdout": "",
+      "stop_reason": ""
+    }
+  }
+}

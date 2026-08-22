@@ -170,6 +170,7 @@ uv run pico run events <run_id> --cwd /path/to/repo
 ```bash
 uv run python scripts/run_evaluations.py
 uv run python scripts/run_triage_evaluation.py
+uv run python scripts/run_real_compaction.py --base-url <openai-compatible-base>
 uv run pytest -q
 uv run ruff check pico applications tests scripts evals
 ```
@@ -188,6 +189,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
+| Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控 32k 窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算；另有固定模型 AUTO/OFF 对照 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
@@ -197,6 +199,14 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Five-repository fixture preflight v2 | 5/5 | 每题均 fail-before/pass-after；绑定官方修复提交、fixture/verifier/patch digest 与 Docker image ID |
 | Historical Real OSS suite v2 | 5/5 | 固定 Runtime commit `61207f4` 的历史模型证据；统一 40 步，五题均为第 1 次尝试 |
 | Historical upstream public tests | 25/25 | 与 Real OSS v2 Patch 绑定的历史上游测试证据；禁网只读 Docker |
+
+真实 Compaction Artifact 见 `artifacts/real-compaction.json` 与
+`artifacts/real-compaction.patch`。模型按顺序各读取一次 12 份证据，最大单次 Input 为
+31,713 Token；Runtime 在估算下一轮达到 33,662 Token 时重建 Provider Session，将旧的
+13 个事件摘要为 624 Token，并保留 7,732 Token 近期事务。Compaction 后 Goal、Constraints、
+Decisions 与 Next Steps 仍在，模型只执行一次 Mutation，最终可见与停止后 Hidden Verifier
+均通过。该测试通过降低Runtime配置窗口来验证真实LLM续接，不冒充自然消耗272k上下文，
+也不代表已经验证跨进程Resume。
 
 ## Pico Triage
 
