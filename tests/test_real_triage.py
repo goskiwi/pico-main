@@ -40,6 +40,27 @@ def test_real_triage_workspace_is_a_clean_failing_baseline(tmp_path):
     assert official_task["official_test_nodes"][0] in command
 
 
+def test_real_triage_baseline_tracks_ignored_generated_source(tmp_path):
+    real = load_real_manifest(Path("validation/real_oss_suite.json"))
+    real_task = next(task for task in real["tasks"] if task["id"] == "urllib3_port_zero")
+    official = load_official_manifest(Path("validation/official_public_tests.json"))
+    official_task = next(
+        task for task in official["tasks"] if task["id"] == "urllib3_port_zero"
+    )
+
+    workspace = tmp_path / "urllib3"
+    prepare_triage_workspace(workspace, real_task, official_task)
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "src/urllib3/_version.py"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert tracked == "src/urllib3/_version.py"
+
+
 def test_usage_metrics_separate_gross_cached_and_uncached_input():
     turns = [
         SimpleNamespace(

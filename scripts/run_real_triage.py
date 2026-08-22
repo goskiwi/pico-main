@@ -63,7 +63,10 @@ def prepare_triage_workspace(workspace, real_task, official_task):
     _git(workspace, "init", "--quiet")
     _git(workspace, "config", "user.name", "Pico Triage")
     _git(workspace, "config", "user.email", "pico-triage@example.invalid")
-    _git(workspace, "add", "--all")
+    # Frozen fixtures may include ignored generated source required for imports.
+    # Track the complete controlled fixture so Implement worktrees reproduce the
+    # same runnable baseline as the Parent workspace.
+    _git(workspace, "add", "-f", "--all")
     _git(workspace, "commit", "--quiet", "-m", "failing CI baseline")
     return _git(workspace, "rev-parse", "HEAD")
 
