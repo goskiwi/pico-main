@@ -20,7 +20,7 @@ class SubtaskSpec(StrictModel):
     prompt: str = Field(min_length=1, max_length=6000)
     depends_on: tuple[str, ...] = ()
     allowed_write_paths: tuple[str, ...] = ()
-    max_tool_executions: int = Field(default=20, ge=1, le=80)
+    max_tool_executions: int = Field(default=12, ge=1, le=12)
 
     @field_validator("prompt")
     @classmethod

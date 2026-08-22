@@ -177,6 +177,15 @@ def test_delegate_tool_schema_is_strict_at_nested_task_level():
     assert set(schema["required"]) == set(schema["properties"])
     assert set(task_schema["required"]) == set(task_schema["properties"])
     assert task_schema["additionalProperties"] is False
+    assert task_schema["properties"]["max_tool_executions"]["maximum"] == 12
+
+    with pytest.raises(ValueError, match="less than or equal to 12"):
+        SubtaskSpec(
+            task_id="explore-too-long",
+            kind="explore",
+            prompt="inspect",
+            max_tool_executions=13,
+        )
 
 
 def test_one_delegation_cannot_mix_explore_and_implement_tasks(tmp_path):

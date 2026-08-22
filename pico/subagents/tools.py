@@ -43,7 +43,7 @@ def build_tool_registry(manager):
                 "to independent Pico children; mixed batches are rejected. Declare semantic "
                 "dependencies explicitly. Explore tasks are read-only and return structured "
                 "evidence handoffs. Implement tasks require exact allowed_write_paths and run "
-                "in isolated worktrees."
+                "in isolated worktrees. Every child has a hard maximum of 12 tool executions."
             ),
             "run": lambda args: _delegate(manager, args),
         },

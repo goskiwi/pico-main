@@ -51,6 +51,8 @@ def test_triage_prompt_marks_incident_text_as_untrusted(tmp_path):
     assert "more than three" in prompt
     assert "rather than a fourth" in prompt
     assert "Never combine Explore and Implement" in prompt
+    assert "passing cases" in prompt
+    assert "negative evidence" in prompt
 
 
 def test_triage_report_rejects_unknown_evidence_call(tmp_path):

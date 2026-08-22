@@ -48,7 +48,9 @@ Required workflow:
    for the next action. Consult Git history only when current source and tests are insufficient.
 6. Use at most one Implement child, in a separate delegate_tasks call, only after the
    required write paths and exact change are known.
-7. Apply the smallest justified patch and pass the verification command.
+7. Treat passing cases in the focused reproduction command as negative evidence: do not
+   modify their code paths merely because they contain similar-looking expressions.
+   Apply the smallest patch justified by the actual failures and pass verification.
 8. Call submit_final with JSON only, matching this shape:
 {{
   "status": "fixed | diagnosed | blocked",
