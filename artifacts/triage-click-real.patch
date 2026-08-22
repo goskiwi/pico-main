@@ -1,0 +1,13 @@
+diff --git a/src/click/utils.py b/src/click/utils.py
+index 223d6b8..4f1a9a0 100644
+--- a/src/click/utils.py
++++ b/src/click/utils.py
+@@ -294,7 +294,7 @@ def echo(
+         out = message
+ 
+     if nl:
+-        out = out or ""
++        out = "" if out is None else out
+         if isinstance(out, str):
+             out += "\n"
+         else:

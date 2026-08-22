@@ -38,6 +38,8 @@ artifacts/*
 !artifacts/project-memory.json
 !artifacts/repo-map.json
 !artifacts/triage-evaluation.json
+!artifacts/triage-click-real.json
+!artifacts/triage-click-real.patch
 release/
 readme_intro_locked/
 output/

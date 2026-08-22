@@ -1,0 +1,82 @@
+{
+  "artifact_type": "pico-triage-real-case",
+  "captured_at": "2026-08-22T10:42:59.799851+00:00",
+  "case": {
+    "failing_baseline_commit": "94bf1d7e743d09e7f4e4f9e022f261c2eedf1815",
+    "id": "click_empty_bytes_echo",
+    "source_commit": "d42f15b71757de791a5781fb179fd972da9169f5",
+    "source_repository": "https://github.com/pallets/click.git"
+  },
+  "checks": {
+    "changed_paths": [
+      "src/click/utils.py"
+    ],
+    "forbidden_changes": [],
+    "hidden_verifier_passed": true,
+    "initial_failure_reproduced": true,
+    "out_of_scope_changes": [],
+    "patch_recorded": true,
+    "scope_valid": true,
+    "visible_test_passed": true
+  },
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "report": {
+    "evidence": [
+      {
+        "claim": "The required reproduction initially failed with TypeError: a bytes-like object is required, not 'str' in tests/test_utils.py::test_echo_custom_file.",
+        "kind": "test_result",
+        "line": 102,
+        "path": "tests/test_utils.py",
+        "tool_call_id": "call_J9v8IWmVmxCYfRALVS3iVaD9"
+      },
+      {
+        "claim": "The fix distinguishes None from byte values during newline construction: None receives a text newline, while bytes and bytearray receive b'\\n' and continue through the binary writer path.",
+        "kind": "source",
+        "line": 296,
+        "path": "src/click/utils.py",
+        "tool_call_id": "call_qfhBk70VgiwajysFIY83Fyi9"
+      },
+      {
+        "claim": "The required verification command passed: 1 passed in 0.04s.",
+        "kind": "test_result",
+        "line": 102,
+        "path": "tests/test_utils.py",
+        "tool_call_id": "call_Y2nkMg19ugrWKNqhZtQiysg9"
+      }
+    ],
+    "executed_tool_count": 6,
+    "incident_id": "click-empty-bytes-echo-ci",
+    "patch": {
+      "changed_paths": [
+        "src/click/utils.py"
+      ]
+    },
+    "repository_revision": "94bf1d7e743d09e7f4e4f9e022f261c2eedf1815",
+    "reproduction": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests/test_utils.py::test_echo_custom_file",
+      "output": "exit_code: 1\n            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)\n            stop_reason: none\n            cleanup_state: not_required\n            output_limited: False\n            stdout:\n            F                                                                        [100%]\n=================================== FAILURES ===================================\n____________________________ test_echo_custom_file _____________________________\n\n    def test_echo_custom_file():\n        f = StringIO()\n        click.echo(\"hello\", file=f)\n        assert f.getvalue() == \"hello\\n\"\n\n        b = BytesIO()\n>       click.echo(b\"\", b)\n\ntests/test_utils.py:102: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nmessage = b'', file = <_io.BytesIO object at 0xffff9035f470>, nl = True\nerr = False, color = None\n\n    def echo(\n        message: t.Any | None = None,\n        file: t.IO[t.Any] | None = None,\n        nl: bool = True,\n        err: bool = False,\n        color: bool | None = None,\n    ) -> None:\n        \"\"\"Print a message and newline to stdout or a file. This should be\n        used instead of :func:`print` because it provides better support\n        for different data, files, and environments.\n\n        Compared to :func:`print`, this does the following:\n\n        -   Ensures that the output encoding is not misconfigured on Linux.\n        -   Supports Unicode in the Windows console.\n        -   Supports writing to binary outputs, and supports writing bytes\n            to text outputs.\n        -   Supports colors and styles on Windows.\n        -   Removes ANSI color and style codes if the output does not look\n            like an interactive terminal.\n        -   Always flushes the output.\n\n        :param message: The string or bytes to output. Other objects are\n            converted to strings.\n        :param file: The file to write to. Defaults to ``stdout``.\n        :param err: Write to ``stderr`` instead of `\n...[truncated 3019 chars]",
+      "status": "reproduced",
+      "tool_call_id": "call_J9v8IWmVmxCYfRALVS3iVaD9"
+    },
+    "root_cause": {
+      "files": [
+        "src/click/utils.py"
+      ],
+      "summary": "click.echo converted an empty bytes or bytearray message into a text newline when nl=True. For a binary custom stream, this reached file.write as str and raised TypeError."
+    },
+    "run_id": "run_20260822-103921-add331",
+    "schema_version": "pico-triage-report",
+    "status": "fixed",
+    "verification": {
+      "command": "PYTHONPATH=src python -m pytest -q -p no:cacheprovider tests/test_utils.py::test_echo_custom_file",
+      "output": ".                                                                        [100%]\n1 passed in 0.04s",
+      "status": "passed"
+    }
+  },
+  "runtime": {
+    "branch": "luna",
+    "commit_sha": "9e3247d2e5cb5b643bcbe09388ddb59fca252dac",
+    "working_tree_dirty": false
+  }
+}

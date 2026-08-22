@@ -106,6 +106,11 @@ def main(argv=None):
         type=Path,
         default=ROOT / "artifacts" / "triage-click-real.json",
     )
+    parser.add_argument(
+        "--patch",
+        type=Path,
+        default=ROOT / "artifacts" / "triage-click-real.patch",
+    )
     args = parser.parse_args(argv)
 
     runtime = git_metadata()
@@ -175,6 +180,7 @@ def main(argv=None):
     hidden = run_verifier(args.workspace, real_task, args.hidden_image)
     after = file_snapshot(args.workspace)
     changed = changed_paths(before, after)
+    patch_text = _git(args.workspace, "diff", "--binary", "HEAD")
     forbidden = [path for path in changed if matches(path, FORBIDDEN_CHANGE_GLOBS)]
     out_of_scope = [
         path for path in changed if not matches(path, real_task["allowed_change_globs"])
@@ -184,6 +190,7 @@ def main(argv=None):
         and report.reproduction.status == "reproduced"
         and visible_after["ok"]
         and hidden["ok"]
+        and patch_text
         and not forbidden
         and not out_of_scope
     )
@@ -203,6 +210,7 @@ def main(argv=None):
             "initial_failure_reproduced": not initial["ok"],
             "visible_test_passed": visible_after["ok"],
             "hidden_verifier_passed": hidden["ok"],
+            "patch_recorded": bool(patch_text),
             "scope_valid": not forbidden and not out_of_scope,
             "changed_paths": changed,
             "forbidden_changes": forbidden,
@@ -210,6 +218,8 @@ def main(argv=None):
         },
         "passed": passed,
     }
+    args.patch.parent.mkdir(parents=True, exist_ok=True)
+    args.patch.write_text(patch_text.rstrip() + "\n", encoding="utf-8")
     args.artifact.parent.mkdir(parents=True, exist_ok=True)
     args.artifact.write_text(
         json.dumps(artifact, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
