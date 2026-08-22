@@ -216,6 +216,13 @@ uv run python scripts/run_triage.py case.json --output triage-report.json
 最终 `TriageReport` 验证每条证据都引用当前 Run 中真实完成的 Tool Call；复现状态、修改路径、
 Verification 和工具步数由 Run Log 与 RunEvidence 确定性派生，而不是由模型自行声明。
 
+第一个真实模型案例复用冻结的 Click Pre-fix Fixture，将上游失败测试提交为干净的 Git
+baseline，并在 Agent 停止后才注入 Hidden Verifier：
+
+```bash
+uv run python scripts/run_click_triage.py --model gpt-5.6-luna
+```
+
 旧的 10/12/14 步差异化结果已删除。Real OSS v2 使用统一 40 工具步预算；没有任务失败后的选择性重跑，本次五题均为第 1 次尝试且没有基础设施重试。它绑定历史 Runtime commit `61207f4`，不能冒充当前工作树的模型结果。完整结果见 `artifacts/real-oss-suite-v2.{json,md}`。
 
 五仓库冻结任务集可以从精确上游 commit 重新物化并运行：
