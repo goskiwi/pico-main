@@ -10,6 +10,7 @@ from pico.tool_context import ToolContext
 from pico.tools import (
     build_tool_registry,
     tool_edit_file,
+    tool_list_files,
     tool_read_file,
     tool_search,
     validate_tool,
@@ -17,18 +18,44 @@ from pico.tools import (
 
 
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
-    (tmp_path / "sample.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "sample.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
         shell_env_provider=lambda: {"PWD": str(tmp_path)},
     )
 
-    result = tool_read_file(context, {"path": "sample.txt", "start": 1, "end": 1})
+    result = tool_read_file(context, {"path": "sample.txt", "start_line": 1, "end_line": 1})
 
     assert "# sample.txt" in result.content
     assert "revision: sha256:" in result.content
     assert "alpha" in result.content
+    assert result.structured == {
+        "path": "sample.txt",
+        "start_line": 1,
+        "end_line": 1,
+        "total_lines": 2,
+        "has_more": True,
+        "revision": result.structured["revision"],
+    }
+
+
+def test_list_files_reports_when_the_result_is_truncated(tmp_path):
+    for index in range(201):
+        (tmp_path / f"file-{index:03d}.txt").write_text("x", encoding="utf-8")
+    context = ToolContext(
+        workspace_root=tmp_path,
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    result = tool_list_files(context, {"path": "."})
+
+    assert result.structured == {
+        "path": ".",
+        "returned_count": 200,
+        "has_more": True,
+    }
 
 
 def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
@@ -46,8 +73,108 @@ def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
         validate_tool(
             context,
             "read_file",
-            {"path": "large.txt", "start": 1, "end": 1},
+            {"path": "large.txt", "start_line": 1, "end_line": 1},
         )
+
+
+def test_old_read_and_shell_parameter_names_are_rejected(tmp_path):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    agent = Pico(
+        FakeModelClient([]),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    old_read = agent.tools.run(
+        "read_file",
+        {"path": "README.md", "start": 1, "end": 1},
+    )
+    old_shell = agent.tools.run(
+        "run_shell",
+        {"command": "true", "timeout": 20},
+    )
+
+    assert old_read.status == "rejected"
+    assert old_read.failure.code == "invalid_arguments"
+    assert old_shell.status == "rejected"
+    assert old_shell.failure.code == "invalid_arguments"
+
+
+def test_file_failures_have_typed_recovery_conditions(tmp_path):
+    target = tmp_path / "README.md"
+    target.write_text("alpha\nalpha\n", encoding="utf-8")
+    agent = Pico(
+        FakeModelClient([]),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    missing = agent.tools.run(
+        "read_file",
+        {"path": "missing.py", "start_line": 1, "end_line": 1},
+    )
+    repeated_missing = agent.tools.run(
+        "read_file",
+        {"path": "missing.py", "start_line": 1, "end_line": 1},
+    )
+    revision = file_revision(target)
+    not_found = agent.tools.run(
+        "edit_file",
+        {
+            "path": "README.md",
+            "old_text": "missing",
+            "new_text": "beta",
+            "expected_revision": revision,
+        },
+    )
+    ambiguous = agent.tools.run(
+        "edit_file",
+        {
+            "path": "README.md",
+            "old_text": "alpha",
+            "new_text": "beta",
+            "expected_revision": revision,
+        },
+    )
+    target.write_text("external\n", encoding="utf-8")
+    conflict = agent.tools.run(
+        "edit_file",
+        {
+            "path": "README.md",
+            "old_text": "external",
+            "new_text": "beta",
+            "expected_revision": revision,
+        },
+    )
+
+    assert (missing.failure.code, missing.failure.recovery) == (
+        "missing_path",
+        "retry_after_change",
+    )
+    assert missing.correction_action == "repair"
+    assert repeated_missing.failure.code == "repeated_identical_call"
+    assert repeated_missing.correction_action == "replan"
+    assert (not_found.failure.code, not_found.failure.recovery) == (
+        "text_not_found",
+        "retry_after_change",
+    )
+    assert (ambiguous.failure.code, ambiguous.failure.recovery) == (
+        "ambiguous_text_match",
+        "retry_after_change",
+    )
+    assert (conflict.failure.code, conflict.failure.recovery) == (
+        "revision_conflict",
+        "retry_after_change",
+    )
+
+    (tmp_path / "missing.py").write_text("created\n", encoding="utf-8")
+    after_change = agent.tools.run(
+        "read_file",
+        {"path": "missing.py", "start_line": 1, "end_line": 1},
+    )
+    assert after_change.status == "success"
 
 
 def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
@@ -119,6 +246,25 @@ def test_fallback_search_has_a_global_match_limit(tmp_path):
     matches = [line for line in result.content.splitlines() if "needle" in line]
     assert len(matches) == 200
     assert "search result limit reached" in result.content
+    assert result.structured["match_count"] == 200
+    assert result.structured["truncated"] is True
+
+
+def test_fallback_search_uses_regex_and_classifies_invalid_patterns(tmp_path):
+    (tmp_path / "source.txt").write_text("Needle value\n", encoding="utf-8")
+    context = ToolContext(
+        workspace_root=tmp_path.resolve(),
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    with patch("pico.tools.shutil.which", return_value=None):
+        matched = tool_search(context, {"pattern": "N.edle", "path": "."})
+        invalid = tool_search(context, {"pattern": "[", "path": "."})
+
+    assert "source.txt:1:" in matched.content
+    assert matched.structured["engine"] == "python_regex"
+    assert invalid.failure.code == "invalid_search_pattern"
 
 
 def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
@@ -199,6 +345,8 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
         {"path": "sample.txt", "old_text": "alpha", "new_text": "beta", "expected_revision": revision},
     )
     assert "after_revision: sha256:" in result.content
+    assert result.structured["replacement_count"] == 1
+    assert result.structured["changed"] is True
     assert path.read_text(encoding="utf-8") == "beta\n"
 
     path.write_text("external\n", encoding="utf-8")

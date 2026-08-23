@@ -108,7 +108,7 @@ First call update_working_state. Record these constraints: read every listed evi
 file exactly once in order, modify only {TARGET_PATH}, and preserve the public API.
 Record a next step to read all evidence before editing.
 
-Then read every file below with one read_file call per file, using start=1 and end=200.
+Then read every file below with one read_file call per file, using start_line=1 and end_line=200.
 Do not use Search, List, project memory, or delegation:
 {files}
 

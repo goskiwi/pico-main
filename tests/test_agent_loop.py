@@ -1,3 +1,5 @@
+import json
+
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -27,7 +29,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("Done."),
         ],
     )
@@ -111,7 +113,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("Done."),
         ],
     )
@@ -120,7 +122,11 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert len(agent.model_client.prompts) == 2
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     assert agent.model_client.recorded_action_results[0][0] == "tool"
-    assert "alpha" in agent.model_client.recorded_action_results[0][1]
+    result = json.loads(agent.model_client.recorded_action_results[0][1])
+    assert result["status"] == "success"
+    assert result["correction_action"] == "continue"
+    assert result["structured"]["path"] == "hello.txt"
+    assert "alpha" in result["content"]
     turns = [
         entry for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
         if entry.kind == "turn_metrics"
@@ -150,7 +156,7 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
             return action
 
     client = ThresholdClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
         ModelAction.tool("list_files", {"path": "."}),
         ModelAction.final("Done after reset."),
     ])
@@ -218,7 +224,7 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
             return action
 
     client = CapacityClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
         ModelAction.final("Done without reset."),
     ])
     agent = Pico(
@@ -253,13 +259,13 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
         def complete_action(self, *args, **kwargs):
             action = super().complete_action(*args, **kwargs)
             self.last_completion_metadata = {
-                "input_tokens": 6800,
+                "input_tokens": 6700,
                 "output_tokens": 0,
             }
             return action
 
     client = GuidanceClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
         ModelAction.final("Done after guided reset."),
     ])
     agent = Pico(
@@ -286,8 +292,8 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
         entry for entry in entries if entry.kind == "provider_session_reset"
     )
     assert reset.payload["tool_result_tokens"] == 300
-    assert reset.payload["estimated_next_total"] == 8124
-    assert reset.payload["provider_context_tokens"] == 7100
+    assert reset.payload["estimated_next_total"] == 8024
+    assert reset.payload["provider_context_tokens"] == 7000
     assert "Runtime tool budget exhausted" in client.prompts[1]
 
 
@@ -312,10 +318,10 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
     client = OverflowClient(
         [
             ModelAction.tool(
-                "read_file", {"path": "first.txt", "start": 1, "end": 80}
+                "read_file", {"path": "first.txt", "start_line": 1, "end_line": 80}
             ),
             ModelAction.tool(
-                "read_file", {"path": "second.txt", "start": 1, "end": 80}
+                "read_file", {"path": "second.txt", "start_line": 1, "end_line": 80}
             ),
             ModelAction.final("Recovered after compaction."),
         ]
@@ -349,7 +355,7 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("Done at the tool boundary."),
         ],
     )
@@ -369,7 +375,7 @@ def test_default_loop_has_no_tool_execution_limit(tmp_path):
         encoding="utf-8",
     )
     outputs = [
-        ModelAction.tool("read_file", {"path": "many.txt", "start": index, "end": index})
+        ModelAction.tool("read_file", {"path": "many.txt", "start_line": index, "end_line": index})
         for index in range(1, 8)
     ]
     outputs.append(ModelAction.final("Completed seven reads."))
@@ -387,7 +393,7 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("First run completed."),
             ModelAction.final("Second run completed."),
         ],
@@ -410,7 +416,7 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.tool("list_files", {"path": "."}),
         ],
     )
@@ -435,7 +441,7 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
         tmp_path,
         [
             ModelAction.tool("read_file", {"path": "missing.txt"}),
-            ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 1}),
+            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("Recovered after correcting the call."),
         ],
     )

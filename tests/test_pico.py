@@ -30,7 +30,7 @@ def build_agent(tmp_path, outputs, **kwargs):
 
 def test_native_tool_loop_records_context_and_working_goal(tmp_path):
     agent = build_agent(tmp_path, [
-        ModelAction.tool("read_file", {"path": "hello.txt", "start": 1, "end": 2}),
+        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 2}),
         ModelAction.final("Read successfully."),
     ])
     assert agent.ask("Read hello") == "Read successfully."

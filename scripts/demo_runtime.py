@@ -32,7 +32,7 @@ def main():
                     "add_constraints": ["Only edit sample.txt"],
                     "add_next_steps": ["Read sample.txt"],
                 }),
-                ModelAction.tool("read_file", {"path": "sample.txt", "start": 1, "end": 20}),
+                ModelAction.tool("read_file", {"path": "sample.txt", "start_line": 1, "end_line": 20}),
                 ModelAction.tool("update_working_state", {
                     "add_decisions": ["The exact source text is alpha"],
                     "remove_next_steps": ["Read sample.txt"],

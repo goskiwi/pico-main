@@ -54,7 +54,7 @@ def run_context_governance_evaluation(
             for index in range(8):
                 call = ToolCall(
                     "read_file",
-                    {"path": "README.md", "start": 1, "end": 1},
+                    {"path": "README.md", "start_line": 1, "end_line": 1},
                     f"call_{size}_{index}",
                 )
                 agent.apply_run_event(run_log.append_tool_call(call))

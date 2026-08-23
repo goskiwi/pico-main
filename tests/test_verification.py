@@ -56,6 +56,7 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         "command": "MODE=test python -m pytest -q",
         "status": "passed",
         "freshness": "current",
+        "started_workspace_fingerprint": "current-workspace",
         "workspace_fingerprint": "current-workspace",
         "exit_code": 0,
         "output": "2 passed",

@@ -286,7 +286,7 @@ def test_run_log_rejects_mismatched_tool_result_before_persistence(tmp_path):
         execution_state="not_started",
         side_effect_state="none",
         content="rejected",
-        failure=FailureInfo("rejected", "rejected", False),
+        failure=FailureInfo("rejected", "rejected", "no_retry"),
     )
 
     with pytest.raises(ValueError, match="pending tool call"):

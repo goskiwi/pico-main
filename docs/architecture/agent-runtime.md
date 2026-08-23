@@ -75,8 +75,9 @@ ToolOutcome keeps three explicit state dimensions for direct inspection:
 
 - `status`: overall result (`success`, `error`, `rejected`, or `partial_success`);
 - `execution_state`: whether the Tool Runner was not started, returned normally, or failed/interrupted;
-- `side_effect_state`: whether effects are absent, changed, partial, or unknown;
-Tool Runners return structured `FailureInfo` through `ToolRunnerResult`; Runtime classification never parses display text to recover exit codes or failure state.
+- `side_effect_state`: whether effects are absent, changed, partial, or unknown.
+
+Tool Runners return machine-readable tool facts plus `FailureInfo` through `ToolRunnerResult`; each failure separates its factual code from a recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`). Runtime maps that condition to an explicit correction action (`repair`, `wait`, `request_user_action`, or `stop_route`), while a repeated unchanged failure escalates to `replan`. Only wait-type failures receive one unchanged-state retry. The audited `ToolOutcome` persists those facts and renders a compact structured result back to the model. Runtime classification never parses display text to recover exit codes or failure state.
 
 ## Context and compaction
 
@@ -88,4 +89,4 @@ Session stores only `active_run_id`. On startup Pico opens that Run Log, repairs
 
 ## Completion
 
-Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. A successful `run_shell` call whose command exactly matches the configured verifier is recorded against the current workspace fingerprint and reused by the Completion Gate. `pico run show` derives its summary directly from the Run Log.
+Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. A `run_shell` call whose command exactly matches the configured verifier records both its starting and finishing workspace fingerprints; only an unchanged successful workspace is reusable by the Completion Gate. `pico run show` derives its summary directly from the Run Log.

@@ -52,6 +52,7 @@ def verify_workspace(
         "command": command,
         "status": "infrastructure_error",
         "freshness": "current",
+        "started_workspace_fingerprint": before,
         "workspace_fingerprint": before,
         "exit_code": None,
         "output": "",

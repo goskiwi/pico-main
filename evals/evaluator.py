@@ -46,7 +46,7 @@ class BenchmarkModel:
         )
         behavior = self.task.get("behavior", "")
         if behavior == "path_escape" and self.step == 1:
-            return ModelAction.tool("read_file", {"path": "../outside.txt", "start": 1, "end": 20})
+            return ModelAction.tool("read_file", {"path": "../outside.txt", "start_line": 1, "end_line": 20})
         if behavior == "invalid_patch" and self.step == 1:
             return ModelAction.tool(
                 "edit_file",
@@ -57,7 +57,7 @@ class BenchmarkModel:
         offset = 1 if behavior in {"path_escape", "invalid_patch"} else 0
         if self.step <= offset + read_count:
             return ModelAction.tool(
-                "read_file", {"path": self.task["target_path"], "start": 1, "end": 200}
+                "read_file", {"path": self.task["target_path"], "start_line": 1, "end_line": 200}
             )
         revisions = re.findall(r"revision: (sha256:[a-f0-9]{64})", prompt)
         if revisions and not self.patch_requested:

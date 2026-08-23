@@ -2,7 +2,7 @@ import pytest
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
-from pico.contracts import ToolCall, ToolRunnerResult
+from pico.contracts import FailureInfo, ToolCall, ToolRunnerResult
 from pico.run_log import RunLog
 from pico.task_state import TaskState
 
@@ -151,11 +151,12 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
         }
     )
     agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
-        "exit_code: 0\nstdout:\n1 passed"
+        "exit_code: 0\nstdout:\n1 passed",
+        structured={"exit_code": 0},
     )
     call = ToolCall(
         "run_shell",
-        {"command": "verify", "timeout": 20},
+        {"command": "verify", "timeout_seconds": 20},
         "call_verify",
     )
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
@@ -171,3 +172,70 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
     verification = agent.run.evidence.verifications[-1]
     assert verification["source_tool_call_id"] == "call_verify"
     assert verification["status"] == "passed"
+    assert verification["started_workspace_fingerprint"] == verification[
+        "workspace_fingerprint"
+    ]
+
+
+def test_matching_shell_verification_is_stale_when_workspace_changes_during_run(
+    tmp_path,
+):
+    agent, target = active_agent(tmp_path)
+    agent.run.evidence.effects.append(
+        {
+            "effect_scope": "workspace",
+            "affected_paths": ["subject.txt"],
+        }
+    )
+
+    def verify_while_workspace_changes(_args):
+        target.write_text("beta\n", encoding="utf-8")
+        return ToolRunnerResult(
+            "exit_code: 0\nstdout:\n1 passed",
+            structured={"exit_code": 0},
+        )
+
+    agent.tools.registry["run_shell"]["run"] = verify_while_workspace_changes
+    call = ToolCall(
+        "run_shell",
+        {"command": "verify", "timeout_seconds": 20},
+        "call_stale_verify",
+    )
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+
+    outcome = agent.tools.run(call)
+    verification = agent.run.evidence.verifications[-1]
+
+    assert outcome.status == "success"
+    assert verification["status"] == "stale"
+    assert verification["freshness"] == "stale"
+    assert verification["started_workspace_fingerprint"] != verification[
+        "workspace_fingerprint"
+    ]
+
+
+def test_failed_matching_shell_command_records_current_verification_failure(tmp_path):
+    agent, _target = active_agent(tmp_path)
+    agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
+        "exit_code: 1\nstderr:\n1 failed",
+        structured={"exit_code": 1},
+        failure=FailureInfo(
+            "command_failed",
+            "command exited with 1",
+            "retry_after_change",
+        ),
+    )
+    call = ToolCall(
+        "run_shell",
+        {"command": "verify", "timeout_seconds": 20},
+        "call_failed_verify",
+    )
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+
+    outcome = agent.tools.run(call)
+    verification = agent.run.evidence.verifications[-1]
+
+    assert outcome.status == "error"
+    assert verification["status"] == "failed"
+    assert verification["freshness"] == "current"
+    assert verification["exit_code"] == 1

@@ -13,6 +13,24 @@ TOOL_STATUSES = frozenset({"success", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
 EFFECT_SCOPES = frozenset({"none", "workspace", "project_memory", "mixed"})
+RECOVERY_CONDITIONS = frozenset(
+    {
+        "retry_after_change",
+        "retry_after_wait",
+        "user_action_required",
+        "no_retry",
+    }
+)
+CORRECTION_ACTIONS = frozenset(
+    {
+        "continue",
+        "repair",
+        "replan",
+        "wait",
+        "request_user_action",
+        "stop_route",
+    }
+)
 
 
 def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
@@ -62,11 +80,14 @@ class ToolRunnerResult:
     """Exact result returned by a tool runner before Runtime auditing."""
 
     content: str
+    structured: dict[str, Any] = field(default_factory=dict)
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
     failure: FailureInfo | None = None
 
     def __post_init__(self):
+        if not isinstance(self.structured, dict):
+            raise TypeError("tool runner structured result must be an object")
         if self.effect_scope not in EFFECT_SCOPES:
             raise ValueError(f"invalid tool effect scope: {self.effect_scope}")
         if self.affected_paths and self.effect_scope == "none":
@@ -107,31 +128,37 @@ class ModelAction:
 class FailureInfo:
     code: str
     detail: str = ""
-    retryable: bool = False
+    recovery: str = "no_retry"
 
     def __post_init__(self):
         if not self.code:
             raise ValueError("failure information requires a code")
+        if self.recovery not in RECOVERY_CONDITIONS:
+            raise ValueError(f"invalid failure recovery condition: {self.recovery}")
 
     def to_dict(self):
         return {
             "code": self.code,
             "detail": self.detail,
-            "retryable": self.retryable,
+            "recovery": self.recovery,
         }
 
     @classmethod
     def from_dict(cls, value):
-        expected = {"code", "detail", "retryable"}
+        expected = {"code", "detail", "recovery"}
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid failure information")
-        if not isinstance(value["retryable"], bool):
-            raise TypeError("failure retryable must be boolean")
         return cls(
             code=str(value["code"]),
             detail=str(value["detail"]),
-            retryable=value["retryable"],
+            recovery=str(value["recovery"]),
         )
+
+
+class ToolFailureError(RuntimeError):
+    def __init__(self, code, detail, recovery="retry_after_change"):
+        self.failure = FailureInfo(str(code), str(detail), str(recovery))
+        super().__init__(self.failure.detail)
 
 
 @dataclass(frozen=True)
@@ -144,6 +171,8 @@ class ToolOutcome:
     execution_state: str
     side_effect_state: str
     content: str
+    correction_action: str = "continue"
+    structured: dict[str, Any] = field(default_factory=dict)
     failure: FailureInfo | None = None
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
@@ -158,6 +187,12 @@ class ToolOutcome:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
         if self.effect_scope not in EFFECT_SCOPES:
             raise ValueError(f"invalid effect scope: {self.effect_scope}")
+        if self.correction_action not in CORRECTION_ACTIONS:
+            raise ValueError(
+                f"invalid correction action: {self.correction_action}"
+            )
+        if not isinstance(self.structured, dict):
+            raise TypeError("tool outcome structured result must be an object")
         if self.status == "success" and self.execution_state != "completed":
             raise ValueError("successful outcome must complete execution")
         if self.status == "rejected" and self.execution_state != "not_started":
@@ -182,6 +217,8 @@ class ToolOutcome:
             "execution_state": self.execution_state,
             "side_effect_state": self.side_effect_state,
             "content": self.content,
+            "correction_action": self.correction_action,
+            "structured": dict(self.structured),
             "failure": self.failure.to_dict() if self.failure else None,
             "affected_paths": list(self.affected_paths),
             "effect_scope": self.effect_scope,
@@ -197,6 +234,8 @@ class ToolOutcome:
             "execution_state",
             "side_effect_state",
             "content",
+            "correction_action",
+            "structured",
             "failure",
             "affected_paths",
             "effect_scope",
@@ -204,8 +243,10 @@ class ToolOutcome:
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid ToolOutcome")
-        if not isinstance(value["affected_paths"], list) or not isinstance(
-            value["artifact"], dict
+        if (
+            not isinstance(value["structured"], dict)
+            or not isinstance(value["affected_paths"], list)
+            or not isinstance(value["artifact"], dict)
         ):
             raise TypeError("ToolOutcome collection fields have invalid types")
         failure = value["failure"]
@@ -216,8 +257,35 @@ class ToolOutcome:
             execution_state=str(value["execution_state"]),
             side_effect_state=str(value["side_effect_state"]),
             content=str(value["content"]),
+            correction_action=str(value["correction_action"]),
+            structured=dict(value["structured"]),
             failure=FailureInfo.from_dict(failure) if failure is not None else None,
             affected_paths=tuple(str(item) for item in value["affected_paths"]),
             effect_scope=str(value["effect_scope"]),
             artifact=dict(value["artifact"]),
+        )
+
+    def render_for_model(self):
+        payload = {
+            "status": self.status,
+            "execution_state": self.execution_state,
+            "side_effect_state": self.side_effect_state,
+            "correction_action": self.correction_action,
+            "content": self.content,
+        }
+        if self.structured:
+            payload["structured"] = dict(self.structured)
+        if self.failure is not None:
+            payload["failure"] = self.failure.to_dict()
+        if self.affected_paths:
+            payload["affected_paths"] = list(self.affected_paths)
+        if self.effect_scope != "none":
+            payload["effect_scope"] = self.effect_scope
+        if self.artifact:
+            payload["artifact"] = dict(self.artifact)
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )

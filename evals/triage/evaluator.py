@@ -92,13 +92,13 @@ class ScriptedTriageModel:
         if self.step == 1:
             return ModelAction.tool(
                 "run_shell",
-                {"command": self.case.failing_command, "timeout": 20},
+                {"command": self.case.failing_command, "timeout_seconds": 20},
                 call_id="call_reproduce",
             )
         if self.step == 2:
             return ModelAction.tool(
                 "read_file",
-                {"path": self.case.target_path, "start": 1, "end": 200},
+                {"path": self.case.target_path, "start_line": 1, "end_line": 200},
                 call_id="call_source",
             )
         if self.step == 3:

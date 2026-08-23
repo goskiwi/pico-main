@@ -4,7 +4,9 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import hashlib
 import os
+import re
 import selectors
 import shutil
 import stat
@@ -13,15 +15,13 @@ import textwrap
 import time
 from collections import deque
 from functools import partial
-from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .contracts import FailureInfo, ToolRunnerResult
+from .contracts import FailureInfo, ToolFailureError, ToolRunnerResult
 from .features.memory import normalize_working_update
-from .mutations import file_revision
 from .project_memory import MEMORY_RECALL_MAX_CARDS
 from .sandbox import shell_argv
 from .workspace import IGNORED_PATH_NAMES
@@ -46,8 +46,8 @@ class ListFilesArgs(ToolArgs):
 
 class ReadFileArgs(ToolArgs):
     path: str = Field(min_length=1)
-    start: int = Field(default=1, ge=1)
-    end: int = Field(default=200, ge=1)
+    start_line: int = Field(default=1, ge=1)
+    end_line: int = Field(default=200, ge=1)
 
 
 class ReadArtifactArgs(ToolArgs):
@@ -63,7 +63,7 @@ class SearchArgs(ToolArgs):
 
 class RunShellArgs(ToolArgs):
     command: str = Field(min_length=1)
-    timeout: int = Field(default=20, ge=1, le=120)
+    timeout_seconds: int = Field(default=20, ge=1, le=120)
 
 
 class WriteFileArgs(ToolArgs):
@@ -262,18 +262,28 @@ def build_action_tools(tools):
 
 
 def _validate_list_files(context, args):
-    if not context.path(args.get("path", ".")).is_dir():
-        raise ValueError("path is not a directory")
+    path = context.path(args.get("path", "."))
+    if not path.exists():
+        raise ToolFailureError("missing_path", f"path does not exist: {args.get('path', '.')}")
+    if not path.is_dir():
+        raise ToolFailureError("invalid_path_type", "path is not a directory")
     return args
 
 
 def _validate_read_file(context, args):
     path = context.path(args["path"])
+    if not path.exists():
+        raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
     if not path.is_file():
-        raise ValueError("path is not a file")
-    if int(args.get("end", 200)) < int(args.get("start", 1)):
+        raise ToolFailureError("invalid_path_type", "path is not a file")
+    if int(args.get("end_line", 200)) < int(args.get("start_line", 1)):
         raise ValueError("invalid line range")
-    if int(args.get("end", 200)) - int(args.get("start", 1)) + 1 > READ_FILE_MAX_LINES:
+    if (
+        int(args.get("end_line", 200))
+        - int(args.get("start_line", 1))
+        + 1
+        > READ_FILE_MAX_LINES
+    ):
         raise ValueError(f"read_file returns at most {READ_FILE_MAX_LINES} lines")
     if path.stat().st_size > READ_FILE_MAX_BYTES:
         raise ValueError(
@@ -291,7 +301,9 @@ def _validate_read_artifact(context, args):
 def _validate_search(context, args):
     if not str(args.get("pattern", "")).strip():
         raise ValueError("pattern must not be empty")
-    context.path(args.get("path", "."))
+    path = context.path(args.get("path", "."))
+    if not path.exists():
+        raise ToolFailureError("missing_path", f"path does not exist: {args.get('path', '.')}")
     return args
 
 
@@ -309,7 +321,7 @@ def _require_mutation_service(context):
 def _validate_write_file(context, args):
     path = context.path(args["path"])
     if path.exists() and path.is_dir():
-        raise ValueError("path is a directory")
+        raise ToolFailureError("invalid_path_type", "path is a directory")
     _require_mutation_service(context)
     return args
 
@@ -317,8 +329,11 @@ def _validate_write_file(context, args):
 def _validate_edit_file(context, args):
     # Edit admission is intentionally strict so the later mutation is
     # deterministic and revision-bound.
-    if not context.path(args["path"]).is_file():
-        raise ValueError("path is not a file")
+    path = context.path(args["path"])
+    if not path.exists():
+        raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
+    if not path.is_file():
+        raise ToolFailureError("invalid_path_type", "path is not a file")
     _require_mutation_service(context)
     return args
 
@@ -374,26 +389,55 @@ def tool_list_files(context, args):
         item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
         if item.name not in IGNORED_PATH_NAMES
     ]
+    selected = entries[:200]
     lines = []
-    for entry in entries[:200]:
+    for entry in selected:
         kind = "[D]" if entry.is_dir() else "[F]"
         lines.append(f"{kind} {entry.relative_to(context.workspace_root)}")
-    return ToolRunnerResult("\n".join(lines) or "(empty)")
+    relative = path.relative_to(context.workspace_root).as_posix() or "."
+    return ToolRunnerResult(
+        "\n".join(lines) or "(empty)",
+        structured={
+            "path": relative,
+            "returned_count": len(selected),
+            "has_more": len(entries) > len(selected),
+        },
+    )
 
 
 def tool_read_file(context, args):
     path = context.path(args["path"])
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        lines = islice(handle, start - 1, end)
-        rendered = []
-        for number, line in enumerate(lines, start=start):
-            line = line.removesuffix("\n").removesuffix("\r")
-            rendered.append(f"{number:>4}: {line}")
-        body = "\n".join(rendered)
+    start_line = int(args.get("start_line", 1))
+    requested_end_line = int(args.get("end_line", 200))
+    digest = hashlib.sha256()
+    rendered = []
+    total_lines = 0
+    with path.open("rb") as handle:
+        for number, raw_line in enumerate(handle, start=1):
+            digest.update(raw_line)
+            total_lines = number
+            if start_line <= number <= requested_end_line:
+                line = raw_line.decode("utf-8", errors="replace")
+                line = line.removesuffix("\n").removesuffix("\r")
+                rendered.append(f"{number:>4}: {line}")
+    body = "\n".join(rendered)
+    revision = "sha256:" + digest.hexdigest()
+    actual_end_line = (
+        min(requested_end_line, total_lines)
+        if total_lines >= start_line
+        else None
+    )
+    relative = path.relative_to(context.workspace_root).as_posix()
     return ToolRunnerResult(
-        f"# {path.relative_to(context.workspace_root)}\nrevision: {file_revision(path)}\n{body}"
+        f"# {relative}\nrevision: {revision}\n{body}",
+        structured={
+            "path": relative,
+            "start_line": start_line,
+            "end_line": actual_end_line,
+            "total_lines": total_lines,
+            "has_more": total_lines > requested_end_line,
+            "revision": revision,
+        },
     )
 
 
@@ -414,10 +458,19 @@ def tool_read_artifact(context, args):
             "\n[More output available; call read_artifact with "
             f"offset={page['end_offset']}.]"
         )
-    return ToolRunnerResult(header + page["content"] + continuation)
+    return ToolRunnerResult(
+        header + page["content"] + continuation,
+        structured={
+            "artifact_id": str(args["artifact_id"]),
+            "offset": page["offset"],
+            "end_offset": page["end_offset"],
+            "total_bytes": page["total_bytes"],
+            "has_more": page["end_offset"] < page["total_bytes"],
+        },
+    )
 
 
-def _bounded_rg_search(root, relative_path, pattern):
+def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded process lifecycle
     process = subprocess.Popen(
         [
             "rg",
@@ -479,14 +532,35 @@ def _bounded_rg_search(root, relative_path, pattern):
     stdout_lines = buffers["stdout"].decode("utf-8", errors="replace").splitlines()
     match_limited = len(stdout_lines) > SEARCH_MAX_MATCHES
     lines = stdout_lines[:SEARCH_MAX_MATCHES]
+    stderr = buffers["stderr"].decode("utf-8", errors="replace").strip()
+    truncated = bool(limited or match_limited)
+    failure = None
     if timed_out:
         lines.append("[search timed out]")
-    elif limited or match_limited:
+        failure = FailureInfo(
+            "search_timeout",
+            "search timed out",
+            "retry_after_change",
+        )
+    elif truncated:
         lines.append("[search result limit reached]")
-    if lines:
-        return "\n".join(lines).replace(str(root) + "/", "")
-    stderr = buffers["stderr"].decode("utf-8", errors="replace").strip()
-    return stderr or "(no matches)"
+    elif process.returncode not in {0, 1}:
+        detail = stderr or f"rg exited with {process.returncode}"
+        code = "invalid_search_pattern" if "regex" in detail.lower() else "search_failed"
+        failure = FailureInfo(code, detail, "retry_after_change")
+    content = "\n".join(lines).replace(str(root) + "/", "")
+    if not content:
+        content = stderr or "(no matches)"
+    return ToolRunnerResult(
+        content,
+        structured={
+            "engine": "rg",
+            "match_count": len(stdout_lines[:SEARCH_MAX_MATCHES]),
+            "truncated": truncated,
+            "timed_out": timed_out,
+        },
+        failure=failure,
+    )
 
 
 def _fallback_search_files(path, deadline):
@@ -530,20 +604,38 @@ def _fallback_search_files(path, deadline):
 
 def _fallback_search(context, path, pattern):
     deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
+    flags = 0 if any(character.isupper() for character in pattern) else re.IGNORECASE
+    try:
+        expression = re.compile(pattern, flags)
+    except re.error as exc:
+        return ToolRunnerResult(
+            f"invalid search pattern: {exc}",
+            structured={
+                "engine": "python_regex",
+                "match_count": 0,
+                "truncated": False,
+                "timed_out": False,
+            },
+            failure=FailureInfo(
+                "invalid_search_pattern",
+                str(exc),
+                "retry_after_change",
+            ),
+        )
     files, limited = _fallback_search_files(path, deadline)
     matches = []
-    needle = pattern.lower()
+    timed_out = False
     for file_path in files:
         if time.monotonic() >= deadline:
-            limited = True
+            timed_out = True
             break
         try:
             with file_path.open("r", encoding="utf-8", errors="replace") as handle:
                 for number, line in enumerate(handle, start=1):
                     if time.monotonic() >= deadline:
-                        limited = True
+                        timed_out = True
                         break
-                    if needle in line.lower():
+                    if expression.search(line):
                         line = line.removesuffix("\n").removesuffix("\r")
                         matches.append(
                             f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
@@ -553,11 +645,30 @@ def _fallback_search(context, path, pattern):
                             break
         except OSError:
             continue
-        if limited:
+        if limited or timed_out:
             break
-    if limited:
+    if timed_out:
+        matches.append("[search timed out]")
+    elif limited:
         matches.append("[search result limit reached]")
-    return "\n".join(matches) or "(no matches)"
+    return ToolRunnerResult(
+        "\n".join(matches) or "(no matches)",
+        structured={
+            "engine": "python_regex",
+            "match_count": len(matches) - int(limited or timed_out),
+            "truncated": bool(limited),
+            "timed_out": timed_out,
+        },
+        failure=(
+            FailureInfo(
+                "search_timeout",
+                "search timed out",
+                "retry_after_change",
+            )
+            if timed_out
+            else None
+        ),
+    )
 
 
 def tool_search(context, args):
@@ -566,21 +677,19 @@ def tool_search(context, args):
 
     if shutil.which("rg"):
         relative_path = path.relative_to(context.workspace_root).as_posix() or "."
-        return ToolRunnerResult(
-            _bounded_rg_search(context.workspace_root, relative_path, pattern)
-        )
-    return ToolRunnerResult(_fallback_search(context, path, pattern))
+        return _bounded_rg_search(context.workspace_root, relative_path, pattern)
+    return _fallback_search(context, path, pattern)
 
 
 def tool_run_shell(context, args):
     command = str(args.get("command", "")).strip()
-    timeout = int(args.get("timeout", 20))
+    timeout_seconds = int(args.get("timeout_seconds", 20))
     if context.sandbox is None:
         raise RuntimeError("Docker sandbox is unavailable")
     result = context.sandbox.run(
         shell_argv(command),
         cwd=context.workspace_root,
-        timeout=timeout,
+        timeout=timeout_seconds,
         env=context.shell_env(),
         execution_context=context.execution_context(),
     )
@@ -588,43 +697,49 @@ def tool_run_shell(context, args):
         failure = FailureInfo(
             "sandbox_infrastructure_error",
             result.stderr.strip() or "Docker could not start the sandbox",
-            False,
+            "user_action_required",
         )
     elif result.cancelled:
         failure = FailureInfo(
             "command_cancelled",
             result.stop_reason or "command cancelled",
-            False,
+            "no_retry",
         )
     elif result.timed_out:
         failure = FailureInfo(
             "command_timeout",
             result.stop_reason or "command timed out",
-            True,
+            "retry_after_change",
         )
     elif result.output_limited:
         failure = FailureInfo(
             "command_output_limit",
             result.stop_reason or "command exceeded the output limit",
-            False,
+            "retry_after_change",
         )
     elif result.killed:
         failure = FailureInfo(
             "command_killed",
             result.stop_reason or "command was killed",
-            False,
+            "retry_after_change",
         )
     elif result.returncode is None:
         failure = FailureInfo(
             "command_result_missing",
             result.stop_reason or "command did not report an exit code",
-            True,
+            "retry_after_wait",
+        )
+    elif result.returncode == 127:
+        failure = FailureInfo(
+            "command_not_found",
+            result.stderr.strip() or "shell could not find the command",
+            "retry_after_change",
         )
     elif result.returncode != 0:
         failure = FailureInfo(
             "command_failed",
             f"command exited with {result.returncode}",
-            True,
+            "retry_after_change",
         )
     else:
         failure = None
@@ -642,6 +757,16 @@ def tool_run_shell(context, args):
             {result.stderr.strip() or "(empty)"}
             """
         ).strip(),
+        structured={
+            "exit_code": result.returncode,
+            "timed_out": result.timed_out,
+            "cancelled": result.cancelled,
+            "killed": result.killed,
+            "output_limited": result.output_limited,
+            "stop_reason": result.stop_reason,
+            "cleanup_state": result.cleanup_state,
+            "sandbox": "docker",
+        },
         failure=failure,
     )
 
@@ -657,6 +782,12 @@ def tool_write_file(context, args):
             f"wrote {relative} ({len(content)} chars)\n"
             f"before_revision: {before}\nafter_revision: {after}"
         ),
+        structured={
+            "path": relative,
+            "changed": changed,
+            "before_revision": before,
+            "after_revision": after,
+        },
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
     )
@@ -672,6 +803,13 @@ def tool_edit_file(context, args):
     changed = before != after
     return ToolRunnerResult(
         content=f"edited {relative}\nbefore_revision: {before}\nafter_revision: {after}",
+        structured={
+            "path": relative,
+            "changed": changed,
+            "replacement_count": 1,
+            "before_revision": before,
+            "after_revision": after,
+        },
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
     )
@@ -708,7 +846,12 @@ def tool_memory_store(context, args):
     if action == "unchanged":
         return ToolRunnerResult(
             f"{action} project memory {card.filename}; no data changed. "
-            "Do not repeat memory_store; submit the final answer if the task is complete."
+            "Do not repeat memory_store; submit the final answer if the task is complete.",
+            structured={
+                "filename": card.filename,
+                "action": action,
+                "changed": False,
+            },
         )
     paths = _memory_effect_paths(context, card.filename)
     return ToolRunnerResult(
@@ -716,13 +859,21 @@ def tool_memory_store(context, args):
             f"{action} project memory {card.filename}; commit complete. "
             "Do not repeat memory_store for the same fact."
         ),
+        structured={
+            "filename": card.filename,
+            "action": action,
+            "changed": True,
+        },
         affected_paths=paths,
         effect_scope="project_memory",
     )
 
 
-def tool_update_working_state(_context, _args):
-    return ToolRunnerResult("working state update accepted")
+def tool_update_working_state(_context, args):
+    return ToolRunnerResult(
+        "working state update accepted",
+        structured={"update": dict(args)},
+    )
 
 
 def tool_memory_recall(context, args):
@@ -740,7 +891,13 @@ def tool_memory_recall(context, args):
             "omitted by recall budget: " + ", ".join(omitted_names)
         )
     lines.extend(["", rendered])
-    return ToolRunnerResult("\n".join(lines))
+    return ToolRunnerResult(
+        "\n".join(lines),
+        structured={
+            "included_filenames": list(included_names),
+            "omitted_filenames": list(omitted_names),
+        },
+    )
 
 
 def tool_memory_forget(context, args):
@@ -750,6 +907,7 @@ def tool_memory_forget(context, args):
     paths = _memory_effect_paths(context, card.filename)
     return ToolRunnerResult(
         content=f"forgot project memory {card.filename}",
+        structured={"filename": card.filename, "changed": True},
         affected_paths=paths,
         effect_scope="project_memory",
     )

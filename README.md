@@ -66,19 +66,19 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 
 核心实现：
 
-- 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用，最终回答也通过 `submit_final`。
+- 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用；Runtime 将状态、失败和工具特有事实作为紧凑结构化结果返回模型，最终回答也通过 `submit_final`。
 - Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；WorkingState、TaskState、RunEvidence 和运行统计由同一事件 reducer 实时投影并可重建。Workspace、Project Memory 和 Artifact 分别持有其当前内容事实。
 - 长上下文治理：Prompt 使用配置的模型 Context Window；预算包含各 section、序列化 Tool Schema，并在 fresh Provider usage 返回后纳入已观测的协议开销。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，并通过独立模型 Session 生成 Goal、Constraints、Progress、Key Decisions、Next Steps 和 Critical Context 六段式语义投影；WorkingState 与 Tool 事实仍为权威来源，Summary 超时、格式错误或不够短时回退确定性事务摘要。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
 - Workspace 新鲜度：工具 runner 以结构化结果声明精确影响路径；普通读取不扫描全仓，写入后只失效 Runtime Workspace revision。Completion/Verifier 才对完整 Workspace 内容做强制指纹扫描并绑定验证证据。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层状态：Run WorkingState 由 `user_message` 和 `update_working_state` Tool 事务投影，保存目标、约束、已确认决定和下一步；Session 只保存 `active_run_id`。跨任务 Project Memory 以 Markdown Card 为唯一事实源，写入来源由 Run ID 和 Tool Call ID 定位；生成的 `MEMORY.md` Catalog 会从 Card 自愈并有界地常驻上下文。主模型按可见描述显式调用 `memory_recall`，Runtime 在独立预算内返回最多五张完整 Card，所有 Recall Call/Result 都进入正常 RunLog 与模型计量。文件事实始终从 Workspace、搜索和 Run Log 获取。
-- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；重复调用检测；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
+- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；失败事实、恢复前提和当前纠错动作分离，只有等待型失败允许一次同状态重试，重复失败升级为 `replan`；写入必须携带 `read_file` 返回的 SHA-256 revision，并通过 fsync + atomic replace 提交。
 - 最小 Shell 环境：未配置时使用默认白名单；显式空白名单保持为空，仅由 Shell 边界补充运行必需的 `PWD`/`PATH`。
 - 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
 - 隔离执行：`run_shell` 在临时 Docker 容器内通过 POSIX Shell 执行，支持 `&&`、管道、重定向、环境变量与 `cd`；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 崩溃恢复：Session 只保存 `active_run_id`。副作用前先 fsync `tool_started` 及精确潜在影响路径/before revision；结果完成后 fsync `tool_result`。恢复时若二者不配对，只检查声明路径并生成 interrupted error/partial，绝不盲目重放。最后一条未完成 JSONL 尾巴可截断，中间损坏直接报错。
 - 恢复配置：模型、预算、超时、Verifier、工具表面和权限策略均使用续跑时的当前配置，不冻结为 Resume identity。
-- 完成证据：观察、修改和结构化 verifier 结果写入 RunEvidence；变更 Python 先做 AST 校验，Workspace 变更需通过绑定当前内容指纹的 Runtime verifier，未解决 partial/unknown 状态禁止成功结束。
+- 完成证据：观察、修改和结构化 verifier 结果写入 RunEvidence；变更 Python 先做 AST 校验，模型触发或 Runtime 自动执行的 Verifier 都比较开始/结束内容指纹，期间变化会使证据 stale；未解决 partial/unknown 状态禁止成功结束。
 
 ## 多 Agent 协作
 

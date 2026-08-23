@@ -10,7 +10,7 @@ from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
 from .features.memory import WorkingState
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState, apply_task_event
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v8"
+RUN_LOG_SCHEMA_VERSION = "run-log-v9"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -590,7 +590,12 @@ class RunLog:
                 execution_state="not_started",
                 side_effect_state="none",
                 content=detail,
-                failure=FailureInfo("operation_not_started", detail, True),
+                correction_action="wait",
+                failure=FailureInfo(
+                    "operation_not_started",
+                    detail,
+                    "retry_after_wait",
+                ),
             )
         else:
             potential = list(started.payload.get("potential_effects", []))
@@ -617,8 +622,11 @@ class RunLog:
                 execution_state="failed",
                 side_effect_state="partial" if changed else ("unknown" if unknown else "none"),
                 content=detail,
+                correction_action="stop_route" if uncertain else "wait",
                 failure=FailureInfo(
-                    "operation_interrupted", detail, not uncertain
+                    "operation_interrupted",
+                    detail,
+                    "no_retry" if uncertain else "retry_after_wait",
                 ),
                 affected_paths=tuple(changed),
                 effect_scope=effect_scope if changed or unknown else "none",
@@ -771,9 +779,10 @@ class RunLog:
             )
         if entry.kind == "tool_result":
             artifact = f" artifact={entry.artifact_id}" if entry.artifact_id else ""
+            outcome = ToolOutcome.from_dict(entry.payload["outcome"])
             return (
                 f"[tool/{entry.name}/{entry.outcome_status}/"
-                f"{entry.side_effect_state}{artifact}] {entry.content}"
+                f"{entry.side_effect_state}{artifact}] {outcome.render_for_model()}"
             )
         return f"[{entry.kind}] {entry.content}"
 

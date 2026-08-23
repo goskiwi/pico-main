@@ -30,7 +30,7 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
     agent = build_agent(tmp_path)
 
     outcome = agent.tools.run(
-        ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_test")
+        ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "call_test")
     )
 
     assert isinstance(outcome, ToolOutcome)
@@ -44,6 +44,8 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
         "execution_state",
         "side_effect_state",
         "content",
+        "correction_action",
+        "structured",
         "failure",
         "affected_paths",
         "effect_scope",
@@ -97,7 +99,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
         [
             ModelAction.tool(
                 "read_file",
-                {"path": "secret.txt", "start": 1, "end": 1},
+                {"path": "secret.txt", "start_line": 1, "end_line": 1},
             ),
             ModelAction.final("Done."),
         ]
@@ -127,8 +129,10 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
         agent.tools.registry["list_files"]["run"] = fail_with_secret
         failed = agent.tools.run(ToolCall("list_files", {}, "call_secret_failure"))
 
+        (tmp_path / "state-change.txt").write_text("changed\n", encoding="utf-8")
         agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
-            (secret + "\n") * 2000
+            (secret + "\n") * 2000,
+            structured={"secret": secret},
         )
         large = agent.tools.run(ToolCall("list_files", {}, "call_secret_artifact"))
         artifact_path = (
@@ -145,10 +149,12 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
     assert secret not in persisted
     assert secret not in failed.content
     assert secret not in failed.failure.detail
+    assert secret not in large.structured["secret"]
     assert secret not in artifact_content
     assert "<redacted>" in provider_result
     assert "<redacted>" in persisted
     assert "<redacted>" in artifact_content
+    assert large.structured["secret"] == "<redacted>"
 
 
 def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
@@ -160,7 +166,7 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     agent = build_agent(tmp_path)
 
     outcome = agent.tools.run(
-        ToolCall("read_file", {"path": "large.txt", "start": 1, "end": 20}, "call_large")
+        ToolCall("read_file", {"path": "large.txt", "start_line": 1, "end_line": 20}, "call_large")
     )
 
     artifact = (
@@ -187,7 +193,7 @@ def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     )
 
     outcome = agent.tools.run(
-        ToolCall("run_shell", {"command": "true", "timeout": 20}, "call_shell_large")
+        ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_shell_large")
     )
 
     assert "head-marker" not in outcome.content
@@ -205,12 +211,14 @@ def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
     failed_agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
         "command display format changed",
         failure=FailureInfo(
-            "command_failed", "command exited with 7", True
+            "command_failed",
+            "command exited with 7",
+            "retry_after_change",
         ),
     )
 
     failed = failed_agent.tools.run(
-        ToolCall("run_shell", {"command": "false", "timeout": 20}, "call_failed")
+        ToolCall("run_shell", {"command": "false", "timeout_seconds": 20}, "call_failed")
     )
 
     assert failed.status == "error"
@@ -223,7 +231,7 @@ def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
     )
 
     successful = successful_agent.tools.run(
-        ToolCall("run_shell", {"command": "true", "timeout": 20}, "call_success")
+        ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_success")
     )
 
     assert successful.status == "success"
@@ -242,8 +250,19 @@ def test_tool_outcome_rejects_impossible_execution_states():
         )
 
 
+def test_failure_info_rejects_old_retryable_field():
+    with pytest.raises(ValueError, match="invalid failure information"):
+        FailureInfo.from_dict(
+            {
+                "code": "command_failed",
+                "detail": "failed",
+                "retryable": True,
+            }
+        )
+
+
 def test_tool_outcome_requires_consistent_effect_facts():
-    failure = FailureInfo("tool_partial_success", "partial", False)
+    failure = FailureInfo("tool_partial_success", "partial", "no_retry")
 
     with pytest.raises(ValueError, match="known side effects require affected paths"):
         ToolOutcome(
@@ -338,7 +357,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
 
 def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
     agent = build_agent(tmp_path)
-    args = {"path": "README.md", "start": 1, "end": 1}
+    args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
     first = agent.tools.run(ToolCall("read_file", args, "call_read_1"))
     repeated = agent.tools.run(ToolCall("read_file", args, "call_read_2"))
@@ -354,7 +373,7 @@ def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
 
 def test_unrelated_workspace_change_does_not_unlock_same_file_read(tmp_path):
     agent = build_agent(tmp_path)
-    read_args = {"path": "README.md", "start": 1, "end": 1}
+    read_args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
     first = agent.tools.run(ToolCall("read_file", read_args, "call_read_before"))
     changed = agent.tools.run(
@@ -382,7 +401,7 @@ def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
     agent.tools.registry["run_shell"]["run"] = lambda _args: (
         executions.append(1) or ToolRunnerResult("exit_code: 0")
     )
-    shell_args = {"command": "true", "timeout": 20}
+    shell_args = {"command": "true", "timeout_seconds": 20}
 
     first = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_before"))
     agent.tools.run(
@@ -403,25 +422,57 @@ def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
     assert len(executions) == 2
 
 
-def test_retryable_execution_error_gets_one_identical_retry(tmp_path):
+def test_retry_after_wait_error_gets_one_identical_retry(tmp_path):
     agent = build_agent(tmp_path)
     executions = []
 
     def fail(_args):
         executions.append(1)
-        raise RuntimeError("transient executor failure")
+        return ToolRunnerResult(
+            "command did not report an exit code",
+            failure=FailureInfo(
+                "command_result_missing",
+                "command did not report an exit code",
+                "retry_after_wait",
+            ),
+        )
 
     agent.tools.registry["run_shell"]["run"] = fail
-    args = {"command": "true", "timeout": 20}
+    args = {"command": "true", "timeout_seconds": 20}
 
     first = agent.tools.run(ToolCall("run_shell", args, "call_shell_1"))
     second = agent.tools.run(ToolCall("run_shell", args, "call_shell_2"))
     third = agent.tools.run(ToolCall("run_shell", args, "call_shell_3"))
 
     assert first.status == "error"
+    assert first.correction_action == "wait"
     assert second.status == "error"
+    assert second.correction_action == "wait"
     assert third.status == "rejected"
+    assert third.correction_action == "replan"
     assert len(executions) == 2
+
+
+def test_retry_after_change_error_blocks_unchanged_retry(tmp_path):
+    agent = build_agent(tmp_path)
+    executions = []
+
+    def fail(_args):
+        executions.append(1)
+        raise RuntimeError("deterministic executor failure")
+
+    agent.tools.registry["run_shell"]["run"] = fail
+    args = {"command": "true", "timeout_seconds": 20}
+
+    first = agent.tools.run(ToolCall("run_shell", args, "call_change_1"))
+    second = agent.tools.run(ToolCall("run_shell", args, "call_change_2"))
+
+    assert first.status == "error"
+    assert first.failure.recovery == "retry_after_change"
+    assert first.correction_action == "repair"
+    assert second.status == "rejected"
+    assert second.correction_action == "replan"
+    assert len(executions) == 1
 
 
 def test_read_only_tools_do_not_scan_workspace(tmp_path, monkeypatch):
@@ -435,8 +486,8 @@ def test_read_only_tools_do_not_scan_workspace(tmp_path, monkeypatch):
         return original()
 
     monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
-    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "read_1"))
-    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start": 1, "end": 2}, "read_2"))
+    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "read_1"))
+    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 2}, "read_2"))
 
     assert scans == 0
 
@@ -450,7 +501,7 @@ def test_read_only_agent_turn_and_run_log_do_not_scan_workspace(
             [
                 ModelAction.tool(
                     "read_file",
-                    {"path": "README.md", "start": 1, "end": 1},
+                    {"path": "README.md", "start_line": 1, "end_line": 1},
                 ),
                 ModelAction.final("Done."),
             ]

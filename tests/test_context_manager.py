@@ -261,7 +261,7 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
     for index in range(5):
-        call = ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, f"call_{index}")
+        call = ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, f"call_{index}")
         run_log.append_tool_call(call)
         append_successful_result(
             run_log, call, successful_outcome(call, "result " + "x " * 100)
@@ -285,8 +285,8 @@ def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tm
     assert run_log.generation == 2
     assert summary.content.startswith("Earlier run summary:")
     assert (
-        '- Tool transaction: read_file {"end": 1, "path": "README.md", '
-        '"start": 1} -> success'
+        '- Tool transaction: read_file {"end_line": 1, "path": "README.md", '
+        '"start_line": 1} -> success'
     ) in summary.content
     assert "- Goal:" not in summary.content
     assert len(run_log.active_events()) < len(run_log.events)
@@ -333,7 +333,7 @@ def test_real_client_capability_uses_semantic_six_section_compaction(tmp_path):
     for index in range(5):
         call = ToolCall(
             "read_file",
-            {"path": "README.md", "start": 1, "end": 1},
+            {"path": "README.md", "start_line": 1, "end_line": 1},
             f"semantic_{index}",
         )
         run_log.append_tool_call(call)
@@ -381,7 +381,7 @@ def test_semantic_summary_failure_falls_back_to_deterministic_compaction(tmp_pat
     for index in range(5):
         call = ToolCall(
             "read_file",
-            {"path": "README.md", "start": 1, "end": 1},
+            {"path": "README.md", "start_line": 1, "end_line": 1},
             f"fallback_{index}",
         )
         run_log.append_tool_call(call)
@@ -433,7 +433,7 @@ def test_repeated_compaction_keeps_completed_tool_arguments(tmp_path):
     for index, path in enumerate(paths):
         call = ToolCall(
             "read_file",
-            {"path": path, "start": 1, "end": 700},
+            {"path": path, "start_line": 1, "end_line": 700},
             f"call_step_{index}",
         )
         run_log.append_tool_call(call)
@@ -456,7 +456,7 @@ def test_current_run_session_events_are_not_duplicated_with_run_log(tmp_path):
     agent.run.task_state = state
     run_log = new_run_log(agent, state)
     run_log.append_user("inspect")
-    call = ToolCall("read_file", {"path": "README.md", "start": 1, "end": 1}, "call_dedupe")
+    call = ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "call_dedupe")
     run_log.append_tool_call(call)
     append_successful_result(
         run_log, call, successful_outcome(call, "unique-current-run-result")

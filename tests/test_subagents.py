@@ -162,7 +162,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
     assert answer == "Parent synthesized both results."
     tool_result = parent.model_client.recorded_action_results[0][1]
     payload = json.loads(tool_result)
-    receipts = payload["tasks"]
+    receipts = payload["structured"]["tasks"]
     assert {item["status"] for item in receipts} == {"completed"}
     assert len({item["child_run_id"] for item in receipts}) == 2
     assert all("delegate_tasks" not in client.action_tool_surfaces[0] for client in clients)

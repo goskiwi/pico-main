@@ -279,7 +279,7 @@ class AgentLoop:
         outcome = agent.tools.run(call)
 
         model_instruction = self._append_budget_instruction(loop_state)
-        provider_result = outcome.content
+        provider_result = outcome.render_for_model()
         if model_instruction:
             provider_result += "\n\nRuntime instruction: " + model_instruction
         self._continue_provider(

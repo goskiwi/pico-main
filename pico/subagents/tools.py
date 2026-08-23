@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from pydantic import Field
 
 from ..contracts import ToolRunnerResult
@@ -20,14 +18,18 @@ class ApplyTaskPatchesArgs(StrictModel):
 
 def _delegate(manager, args):
     result = manager.delegate(tuple(SubtaskSpec.model_validate(item) for item in args["tasks"]))
-    return ToolRunnerResult(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return ToolRunnerResult(
+        f"delegated {len(result['tasks'])} tasks",
+        structured=dict(result),
+    )
 
 
 def _apply(manager, args):
     result = manager.integration.apply(tuple(args["task_ids"]))
     changed = tuple(result["changed_paths"])
     return ToolRunnerResult(
-        content=json.dumps(result, ensure_ascii=False, sort_keys=True),
+        content=f"applied {len(result['task_ids'])} task patches",
+        structured=dict(result),
         affected_paths=changed,
         effect_scope="workspace" if changed else "none",
     )

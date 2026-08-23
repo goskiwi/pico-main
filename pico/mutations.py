@@ -7,6 +7,7 @@ import os
 import threading
 from pathlib import Path
 
+from .contracts import ToolFailureError
 from .persistence import atomic_replace_bytes
 
 ABSENT_REVISION = "absent"
@@ -29,9 +30,28 @@ def file_revision(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-class RevisionConflict(RuntimeError):
+class RevisionConflict(ToolFailureError):
     def __init__(self, path, expected, actual):
-        super().__init__(f"revision conflict for {path}: expected {expected}, actual {actual}; read the file again")
+        super().__init__(
+            "revision_conflict",
+            f"revision conflict for {path}: expected {expected}, actual {actual}; read the file again",
+        )
+
+
+class TextNotFound(ToolFailureError):
+    def __init__(self):
+        super().__init__(
+            "text_not_found",
+            "old_text was not found; read the current file and choose a current exact block",
+        )
+
+
+class AmbiguousTextMatch(ToolFailureError):
+    def __init__(self, count):
+        super().__init__(
+            "ambiguous_text_match",
+            f"old_text matched {int(count)} locations; use a longer unique block",
+        )
 
 
 def _workspace_lock(root: Path):
@@ -85,8 +105,10 @@ class WorkspaceMutationService:
                 raise RevisionConflict(target.relative_to(self.root), expected_revision, actual)
             text = raw.decode("utf-8")
             count = text.count(str(old_text))
-            if count != 1:
-                raise ValueError(f"old_text must occur exactly once, found {count}")
+            if count == 0:
+                raise TextNotFound()
+            if count > 1:
+                raise AmbiguousTextMatch(count)
             payload = text.replace(str(old_text), str(new_text), 1).encode("utf-8")
             self._check_payload(payload)
             after = content_revision(payload)

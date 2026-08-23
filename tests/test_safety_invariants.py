@@ -44,7 +44,7 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
 
     read_git = agent.tools.run(
         "read_file",
-        {"path": ".git/config", "start": 1, "end": 10},
+        {"path": ".git/config", "start_line": 1, "end_line": 10},
     )
     write_pico = agent.tools.run(
         "write_file",
@@ -74,9 +74,11 @@ def test_shell_runs_inside_docker_and_env_is_filtered(tmp_path):
     agent = build_agent(tmp_path, sandbox=sandbox)
     with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LANG": "C"}, clear=True):
         outcome = agent.tools.run(
-            "run_shell", {"command": "python -c 'print(1)'", "timeout": 3}
+            "run_shell", {"command": "python -c 'print(1)'", "timeout_seconds": 3}
         )
     assert outcome.status == "success"
+    assert outcome.structured["exit_code"] == 0
+    assert outcome.structured["timed_out"] is False
     argv, options = sandbox.calls[0]
     assert argv == ("/bin/sh", "-c", "python -c 'print(1)'")
     assert "OPENAI_API_KEY" not in options["env"]
@@ -90,7 +92,7 @@ def test_shell_failure_is_structured_before_tool_executor_classification(tmp_pat
     agent = build_agent(tmp_path, sandbox=sandbox)
 
     outcome = agent.tools.run(
-        "run_shell", {"command": "false", "timeout": 3}
+        "run_shell", {"command": "false", "timeout_seconds": 3}
     )
 
     assert outcome.status == "error"
@@ -98,6 +100,7 @@ def test_shell_failure_is_structured_before_tool_executor_classification(tmp_pat
     assert outcome.side_effect_state == "none"
     assert outcome.failure.code == "command_failed"
     assert outcome.failure.detail == "command exited with 7"
+    assert outcome.structured["exit_code"] == 7
 
 
 def test_shell_argv_preserves_compound_command_for_container_shell():
@@ -116,7 +119,28 @@ def test_approval_denial_prevents_sandbox_start(tmp_path):
     agent.config = PicoConfig.build(agent.config, approval_policy="never")
     outcome = agent.tools.run("run_shell", {"command": "echo hi"})
     assert outcome.status == "rejected"
+    assert outcome.correction_action == "stop_route"
     assert sandbox.calls == []
+
+
+def test_sandbox_infrastructure_failure_requests_user_action(tmp_path):
+    sandbox = FakeSandbox(
+        SandboxResult(
+            returncode=125,
+            stderr="docker unavailable",
+            infrastructure_error=True,
+        )
+    )
+    agent = build_agent(tmp_path, sandbox=sandbox)
+
+    outcome = agent.tools.run(
+        "run_shell",
+        {"command": "true", "timeout_seconds": 3},
+    )
+
+    assert outcome.status == "error"
+    assert outcome.failure.recovery == "user_action_required"
+    assert outcome.correction_action == "request_user_action"
 
 
 def test_docker_mounts_workspace_read_only(tmp_path):
