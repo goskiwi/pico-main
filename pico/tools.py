@@ -75,7 +75,7 @@ class WriteFileArgs(ToolArgs):
     )
 
 
-class PatchFileArgs(ToolArgs):
+class EditFileArgs(ToolArgs):
     path: str = Field(min_length=1)
     old_text: str = Field(min_length=1)
     new_text: str
@@ -159,8 +159,8 @@ BASE_TOOL_SPECS = {
         "workspace_mutating": True,
         "description": "Write a text file.",
     },
-    "patch_file": {
-        "args_schema": PatchFileArgs,
+    "edit_file": {
+        "args_schema": EditFileArgs,
         "risky": True,
         "workspace_mutating": True,
         "description": (
@@ -314,8 +314,8 @@ def _validate_write_file(context, args):
     return args
 
 
-def _validate_patch_file(context, args):
-    # Patch admission is intentionally strict so the later mutation is
+def _validate_edit_file(context, args):
+    # Edit admission is intentionally strict so the later mutation is
     # deterministic and revision-bound.
     if not context.path(args["path"]).is_file():
         raise ValueError("path is not a file")
@@ -352,7 +352,7 @@ _TOOL_VALIDATORS = {
     "search": _validate_search,
     "run_shell": _validate_run_shell,
     "write_file": _validate_write_file,
-    "patch_file": _validate_patch_file,
+    "edit_file": _validate_edit_file,
     "update_working_state": _validate_working_state,
     "memory_recall": _validate_memory_recall,
     "memory_store": _validate_project_memory,
@@ -662,16 +662,16 @@ def tool_write_file(context, args):
     )
 
 
-def tool_patch_file(context, args):
+def tool_edit_file(context, args):
     path = context.path(args["path"])
     old_text = str(args.get("old_text", ""))
-    before, after = context.mutation_service.patch(
+    before, after = context.mutation_service.edit(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
     relative = path.relative_to(context.workspace_root).as_posix()
     changed = before != after
     return ToolRunnerResult(
-        content=f"patched {relative}\nbefore_revision: {before}\nafter_revision: {after}",
+        content=f"edited {relative}\nbefore_revision: {before}\nafter_revision: {after}",
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
     )
@@ -762,7 +762,7 @@ _TOOL_RUNNERS = {
     "search": tool_search,
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
-    "patch_file": tool_patch_file,
+    "edit_file": tool_edit_file,
     "update_working_state": tool_update_working_state,
     "memory_recall": tool_memory_recall,
     "memory_store": tool_memory_store,

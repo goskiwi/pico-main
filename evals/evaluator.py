@@ -49,7 +49,7 @@ class BenchmarkModel:
             return ModelAction.tool("read_file", {"path": "../outside.txt", "start": 1, "end": 20})
         if behavior == "invalid_patch" and self.step == 1:
             return ModelAction.tool(
-                "patch_file",
+                "edit_file",
                 {"path": self.task["target_path"], "old_text": self.task["old_text"],
                  "new_text": self.task["new_text"], "expected_revision": "absent"},
             )
@@ -63,7 +63,7 @@ class BenchmarkModel:
         if revisions and not self.patch_requested:
             self.patch_requested = True
             return ModelAction.tool(
-                "patch_file",
+                "edit_file",
                 {
                     "path": self.task["target_path"],
                     "old_text": self.task["old_text"],

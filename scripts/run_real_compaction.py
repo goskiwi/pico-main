@@ -150,7 +150,7 @@ def analyze_run(events, task_state):
         entry
         for entry in events
         if entry.kind == "tool_result"
-        and entry.name in {"write_file", "patch_file"}
+        and entry.name in {"write_file", "edit_file"}
         and entry.outcome_status == "success"
         and entry.side_effect_state == "changed"
     ]
@@ -229,7 +229,7 @@ def main(argv=None):
         session_store=SessionStore(workspace / ".pico" / "sessions"),
         config=PicoConfig(
             approval_policy="auto",
-            allowed_tools=("read_file", "patch_file", "update_working_state"),
+            allowed_tools=("read_file", "edit_file", "update_working_state"),
             allowed_write_paths=(TARGET_PATH,),
             max_tool_executions=18,
             max_new_tokens=1024,

@@ -669,7 +669,7 @@ def test_restore_reconciles_interrupted_operation_without_replay(tmp_path):
     state = TaskState.create("task_crash", "edit", run_id="run_crash")
     run_log = new_run_log(agent, state)
     run_log.append_user("edit")
-    call = ToolCall("patch_file", {"path": "README.md"}, "call_crash")
+    call = ToolCall("edit_file", {"path": "README.md"}, "call_crash")
     run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,

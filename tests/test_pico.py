@@ -189,7 +189,7 @@ def test_revision_conflict_is_a_tool_error(tmp_path):
     read = agent.tools.run(ToolCall("read_file", {"path": "hello.txt"}, "read"))
     revision = read.content.split("revision: ", 1)[1].splitlines()[0]
     (tmp_path / "hello.txt").write_text("external\n")
-    outcome = agent.tools.run(ToolCall("patch_file", {
+    outcome = agent.tools.run(ToolCall("edit_file", {
         "path": "hello.txt", "old_text": "external", "new_text": "lost",
         "expected_revision": revision,
     }, "patch"))

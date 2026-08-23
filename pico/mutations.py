@@ -74,7 +74,7 @@ class WorkspaceMutationService:
                 self._atomic_replace(target, payload)
         return actual, after
 
-    def patch(self, path, old_text, new_text, expected_revision):
+    def edit(self, path, old_text, new_text, expected_revision):
         target = self._target(path)
         with self._lock:
             if not target.is_file():

@@ -50,7 +50,7 @@ class ToolManager:
                 raise ValueError(f"unknown tool: {name}")
             validated = tool["args_schema"].model_validate(args or {}).model_dump()
         allowed_paths = runtime.config.allowed_write_paths
-        if name in {"write_file", "patch_file"} and allowed_paths is not None:
+        if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
             if relative not in set(allowed_paths):

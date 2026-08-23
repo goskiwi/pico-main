@@ -107,7 +107,7 @@ class ScriptedTriageModel:
             if not revisions:
                 return ModelAction.invalid("Read the target before patching it.")
             return ModelAction.tool(
-                "patch_file",
+                "edit_file",
                 {
                     "path": self.case.target_path,
                     "old_text": self.case.old_text,

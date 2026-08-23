@@ -146,7 +146,7 @@ class ToolExecutor:
         paths = []
         working_state = ()
         workspace_revision = None
-        if name in {"read_file", "write_file", "patch_file"}:
+        if name in {"read_file", "write_file", "edit_file"}:
             paths.append(agent.workspace.resolve_tool_path(args["path"]))
         elif name in {"list_files", "search"}:
             paths.append(agent.workspace.resolve_tool_path(args.get("path", ".")))
@@ -187,7 +187,7 @@ class ToolExecutor:
 
     @classmethod
     def _potential_effects(cls, agent, name, args, workspace_mutating):
-        if name in {"write_file", "patch_file"}:
+        if name in {"write_file", "edit_file"}:
             path = agent.workspace.resolve_tool_path(args["path"])
             return "workspace", ((cls._logical_path(agent, path), path),)
         if name in {"memory_store", "memory_forget"}:

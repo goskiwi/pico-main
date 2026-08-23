@@ -9,7 +9,7 @@ from pico.mutations import WorkspaceMutationService, file_revision
 from pico.tool_context import ToolContext
 from pico.tools import (
     build_tool_registry,
-    tool_patch_file,
+    tool_edit_file,
     tool_read_file,
     tool_search,
     validate_tool,
@@ -62,11 +62,11 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
     assert "read_file" in tools
     assert set(tools) == {
         "list_files", "read_file", "read_artifact", "search", "run_shell",
-        "write_file", "patch_file", "update_working_state", "memory_recall",
+        "write_file", "edit_file", "update_working_state", "memory_recall",
         "memory_store", "memory_forget",
     }
     assert "&&" in tools["run_shell"]["description"]
-    assert "as small as possible" in tools["patch_file"]["description"]
+    assert "as small as possible" in tools["edit_file"]["description"]
 
 
 def test_search_returns_workspace_relative_paths(tmp_path):
@@ -194,7 +194,7 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
         mutation_service=WorkspaceMutationService(tmp_path),
     )
     revision = file_revision(path)
-    result = tool_patch_file(
+    result = tool_edit_file(
         context,
         {"path": "sample.txt", "old_text": "alpha", "new_text": "beta", "expected_revision": revision},
     )
@@ -203,7 +203,7 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
 
     path.write_text("external\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="revision conflict"):
-        tool_patch_file(
+        tool_edit_file(
             context,
             {"path": "sample.txt", "old_text": "external", "new_text": "lost", "expected_revision": revision},
         )
@@ -222,5 +222,5 @@ def test_noop_mutations_do_not_replace_the_file(tmp_path, monkeypatch):
     revision = file_revision(path)
 
     assert service.write(path, "same\n", revision) == (revision, revision)
-    assert service.patch(path, "same", "same", revision) == (revision, revision)
+    assert service.edit(path, "same", "same", revision) == (revision, revision)
     assert calls == []

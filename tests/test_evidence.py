@@ -6,7 +6,7 @@ from pico.run_log import RunEvent
 def changed_outcome():
     return ToolOutcome(
         tool_call_id="call_1",
-        tool_name="patch_file",
+        tool_name="edit_file",
         status="success",
         execution_state="completed",
         side_effect_state="changed",
@@ -66,7 +66,7 @@ def test_workspace_fact_invalidates_current_verification():
             "tool_result",
                 {
                     "tool_call_id": "call_1",
-                    "tool_name": "patch_file",
+                    "tool_name": "edit_file",
                     "workspace_revision": 1,
                     "outcome": changed_outcome().to_dict(),
             },

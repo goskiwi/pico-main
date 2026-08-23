@@ -203,7 +203,7 @@ def test_run_log_rejects_tool_started_without_tool_call(tmp_path):
             "tool_started",
             {
                 "tool_call_id": "call_pending",
-                "tool_name": "patch_file",
+                "tool_name": "edit_file",
                 "risky": True,
                 "effect_scope": "workspace",
                 "potential_effects": [],

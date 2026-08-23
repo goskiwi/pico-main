@@ -676,7 +676,7 @@ def test_ordered_implement_dependency_receives_prior_patch_and_integrates(tmp_pa
         return FakeModelClient(
             [
                 ModelAction.tool(
-                    "patch_file",
+                    "edit_file",
                     {
                         "path": "shared.py",
                         "old_text": "first\n",

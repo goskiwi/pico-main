@@ -90,7 +90,7 @@ def run_variant(args, variant, api_key, base_url, run_group):
         session_store=SessionStore(workspace / ".pico" / "sessions"),
         config=PicoConfig(
             approval_policy="auto",
-            allowed_tools=("read_file", "patch_file", "update_working_state"),
+            allowed_tools=("read_file", "edit_file", "update_working_state"),
             allowed_write_paths=(TARGET_PATH,),
             max_tool_executions=18,
             max_new_tokens=1024,

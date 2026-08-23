@@ -38,7 +38,7 @@ def main():
                     "remove_next_steps": ["Read sample.txt"],
                     "add_next_steps": ["Replace alpha with beta"],
                 }),
-                ModelAction.tool("patch_file", {
+                ModelAction.tool("edit_file", {
                     "path": "sample.txt", "old_text": "alpha", "new_text": "beta",
                     "expected_revision": revision,
                 }),

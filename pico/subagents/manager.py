@@ -56,7 +56,7 @@ IMPLEMENT_TOOLS = (
     "read_file",
     "run_shell",
     "write_file",
-    "patch_file",
+    "edit_file",
     "update_working_state",
 )
 
