@@ -144,8 +144,8 @@ class Pico:
 
         return entry
 
-    def run_verification(self, workspace_fingerprint):
-        return run_verification(self, workspace_fingerprint)
+    def run_verification(self, workspace_mutation_sequence):
+        return run_verification(self, workspace_mutation_sequence)
 
     def ask(self, user_message):
         from .agent_loop import AgentLoop

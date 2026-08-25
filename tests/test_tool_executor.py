@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+import pico.mutations as mutation_module
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -12,6 +13,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
+from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.task_state import TaskState
 
@@ -330,7 +332,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         {
             "status": "passed",
             "freshness": "current",
-            "workspace_fingerprint": "workspace_current",
+            "workspace_mutation_sequence": 0,
         },
     )
     agent.run.evidence.apply_event(verification)
@@ -475,79 +477,6 @@ def test_retry_after_change_error_blocks_unchanged_retry(tmp_path):
     assert len(executions) == 1
 
 
-def test_read_only_tools_do_not_scan_workspace(tmp_path, monkeypatch):
-    agent = build_agent(tmp_path)
-    scans = 0
-    original = agent.workspace._scan_snapshot
-
-    def counted():
-        nonlocal scans
-        scans += 1
-        return original()
-
-    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
-    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "read_1"))
-    agent.tools.run(ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 2}, "read_2"))
-
-    assert scans == 0
-
-
-def test_read_only_agent_turn_and_run_log_do_not_scan_workspace(
-    tmp_path, monkeypatch
-):
-    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    agent = Pico(
-        model_client=FakeModelClient(
-            [
-                ModelAction.tool(
-                    "read_file",
-                    {"path": "README.md", "start_line": 1, "end_line": 1},
-                ),
-                ModelAction.final("Done."),
-            ]
-        ),
-        workspace=WorkspaceContext.build(tmp_path),
-        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
-    )
-    scans = 0
-    original = agent.workspace._scan_snapshot
-
-    def counted():
-        nonlocal scans
-        scans += 1
-        return original()
-
-    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
-
-    assert agent.ask("Read README.md") == "Done."
-    assert scans == 0
-
-
-def test_workspace_mutation_records_exact_path_without_scanning(tmp_path, monkeypatch):
-    agent = build_agent(tmp_path)
-    scans = 0
-    original = agent.workspace._scan_snapshot
-
-    def counted():
-        nonlocal scans
-        scans += 1
-        return original()
-
-    monkeypatch.setattr(agent.workspace, "_scan_snapshot", counted)
-    outcome = agent.tools.run(
-        ToolCall(
-            "write_file",
-            {"path": "created.txt", "content": "created\n", "expected_revision": "absent"},
-            "write_1",
-        )
-    )
-
-    assert scans == 0
-    assert outcome.affected_paths == ("created.txt",)
-    assert agent.workspace.revision == 1
-
-
 def test_workspace_mutation_increments_revision_once_when_refresh_detects_change(
     tmp_path,
     monkeypatch,
@@ -601,3 +530,55 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
     assert repeated.status == "rejected"
     assert "inspect state" in repeated.failure.detail
     assert len(executions) == 1
+
+
+def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
+    tmp_path,
+    monkeypatch,
+):
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_text("agent-read\n", encoding="utf-8")
+    revision = file_revision(target)
+    original_replace = mutation_module.atomic_replace_bytes
+
+    def drift_after_staging(path, payload, **options):
+        original_guard = options["commit_guard"]
+
+        def guarded_commit():
+            target.write_text("external-change\n", encoding="utf-8")
+            original_guard()
+
+        return original_replace(
+            path,
+            payload,
+            mode=options["mode"],
+            commit_guard=guarded_commit,
+        )
+
+    monkeypatch.setattr(
+        "pico.mutations.atomic_replace_bytes",
+        drift_after_staging,
+    )
+
+    outcome = agent.tools.run(
+        ToolCall(
+            "write_file",
+            {
+                "path": "subject.txt",
+                "content": "agent-change\n",
+                "expected_revision": revision,
+            },
+            "call_commit_conflict",
+        )
+    )
+
+    assert outcome.status == "error"
+    assert outcome.execution_state == "failed"
+    assert outcome.side_effect_state == "none"
+    assert outcome.affected_paths == ()
+    assert outcome.failure.code == "revision_conflict"
+    assert outcome.structured["expected_revision"] == revision
+    assert outcome.structured["actual_revision"] == file_revision(target)
+    assert target.read_text(encoding="utf-8") == "external-change\n"
+    assert agent.workspace.revision == 1

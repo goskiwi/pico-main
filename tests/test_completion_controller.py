@@ -3,6 +3,7 @@ import pytest
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolRunnerResult
+from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.task_state import TaskState
 
@@ -28,40 +29,32 @@ def active_agent(tmp_path):
     return agent, target
 
 
-def test_completion_does_not_reuse_verification_after_external_edit(tmp_path):
+def test_completion_freshness_ignores_external_edits_without_runtime_events(
+    tmp_path,
+):
     agent, target = active_agent(tmp_path)
-    before = agent.workspace.content_fingerprint(force=True)
     agent.run.evidence.effects.append(
         {
             "effect_scope": "workspace",
             "affected_paths": ["subject.txt"],
+            "event_sequence": 0,
         }
     )
     agent.run.evidence.verifications.append(
         {
             "status": "passed",
             "freshness": "current",
-            "workspace_fingerprint": before,
+            "workspace_mutation_sequence": 0,
         }
     )
     target.write_text("beta\n", encoding="utf-8")
-    calls = []
-
-    def verify(workspace_fingerprint):
-        calls.append(True)
-        return {
-            "status": "passed",
-            "freshness": "current",
-            "workspace_fingerprint": workspace_fingerprint,
-        }
-
-    agent.run_verification = verify
+    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
+        AssertionError("external edits are outside Runtime mutation freshness")
+    )
 
     assessment = CompletionController(agent).assess("done")
 
     assert assessment.allowed is True
-    assert calls == [True]
-    assert agent.run.evidence.verifications[-1]["workspace_fingerprint"] != before
 
 
 def test_invalid_changed_python_blocks_completion_before_verification(tmp_path):
@@ -74,7 +67,7 @@ def test_invalid_changed_python_blocks_completion_before_verification(tmp_path):
         }
     )
     verification_calls = []
-    agent.run_verification = lambda _fingerprint: verification_calls.append(True)
+    agent.run_verification = lambda _sequence: verification_calls.append(True)
 
     assessment = CompletionController(agent).assess("done")
 
@@ -82,6 +75,56 @@ def test_invalid_changed_python_blocks_completion_before_verification(tmp_path):
     assert assessment.status == "syntax_invalid"
     assert "broken.py" in assessment.instruction
     assert verification_calls == []
+
+
+def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
+    agent, target = active_agent(tmp_path)
+
+    def edit(call_id, old_text, new_text):
+        call = ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": old_text,
+                "new_text": new_text,
+                "expected_revision": file_revision(target),
+            },
+            call_id,
+        )
+        agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+        return agent.tools.run(call)
+
+    assert edit("call_first_edit", "alpha", "beta").status == "success"
+    first_cursor = agent.run.evidence.last_workspace_mutation_sequence
+    agent.emit_event(
+        "verification_result",
+        {
+            "status": "passed",
+            "freshness": "current",
+            "workspace_mutation_sequence": first_cursor,
+        },
+    )
+
+    assert edit("call_second_edit", "beta", "gamma").status == "success"
+    second_cursor = agent.run.evidence.last_workspace_mutation_sequence
+    assert second_cursor > first_cursor
+    assert agent.run.evidence.verifications[0]["freshness"] == "stale"
+    calls = []
+
+    def verify(sequence):
+        calls.append(sequence)
+        return {
+            "status": "passed",
+            "freshness": "current",
+            "workspace_mutation_sequence": sequence,
+        }
+
+    agent.run_verification = verify
+
+    assessment = CompletionController(agent).assess("done")
+
+    assert assessment.allowed is True
+    assert calls == [second_cursor]
 
 
 def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
@@ -93,11 +136,11 @@ def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
         }
     )
 
-    def fail_verification(workspace_fingerprint):
+    def fail_verification(workspace_mutation_sequence):
         return {
             "status": "failed",
             "freshness": "current",
-            "workspace_fingerprint": workspace_fingerprint,
+            "workspace_mutation_sequence": workspace_mutation_sequence,
             "output": "1 failed",
         }
 
@@ -125,10 +168,10 @@ def test_verifier_infrastructure_error_stops_instead_of_looping(tmp_path):
             "affected_paths": ["subject.txt"],
         }
     )
-    agent.run_verification = lambda workspace_fingerprint: {
+    agent.run_verification = lambda workspace_mutation_sequence: {
         "status": "infrastructure_error",
         "freshness": "current",
-        "workspace_fingerprint": workspace_fingerprint,
+        "workspace_mutation_sequence": workspace_mutation_sequence,
         "output": "docker unavailable",
     }
 
@@ -162,7 +205,7 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
 
     outcome = agent.tools.run(call)
-    agent.run_verification = lambda _fingerprint: (_ for _ in ()).throw(
+    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
         AssertionError("matching verification must not run twice")
     )
     assessment = CompletionController(agent).assess("done")
@@ -172,45 +215,8 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
     verification = agent.run.evidence.verifications[-1]
     assert verification["source_tool_call_id"] == "call_verify"
     assert verification["status"] == "passed"
-    assert verification["started_workspace_fingerprint"] == verification[
-        "workspace_fingerprint"
-    ]
-
-
-def test_matching_shell_verification_is_stale_when_workspace_changes_during_run(
-    tmp_path,
-):
-    agent, target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-        }
-    )
-
-    def verify_while_workspace_changes(_args):
-        target.write_text("beta\n", encoding="utf-8")
-        return ToolRunnerResult(
-            "exit_code: 0\nstdout:\n1 passed",
-            structured={"exit_code": 0},
-        )
-
-    agent.tools.registry["run_shell"]["run"] = verify_while_workspace_changes
-    call = ToolCall(
-        "run_shell",
-        {"command": "verify", "timeout_seconds": 20},
-        "call_stale_verify",
-    )
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-
-    outcome = agent.tools.run(call)
-    verification = agent.run.evidence.verifications[-1]
-
-    assert outcome.status == "success"
-    assert verification["status"] == "stale"
-    assert verification["freshness"] == "stale"
-    assert verification["started_workspace_fingerprint"] != verification[
-        "workspace_fingerprint"
+    assert verification["started_workspace_mutation_sequence"] == verification[
+        "workspace_mutation_sequence"
     ]
 
 

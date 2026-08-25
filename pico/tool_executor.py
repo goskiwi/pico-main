@@ -148,16 +148,18 @@ class ToolExecutor:
         call,
         outcome,
         result_entry,
-        started_fingerprint,
+        started_mutation_sequence,
     ):
         if (
             result_entry is None
-            or not started_fingerprint
+            or started_mutation_sequence is None
             or not cls._is_matching_verification(agent, call)
         ):
             return
-        finished_fingerprint = agent.workspace.content_fingerprint(force=True)
-        stale = started_fingerprint != finished_fingerprint
+        finished_mutation_sequence = (
+            agent.run.evidence.last_workspace_mutation_sequence
+        )
+        stale = started_mutation_sequence != finished_mutation_sequence
         if stale:
             status = "stale"
         elif outcome.status == "success":
@@ -175,8 +177,10 @@ class ToolExecutor:
                 "command": str(call.args.get("command", "")).strip(),
                 "status": status,
                 "freshness": "stale" if stale else "current",
-                "started_workspace_fingerprint": started_fingerprint,
-                "workspace_fingerprint": finished_fingerprint,
+                "started_workspace_mutation_sequence": (
+                    started_mutation_sequence
+                ),
+                "workspace_mutation_sequence": finished_mutation_sequence,
                 "exit_code": outcome.structured.get("exit_code"),
                 "output": outcome.content[-4000:],
                 "source_tool_call_id": call.call_id,
@@ -370,6 +374,7 @@ class ToolExecutor:
                 exc.failure.code,
                 exc.failure.detail,
                 exc.failure.recovery,
+                structured=exc.structured,
                 outcome_key=admission_key,
             )
         except Exception as exc:  # noqa: BLE001 - admission converts validator failures to outcomes
@@ -417,11 +422,12 @@ class ToolExecutor:
                 for path, state in sorted(effects_before.items())
             ],
         )
-        verification_start_fingerprint = ""
+        verification_start_mutation_sequence = None
+        observed_workspace_drift = False
         try:
             if self._is_matching_verification(agent, call):
-                verification_start_fingerprint = (
-                    agent.workspace.content_fingerprint(force=True)
+                verification_start_mutation_sequence = (
+                    agent.run.evidence.last_workspace_mutation_sequence
                 )
             execution = tool["run"](args)
             if not isinstance(execution, ToolRunnerResult):
@@ -447,32 +453,37 @@ class ToolExecutor:
             )
         except Exception as exc:  # noqa: BLE001 - tool boundary must capture arbitrary runner failures
             effects_after = self._effect_snapshot(agent, potential_paths)
-            paths = self._effect_diff(effects_before, effects_after)
-            unknown = bool(workspace_mutating and not potential_paths)
-            uncertain = bool(paths or unknown)
-            typed_failure = (
-                exc.failure
-                if isinstance(exc, ToolFailureError) and not uncertain
-                else None
+            detected_paths = self._effect_diff(effects_before, effects_after)
+            typed_error = exc if isinstance(exc, ToolFailureError) else None
+            observed_workspace_drift = bool(
+                typed_error
+                and detected_paths
+                and potential_scope in {"workspace", "mixed"}
             )
+            paths = [] if typed_error else detected_paths
+            unknown = bool(
+                not typed_error and workspace_mutating and not potential_paths
+            )
+            uncertain = bool(paths or unknown)
             outcome = self._outcome(
                 call, "partial_success" if uncertain else "error", "failed",
                 "partial" if paths else ("unknown" if unknown else "none"),
                 f"error: tool {name} failed: {exc}",
-                failure=typed_failure or FailureInfo(
+                failure=(typed_error.failure if typed_error else None) or FailureInfo(
                     "tool_partial_success" if paths else ("tool_effect_unknown" if unknown else "tool_failed"),
                     str(exc),
                     "no_retry" if uncertain else "retry_after_change",
                 ),
                 affected_paths=paths,
                 effect_scope=potential_scope,
+                structured=(typed_error.structured if typed_error else None),
             )
 
         workspace_effect = (
             outcome.side_effect_state != "none"
             and outcome.effect_scope in {"workspace", "mixed"}
         )
-        if workspace_effect:
+        if workspace_effect or observed_workspace_drift:
             revision_before_refresh = agent.workspace.revision
             agent.prompt.refresh(force=True)
             if agent.workspace.revision == revision_before_refresh:
@@ -483,7 +494,7 @@ class ToolExecutor:
             call,
             outcome,
             result_entry,
-            verification_start_fingerprint,
+            verification_start_mutation_sequence,
         )
         result_key = self._repeat_key(agent, run_id, name, args)
         self._outcomes_by_state.setdefault(result_key, []).append(outcome)
@@ -497,6 +508,7 @@ class ToolExecutor:
         recovery="no_retry",
         *,
         correction_action=None,
+        structured=None,
         outcome_key=None,
     ):
         outcome = self._outcome(
@@ -508,6 +520,7 @@ class ToolExecutor:
                 recovery,
             ),
             correction_action=correction_action,
+            structured=structured,
         )
         self._record_tool_result(self.agent, outcome)
         if outcome_key is not None:

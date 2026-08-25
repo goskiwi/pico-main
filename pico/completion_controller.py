@@ -35,14 +35,14 @@ class CompletionController:
                 instruction=instruction,
             )
 
-        fingerprint, verification_guidance = self._ensure_verification()
+        mutation_sequence, verification_guidance = self._ensure_verification()
         if verification_guidance:
             return CompletionResult(
                 status="verification_failed",
                 instruction=verification_guidance,
             )
 
-        decision = self.runtime.run.evidence.assess_completion(fingerprint)
+        decision = self.runtime.run.evidence.assess_completion(mutation_sequence)
         if not decision.allowed:
             return CompletionResult(
                 status=decision.status,
@@ -83,10 +83,14 @@ class CompletionController:
         )
         if not needs_verification:
             return "", ""
-        fingerprint = runtime.workspace.content_fingerprint(force=True)
-        verification = runtime.run.evidence.current_verification(fingerprint)
+        mutation_sequence = (
+            runtime.run.evidence.last_workspace_mutation_sequence
+        )
+        verification = runtime.run.evidence.current_verification(
+            mutation_sequence
+        )
         if verification is None:
-            verification = runtime.run_verification(fingerprint)
+            verification = runtime.run_verification(mutation_sequence)
             runtime.emit_event(
                 "verification_result",
                 verification or {"status": "skipped"},
@@ -97,9 +101,9 @@ class CompletionController:
                 + str(verification.get("output", "verification unavailable"))
             )
         if not verification or verification.get("status") != "passed":
-            return fingerprint, (
+            return mutation_sequence, (
                 "Runtime verification failed; inspect and repair before "
                 "submit_final.\n"
                 + str((verification or {}).get("output", "verification unavailable"))
             )
-        return fingerprint, ""
+        return mutation_sequence, ""

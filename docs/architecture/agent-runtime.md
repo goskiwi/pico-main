@@ -52,7 +52,7 @@ assistant_final / run_stopped
 
 The Run Log is single-writer and fsynced after every accepted event. It has no hash chain: a hash stored beside mutable local data is not a trusted tamper boundary. Contiguous sequence and IDs plus strict User, Tool Call/Started/Result, and terminal payloads reject causal corruption; telemetry payloads remain extensible. A final incomplete JSONL tail is a crash artifact and is truncated; malformed complete events fail closed.
 
-Replaceable snapshots and Workspace mutations use temporary files plus atomic replace. Pico targets ordinary process-crash recovery and does not claim a cross-filesystem or power-loss transaction across every content store.
+Replaceable snapshots and Workspace mutations use same-directory temporary files plus atomic replace. Workspace write/edit stage and fsync the complete payload, then revalidate the caller's expected revision at the `os.replace` commit point. A mismatch preserves the external content and returns structured expected/actual revision facts for a model-driven re-read and repair. Pico targets ordinary process-crash recovery and does not claim a cross-filesystem, power-loss or database-linearizable transaction across every content store.
 
 ## Tool recovery
 
@@ -89,4 +89,10 @@ Session stores only `active_run_id`. On startup Pico opens that Run Log, repairs
 
 ## Completion
 
-Completion remains blocked by invalid Python syntax, failed current-workspace verification, unresolved partial/unknown effects, or unapplied implementation Child patches. A `run_shell` call whose command exactly matches the configured verifier records both its starting and finishing workspace fingerprints; only an unchanged successful workspace is reusable by the Completion Gate. `pico run show` derives its summary directly from the Run Log.
+Completion remains blocked by invalid Python syntax, failed verification, unresolved partial/unknown effects, or unapplied implementation Child patches. Each workspace ToolResult contributes its durable Run Log sequence to RunEvidence. A matching `run_shell` or Runtime verifier records the latest workspace mutation sequence; only a successful verification bound to the current mutation cursor is reusable by the Completion Gate. This freshness contract covers Runtime-recorded workspace mutations, not arbitrary external editors after verification. `pico run show` derives its summary directly from the Run Log.
+
+### Rejected workspace freshness designs
+
+Pico previously opened every non-ignored workspace file, computed a SHA-256 for each, and hashed the complete map before and after verification. That cost scales with total repository bytes and duplicated facts already owned by Git and the Run Log, so the full-workspace fingerprint path and API were removed.
+
+A Git worktree version remains a possible stronger contract if Pico later must detect IDE or other process changes at Completion. It would combine HEAD, staged index identity, porcelain-v2 status, dirty/untracked content revisions, explicit Runtime-affected ignored paths, and submodule state. It is not implemented now: it adds Git scans, non-Git fallback semantics, ignored-file and submodule edge cases without evidence that Completion must monitor external writers. Stale writes remain protected separately by expected-revision checks at the file commit point.

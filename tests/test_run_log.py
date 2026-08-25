@@ -174,6 +174,23 @@ def test_run_log_rejects_invalid_task_projection(tmp_path):
         )
 
 
+def test_run_log_rejects_removed_workspace_fingerprint_contract(tmp_path):
+    store = RunStore(tmp_path / ".pico" / "runs")
+    append(store, "run_old_verification", "user_message", {"content": "Inspect"})
+
+    with pytest.raises(ValueError, match="invalid verification_result payload"):
+        append(
+            store,
+            "run_old_verification",
+            "verification_result",
+            {
+                "status": "passed",
+                "freshness": "current",
+                "workspace_fingerprint": "removed",
+            },
+        )
+
+
 def test_run_log_repairs_only_an_incomplete_tail(tmp_path):
     store = RunStore(tmp_path / ".pico" / "runs")
     append(store, "run_tail", "user_message", {"content": "Inspect"})

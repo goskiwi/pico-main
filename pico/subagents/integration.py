@@ -46,15 +46,15 @@ class PatchIntegrator:
         execution = ExecutionContext.standalone(
             max_seconds=self.parent.config.run_timeout_seconds,
         )
-        workspace_fingerprint = hashlib.sha256(worktree.patch()).hexdigest()
+        workspace_mutation_sequence = 0
         verification = verify_workspace(
             root=worktree.path,
             command=command,
             sandbox=self.parent.dependencies.sandbox_factory(worktree.path),
             timeout_seconds=self.parent.config.run_timeout_seconds,
             redact_text=self.parent.redact_text,
-            fingerprint_provider=lambda: hashlib.sha256(worktree.patch()).hexdigest(),
-            workspace_fingerprint=workspace_fingerprint,
+            mutation_sequence_provider=lambda: 0,
+            workspace_mutation_sequence=workspace_mutation_sequence,
             execution_context=execution,
         )
         if not verification or verification["status"] != "passed":

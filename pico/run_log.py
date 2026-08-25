@@ -10,7 +10,7 @@ from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
 from .features.memory import WorkingState
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState, apply_task_event
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v9"
+RUN_LOG_SCHEMA_VERSION = "run-log-v10"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -120,12 +120,38 @@ def _validate_stopped_payload(kind, payload):
         raise ValueError("run_stopped duration cannot be negative")
 
 
+def _validate_verification_payload(kind, payload):
+    _exact_payload(
+        kind,
+        payload,
+        {"status", "freshness", "workspace_mutation_sequence"},
+        {
+            "command",
+            "started_workspace_mutation_sequence",
+            "exit_code",
+            "output",
+            "source_tool_call_id",
+        },
+    )
+    if payload["freshness"] not in {"current", "stale"}:
+        raise ValueError("verification_result has invalid freshness")
+    if not isinstance(payload["workspace_mutation_sequence"], int):
+        raise TypeError("verification_result mutation sequence must be an integer")
+    if "started_workspace_mutation_sequence" in payload and not isinstance(
+        payload["started_workspace_mutation_sequence"], int
+    ):
+        raise TypeError(
+            "verification_result started mutation sequence must be an integer"
+        )
+
+
 _PAYLOAD_VALIDATORS = {
     "user_message": _validate_text_payload,
     "model_instruction": _validate_text_payload,
     "assistant_tool_call": _validate_tool_call_payload,
     "tool_started": _validate_tool_started_payload,
     "tool_result": _validate_tool_result_payload,
+    "verification_result": _validate_verification_payload,
     "assistant_final": _validate_final_payload,
     "run_stopped": _validate_stopped_payload,
 }

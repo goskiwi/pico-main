@@ -41,8 +41,8 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         sandbox=Sandbox(),
         timeout_seconds=600,
         redact_text=str,
-        fingerprint_provider=lambda: "current-workspace",
-        workspace_fingerprint="current-workspace",
+        mutation_sequence_provider=lambda: 7,
+        workspace_mutation_sequence=7,
     )
 
     assert recorded["argv"] == (
@@ -56,8 +56,8 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         "command": "MODE=test python -m pytest -q",
         "status": "passed",
         "freshness": "current",
-        "started_workspace_fingerprint": "current-workspace",
-        "workspace_fingerprint": "current-workspace",
+        "started_workspace_mutation_sequence": 7,
+        "workspace_mutation_sequence": 7,
         "exit_code": 0,
         "output": "2 passed",
     }
@@ -79,10 +79,37 @@ def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
         sandbox=Sandbox(),
         timeout_seconds=60,
         redact_text=str,
-        fingerprint_provider=lambda: "current-workspace",
-        workspace_fingerprint="current-workspace",
+        mutation_sequence_provider=lambda: 7,
+        workspace_mutation_sequence=7,
     )
 
     assert result["status"] == "infrastructure_error"
     assert result["exit_code"] == 125
     assert "invalid mount config" in result["output"]
+
+
+def test_runtime_verification_is_stale_when_runtime_mutation_cursor_changes(
+    tmp_path,
+):
+    mutation_sequence = [7]
+
+    class Sandbox:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            mutation_sequence[0] = 9
+            return SandboxResult(returncode=0, stdout="2 passed")
+
+    result = verify_workspace(
+        root=tmp_path,
+        command="python -m pytest -q",
+        sandbox=Sandbox(),
+        timeout_seconds=60,
+        redact_text=str,
+        mutation_sequence_provider=lambda: mutation_sequence[0],
+        workspace_mutation_sequence=7,
+    )
+
+    assert result["status"] == "stale"
+    assert result["freshness"] == "stale"
+    assert result["started_workspace_mutation_sequence"] == 7
+    assert result["workspace_mutation_sequence"] == 9

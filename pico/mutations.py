@@ -32,25 +32,46 @@ def file_revision(path: Path) -> str:
 
 class RevisionConflict(ToolFailureError):
     def __init__(self, path, expected, actual):
+        logical_path = Path(path).as_posix()
         super().__init__(
             "revision_conflict",
-            f"revision conflict for {path}: expected {expected}, actual {actual}; read the file again",
+            f"revision conflict for {logical_path}: expected {expected}, actual {actual}; read the file again",
+            structured={
+                "path": logical_path,
+                "expected_revision": str(expected),
+                "actual_revision": str(actual),
+                "recommended_next_tool": "read_file",
+            },
         )
 
 
 class TextNotFound(ToolFailureError):
-    def __init__(self):
+    def __init__(self, path, revision):
+        logical_path = Path(path).as_posix()
         super().__init__(
             "text_not_found",
             "old_text was not found; read the current file and choose a current exact block",
+            structured={
+                "path": logical_path,
+                "actual_revision": str(revision),
+                "match_count": 0,
+                "recommended_next_tool": "read_file",
+            },
         )
 
 
 class AmbiguousTextMatch(ToolFailureError):
-    def __init__(self, count):
+    def __init__(self, path, revision, count):
+        logical_path = Path(path).as_posix()
         super().__init__(
             "ambiguous_text_match",
             f"old_text matched {int(count)} locations; use a longer unique block",
+            structured={
+                "path": logical_path,
+                "actual_revision": str(revision),
+                "match_count": int(count),
+                "recommended_next_tool": "read_file",
+            },
         )
 
 
@@ -76,42 +97,56 @@ class WorkspaceMutationService:
         if len(payload) > MAX_TEXT_FILE_BYTES:
             raise ValueError(f"text mutation exceeds {MAX_TEXT_FILE_BYTES} bytes")
 
-    @staticmethod
-    def _atomic_replace(path: Path, payload: bytes):
-        mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-        atomic_replace_bytes(path, payload, mode=mode)
+    def _require_revision(self, target, logical_path, expected_revision):
+        actual = file_revision(target)
+        if actual != expected_revision:
+            raise RevisionConflict(logical_path, expected_revision, actual)
+        return actual
+
+    def _commit(self, target, logical_path, payload, expected_revision):
+        mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
+        atomic_replace_bytes(
+            target,
+            payload,
+            mode=mode,
+            commit_guard=lambda: self._require_revision(
+                target,
+                logical_path,
+                expected_revision,
+            ),
+        )
 
     def write(self, path, content, expected_revision):
         target = self._target(path)
+        logical_path = target.relative_to(self.root)
         payload = str(content).encode("utf-8")
         self._check_payload(payload)
         with self._lock:
-            actual = file_revision(target)
-            if actual != expected_revision:
-                raise RevisionConflict(target.relative_to(self.root), expected_revision, actual)
+            actual = self._require_revision(target, logical_path, expected_revision)
             after = content_revision(payload)
             if actual != after:
-                self._atomic_replace(target, payload)
+                self._commit(target, logical_path, payload, expected_revision)
         return actual, after
 
     def edit(self, path, old_text, new_text, expected_revision):
         target = self._target(path)
+        logical_path = target.relative_to(self.root)
         with self._lock:
             if not target.is_file():
                 raise ValueError("patch target is not a file")
             raw = target.read_bytes()
             actual = content_revision(raw)
             if actual != expected_revision:
-                raise RevisionConflict(target.relative_to(self.root), expected_revision, actual)
+                raise RevisionConflict(logical_path, expected_revision, actual)
             text = raw.decode("utf-8")
             count = text.count(str(old_text))
             if count == 0:
-                raise TextNotFound()
+                raise TextNotFound(logical_path, actual)
             if count > 1:
-                raise AmbiguousTextMatch(count)
+                raise AmbiguousTextMatch(logical_path, actual, count)
             payload = text.replace(str(old_text), str(new_text), 1).encode("utf-8")
             self._check_payload(payload)
             after = content_revision(payload)
             if actual != after:
-                self._atomic_replace(target, payload)
+                self._commit(target, logical_path, payload, expected_revision)
         return actual, after

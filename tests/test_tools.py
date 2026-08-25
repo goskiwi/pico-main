@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+import pico.mutations as mutation_module
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.contracts import ToolCall, ToolRunnerResult
 from pico.mutations import WorkspaceMutationService, file_revision
@@ -160,14 +161,27 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         "text_not_found",
         "retry_after_change",
     )
+    assert not_found.structured == {
+        "path": "README.md",
+        "actual_revision": revision,
+        "match_count": 0,
+        "recommended_next_tool": "read_file",
+    }
     assert (ambiguous.failure.code, ambiguous.failure.recovery) == (
         "ambiguous_text_match",
         "retry_after_change",
     )
+    assert ambiguous.structured["match_count"] == 2
     assert (conflict.failure.code, conflict.failure.recovery) == (
         "revision_conflict",
         "retry_after_change",
     )
+    assert conflict.structured == {
+        "path": "README.md",
+        "expected_revision": revision,
+        "actual_revision": file_revision(target),
+        "recommended_next_tool": "read_file",
+    }
 
     (tmp_path / "missing.py").write_text("created\n", encoding="utf-8")
     after_change = agent.tools.run(
@@ -363,12 +377,81 @@ def test_noop_mutations_do_not_replace_the_file(tmp_path, monkeypatch):
     service = WorkspaceMutationService(tmp_path)
     calls = []
     monkeypatch.setattr(
-        service,
-        "_atomic_replace",
-        lambda target, payload: calls.append((target, payload)),
+        "pico.mutations.atomic_replace_bytes",
+        lambda target, payload, **options: calls.append(
+            (target, payload, options)
+        ),
     )
     revision = file_revision(path)
 
     assert service.write(path, "same\n", revision) == (revision, revision)
     assert service.edit(path, "same", "same", revision) == (revision, revision)
     assert calls == []
+
+
+def test_write_revalidates_revision_at_atomic_commit(tmp_path, monkeypatch):
+    path = tmp_path / "sample.txt"
+    path.write_text("agent-read\n", encoding="utf-8")
+    service = WorkspaceMutationService(tmp_path)
+    revision = file_revision(path)
+    original_replace = mutation_module.atomic_replace_bytes
+
+    def drift_after_staging(target, payload, **options):
+        original_guard = options["commit_guard"]
+
+        def guarded_commit():
+            path.write_text("external-change\n", encoding="utf-8")
+            original_guard()
+
+        return original_replace(
+            target,
+            payload,
+            mode=options["mode"],
+            commit_guard=guarded_commit,
+        )
+
+    monkeypatch.setattr(
+        "pico.mutations.atomic_replace_bytes",
+        drift_after_staging,
+    )
+
+    with pytest.raises(RuntimeError, match="revision conflict") as failure:
+        service.write(path, "agent-change\n", revision)
+
+    assert failure.value.structured["expected_revision"] == revision
+    assert failure.value.structured["actual_revision"] == file_revision(path)
+    assert path.read_text(encoding="utf-8") == "external-change\n"
+    assert list(tmp_path.glob("sample.txt.*.tmp")) == []
+
+
+def test_edit_revalidates_revision_at_atomic_commit(tmp_path, monkeypatch):
+    path = tmp_path / "sample.txt"
+    path.write_text("alpha\n", encoding="utf-8")
+    service = WorkspaceMutationService(tmp_path)
+    revision = file_revision(path)
+    original_replace = mutation_module.atomic_replace_bytes
+
+    def drift_after_staging(target, payload, **options):
+        original_guard = options["commit_guard"]
+
+        def guarded_commit():
+            path.write_text("external-change\n", encoding="utf-8")
+            original_guard()
+
+        return original_replace(
+            target,
+            payload,
+            mode=options["mode"],
+            commit_guard=guarded_commit,
+        )
+
+    monkeypatch.setattr(
+        "pico.mutations.atomic_replace_bytes",
+        drift_after_staging,
+    )
+
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        service.edit(path, "alpha", "beta", revision)
+
+    assert path.read_text(encoding="utf-8") == "external-change\n"
+    assert list(tmp_path.glob("sample.txt.*.tmp")) == []

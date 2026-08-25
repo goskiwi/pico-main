@@ -18,7 +18,7 @@ Session 只保存 `active_run_id`。副作用前 fsync `tool_started`，记录�
 
 ## 工具安全
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；写入采用 revision-bound compare-and-swap 与 fsync/atomic replace。模型命令进入禁网、只读 Workspace 的 Docker Profile，并共享整轮 deadline/cancellation token。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；write/edit 先将完整内容写入同目录临时文件并 fsync，在 `os.replace` 提交点复验 expected revision，冲突以结构化 expected/actual revision 驱动模型重新读取和修复。模型命令进入禁网、只读 Workspace 的 Docker Profile，并共享整轮 deadline/cancellation token。
 
 ## 多 Agent
 
@@ -26,4 +26,4 @@ Parent 基于显式依赖 DAG 调度 Child；Explore 只读，Implement 在独�
 
 ## 评测与审计
 
-Run Log `turn_metrics` 每轮保留 Provider continuation、Token 和延迟证据；只有新建或旋转后的 Prompt 保存完整 section projection，复用轮次只保存稳定引用，避免重复遥测。结构化 verifier 绑定完整 Workspace 内容指纹。Completion Gate 阻止失败验证或未知副作用被报告为成功。大输出保存为当前 Run 范围内的 Artifact。
+Run Log `turn_metrics` 每轮保留 Provider continuation、Token 和延迟证据；只有新建或旋转后的 Prompt 保存完整 section projection，复用轮次只保存稳定引用，避免重复遥测。结构化 verifier 绑定 Run Log 中最后一次 workspace mutation sequence，无需全仓内容扫描。Completion Gate 阻止失败验证或未知副作用被报告为成功。大输出保存为当前 Run 范围内的 Artifact。

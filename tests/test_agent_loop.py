@@ -9,6 +9,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.agent_loop import AgentLoop
+from pico.mutations import content_revision, file_revision
 from pico.sandbox import SandboxResult
 
 
@@ -50,6 +51,123 @@ def test_pico_ask_delegates_to_agent_loop(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("Facade works.")])
 
     assert agent.ask("Use facade") == "Facade works."
+
+
+def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
+    tmp_path,
+):
+    target = tmp_path / "subject.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    initial_revision = file_revision(target)
+    external_content = "alpha\nexternal\n"
+    external_revision = content_revision(external_content.encode("utf-8"))
+    verified_contents = []
+
+    class DriftBeforeFirstEditClient(FakeModelClient):
+        request_count = 0
+
+        def complete_action(self, *args, **kwargs):
+            self.request_count += 1
+            if self.request_count == 2:
+                target.write_text(external_content, encoding="utf-8")
+            return super().complete_action(*args, **kwargs)
+
+    class RecordingVerificationSandbox:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            verified_contents.append(target.read_text(encoding="utf-8"))
+            return SandboxResult(returncode=0, stdout="1 passed\n")
+
+    client = DriftBeforeFirstEditClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "subject.txt", "start_line": 1, "end_line": 20},
+                call_id="call_read_initial",
+            ),
+            ModelAction.tool(
+                "edit_file",
+                {
+                    "path": "subject.txt",
+                    "old_text": "alpha\n",
+                    "new_text": "agent\n",
+                    "expected_revision": initial_revision,
+                },
+                call_id="call_edit_stale",
+            ),
+            ModelAction.tool(
+                "read_file",
+                {"path": "subject.txt", "start_line": 1, "end_line": 20},
+                call_id="call_read_current",
+            ),
+            ModelAction.tool(
+                "edit_file",
+                {
+                    "path": "subject.txt",
+                    "old_text": "alpha\n",
+                    "new_text": "agent\n",
+                    "expected_revision": external_revision,
+                },
+                call_id="call_edit_repaired",
+            ),
+            ModelAction.final("Recovered safely."),
+        ]
+    )
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="verify",
+        ),
+        sandbox=RecordingVerificationSandbox(),
+    )
+
+    answer = agent.ask("Replace alpha without losing concurrent edits")
+
+    assert answer == "Recovered safely."
+    assert target.read_text(encoding="utf-8") == "agent\nexternal\n"
+    assert verified_contents == ["agent\nexternal\n"]
+
+    events = agent.dependencies.run_store.read_events(agent.run.task_state)
+    outcomes = {
+        entry.call_id: entry.payload["outcome"]
+        for entry in events
+        if entry.kind == "tool_result"
+    }
+    conflict = outcomes["call_edit_stale"]
+    assert conflict["status"] == "error"
+    assert conflict["execution_state"] == "failed"
+    assert conflict["side_effect_state"] == "none"
+    assert conflict["correction_action"] == "repair"
+    assert conflict["failure"]["code"] == "revision_conflict"
+    assert conflict["failure"]["recovery"] == "retry_after_change"
+    assert conflict["structured"] == {
+        "path": "subject.txt",
+        "expected_revision": initial_revision,
+        "actual_revision": external_revision,
+        "recommended_next_tool": "read_file",
+    }
+    assert outcomes["call_read_current"]["structured"]["revision"] == (
+        external_revision
+    )
+    assert outcomes["call_edit_repaired"]["status"] == "success"
+    assert outcomes["call_edit_repaired"]["structured"]["before_revision"] == (
+        external_revision
+    )
+
+    repaired_sequence = next(
+        entry.sequence
+        for entry in events
+        if entry.kind == "tool_result" and entry.call_id == "call_edit_repaired"
+    )
+    verification = next(
+        entry for entry in events if entry.kind == "verification_result"
+    )
+    assert verification.sequence > repaired_sequence
+    assert verification.payload["status"] == "passed"
+    assert verification.payload["freshness"] == "current"
 
 
 def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):

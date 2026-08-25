@@ -12,6 +12,7 @@ def fact_from_event(entry):
         "side_effect_state": str(outcome.get("side_effect_state", "unknown")),
         "affected_paths": list(outcome.get("affected_paths", [])),
         "effect_scope": str(outcome.get("effect_scope", "none")),
+        "event_sequence": int(entry.sequence),
     }
 
 
@@ -53,15 +54,26 @@ class RunEvidence:
             }
         )
 
-    def current_verification(self, workspace_fingerprint):
+    @property
+    def last_workspace_mutation_sequence(self):
+        return max(
+            (
+                int(item.get("event_sequence", 0))
+                for item in self.effects
+                if item.get("effect_scope") in {"workspace", "mixed"}
+            ),
+            default=0,
+        )
+
+    def current_verification(self, workspace_mutation_sequence):
         return next(
             (
                 item
                 for item in reversed(self.verifications)
                 if item.get("status") == "passed"
                 and item.get("freshness") == "current"
-                and item.get("workspace_fingerprint")
-                == str(workspace_fingerprint)
+                and int(item.get("workspace_mutation_sequence", -1))
+                == int(workspace_mutation_sequence)
             ),
             None,
         )
@@ -84,11 +96,11 @@ class RunEvidence:
                 unresolved.append(effect)
         return unresolved
 
-    def assess_completion(self, workspace_fingerprint=""):
+    def assess_completion(self, workspace_mutation_sequence=None):
         unresolved = self.unresolved_effects()
         verified = bool(
-            workspace_fingerprint
-            and self.current_verification(workspace_fingerprint) is not None
+            workspace_mutation_sequence is not None
+            and self.current_verification(workspace_mutation_sequence) is not None
         )
         remaining = [
             effect

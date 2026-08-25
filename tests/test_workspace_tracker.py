@@ -4,37 +4,12 @@ from pico import WorkspaceContext
 from pico.workspace_tracker import WorkspaceTracker
 
 
-def test_forced_content_fingerprint_detects_external_edit(tmp_path):
-    target = tmp_path / "subject.txt"
-    target.write_text("alpha\n", encoding="utf-8")
-    tracker = WorkspaceTracker(WorkspaceContext.build(tmp_path))
-    before = tracker.content_fingerprint()
-
-    target.write_text("beta\n", encoding="utf-8")
-
-    assert tracker.content_fingerprint() == before
-    assert tracker.content_fingerprint(force=True) != before
-
-
-def test_workspace_snapshot_does_not_expose_internal_cache(tmp_path):
-    (tmp_path / "subject.txt").write_text("alpha\n", encoding="utf-8")
+def test_workspace_tracker_has_no_full_workspace_snapshot_api(tmp_path):
     tracker = WorkspaceTracker(WorkspaceContext.build(tmp_path))
 
-    snapshot = tracker.capture_snapshot(force=True)
-    snapshot.clear()
-
-    assert "subject.txt" in tracker.capture_snapshot()
-
-
-def test_workspace_snapshot_skips_file_symlinks(tmp_path):
-    outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
-    outside.write_text("outside\n", encoding="utf-8")
-    (tmp_path / "linked.txt").symlink_to(outside)
-    tracker = WorkspaceTracker(WorkspaceContext.build(tmp_path))
-
-    snapshot = tracker.capture_snapshot(force=True)
-
-    assert "linked.txt" not in snapshot
+    assert not hasattr(tracker, "capture_snapshot")
+    assert not hasattr(tracker, "content_fingerprint")
+    assert not hasattr(tracker, "_scan_snapshot")
 
 
 def test_workspace_git_status_excludes_pico_from_nested_cwd(tmp_path):

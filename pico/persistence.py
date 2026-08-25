@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 
 
-def atomic_replace_bytes(path, payload, *, mode=0o600):
+def atomic_replace_bytes(path, payload, *, mode=0o600, commit_guard=None):
+    """Stage complete bytes, validate the commit condition, then replace."""
+
     path = Path(path)
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -22,6 +24,8 @@ def atomic_replace_bytes(path, payload, *, mode=0o600):
             handle.flush()
             os.fsync(handle.fileno())
         temporary.chmod(int(mode))
+        if commit_guard is not None:
+            commit_guard()
         os.replace(temporary, path)
     finally:
         if temporary.exists():

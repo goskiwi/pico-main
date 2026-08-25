@@ -47,7 +47,7 @@ assistant_tool_call
 -> tool_result + side-effect state
 ```
 
-写入要求 `read_file` 返回的 revision，并通过 atomic replace 提交；外部编辑会形成显式
+写入携带通常由 `read_file` 返回的 expected revision；完整内容先写入同目录临时文件并 fsync，在 atomic replace 提交点复验 revision。外部编辑会形成包含 expected/actual revision 的显式
 冲突，不会被静默覆盖。
 
 ### 1:45～2:30：恢复与状态投影

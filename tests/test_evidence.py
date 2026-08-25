@@ -46,6 +46,7 @@ def test_live_and_run_log_recovery_build_identical_evidence():
 
     assert restored.effects == live.effects
     assert restored.verifications == live.verifications
+    assert restored.last_workspace_mutation_sequence == run_event.sequence
 
 
 def test_workspace_fact_invalidates_current_verification():
@@ -56,7 +57,7 @@ def test_workspace_fact_invalidates_current_verification():
             {
                 "status": "passed",
                 "freshness": "current",
-                "workspace_fingerprint": "workspace-before",
+                "workspace_mutation_sequence": 0,
             },
         )
     )
@@ -75,6 +76,7 @@ def test_workspace_fact_invalidates_current_verification():
     )
 
     assert evidence.verifications[0]["freshness"] == "stale"
+    assert evidence.last_workspace_mutation_sequence == 2
 
 
 def effect(call_id, status, side_effect_state, paths, scope="workspace"):
@@ -91,7 +93,7 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
     unresolved = RunEvidence(
         effects=[effect("call_partial", "partial_success", "partial", ("x.py",))]
     )
-    assert unresolved.assess_completion("").allowed is False
+    assert unresolved.assess_completion().allowed is False
 
     repaired = RunEvidence(
         effects=[
@@ -99,18 +101,18 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
             effect("call_repair", "success", "changed", ("x.py",)),
         ]
     )
-    assert repaired.assess_completion("").allowed is True
+    assert repaired.assess_completion().allowed is True
 
     verification = {
         "status": "passed",
         "freshness": "current",
-        "workspace_fingerprint": "workspace-current",
+        "workspace_mutation_sequence": 1,
     }
     workspace_partial = RunEvidence(
         effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],
         verifications=[verification],
     )
-    assert workspace_partial.assess_completion("workspace-current").allowed is True
+    assert workspace_partial.assess_completion(1).allowed is True
 
     memory_partial = RunEvidence(
         effects=[
@@ -124,7 +126,7 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
         ],
         verifications=[verification],
     )
-    assert memory_partial.assess_completion("workspace-current").allowed is False
+    assert memory_partial.assess_completion(1).allowed is False
 
     memory_partial.effects.append(
         effect(
@@ -135,4 +137,4 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
             scope="project_memory",
         )
     )
-    assert memory_partial.assess_completion("workspace-current").allowed is True
+    assert memory_partial.assess_completion(1).allowed is True

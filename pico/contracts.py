@@ -156,8 +156,18 @@ class FailureInfo:
 
 
 class ToolFailureError(RuntimeError):
-    def __init__(self, code, detail, recovery="retry_after_change"):
+    """Typed pre-effect failure raised before a Tool commits side effects."""
+
+    def __init__(
+        self,
+        code,
+        detail,
+        recovery="retry_after_change",
+        *,
+        structured=None,
+    ):
         self.failure = FailureInfo(str(code), str(detail), str(recovery))
+        self.structured = dict(structured or {})
         super().__init__(self.failure.detail)
 
 
