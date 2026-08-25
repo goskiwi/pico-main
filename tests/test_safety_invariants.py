@@ -116,7 +116,7 @@ def test_docker_exit_125_is_classified_as_infrastructure_failure():
 def test_approval_denial_prevents_sandbox_start(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
-    agent.config = PicoConfig.build(agent.config, approval_policy="never")
+    agent.config = PicoConfig.build(agent.config, approval_policy="deny")
     outcome = agent.tools.run("run_shell", {"command": "echo hi"})
     assert outcome.status == "rejected"
     assert outcome.correction_action == "stop_route"

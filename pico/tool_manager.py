@@ -97,7 +97,7 @@ class ToolManager:
             return False
         if config.approval_policy == "auto":
             return True
-        if config.approval_policy == "never":
+        if config.approval_policy == "deny":
             return False
         try:
             answer = input(

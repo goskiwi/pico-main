@@ -171,7 +171,7 @@ def test_runtime_policy_changes_do_not_invalidate_resume(tmp_path):
     )
     agent, store, state, _ = build_interrupted_run(tmp_path, config=initial)
     changed = PicoConfig(
-        approval_policy="never",
+        approval_policy="deny",
         max_tool_executions=50,
         max_new_tokens=2048,
         read_only=False,

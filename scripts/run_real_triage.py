@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from applications.triage import TriageCase, TriageWorkflow
 from pico import OpenAICompatibleModelClient, PicoConfig
 from pico.config import load_project_env, provider_env
+from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
@@ -211,7 +212,7 @@ def main(argv=None):
     if not api_key:
         raise RuntimeError("PICO_OPENAI_API_KEY is required")
     base_url = args.base_url or provider_env(
-        "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
+        "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
     real_manifest = load_real_manifest(ROOT / "validation" / "real_oss_suite.json")
     real_task = next(

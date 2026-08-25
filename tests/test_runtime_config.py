@@ -2,6 +2,7 @@ import pytest
 
 from pico import PicoConfig
 from pico.cli import build_arg_parser
+from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.runtime_config import DEFAULT_SHELL_ENV_ALLOWLIST
 
 
@@ -43,6 +44,19 @@ def test_cli_accepts_custom_max_new_tokens():
     assert args.max_new_tokens == 2048
     assert args.compaction_reserve_tokens == 12000
     assert args.compaction_keep_recent_tokens == 16000
+
+
+def test_approval_policy_uses_explicit_deny_name():
+    config = PicoConfig.build(approval_policy="deny")
+    args = build_arg_parser().parse_args(["--approval", "deny"])
+
+    assert config.approval_policy == args.approval == "deny"
+    with pytest.raises(ValueError, match="approval_policy must be ask, auto, or deny"):
+        PicoConfig.build(approval_policy="never")
+
+
+def test_expected_gateway_is_the_shared_provider_default():
+    assert DEFAULT_OPENAI_BASE_URL == "https://www.right.codes/codex/v1"
 
 
 def test_provider_context_limit_must_exceed_output_reserve():

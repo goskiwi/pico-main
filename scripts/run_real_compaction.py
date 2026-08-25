@@ -23,6 +23,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.config import load_project_env, provider_env
+from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.real_case_support import git_metadata, require_clean_runtime
 
@@ -207,7 +208,7 @@ def main(argv=None):
     if not api_key:
         raise RuntimeError("PICO_OPENAI_API_KEY is required")
     base_url = args.base_url or provider_env(
-        "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
+        "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
     workspace = prepare_workspace(args.workspace)
     initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)

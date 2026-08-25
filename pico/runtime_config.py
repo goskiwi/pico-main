@@ -61,8 +61,8 @@ class PicoConfig:
         return candidate.normalized()
 
     def normalized(self) -> PicoConfig:
-        if self.approval_policy not in {"ask", "auto", "never"}:
-            raise ValueError("approval_policy must be ask, auto, or never")
+        if self.approval_policy not in {"ask", "auto", "deny"}:
+            raise ValueError("approval_policy must be ask, auto, or deny")
         max_new_tokens = int(self.max_new_tokens)
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")

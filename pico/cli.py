@@ -12,7 +12,7 @@ import sys
 import textwrap
 
 from .config import load_project_env, provider_env
-from .providers.clients import OpenAICompatibleModelClient
+from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
 from .workspace import WorkspaceContext, middle
 
@@ -48,7 +48,6 @@ HELP_DETAILS = textwrap.dedent(
 
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
-DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
 
 
@@ -231,9 +230,9 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--approval",
-        choices=("ask", "auto", "never"),
+        choices=("ask", "auto", "deny"),
         default=defaults.approval_policy,
-        help="Approval policy for risky tools.",
+        help="Approval policy for risky tools; deny rejects them before execution.",
     )
     parser.add_argument(
         "--secret-env-name",

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from applications.triage import TriageCase, TriageWorkflow
 from pico import OpenAICompatibleModelClient, PicoConfig
 from pico.config import load_project_env, provider_env
+from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 
 
 def main(argv=None):
@@ -25,7 +26,12 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask")
+    parser.add_argument(
+        "--approval",
+        choices=("ask", "auto", "deny"),
+        default="ask",
+        help="Approval policy for risky tools; deny rejects before execution.",
+    )
     parser.add_argument("--max-tool-executions", type=int, default=40)
     args = parser.parse_args(argv)
 
@@ -33,7 +39,7 @@ def main(argv=None):
     load_project_env(case.repository_root, boundary=case.repository_root)
     model = args.model or provider_env("PICO_OPENAI_MODEL", "gpt-5.4")
     base_url = args.base_url or provider_env(
-        "PICO_OPENAI_API_BASE", "https://api.openai.com/v1"
+        "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
     api_key = provider_env("PICO_OPENAI_API_KEY")
 

@@ -10,6 +10,7 @@ from http.client import IncompleteRead, RemoteDisconnected
 from ..contracts import ModelAction
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
+DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
 
 
 class FakeModelClient:

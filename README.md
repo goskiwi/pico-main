@@ -119,14 +119,18 @@ uv run pico "inspect the failing test and implement a verified fix"
 
 ```dotenv
 PICO_OPENAI_API_KEY="your-api-key"
-PICO_OPENAI_API_BASE="https://api.openai.com/v1"
+PICO_OPENAI_API_BASE="https://www.right.codes/codex/v1"
 PICO_OPENAI_MODEL="gpt-5.4"
 ```
+
+`right.codes` 是 Pico 预期使用的默认 OpenAI-compatible Gateway；如需连接其他
+Responses Endpoint，必须显式覆盖 `PICO_OPENAI_API_BASE` 或传入 `--base-url`。
 
 常用运行参数：
 
 ```bash
 uv run pico --approval ask
+uv run pico --approval deny
 uv run pico --run-timeout 600
 uv run pico --max-tool-executions 40
 uv run pico --max-new-tokens 1024
@@ -137,6 +141,9 @@ uv run pico --resume latest
 uv run pico run show <run_id> --cwd /path/to/repo
 uv run pico run events <run_id> --cwd /path/to/repo
 ```
+
+Risky Tool 的 Approval Policy 语义为：`ask` 交互确认、`auto` 自动批准、`deny`
+拒绝执行。`deny` 返回结构化 rejected ToolOutcome，不会启动对应 Tool Runner。
 
 `--verify-command ""` 可显式关闭自动 verifier。若未提供，Python/Node 项目会按仓库文件自动选择默认命令。
 模型通过 `run_shell` 成功执行完全相同的验证命令时，Runtime 会把结果绑定到当前 Workspace
