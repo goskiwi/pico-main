@@ -473,7 +473,7 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
     assert applied["status"] == "applied"
     assert applied["verification"]["exit_code"] == 0
     assert applied["verification"]["status"] == "passed"
-    assert applied["verification"]["workspace_mutation_sequence"] == 0
+    assert applied["verification"]["finished_workspace_mutation_sequence"] == 0
     assert (root / "auth.py").read_text() == "implement-auth\n"
     assert (root / "cache.py").read_text() == "implement-cache\n"
 

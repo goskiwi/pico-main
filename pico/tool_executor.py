@@ -177,10 +177,8 @@ class ToolExecutor:
                 "command": str(call.args.get("command", "")).strip(),
                 "status": status,
                 "freshness": "stale" if stale else "current",
-                "started_workspace_mutation_sequence": (
-                    started_mutation_sequence
-                ),
-                "workspace_mutation_sequence": finished_mutation_sequence,
+                "started_workspace_mutation_sequence": started_mutation_sequence,
+                "finished_workspace_mutation_sequence": finished_mutation_sequence,
                 "exit_code": outcome.structured.get("exit_code"),
                 "output": outcome.content[-4000:],
                 "source_tool_call_id": call.call_id,

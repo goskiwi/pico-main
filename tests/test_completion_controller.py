@@ -44,7 +44,7 @@ def test_completion_freshness_ignores_external_edits_without_runtime_events(
         {
             "status": "passed",
             "freshness": "current",
-            "workspace_mutation_sequence": 0,
+            "finished_workspace_mutation_sequence": 0,
         }
     )
     target.write_text("beta\n", encoding="utf-8")
@@ -101,7 +101,7 @@ def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
         {
             "status": "passed",
             "freshness": "current",
-            "workspace_mutation_sequence": first_cursor,
+            "finished_workspace_mutation_sequence": first_cursor,
         },
     )
 
@@ -116,7 +116,7 @@ def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
         return {
             "status": "passed",
             "freshness": "current",
-            "workspace_mutation_sequence": sequence,
+            "finished_workspace_mutation_sequence": sequence,
         }
 
     agent.run_verification = verify
@@ -136,11 +136,11 @@ def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
         }
     )
 
-    def fail_verification(workspace_mutation_sequence):
+    def fail_verification(started_workspace_mutation_sequence):
         return {
             "status": "failed",
             "freshness": "current",
-            "workspace_mutation_sequence": workspace_mutation_sequence,
+            "finished_workspace_mutation_sequence": started_workspace_mutation_sequence,
             "output": "1 failed",
         }
 
@@ -168,10 +168,10 @@ def test_verifier_infrastructure_error_stops_instead_of_looping(tmp_path):
             "affected_paths": ["subject.txt"],
         }
     )
-    agent.run_verification = lambda workspace_mutation_sequence: {
+    agent.run_verification = lambda started_workspace_mutation_sequence: {
         "status": "infrastructure_error",
         "freshness": "current",
-        "workspace_mutation_sequence": workspace_mutation_sequence,
+        "finished_workspace_mutation_sequence": (started_workspace_mutation_sequence),
         "output": "docker unavailable",
     }
 
@@ -216,7 +216,7 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
     assert verification["source_tool_call_id"] == "call_verify"
     assert verification["status"] == "passed"
     assert verification["started_workspace_mutation_sequence"] == verification[
-        "workspace_mutation_sequence"
+        "finished_workspace_mutation_sequence"
     ]
 
 

@@ -42,7 +42,7 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         timeout_seconds=600,
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
-        workspace_mutation_sequence=7,
+        started_workspace_mutation_sequence=7,
     )
 
     assert recorded["argv"] == (
@@ -57,7 +57,7 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         "status": "passed",
         "freshness": "current",
         "started_workspace_mutation_sequence": 7,
-        "workspace_mutation_sequence": 7,
+        "finished_workspace_mutation_sequence": 7,
         "exit_code": 0,
         "output": "2 passed",
     }
@@ -80,7 +80,7 @@ def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
         timeout_seconds=60,
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
-        workspace_mutation_sequence=7,
+        started_workspace_mutation_sequence=7,
     )
 
     assert result["status"] == "infrastructure_error"
@@ -106,10 +106,10 @@ def test_runtime_verification_is_stale_when_runtime_mutation_cursor_changes(
         timeout_seconds=60,
         redact_text=str,
         mutation_sequence_provider=lambda: mutation_sequence[0],
-        workspace_mutation_sequence=7,
+        started_workspace_mutation_sequence=7,
     )
 
     assert result["status"] == "stale"
     assert result["freshness"] == "stale"
     assert result["started_workspace_mutation_sequence"] == 7
-    assert result["workspace_mutation_sequence"] == 9
+    assert result["finished_workspace_mutation_sequence"] == 9

@@ -57,7 +57,7 @@ def test_workspace_fact_invalidates_current_verification():
             {
                 "status": "passed",
                 "freshness": "current",
-                "workspace_mutation_sequence": 0,
+                "finished_workspace_mutation_sequence": 0,
             },
         )
     )
@@ -106,7 +106,7 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
     verification = {
         "status": "passed",
         "freshness": "current",
-        "workspace_mutation_sequence": 1,
+        "finished_workspace_mutation_sequence": 1,
     }
     workspace_partial = RunEvidence(
         effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],

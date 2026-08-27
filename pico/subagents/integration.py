@@ -46,7 +46,7 @@ class PatchIntegrator:
         execution = ExecutionContext.standalone(
             max_seconds=self.parent.config.run_timeout_seconds,
         )
-        workspace_mutation_sequence = 0
+        started_workspace_mutation_sequence = 0
         verification = verify_workspace(
             root=worktree.path,
             command=command,
@@ -54,7 +54,7 @@ class PatchIntegrator:
             timeout_seconds=self.parent.config.run_timeout_seconds,
             redact_text=self.parent.redact_text,
             mutation_sequence_provider=lambda: 0,
-            workspace_mutation_sequence=workspace_mutation_sequence,
+            started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
             execution_context=execution,
         )
         if not verification or verification["status"] != "passed":

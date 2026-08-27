@@ -40,20 +40,20 @@ def verify_workspace(
     timeout_seconds,
     redact_text,
     mutation_sequence_provider,
-    workspace_mutation_sequence,
+    started_workspace_mutation_sequence,
     execution_context=None,
 ):
     command = str(command or "").strip()
     if not command:
         return None
     root = Path(root).resolve()
-    before = int(workspace_mutation_sequence)
+    before = int(started_workspace_mutation_sequence)
     record = {
         "command": command,
         "status": "infrastructure_error",
         "freshness": "current",
         "started_workspace_mutation_sequence": before,
-        "workspace_mutation_sequence": before,
+        "finished_workspace_mutation_sequence": before,
         "exit_code": None,
         "output": "",
     }
@@ -80,14 +80,14 @@ def verify_workspace(
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
         record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     after = int(mutation_sequence_provider())
-    record["workspace_mutation_sequence"] = after
+    record["finished_workspace_mutation_sequence"] = after
     if before != after:
         record["status"] = "stale"
         record["freshness"] = "stale"
     return record
 
 
-def run_verification(agent, workspace_mutation_sequence):
+def run_verification(agent, started_workspace_mutation_sequence):
     execution_context = (
         agent.run.execution_context.child()
         if agent.run.execution_context
@@ -102,6 +102,6 @@ def run_verification(agent, workspace_mutation_sequence):
         mutation_sequence_provider=lambda: (
             agent.run.evidence.last_workspace_mutation_sequence
         ),
-        workspace_mutation_sequence=workspace_mutation_sequence,
+        started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
         execution_context=execution_context,
     )

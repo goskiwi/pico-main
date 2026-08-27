@@ -65,15 +65,15 @@ class RunEvidence:
             default=0,
         )
 
-    def current_verification(self, workspace_mutation_sequence):
+    def current_verification(self, expected_workspace_mutation_sequence):
         return next(
             (
                 item
                 for item in reversed(self.verifications)
                 if item.get("status") == "passed"
                 and item.get("freshness") == "current"
-                and int(item.get("workspace_mutation_sequence", -1))
-                == int(workspace_mutation_sequence)
+                and int(item.get("finished_workspace_mutation_sequence", -1))
+                == int(expected_workspace_mutation_sequence)
             ),
             None,
         )
@@ -96,11 +96,12 @@ class RunEvidence:
                 unresolved.append(effect)
         return unresolved
 
-    def assess_completion(self, workspace_mutation_sequence=None):
+    def assess_completion(self, expected_workspace_mutation_sequence=None):
         unresolved = self.unresolved_effects()
         verified = bool(
-            workspace_mutation_sequence is not None
-            and self.current_verification(workspace_mutation_sequence) is not None
+            expected_workspace_mutation_sequence is not None
+            and self.current_verification(expected_workspace_mutation_sequence)
+            is not None
         )
         remaining = [
             effect

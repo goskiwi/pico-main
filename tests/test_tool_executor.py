@@ -332,7 +332,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         {
             "status": "passed",
             "freshness": "current",
-            "workspace_mutation_sequence": 0,
+            "finished_workspace_mutation_sequence": 0,
         },
     )
     agent.run.evidence.apply_event(verification)
