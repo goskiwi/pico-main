@@ -55,6 +55,7 @@ class PatchIntegrator:
             redact_text=self.parent.redact_text,
             mutation_sequence_provider=lambda: 0,
             started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
+            changed_paths=worktree.changed_paths(),
             execution_context=execution,
         )
         if not verification or verification["status"] != "passed":

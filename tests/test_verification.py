@@ -1,4 +1,5 @@
 from evals.pytest_output import parse_pytest_output
+from pico.mutations import file_revision
 from pico.sandbox import SandboxResult
 from pico.verification import verify_workspace
 
@@ -43,6 +44,7 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
         started_workspace_mutation_sequence=7,
+        changed_paths=(),
     )
 
     assert recorded["argv"] == (
@@ -58,6 +60,8 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
         "freshness": "current",
         "started_workspace_mutation_sequence": 7,
         "finished_workspace_mutation_sequence": 7,
+        "started_changed_path_states": {},
+        "finished_changed_path_states": {},
         "exit_code": 0,
         "output": "2 passed",
     }
@@ -81,6 +85,7 @@ def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
         started_workspace_mutation_sequence=7,
+        changed_paths=(),
     )
 
     assert result["status"] == "infrastructure_error"
@@ -107,9 +112,42 @@ def test_runtime_verification_is_stale_when_runtime_mutation_cursor_changes(
         redact_text=str,
         mutation_sequence_provider=lambda: mutation_sequence[0],
         started_workspace_mutation_sequence=7,
+        changed_paths=(),
     )
 
     assert result["status"] == "stale"
     assert result["freshness"] == "stale"
     assert result["started_workspace_mutation_sequence"] == 7
     assert result["finished_workspace_mutation_sequence"] == 9
+
+
+def test_runtime_verification_is_stale_when_changed_path_changes_during_run(
+    tmp_path,
+):
+    target = tmp_path / "subject.txt"
+    target.write_text("before\n", encoding="utf-8")
+    before = file_revision(target)
+
+    class Sandbox:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            target.write_text("external\n", encoding="utf-8")
+            return SandboxResult(returncode=0, stdout="2 passed")
+
+    result = verify_workspace(
+        root=tmp_path,
+        command="python -m pytest -q",
+        sandbox=Sandbox(),
+        timeout_seconds=60,
+        redact_text=str,
+        mutation_sequence_provider=lambda: 7,
+        started_workspace_mutation_sequence=7,
+        changed_paths=("subject.txt",),
+    )
+
+    assert result["status"] == "stale"
+    assert result["freshness"] == "stale"
+    assert result["started_changed_path_states"] == {"subject.txt": before}
+    assert result["finished_changed_path_states"] == {
+        "subject.txt": file_revision(target)
+    }

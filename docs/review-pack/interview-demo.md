@@ -60,7 +60,7 @@ Session 只保存 `active_run_id`。重启时 Runtime 重放 RunLog；未完成�
 ### 2:30～3:00：完成权
 
 打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 仍会检查 Python
-语法、当前 Workspace 验证、partial/unknown 副作用和未应用 Child Patch。模型负责建议，
+语法、当前 Workspace 验证、changed-path states、partial/unknown 副作用和未应用 Child Patch。模型负责建议，
 Runtime 负责事实和完成边界。
 
 ## 5 分钟现场 Demo

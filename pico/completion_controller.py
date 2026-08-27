@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .verification import changed_python_syntax_issues
+from .verification import capture_changed_path_states, changed_python_syntax_issues
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -35,14 +35,21 @@ class CompletionController:
                 instruction=instruction,
             )
 
-        mutation_sequence, verification_guidance = self._ensure_verification()
+        (
+            mutation_sequence,
+            current_changed_path_states,
+            verification_guidance,
+        ) = self._ensure_verification()
         if verification_guidance:
             return CompletionResult(
                 status="verification_failed",
                 instruction=verification_guidance,
             )
 
-        decision = self.runtime.run.evidence.assess_completion(mutation_sequence)
+        decision = self.runtime.run.evidence.assess_completion(
+            mutation_sequence,
+            current_changed_path_states,
+        )
         if not decision.allowed:
             return CompletionResult(
                 status=decision.status,
@@ -82,28 +89,43 @@ class CompletionController:
             and runtime.config.verification_command
         )
         if not needs_verification:
-            return "", ""
+            return None, None, ""
         mutation_sequence = (
             runtime.run.evidence.last_workspace_mutation_sequence
         )
+        current_changed_path_states = capture_changed_path_states(
+            runtime.workspace.root,
+            runtime.run.evidence.changed_paths,
+        )
         verification = runtime.run.evidence.current_verification(
-            mutation_sequence
+            mutation_sequence,
+            current_changed_path_states,
         )
         if verification is None:
             verification = runtime.run_verification(mutation_sequence)
-            runtime.emit_event(
-                "verification_result",
-                verification or {"status": "skipped"},
-            )
+            if verification is not None:
+                runtime.emit_event("verification_result", verification)
+        current_changed_path_states = capture_changed_path_states(
+            runtime.workspace.root,
+            runtime.run.evidence.changed_paths,
+        )
         if verification and verification.get("status") == "infrastructure_error":
             raise RuntimeError(
                 "Runtime verification infrastructure error: "
                 + str(verification.get("output", "verification unavailable"))
             )
         if not verification or verification.get("status") != "passed":
-            return mutation_sequence, (
+            return mutation_sequence, current_changed_path_states, (
                 "Runtime verification failed; inspect and repair before "
                 "submit_final.\n"
                 + str((verification or {}).get("output", "verification unavailable"))
             )
-        return mutation_sequence, ""
+        if runtime.run.evidence.current_verification(
+            mutation_sequence,
+            current_changed_path_states,
+        ) is None:
+            return mutation_sequence, current_changed_path_states, (
+                "Runtime workspace changed after verification; run verification "
+                "again before submit_final."
+            )
+        return mutation_sequence, current_changed_path_states, ""

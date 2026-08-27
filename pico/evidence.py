@@ -65,7 +65,11 @@ class RunEvidence:
             default=0,
         )
 
-    def current_verification(self, expected_workspace_mutation_sequence):
+    def current_verification(
+        self,
+        expected_workspace_mutation_sequence,
+        current_changed_path_states,
+    ):
         return next(
             (
                 item
@@ -74,6 +78,8 @@ class RunEvidence:
                 and item.get("freshness") == "current"
                 and int(item.get("finished_workspace_mutation_sequence", -1))
                 == int(expected_workspace_mutation_sequence)
+                and item.get("finished_changed_path_states")
+                == dict(current_changed_path_states)
             ),
             None,
         )
@@ -96,11 +102,19 @@ class RunEvidence:
                 unresolved.append(effect)
         return unresolved
 
-    def assess_completion(self, expected_workspace_mutation_sequence=None):
+    def assess_completion(
+        self,
+        expected_workspace_mutation_sequence=None,
+        current_changed_path_states=None,
+    ):
         unresolved = self.unresolved_effects()
         verified = bool(
             expected_workspace_mutation_sequence is not None
-            and self.current_verification(expected_workspace_mutation_sequence)
+            and current_changed_path_states is not None
+            and self.current_verification(
+                expected_workspace_mutation_sequence,
+                current_changed_path_states,
+            )
             is not None
         )
         remaining = [

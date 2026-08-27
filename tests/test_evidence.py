@@ -57,7 +57,10 @@ def test_workspace_fact_invalidates_current_verification():
             {
                 "status": "passed",
                 "freshness": "current",
+                "started_workspace_mutation_sequence": 0,
                 "finished_workspace_mutation_sequence": 0,
+                "started_changed_path_states": {},
+                "finished_changed_path_states": {},
             },
         )
     )
@@ -106,13 +109,19 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
     verification = {
         "status": "passed",
         "freshness": "current",
+        "started_workspace_mutation_sequence": 1,
         "finished_workspace_mutation_sequence": 1,
+        "started_changed_path_states": {"x.py": "sha256:current"},
+        "finished_changed_path_states": {"x.py": "sha256:current"},
     }
     workspace_partial = RunEvidence(
         effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],
         verifications=[verification],
     )
-    assert workspace_partial.assess_completion(1).allowed is True
+    assert workspace_partial.assess_completion(
+        1,
+        {"x.py": "sha256:current"},
+    ).allowed is True
 
     memory_partial = RunEvidence(
         effects=[
@@ -126,7 +135,10 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
         ],
         verifications=[verification],
     )
-    assert memory_partial.assess_completion(1).allowed is False
+    assert memory_partial.assess_completion(
+        1,
+        {"x.py": "sha256:current"},
+    ).allowed is False
 
     memory_partial.effects.append(
         effect(
@@ -137,4 +149,7 @@ def test_completion_evidence_tracks_repair_and_verification_scope():
             scope="project_memory",
         )
     )
-    assert memory_partial.assess_completion(1).allowed is True
+    assert memory_partial.assess_completion(
+        1,
+        {"x.py": "sha256:current"},
+    ).allowed is True

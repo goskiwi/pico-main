@@ -187,7 +187,8 @@ def main():
         assert replayed.working_state.next_steps == ()
         assert evidence.changed_paths == ["calculator.py"]
         assert evidence.current_verification(
-            evidence.last_workspace_mutation_sequence
+            evidence.last_workspace_mutation_sequence,
+            verification_events[-1]["finished_changed_path_states"],
         ) is not None
         assert len(sandbox.calls) == 1
         assert verification_events[0]["source_tool_call_id"] == "call_verify"

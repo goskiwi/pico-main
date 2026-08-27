@@ -10,7 +10,7 @@ from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
 from .features.memory import WorkingState
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState, apply_task_event
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v11"
+RUN_LOG_SCHEMA_VERSION = "run-log-v12"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -124,10 +124,16 @@ def _validate_verification_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"status", "freshness", "finished_workspace_mutation_sequence"},
+        {
+            "status",
+            "freshness",
+            "started_workspace_mutation_sequence",
+            "finished_workspace_mutation_sequence",
+            "started_changed_path_states",
+            "finished_changed_path_states",
+        },
         {
             "command",
-            "started_workspace_mutation_sequence",
             "exit_code",
             "output",
             "source_tool_call_id",
@@ -139,12 +145,24 @@ def _validate_verification_payload(kind, payload):
         raise TypeError(
             "verification_result finished mutation sequence must be an integer"
         )
-    if "started_workspace_mutation_sequence" in payload and not isinstance(
-        payload["started_workspace_mutation_sequence"], int
-    ):
+    if not isinstance(payload["started_workspace_mutation_sequence"], int):
         raise TypeError(
             "verification_result started mutation sequence must be an integer"
         )
+    for state_field in (
+        "started_changed_path_states",
+        "finished_changed_path_states",
+    ):
+        states = payload[state_field]
+        if not isinstance(states, dict) or any(
+            not isinstance(path, str)
+            or not path
+            or not isinstance(state, str)
+            for path, state in states.items()
+        ):
+            raise TypeError(
+                f"verification_result {state_field} must map paths to states"
+            )
 
 
 _PAYLOAD_VALIDATORS = {

@@ -6,6 +6,8 @@ import ast
 from pathlib import Path
 
 from .sandbox import shell_argv
+from .workspace import normalize_relative_file
+from .workspace_tracker import WorkspaceTracker
 
 
 def changed_python_syntax_issues(agent):
@@ -32,6 +34,16 @@ def discover_verification_command(root):
     return ""
 
 
+def capture_changed_path_states(root, changed_paths):
+    root = Path(root).resolve()
+    return {
+        relative: WorkspaceTracker.path_state(root / relative)
+        for relative in sorted(
+            {normalize_relative_file(path) for path in changed_paths}
+        )
+    }
+
+
 def verify_workspace(
     *,
     root,
@@ -41,19 +53,24 @@ def verify_workspace(
     redact_text,
     mutation_sequence_provider,
     started_workspace_mutation_sequence,
+    changed_paths,
     execution_context=None,
 ):
     command = str(command or "").strip()
     if not command:
         return None
     root = Path(root).resolve()
+    changed_paths = tuple(changed_paths)
     before = int(started_workspace_mutation_sequence)
+    started_changed_path_states = capture_changed_path_states(root, changed_paths)
     record = {
         "command": command,
         "status": "infrastructure_error",
         "freshness": "current",
         "started_workspace_mutation_sequence": before,
         "finished_workspace_mutation_sequence": before,
+        "started_changed_path_states": started_changed_path_states,
+        "finished_changed_path_states": dict(started_changed_path_states),
         "exit_code": None,
         "output": "",
     }
@@ -80,8 +97,10 @@ def verify_workspace(
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
         record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     after = int(mutation_sequence_provider())
+    finished_changed_path_states = capture_changed_path_states(root, changed_paths)
     record["finished_workspace_mutation_sequence"] = after
-    if before != after:
+    record["finished_changed_path_states"] = finished_changed_path_states
+    if before != after or started_changed_path_states != finished_changed_path_states:
         record["status"] = "stale"
         record["freshness"] = "stale"
     return record
@@ -103,5 +122,6 @@ def run_verification(agent, started_workspace_mutation_sequence):
             agent.run.evidence.last_workspace_mutation_sequence
         ),
         started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
+        changed_paths=agent.run.evidence.changed_paths,
         execution_context=execution_context,
     )

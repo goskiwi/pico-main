@@ -10,6 +10,7 @@ from .contracts import (
     ToolRunnerResult,
     tool_call_hash,
 )
+from .verification import capture_changed_path_states
 
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
 SHELL_TOOL_PREVIEW_BYTES = 16 * 1024
@@ -149,17 +150,26 @@ class ToolExecutor:
         outcome,
         result_entry,
         started_mutation_sequence,
+        started_changed_path_states,
     ):
         if (
             result_entry is None
             or started_mutation_sequence is None
+            or started_changed_path_states is None
             or not cls._is_matching_verification(agent, call)
         ):
             return
         finished_mutation_sequence = (
             agent.run.evidence.last_workspace_mutation_sequence
         )
-        stale = started_mutation_sequence != finished_mutation_sequence
+        finished_changed_path_states = capture_changed_path_states(
+            agent.workspace.root,
+            agent.run.evidence.changed_paths,
+        )
+        stale = (
+            started_mutation_sequence != finished_mutation_sequence
+            or started_changed_path_states != finished_changed_path_states
+        )
         if stale:
             status = "stale"
         elif outcome.status == "success":
@@ -179,6 +189,8 @@ class ToolExecutor:
                 "freshness": "stale" if stale else "current",
                 "started_workspace_mutation_sequence": started_mutation_sequence,
                 "finished_workspace_mutation_sequence": finished_mutation_sequence,
+                "started_changed_path_states": started_changed_path_states,
+                "finished_changed_path_states": finished_changed_path_states,
                 "exit_code": outcome.structured.get("exit_code"),
                 "output": outcome.content[-4000:],
                 "source_tool_call_id": call.call_id,
@@ -421,11 +433,16 @@ class ToolExecutor:
             ],
         )
         verification_start_mutation_sequence = None
+        verification_started_changed_path_states = None
         observed_workspace_drift = False
         try:
             if self._is_matching_verification(agent, call):
                 verification_start_mutation_sequence = (
                     agent.run.evidence.last_workspace_mutation_sequence
+                )
+                verification_started_changed_path_states = capture_changed_path_states(
+                    agent.workspace.root,
+                    agent.run.evidence.changed_paths,
                 )
             execution = tool["run"](args)
             if not isinstance(execution, ToolRunnerResult):
@@ -493,6 +510,7 @@ class ToolExecutor:
             outcome,
             result_entry,
             verification_start_mutation_sequence,
+            verification_started_changed_path_states,
         )
         result_key = self._repeat_key(agent, run_id, name, args)
         self._outcomes_by_state.setdefault(result_key, []).append(outcome)

@@ -6,6 +6,7 @@ from pico.contracts import FailureInfo, ToolCall, ToolRunnerResult
 from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.task_state import TaskState
+from pico.verification import capture_changed_path_states
 
 
 def active_agent(tmp_path):
@@ -29,9 +30,23 @@ def active_agent(tmp_path):
     return agent, target
 
 
-def test_completion_freshness_ignores_external_edits_without_runtime_events(
-    tmp_path,
-):
+def verification_payload(agent, sequence, *, status="passed", **extra):
+    states = capture_changed_path_states(
+        agent.workspace.root,
+        agent.run.evidence.changed_paths,
+    )
+    return {
+        "status": status,
+        "freshness": "current",
+        "started_workspace_mutation_sequence": sequence,
+        "finished_workspace_mutation_sequence": sequence,
+        "started_changed_path_states": states,
+        "finished_changed_path_states": dict(states),
+        **extra,
+    }
+
+
+def test_external_edit_of_changed_path_invalidates_and_reruns_verification(tmp_path):
     agent, target = active_agent(tmp_path)
     agent.run.evidence.effects.append(
         {
@@ -40,21 +55,21 @@ def test_completion_freshness_ignores_external_edits_without_runtime_events(
             "event_sequence": 0,
         }
     )
-    agent.run.evidence.verifications.append(
-        {
-            "status": "passed",
-            "freshness": "current",
-            "finished_workspace_mutation_sequence": 0,
-        }
-    )
+    agent.run.evidence.verifications.append(verification_payload(agent, 0))
     target.write_text("beta\n", encoding="utf-8")
-    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
-        AssertionError("external edits are outside Runtime mutation freshness")
-    )
+    calls = []
+
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence)
+
+    agent.run_verification = verify
 
     assessment = CompletionController(agent).assess("done")
 
     assert assessment.allowed is True
+    assert calls == [0]
+    assert len(agent.run.evidence.verifications) == 2
 
 
 def test_invalid_changed_python_blocks_completion_before_verification(tmp_path):
@@ -98,11 +113,7 @@ def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
     first_cursor = agent.run.evidence.last_workspace_mutation_sequence
     agent.emit_event(
         "verification_result",
-        {
-            "status": "passed",
-            "freshness": "current",
-            "finished_workspace_mutation_sequence": first_cursor,
-        },
+        verification_payload(agent, first_cursor),
     )
 
     assert edit("call_second_edit", "beta", "gamma").status == "success"
@@ -113,11 +124,7 @@ def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
 
     def verify(sequence):
         calls.append(sequence)
-        return {
-            "status": "passed",
-            "freshness": "current",
-            "finished_workspace_mutation_sequence": sequence,
-        }
+        return verification_payload(agent, sequence)
 
     agent.run_verification = verify
 
@@ -137,12 +144,12 @@ def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
     )
 
     def fail_verification(started_workspace_mutation_sequence):
-        return {
-            "status": "failed",
-            "freshness": "current",
-            "finished_workspace_mutation_sequence": started_workspace_mutation_sequence,
-            "output": "1 failed",
-        }
+        return verification_payload(
+            agent,
+            started_workspace_mutation_sequence,
+            status="failed",
+            output="1 failed",
+        )
 
     agent.run_verification = fail_verification
 
@@ -168,12 +175,14 @@ def test_verifier_infrastructure_error_stops_instead_of_looping(tmp_path):
             "affected_paths": ["subject.txt"],
         }
     )
-    agent.run_verification = lambda started_workspace_mutation_sequence: {
-        "status": "infrastructure_error",
-        "freshness": "current",
-        "finished_workspace_mutation_sequence": (started_workspace_mutation_sequence),
-        "output": "docker unavailable",
-    }
+    agent.run_verification = lambda started_workspace_mutation_sequence: (
+        verification_payload(
+            agent,
+            started_workspace_mutation_sequence,
+            status="infrastructure_error",
+            output="docker unavailable",
+        )
+    )
 
     with pytest.raises(RuntimeError, match="docker unavailable"):
         CompletionController(agent).assess("done")
@@ -218,6 +227,9 @@ def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
     assert verification["started_workspace_mutation_sequence"] == verification[
         "finished_workspace_mutation_sequence"
     ]
+    assert verification["started_changed_path_states"] == verification[
+        "finished_changed_path_states"
+    ]
 
 
 def test_failed_matching_shell_command_records_current_verification_failure(tmp_path):
@@ -245,3 +257,41 @@ def test_failed_matching_shell_command_records_current_verification_failure(tmp_
     assert verification["status"] == "failed"
     assert verification["freshness"] == "current"
     assert verification["exit_code"] == 1
+
+
+def test_matching_shell_verification_is_stale_when_changed_path_changes(
+    tmp_path,
+):
+    agent, target = active_agent(tmp_path)
+    agent.run.evidence.effects.append(
+        {
+            "effect_scope": "workspace",
+            "affected_paths": ["subject.txt"],
+            "event_sequence": 0,
+        }
+    )
+
+    def verify(_args):
+        target.write_text("external\n", encoding="utf-8")
+        return ToolRunnerResult(
+            "exit_code: 0\nstdout:\n1 passed",
+            structured={"exit_code": 0},
+        )
+
+    agent.tools.registry["run_shell"]["run"] = verify
+    call = ToolCall(
+        "run_shell",
+        {"command": "verify", "timeout_seconds": 20},
+        "call_stale_verify",
+    )
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+
+    outcome = agent.tools.run(call)
+    verification = agent.run.evidence.verifications[-1]
+
+    assert outcome.status == "success"
+    assert verification["status"] == "stale"
+    assert verification["freshness"] == "stale"
+    assert verification["started_changed_path_states"] != verification[
+        "finished_changed_path_states"
+    ]
