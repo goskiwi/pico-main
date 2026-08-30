@@ -129,7 +129,7 @@ def test_read_only_requires_successful_observation(tmp_path):
     assert CompletionController(agent).assess("done").status == "observation_required"
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-    assert agent.tools.run(call).status == "success"
+    assert agent.tools.execute(call).status == "success"
     assert CompletionController(agent).assess("done").allowed
 
 

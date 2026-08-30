@@ -299,7 +299,7 @@ class AgentLoop:
         loop_state.completion_block_count = 0
         call = turn.action.tool_call
         agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-        outcome = agent.tools.run(call)
+        outcome = agent.tools.execute(call)
 
         model_instruction = self._append_budget_instruction(loop_state)
         provider_result = outcome.render_for_model()

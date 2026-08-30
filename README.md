@@ -28,11 +28,12 @@ AgentLoop 请求 Provider
   -> Responses 输出恰好一个 function_call
   -> 解析为 ModelAction.tool
   -> 先写 assistant_tool_call Fact
-  -> ToolManager：Registry / Surface / Schema / Policy / Approval
-  -> ToolExecutor：规划潜在影响与 preimage
+  -> ToolRuntime：Registry / Surface / Schema / Policy / Approval
+  -> ToolRuntime 私有 tool-execution helpers：协议、重复调用、影响范围与 preimage
   -> 先 fsync tool_started Fact
-  -> 当前 Tool Runner 返回 ToolRunnerResult
-  -> ToolExecutor 归一化为 ToolOutcome
+  -> ToolContext 向当前 Tool Runner 提供 Workspace、Store、Sandbox 与 Run 身份
+  -> Tool Runner 返回 ToolRunnerResult
+  -> ToolRuntime 私有 tool-execution helpers 归一化为 ToolOutcome
   -> fsync tool_result Fact，并更新 RunProjection / RunEvidence
   -> 将有界 ToolOutcome 回写 Provider
 ```
@@ -63,8 +64,8 @@ ModelAction.final
   Side Effect、RunChangeSet 与验证记录。
 - **Completion**：`CompletionController` 基于 TaskContract、Evidence 和当前 Workspace
   状态作出的“允许最终提交或继续工作”决策；只有随后写入终态 Fact 才算 Run 已结束。
-- **Tool runtime**：当前是职责名称，不是独立类。它由 `ToolManager -> ToolExecutor ->
-  Tool Runner` 这条真实调用链共同实现。
+- **Tool runtime**：当前公开边界是 `ToolRuntime`；它通过 `tool_execution.py` 的私有纯函数、
+  helpers、`ToolContext` 和具体 Tool Runner 完成一次工具事务，不持有第二份持久状态。
 
 ## Runtime 对象边界
 
@@ -113,10 +114,10 @@ state = agent.run.task
 Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 `CompletionController` 负责 TaskContract、Subagent、Verifier 与 Completion Gate。
 
-当前工具轮的编排仍横跨 `AgentLoop`、`ToolManager`、`ToolExecutor` 与具体 Tool
-Runner；最终提交则由 `CompletionController` 判断、`RunLifecycle` 持久化。后续重构目标是
-减少这些模块之间重复的参数传递和分支判断，并让每条路径拥有更清晰的单一入口；在完成该
-重构前，本文只使用上述当前类和返回类型，不把计划中的抽象描述为现有实现。
+当前工具轮已经收口到 `ToolRuntime` 公开边界：`AgentLoop` 只提交 `ToolCall` 并消费
+`ToolOutcome`，工具协议、准入、执行和 Fact 写入由 `ToolRuntime` 协调，纯值计算下沉到
+私有 `tool_execution.py`。最终提交仍由 `CompletionController` 判断、
+`RunLifecycle` 持久化。
 
 核心实现：
 
@@ -144,7 +145,7 @@ Parent 通过两个原生工具编排独立 Pico Child：
 Explore Child 共享同一源码快照但只有只读工具，并以包含精确路径、行号和关键片段的
 证据交接替代完整工具历史。Implement Child 使用独立 Git
 Worktree、独立 Model Client、Session、Run Log 和 Artifact namespace；
-写操作在 ToolExecutor 准入阶段受精确文件白名单限制，任务结束后再以实际 Git Diff
+写操作在 ToolRuntime 准入阶段受精确文件白名单限制，任务结束后再以实际 Git Diff
 复核一次。无依赖且写文件重叠的实现任务会在规划阶段被拒绝；有依赖的实现任务会把
 上游 Patch 作为临时基线后继续工作。
 

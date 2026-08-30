@@ -138,6 +138,7 @@ BASE_TOOL_SPECS = {
     "read_artifact": {
         "args_schema": ReadArtifactArgs,
         "risky": False,
+        "manual_observation": True,
         "description": (
             "Read up to 8 KiB from a truncated tool-output artifact in the current run."
         ),

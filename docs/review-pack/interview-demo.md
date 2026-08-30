@@ -38,14 +38,19 @@ final   -> 交给 CompletionController
 
 ### 1:00～1:45：工具事务
 
-打开 `pico/tool_executor.py` 和 `pico/run_log.py`：
+打开 `pico/tool_runtime.py` 和 `pico/run_log.py`：
 
 ```text
 assistant_tool_call
+-> ToolRuntime 准入与私有 tool-execution helpers
 -> fsynced tool_started + before-state paths
--> Tool Runner
+-> ToolContext-bound Tool Runner
 -> tool_result + side-effect state
 ```
+
+强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界；参数校验、Approval、preimage 和
+Fact 写入仍由它保持因果顺序，纯值计算下沉到私有 `tool_execution.py`，具体 Runner 只获得
+`ToolContext` 中的受限能力。
 
 `write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。
 

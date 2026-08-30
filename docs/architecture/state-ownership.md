@@ -9,8 +9,8 @@ Terminology in this document is strict:
 - **Evidence** is the `RunEvidence` projection derived from Tool Result and Verification Facts.
 - **Completion** is the decision made by `CompletionController`; terminal ownership begins only
   when `RunLifecycle` appends `assistant_final` or `run_stopped`.
-- **Tool runtime** describes the current `ToolManager -> ToolExecutor -> Tool Runner`
-  responsibility chain. No standalone object owns a second Tool state.
+- **Tool runtime** is the `ToolRuntime` public boundary backed by private tool-execution helpers,
+  `ToolContext` and concrete Tool Runners. It owns no second durable Tool state.
 
 | Scope | Source of truth | Derived state |
 |---|---|---|
@@ -27,7 +27,7 @@ Terminology in this document is strict:
 | Path | Durable writes | Rebuildable/current state |
 |---|---|---|
 | CLI / resume | First `user_message.contract`, then Session `active_run_id`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | RuntimeRecovery selection and one RunProjection replay |
-| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolManager admission, ToolExecutor orchestration, Tool Runner result, Projection and Evidence updates |
+| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolRuntime admission/orchestration, private tool-execution helpers, ToolContext-bound Tool Runner result, Projection and Evidence updates |
 | Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
 
 Invariants:
@@ -42,7 +42,3 @@ Invariants:
 - Tool protocol events form one strict `assistant_tool_call -> tool_started? -> tool_result` transaction.
 - Subagent scheduling and Patch application are synchronous and process-local; cross-process Child recovery is outside scope.
 - Old persistence formats are rejected; no compatibility or migration branch exists.
-
-Future refactoring may reduce handoffs inside the current Tool chain and final-settlement path,
-but it must not introduce another durable Tool status, Evidence file or terminal summary. Until
-that work exists, ownership remains with the concrete classes and stores listed above.

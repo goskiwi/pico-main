@@ -3,6 +3,7 @@ from .features.memory import WorkingState
 from .providers.clients import FakeModelClient, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
 from .task_state import TaskContract
+from .tool_runtime import ToolRuntime
 from .workspace import WorkspaceContext
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "TaskContract",
     "ToolCall",
     "ToolOutcome",
+    "ToolRuntime",
     "WorkingState",
     "WorkspaceContext",
 ]

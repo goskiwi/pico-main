@@ -52,16 +52,16 @@ def run_active(agent, call):
         agent.run.projection = RunProjection().apply_event(first)
         agent.run.run_log = run_log
     agent.apply_run_event(run_log.append_tool_call(call))
-    return agent.tools.run(call)
+    return agent.tools.execute(call)
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.write_text("secret")
     agent = build_agent(tmp_path)
-    assert agent.tools.run("read_file", {"path": "../" + outside.name}).status == "rejected"
+    assert agent.tools.execute("read_file", {"path": "../" + outside.name}).status == "rejected"
     (tmp_path / "link").symlink_to(outside)
-    assert agent.tools.run("read_file", {"path": "link"}).status == "rejected"
+    assert agent.tools.execute("read_file", {"path": "link"}).status == "rejected"
 
 
 def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
@@ -69,7 +69,7 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
     (tmp_path / ".git" / "config").write_text("internal\n", encoding="utf-8")
     agent = build_agent(tmp_path)
 
-    read_git = agent.tools.run(
+    read_git = agent.tools.execute(
         "read_file",
         {"path": ".git/config", "start_line": 1, "end_line": 10},
     )
@@ -100,7 +100,7 @@ def test_shell_runs_inside_docker_and_env_is_filtered(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
     with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LANG": "C"}, clear=True):
-        outcome = agent.tools.run(
+        outcome = agent.tools.execute(
             "run_shell", {"command": "python -c 'print(1)'", "timeout_seconds": 3}
         )
     assert outcome.status == "success"
@@ -112,13 +112,13 @@ def test_shell_runs_inside_docker_and_env_is_filtered(tmp_path):
     assert options["timeout"] == 3
 
 
-def test_shell_failure_is_structured_before_tool_executor_classification(tmp_path):
+def test_shell_failure_is_structured_before_tool_runtime_classification(tmp_path):
     sandbox = FakeSandbox(
         SandboxResult(returncode=7, stderr="command failed\n")
     )
     agent = build_agent(tmp_path, sandbox=sandbox)
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         "run_shell", {"command": "false", "timeout_seconds": 3}
     )
 
@@ -144,7 +144,7 @@ def test_approval_denial_prevents_sandbox_start(tmp_path):
     sandbox = FakeSandbox()
     agent = build_agent(tmp_path, sandbox=sandbox)
     agent.config = PicoConfig.build(agent.config, approval_policy="deny")
-    outcome = agent.tools.run("run_shell", {"command": "echo hi"})
+    outcome = agent.tools.execute("run_shell", {"command": "echo hi"})
     assert outcome.status == "rejected"
     assert outcome.correction_action == "stop_route"
     assert sandbox.calls == []
@@ -160,7 +160,7 @@ def test_sandbox_infrastructure_failure_requests_user_action(tmp_path):
     )
     agent = build_agent(tmp_path, sandbox=sandbox)
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         "run_shell",
         {"command": "true", "timeout_seconds": 3},
     )

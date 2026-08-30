@@ -1,7 +1,11 @@
-"""Staged tool admission and canonical outcome construction."""
+"""The one public runtime boundary for model-visible tools."""
+
+from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
+from . import tools as toolkit
 from .contracts import (
     FailureInfo,
     ToolCall,
@@ -9,65 +13,156 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
+from .tool_context import ToolContext
+from .tool_execution import (
+    _tool_preview_limit,
+    attach_preimage_artifacts,
+    classify_runner_result,
+    effect_diff,
+    intersect_write_scopes,
+    model_tool_output,
+    path_transitions,
+    redact_structured,
+    repeat_key,
+    tracked_workspace_drift,
+)
 
-DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
-SHELL_TOOL_PREVIEW_BYTES = 16 * 1024
-
-
-def _tool_preview_limit(tool_name):
-    return SHELL_TOOL_PREVIEW_BYTES if tool_name == "run_shell" else DEFAULT_TOOL_PREVIEW_BYTES
-
-
-def _complete_lines_within_budget(lines, budget, *, from_tail=False):
-    selected = []
-    used = 0
-    candidates = reversed(lines) if from_tail else iter(lines)
-    for line in candidates:
-        encoded_size = len(line.encode("utf-8")) + (1 if selected else 0)
-        if used + encoded_size > budget:
-            break
-        selected.append(line)
-        used += encoded_size
-    if from_tail:
-        selected.reverse()
-    return selected
-
-
-def model_tool_output(content, tool_name, descriptor):
-    content = str(content)
-    total_bytes = len(content.encode("utf-8"))
-    limit = _tool_preview_limit(tool_name)
-    if total_bytes <= limit:
-        return content
-    if not descriptor.get("artifact_id"):
-        raise RuntimeError("truncated tool output requires an artifact")
-    lines = content.splitlines()
-    from_tail = tool_name == "run_shell"
-    selected = _complete_lines_within_budget(lines, limit - 512, from_tail=from_tail)
-    if from_tail:
-        start_line = len(lines) - len(selected) + 1
-        end_line = len(lines)
-    else:
-        start_line = 1
-        end_line = len(selected)
-    preview = "\n".join(selected)
-    notice = (
-        f"[Output truncated: showing lines {start_line}-{end_line} of {len(lines)}; "
-        f"full_bytes={total_bytes}; artifact_id={descriptor['artifact_id']}. "
-        "Use read_artifact with this artifact_id and offset=0 to inspect the full "
-        "output in 8 KiB pages.]"
-    )
-    return "\n".join(part for part in (preview, notice) if part)
+if TYPE_CHECKING:
+    from .runtime import Pico
 
 
 def _run_id(agent):
     return str(agent.run.projection.run_id or "manual")
 
 
-class ToolExecutor:
-    def __init__(self, agent):
-        self.agent = agent
+class ToolRuntime:
+    """Own tool discovery, policy admission, and transaction execution."""
+
+    def __init__(self, runtime: Pico):
+        self.runtime = runtime
+        self.registry = self._build_registry()
+        self.surface = self._apply_allowlist(self.registry)
+        self.action_schemas = toolkit.build_action_tools(self.surface)
         self._repeat_outcomes = {}
+
+    def _build_registry(self):
+        tools = toolkit.build_tool_registry(self.context())
+        if self.runtime.dependencies.subagents is not None:
+            from .subagents.tools import build_tool_registry
+
+            tools.update(build_tool_registry(self.runtime.dependencies.subagents))
+        return tools
+
+    def _apply_allowlist(self, tools):
+        allowed_tools = self.runtime.config.allowed_tools
+        if allowed_tools is None:
+            return tools
+        unknown = [name for name in allowed_tools if name not in tools]
+        if unknown:
+            raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
+        allowed = set(allowed_tools)
+        return {name: tool for name, tool in tools.items() if name in allowed}
+
+    def validate(self, name, args):
+        runtime = self.runtime
+        task = runtime.run.task
+        tool = self.registry.get(name)
+        contract = getattr(task, "contract", None)
+        if (
+            contract is not None
+            and contract.task_kind == "read_only"
+            and tool is not None
+            and tool.get("state_mutating", False)
+        ):
+            raise ToolFailureError(
+                "read_only_task",
+                f"task requirements do not allow state-mutating tool: {name}",
+                "no_retry",
+            )
+        if tool is None:
+            raise ValueError(f"unknown tool: {name}")
+        validated = tool["args_schema"].model_validate(args or {}).model_dump()
+        validator = tool.get("validate")
+        if validator is not None:
+            validated = validator(validated)
+        if (
+            contract is not None
+            and contract.task_kind == "read_only"
+            and name == "delegate_tasks"
+            and any(item.get("kind") == "implement" for item in validated["tasks"])
+        ):
+            raise ToolFailureError(
+                "read_only_task",
+                "read-only task may delegate explore tasks only",
+                "no_retry",
+            )
+        allowed_paths = intersect_write_scopes(
+            getattr(contract, "allowed_write_paths", None),
+            runtime.config.allowed_write_paths,
+        )
+        if name in {"write_file", "edit_file"} and allowed_paths is not None:
+            target = runtime.workspace.resolve_tool_path(validated["path"])
+            relative = target.relative_to(runtime.workspace.root).as_posix()
+            if relative not in set(allowed_paths):
+                raise ValueError(f"write path outside allowed scope: {relative}")
+        return validated
+
+    def model_action_tools(self):
+        task = self.runtime.run.task
+        contract = getattr(task, "contract", None)
+        if contract is None or contract.task_kind != "read_only":
+            return list(self.action_schemas)
+        return [
+            schema
+            for schema in self.action_schemas
+            if schema["name"] == "submit_final"
+            or not self.registry.get(schema["name"], {}).get(
+                "state_mutating", False
+            )
+        ]
+
+    def context(self):
+        runtime = self.runtime
+        return ToolContext(
+            workspace_root=runtime.workspace.root,
+            path_resolver=runtime.workspace.resolve_tool_path,
+            shell_env_provider=runtime.shell_env,
+            project_memory=runtime.dependencies.project_memory,
+            artifact_store=runtime.dependencies.artifacts,
+            run_id_provider=lambda: str(runtime.run.projection.run_id or "manual"),
+            tool_call_id_provider=lambda: (
+                runtime.run.run_log.pending_call_id()
+                if runtime.run.run_log is not None
+                else ""
+            ),
+            working_state_provider=lambda: (
+                runtime.run.task.working if runtime.run.task is not None else None
+            ),
+            token_counter_provider=lambda text: runtime.prompt.context.tokenizer.count(
+                text
+            ),
+            mutation_service=runtime.dependencies.mutations,
+            sandbox=runtime.dependencies.sandbox,
+            execution_context_provider=lambda: (
+                runtime.run.execution_context.child()
+                if runtime.run.execution_context is not None
+                else None
+            ),
+        )
+
+    def approve(self, name, args):
+        config = self.runtime.config
+        if config.approval_policy == "auto":
+            return True
+        if config.approval_policy == "deny":
+            return False
+        try:
+            answer = input(
+                f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
+            )
+        except EOFError:
+            return False
+        return answer.strip().lower() in {"y", "yes"}
 
     @staticmethod
     def _run_boundary_reason(agent, call_id):
@@ -95,7 +190,7 @@ class ToolExecutor:
         return ""
 
     def _reject_out_of_protocol_call(self, call):
-        reason = self._run_boundary_reason(self.agent, call.call_id)
+        reason = self._run_boundary_reason(self.runtime, call.call_id)
         if not reason:
             return None
         return self._rejected(
@@ -107,17 +202,17 @@ class ToolExecutor:
         )
 
     def _resolve_tool(self, call):
-        tool = self.agent.tools.registry.get(call.name)
+        tool = self.registry.get(call.name)
         if tool is None:
             return None, self._rejected(
                 call, "unknown_tool", "unknown tool", "retry_after_change"
             )
-        allowed = self.agent.config.allowed_tools
+        allowed = self.runtime.config.allowed_tools
         if allowed is not None and call.name not in allowed:
             return None, self._rejected(
                 call, "tool_not_allowed", "tool outside run surface"
             )
-        if self.agent.run.task is None and not tool.get(
+        if self.runtime.run.task is None and not tool.get(
             "manual_observation", False
         ):
             return None, self._rejected(
@@ -141,21 +236,6 @@ class ToolExecutor:
         return run_log
 
     @classmethod
-    def _redact_structured(cls, agent, value):
-        if isinstance(value, str):
-            return agent.redact_text(value)
-        if isinstance(value, dict):
-            return {
-                str(key): cls._redact_structured(agent, item)
-                for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple)):
-            return [cls._redact_structured(agent, item) for item in value]
-        if value is None or isinstance(value, (bool, int, float)):
-            return value
-        return agent.redact_text(str(value))
-
-    @classmethod
     def _record_tool_started(
         cls, agent, call, *, risky, effect_scope, potential_effects
     ):
@@ -177,19 +257,6 @@ class ToolExecutor:
         if run_log is None:
             return None
         return agent.apply_run_event(run_log.append_tool_result(outcome))
-
-    @staticmethod
-    def _repeat_key(run_id, name, args):
-        try:
-            args_signature = json.dumps(
-                dict(args),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError):
-            return None
-        return str(run_id), str(name), args_signature
 
     def _reject_repeated_call(self, call, repeat_key):
         previous = self._repeat_outcomes.get(repeat_key, ()) if repeat_key else ()
@@ -219,29 +286,6 @@ class ToolExecutor:
         }
 
     @staticmethod
-    def _tracked_workspace_drift(agent, states, effect_scope):
-        if effect_scope not in {"workspace", "mixed"}:
-            return ()
-        evidence = getattr(getattr(agent.run, "projection", None), "evidence", None)
-        evidence = evidence or getattr(agent.run, "evidence", None)
-        tracked = getattr(getattr(evidence, "change_set", None), "files", {})
-        drift = []
-        for path, actual_state in sorted(states.items()):
-            change = tracked.get(path)
-            if change is None:
-                continue
-            projected_state = str(change.current_after_state)
-            if projected_state != actual_state:
-                drift.append(
-                    {
-                        "path": path,
-                        "projected_state": projected_state,
-                        "actual_state": actual_state,
-                    }
-                )
-        return tuple(drift)
-
-    @staticmethod
     def _preimage_artifacts(agent, call, paths, states, effect_scope):
         if (
             effect_scope not in {"workspace", "mixed"}
@@ -269,45 +313,13 @@ class ToolExecutor:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    @staticmethod
-    def _attach_preimage_artifacts(structured, preimages):
-        structured = dict(structured or {})
-        transitions = []
-        for item in structured.get("path_transitions", ()):
-            transition = dict(item)
-            path = str(transition.get("path", ""))
-            transition["before_artifact_id"] = str(
-                preimages[path]
-                if path in preimages
-                else transition.get("before_artifact_id", "")
-            )
-            transitions.append(transition)
-        if transitions:
-            structured["path_transitions"] = transitions
-        return structured
-
-    @staticmethod
-    def _effect_diff(before, after):
-        return [
-            path
-            for path in sorted(set(before) | set(after))
-            if before.get(path, "absent") != after.get(path, "absent")
-        ]
-
-    @staticmethod
-    def _path_transitions(before, after, preimages, paths):
-        return [
-            {
-                "path": path,
-                "before_state": before[path],
-                "after_state": after[path],
-                "before_artifact_id": preimages.get(path, ""),
-            }
-            for path in paths
-        ]
-
-    def execute(self, call):
-        agent = self.agent
+    def execute(self, call_or_name, args=None):
+        call = (
+            call_or_name
+            if isinstance(call_or_name, ToolCall)
+            else ToolCall(str(call_or_name), dict(args or {}))
+        )
+        agent = self.runtime
         name, args = call.name, call.args
         boundary_rejection = self._reject_out_of_protocol_call(call)
         if boundary_rejection is not None:
@@ -317,13 +329,13 @@ class ToolExecutor:
         if admission_rejection is not None:
             return admission_rejection
         workspace_mutating = bool(tool.get("workspace_mutating", False))
-        raw_key = self._repeat_key(run_id, name, args)
+        raw_key = repeat_key(run_id, name, args)
         repeated = self._reject_repeated_call(call, raw_key)
         if repeated is not None:
             return repeated
 
         try:
-            args = agent.tools.validate(name, args)
+            args = self.validate(name, args)
         except ToolFailureError as exc:
             return self._rejected(
                 call,
@@ -341,11 +353,11 @@ class ToolExecutor:
             )
         call = ToolCall(name, args, call.call_id)
         agent.prompt.refresh()
-        repeat_key = self._repeat_key(run_id, name, args)
-        repeated = self._reject_repeated_call(call, repeat_key)
+        normalized_repeat_key = repeat_key(run_id, name, args)
+        repeated = self._reject_repeated_call(call, normalized_repeat_key)
         if repeated is not None:
             return repeated
-        if tool["risky"] and not agent.tools.approve(name, args):
+        if tool["risky"] and not self.approve(name, args):
             return self._rejected(call, "approval_denied", "approval denied")
 
         try:
@@ -355,10 +367,10 @@ class ToolExecutor:
             return self._rejected(
                 call, "effect_planning_failed", str(exc), "retry_after_change"
             )
-        drift = self._tracked_workspace_drift(
-            agent,
+        drift = tracked_workspace_drift(
             effects_before,
             potential_scope,
+            agent.run.evidence.change_set.files,
         )
         if drift:
             paths = ", ".join(item["path"] for item in drift)
@@ -397,11 +409,10 @@ class ToolExecutor:
             execution = tool["run"](args)
             if not isinstance(execution, ToolRunnerResult):
                 raise TypeError("tool runner must return ToolRunnerResult")
-            paths = list(execution.affected_paths)
             failure = execution.failure
-            status = "success" if failure is None else ("partial_success" if paths else "error")
-            side_effect = (
-                "partial" if failure is not None and paths else ("changed" if paths else "none")
+            status, side_effect, paths = classify_runner_result(
+                failure,
+                execution.affected_paths,
             )
             outcome = self._outcome(
                 call,
@@ -412,13 +423,13 @@ class ToolExecutor:
                 failure=failure,
                 affected_paths=paths,
                 effect_scope=execution.effect_scope,
-                structured=self._attach_preimage_artifacts(
+                structured=attach_preimage_artifacts(
                     execution.structured, preimages
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - tool boundary
             effects_after = self._effect_snapshot(agent, potential_paths)
-            detected_paths = self._effect_diff(effects_before, effects_after)
+            detected_paths = effect_diff(effects_before, effects_after)
             typed_error = exc if isinstance(exc, ToolFailureError) else None
             observed_workspace_drift = bool(
                 typed_error
@@ -428,7 +439,7 @@ class ToolExecutor:
             paths = [] if typed_error else detected_paths
             unknown = bool(not typed_error and workspace_mutating and not potential_paths)
             uncertain = bool(paths or unknown)
-            transitions = self._path_transitions(
+            transitions = path_transitions(
                 effects_before,
                 effects_after,
                 preimages,
@@ -463,8 +474,11 @@ class ToolExecutor:
         ) or observed_workspace_drift:
             agent.prompt.refresh(force=True)
         self._record_tool_result(agent, outcome)
-        if repeat_key is not None and outcome.side_effect_state in {"partial", "unknown"}:
-            self._repeat_outcomes.setdefault(repeat_key, []).append(outcome)
+        if normalized_repeat_key is not None and outcome.side_effect_state in {
+            "partial",
+            "unknown",
+        }:
+            self._repeat_outcomes.setdefault(normalized_repeat_key, []).append(outcome)
         return outcome
 
     def _rejected(
@@ -487,7 +501,7 @@ class ToolExecutor:
             structured=structured,
         )
         if record:
-            self._record_tool_result(self.agent, outcome)
+            self._record_tool_result(self.runtime, outcome)
         return outcome
 
     def _outcome(
@@ -503,20 +517,20 @@ class ToolExecutor:
         effect_scope="none",
         structured=None,
     ):
-        safe_content = self.agent.redact_text(content)
-        safe_structured = self._redact_structured(
-            self.agent, dict(structured or {})
+        safe_content = self.runtime.redact_text(content)
+        safe_structured = redact_structured(
+            dict(structured or {}), self.runtime.redact_text
         )
         if failure is not None:
             failure = FailureInfo(
                 failure.code,
-                self.agent.redact_text(failure.detail),
+                self.runtime.redact_text(failure.detail),
                 failure.recovery,
             )
         descriptor = {}
         if len(safe_content.encode("utf-8")) > _tool_preview_limit(call.name):
-            descriptor = self.agent.dependencies.artifacts.write_tool_output(
-                _run_id(self.agent), call.call_id, safe_content
+            descriptor = self.runtime.dependencies.artifacts.write_tool_output(
+                _run_id(self.runtime), call.call_id, safe_content
             )
         return ToolOutcome(
             tool_call_id=call.call_id,

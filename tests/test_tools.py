@@ -59,7 +59,7 @@ def start_run(agent):
 def run_active(agent, call):
     run_log = agent.run.run_log or start_run(agent)
     agent.apply_run_event(run_log.append_tool_call(call))
-    return agent.tools.run(call)
+    return agent.tools.execute(call)
 
 
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
@@ -131,11 +131,11 @@ def test_old_read_and_shell_parameter_names_are_rejected(tmp_path):
         config=PicoConfig(approval_policy="auto"),
     )
 
-    old_read = agent.tools.run(
+    old_read = agent.tools.execute(
         "read_file",
         {"path": "README.md", "start": 1, "end": 1},
     )
-    old_shell = agent.tools.run(
+    old_shell = agent.tools.execute(
         "run_shell",
         {"command": "true", "timeout": 20},
     )
@@ -156,11 +156,11 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         config=PicoConfig(approval_policy="auto"),
     )
 
-    missing = agent.tools.run(
+    missing = agent.tools.execute(
         "read_file",
         {"path": "missing.py", "start_line": 1, "end_line": 1},
     )
-    repeated_missing = agent.tools.run(
+    repeated_missing = agent.tools.execute(
         "read_file",
         {"path": "missing.py", "start_line": 1, "end_line": 1},
     )

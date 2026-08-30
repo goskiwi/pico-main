@@ -9,6 +9,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
+    ToolRuntime,
     WorkspaceContext,
 )
 from pico.contracts import ToolCall
@@ -53,6 +54,8 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
     assert agent.run.task.contract.goal == "Read hello"
     assert agent.run.task.lifecycle.status == "completed"
     assert agent.dependencies.run_store is not None
+    assert isinstance(agent.tools, ToolRuntime)
+    assert not hasattr(agent.tools, "executor")
     assert not hasattr(agent, "services")
 
 
@@ -227,7 +230,7 @@ def test_revision_conflict_is_a_tool_error(tmp_path):
     RunLifecycle(agent).initialize("Edit hello", **NO_CHANGE_TASK)
     read_call = ToolCall("read_file", {"path": "hello.txt"}, "read")
     agent.apply_run_event(agent.run.run_log.append_tool_call(read_call))
-    read = agent.tools.run(read_call)
+    read = agent.tools.execute(read_call)
     revision = read.content.split("revision: ", 1)[1].splitlines()[0]
     (tmp_path / "hello.txt").write_text("external\n")
     edit_call = ToolCall("edit_file", {
@@ -235,7 +238,7 @@ def test_revision_conflict_is_a_tool_error(tmp_path):
         "expected_revision": revision,
     }, "patch")
     agent.apply_run_event(agent.run.run_log.append_tool_call(edit_call))
-    outcome = agent.tools.run(edit_call)
+    outcome = agent.tools.execute(edit_call)
     assert outcome.status == "error"
     assert "revision conflict" in outcome.content
 

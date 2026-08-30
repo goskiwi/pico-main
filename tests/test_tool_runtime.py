@@ -57,13 +57,13 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
 def run_active(agent, call):
     run_log = agent.run.run_log or start_run(agent)
     agent.apply_run_event(run_log.append_tool_call(call))
-    return agent.tools.run(call)
+    return agent.tools.execute(call)
 
 
-def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
+def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "call_test")
     )
 
@@ -89,7 +89,7 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
 
 
 def test_rejected_call_never_enters_execution(tmp_path):
-    outcome = build_agent(tmp_path).tools.run(
+    outcome = build_agent(tmp_path).tools.execute(
         ToolCall("missing", {}, "call_missing")
     )
 
@@ -103,7 +103,7 @@ def test_artifact_rejects_old_schema_and_detects_tampering(tmp_path):
     agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
         "large output\n" * 2000
     )
-    outcome = agent.tools.run(ToolCall("list_files", {}, "call_artifact"))
+    outcome = agent.tools.execute(ToolCall("list_files", {}, "call_artifact"))
     root = tmp_path / ".pico" / "runs" / "manual" / "artifacts"
     descriptor_path = root / f"{outcome.artifact_id}.json"
     descriptor = descriptor_path.read_text(encoding="utf-8")
@@ -166,14 +166,14 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             raise RuntimeError(secret)
 
         agent.tools.registry["list_files"]["run"] = fail_with_secret
-        failed = agent.tools.run(ToolCall("list_files", {}, "call_secret_failure"))
+        failed = agent.tools.execute(ToolCall("list_files", {}, "call_secret_failure"))
 
         (tmp_path / "state-change.txt").write_text("changed\n", encoding="utf-8")
         agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
             (secret + "\n") * 2000,
             structured={"secret": secret},
         )
-        large = agent.tools.run(ToolCall("list_files", {}, "call_secret_artifact"))
+        large = agent.tools.execute(ToolCall("list_files", {}, "call_secret_artifact"))
         artifact_path = (
             tmp_path
             / ".pico"
@@ -204,7 +204,7 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     )
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         ToolCall("read_file", {"path": "large.txt", "start_line": 1, "end_line": 20}, "call_large")
     )
 
@@ -224,6 +224,31 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     assert page["descriptor"]["size_bytes"] > 16000
 
 
+def test_manual_observation_can_page_its_own_large_artifact(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
+        "manual-artifact-line\n" * 2000
+    )
+    source = agent.tools.execute(ToolCall("list_files", {}, "call_manual_source"))
+
+    page = agent.tools.execute(
+        ToolCall(
+            "read_artifact",
+            {
+                "artifact_id": source.artifact_id,
+                "offset": 0,
+                "max_bytes": 8192,
+            },
+            "call_manual_page",
+        )
+    )
+
+    assert source.status == "success"
+    assert page.status == "success"
+    assert "manual-artifact-line" in page.content
+    assert page.structured["artifact_id"] == source.artifact_id
+
+
 def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
     agent = build_agent(tmp_path)
     output = "head-marker\n" + "noise\n" * 5000 + "tail-marker\n"
@@ -231,7 +256,7 @@ def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
         lambda _args: ToolRunnerResult("exit_code: 0\n" + output)
     )
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_shell_large")
     )
 
@@ -256,7 +281,7 @@ def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
         ),
     )
 
-    failed = failed_agent.tools.run(
+    failed = failed_agent.tools.execute(
         ToolCall("run_shell", {"command": "false", "timeout_seconds": 20}, "call_failed")
     )
 
@@ -269,7 +294,7 @@ def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
         lambda _args: ToolRunnerResult("exit_code: 99")
     )
 
-    successful = successful_agent.tools.run(
+    successful = successful_agent.tools.execute(
         ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_success")
     )
 
@@ -342,7 +367,7 @@ def test_tool_runner_rejects_legacy_string_result(tmp_path):
     agent = build_agent(tmp_path)
     agent.tools.registry["list_files"]["run"] = lambda _args: "legacy result"
 
-    outcome = agent.tools.run(ToolCall("list_files", {}, "call_legacy_runner"))
+    outcome = agent.tools.execute(ToolCall("list_files", {}, "call_legacy_runner"))
 
     assert outcome.status == "error"
     assert outcome.failure.detail == "tool runner must return ToolRunnerResult"
@@ -351,7 +376,7 @@ def test_tool_runner_rejects_legacy_string_result(tmp_path):
 def test_manual_mutation_is_rejected_without_touching_workspace(tmp_path):
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.run(
+    outcome = agent.tools.execute(
         ToolCall(
             "write_file",
             {"path": "manual.txt", "content": "must not exist\n"},
@@ -478,7 +503,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
     )
     source = agent.apply_run_event(run_log.append_tool_call(call))
 
-    outcome = agent.tools.run(call)
+    outcome = agent.tools.execute(call)
 
     card = agent.dependencies.project_memory.recall("project_release_command.md")
     assert outcome.status == "success"
@@ -500,10 +525,10 @@ def test_successful_identical_observation_is_allowed(tmp_path):
     agent = build_agent(tmp_path)
     args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
-    first = agent.tools.run(ToolCall("read_file", args, "call_read_1"))
-    repeated = agent.tools.run(ToolCall("read_file", args, "call_read_2"))
+    first = agent.tools.execute(ToolCall("read_file", args, "call_read_1"))
+    repeated = agent.tools.execute(ToolCall("read_file", args, "call_read_2"))
     (tmp_path / "README.md").write_text("changed\n", encoding="utf-8")
-    after_change = agent.tools.run(ToolCall("read_file", args, "call_read_3"))
+    after_change = agent.tools.execute(ToolCall("read_file", args, "call_read_3"))
 
     assert first.status == "success"
     assert repeated.status == "success"
@@ -515,7 +540,7 @@ def test_repeated_read_remains_allowed_across_workspace_change(tmp_path):
     agent = build_agent(tmp_path)
     read_args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
-    first = agent.tools.run(ToolCall("read_file", read_args, "call_read_before"))
+    first = agent.tools.execute(ToolCall("read_file", read_args, "call_read_before"))
     changed = run_active(
         agent,
         ToolCall(
@@ -544,8 +569,8 @@ def test_workspace_wide_observation_can_repeat_without_workspace_change(tmp_path
     )
     shell_args = {"command": "true", "timeout_seconds": 20}
 
-    first = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_before"))
-    second = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_after"))
+    first = agent.tools.execute(ToolCall("run_shell", shell_args, "call_shell_before"))
+    second = agent.tools.execute(ToolCall("run_shell", shell_args, "call_shell_after"))
 
     assert first.status == "success"
     assert second.status == "success"
@@ -570,9 +595,9 @@ def test_retry_after_wait_error_does_not_block_identical_retries(tmp_path):
     agent.tools.registry["run_shell"]["run"] = fail
     args = {"command": "true", "timeout_seconds": 20}
 
-    first = agent.tools.run(ToolCall("run_shell", args, "call_shell_1"))
-    second = agent.tools.run(ToolCall("run_shell", args, "call_shell_2"))
-    third = agent.tools.run(ToolCall("run_shell", args, "call_shell_3"))
+    first = agent.tools.execute(ToolCall("run_shell", args, "call_shell_1"))
+    second = agent.tools.execute(ToolCall("run_shell", args, "call_shell_2"))
+    third = agent.tools.execute(ToolCall("run_shell", args, "call_shell_3"))
 
     assert first.status == "error"
     assert first.correction_action == "wait"
@@ -594,8 +619,8 @@ def test_retry_after_change_error_does_not_block_identical_retry(tmp_path):
     agent.tools.registry["run_shell"]["run"] = fail
     args = {"command": "true", "timeout_seconds": 20}
 
-    first = agent.tools.run(ToolCall("run_shell", args, "call_change_1"))
-    second = agent.tools.run(ToolCall("run_shell", args, "call_change_2"))
+    first = agent.tools.execute(ToolCall("run_shell", args, "call_change_1"))
+    second = agent.tools.execute(ToolCall("run_shell", args, "call_change_2"))
 
     assert first.status == "error"
     assert first.failure.recovery == "retry_after_change"

@@ -70,7 +70,7 @@ def test_active_run_restores_same_projection(tmp_path):
     agent, store, projection, log = build_interrupted_run(tmp_path)
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     agent.apply_run_event(log.append_tool_call(call))
-    assert agent.tools.run(call).status == "success"
+    assert agent.tools.execute(call).status == "success"
     agent.session.set_active_run("")
 
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
@@ -93,7 +93,7 @@ def test_incremental_working_state_restores_from_tool_events(tmp_path):
         "state",
     )
     agent.apply_run_event(log.append_tool_call(call))
-    assert agent.tools.run(call).status == "success"
+    assert agent.tools.execute(call).status == "success"
 
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
     assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."

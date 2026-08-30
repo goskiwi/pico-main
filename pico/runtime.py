@@ -22,7 +22,7 @@ from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .sandbox import DockerSandbox, DockerSandboxConfig
 from .session_store import SessionStore
-from .tool_manager import ToolManager
+from .tool_runtime import ToolRuntime
 from .verification import run_verification
 from .workspace_tracker import WorkspaceTracker
 
@@ -92,7 +92,7 @@ class Pico:
                 max_workers=self.config.subagent_max_workers,
             )
 
-        self.tools = ToolManager(self)
+        self.tools = ToolRuntime(self)
         self.recovery = RuntimeRecovery(self)
         self.prompt = PromptBuilder(self)
         self.session.save()

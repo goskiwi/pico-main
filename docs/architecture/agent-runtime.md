@@ -25,18 +25,20 @@ AgentLoop
   -> PromptBuilder / ContextManager
   -> OpenAICompatibleModelClient -> ModelAction.tool
   -> append assistant_tool_call Fact
-  -> ToolManager validates Registry / Surface / Schema / Policy / Approval
-  -> ToolExecutor captures potential effects and first preimages
+  -> ToolRuntime validates Registry / Surface / Schema / Policy / Approval
+  -> private tool-execution helpers enforce protocol/repeat guards and capture effects/preimages
   -> append + fsync tool_started Fact
+  -> ToolContext supplies bounded Workspace / Store / Sandbox / Run capabilities
   -> concrete Tool Runner -> ToolRunnerResult
-  -> ToolExecutor -> ToolOutcome
+  -> private tool-execution helpers -> ToolOutcome
   -> append + fsync tool_result Fact
   -> RunProjection applies Fact and RunEvidence derives observations/effects
   -> bounded ToolOutcome returned to the Provider session
 ```
 
-There is currently no standalone Tool-runtime object. **Tool runtime** names the responsibility
-implemented by the real `ToolManager -> ToolExecutor -> Tool Runner` chain.
+`ToolRuntime` is the one public boundary for model-visible tools. Stateless value helpers live in
+the private `tool_execution.py` module; transaction order and persistence stay in `ToolRuntime`.
+Concrete runners receive only a `ToolContext` rather than the whole Pico object.
 
 ### Final submission
 
@@ -65,16 +67,8 @@ controlled stop
   observations, side effects, final net changes and verification records.
 - **Completion**: the `CompletionController` decision about whether final submission is allowed.
   A Run is terminal only after `RunLifecycle` appends the corresponding terminal Fact.
-- **Tool runtime**: the current cross-module execution responsibility described above, not a
-  class or persisted object.
-
-## Refactor direction
-
-The durable contracts above are the boundary to preserve. A later refactor may consolidate
-Tool-turn orchestration that is currently split across AgentLoop, ToolManager and ToolExecutor,
-and may simplify the handoff between CompletionController and RunLifecycle. That consolidation
-has not happened yet: current code and diagrams intentionally name only the classes and return
-types that exist in this repository.
+- **Tool runtime**: the concrete `ToolRuntime` public boundary plus its private tool-execution helpers,
+  `ToolContext` and concrete Tool Runners. It owns orchestration, not a second persistence format.
 
 ## State ownership
 

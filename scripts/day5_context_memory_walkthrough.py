@@ -143,7 +143,7 @@ def main():
             "call_memory_recall",
         )
         agent.apply_run_event(run_log.append_tool_call(recall_call))
-        recall_outcome = agent.tools.run(recall_call)
+        recall_outcome = agent.tools.execute(recall_call)
 
         assert memory_filename in prompt
         assert memory_literal not in prompt

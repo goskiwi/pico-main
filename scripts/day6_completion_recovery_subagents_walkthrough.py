@@ -82,7 +82,7 @@ def apply_edit(agent, call_id, old_text, new_text):
         call_id,
     )
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-    return agent.tools.run(call)
+    return agent.tools.execute(call)
 
 
 def completion_experiment(root):
