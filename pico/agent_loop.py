@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from .completion_controller import CompletionController
 from .providers import ProviderContextOverflow
 from .run_lifecycle import RunLifecycle, reload_current_run
+from .run_projection import RunOutcome
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -34,7 +35,7 @@ class AgentLoop:
         task_kind,
         requires_workspace_change,
         requires_verification,
-    ):
+    ) -> RunOutcome:
         loop_state = self.lifecycle.initialize(
             user_message,
             task_kind=task_kind,

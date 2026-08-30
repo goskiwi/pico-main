@@ -113,14 +113,14 @@ def main():
 
         print_section("ask() 之前", component_snapshot(agent))
 
-        answer = agent.ask(
+        outcome = agent.ask(
             "请读取 README.md，然后告诉我是否读取成功。",
             task_kind="read_only",
             requires_workspace_change=False,
             requires_verification=False,
         )
 
-        print_section("最终回答", answer)
+        print_section("最终回答", outcome.answer)
         print_section("ask() 之后", component_snapshot(agent))
         print_section("Run Log 事件", event_snapshot(agent))
         print_section(

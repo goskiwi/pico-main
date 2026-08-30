@@ -104,7 +104,7 @@ def main():
                 verification_command="",
             ),
         )
-        answer = repaired.ask(
+        outcome = repaired.ask(
             "Replace alpha without losing concurrent edits",
             task_kind="modify",
             requires_workspace_change=True,
@@ -135,7 +135,7 @@ def main():
                 verification_command="",
             ),
         )
-        denied_answer = denied.ask(
+        denied_outcome = denied.ask(
             "Create created.txt",
             task_kind="modify",
             requires_workspace_change=False,
@@ -148,7 +148,7 @@ def main():
             if event.kind == "tool_started"
         ]
 
-        assert answer == "Concurrent edit preserved and repair completed."
+        assert outcome.answer == "Concurrent edit preserved and repair completed."
         assert target.read_text(encoding="utf-8") == "agent\nexternal\n"
         by_id = {item["call_id"]: item for item in repair_outcomes}
         assert by_id["call_edit_stale"]["failure"] == "revision_conflict"
@@ -157,7 +157,7 @@ def main():
         assert by_id["call_edit_repaired"]["affected_paths"] == [
             "subject.txt"
         ]
-        assert denied_answer == "Denied write was not executed."
+        assert denied_outcome.answer == "Denied write was not executed."
         assert denied_outcomes[0]["failure"] == "approval_denied"
         assert denied_outcomes[0]["execution_state"] == "not_started"
         assert denied_started == []
@@ -166,7 +166,7 @@ def main():
         print_section(
             "并发修改后的修复",
             {
-                "answer": answer,
+                "answer": outcome.answer,
                 "final_content": target.read_text(encoding="utf-8"),
                 "tool_outcomes": repair_outcomes,
             },
@@ -174,7 +174,7 @@ def main():
         print_section(
             "Approval deny",
             {
-                "answer": denied_answer,
+                "answer": denied_outcome.answer,
                 "tool_outcomes": denied_outcomes,
                 "tool_started_events": denied_started,
                 "file_exists": (denied_root / "created.txt").exists(),

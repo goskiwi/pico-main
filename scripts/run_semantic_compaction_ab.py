@@ -111,14 +111,14 @@ def run_variant(args, variant, api_key, base_url, run_group):
         agent.prompt.context.semantic_summarizer = None
     summarizer = agent.prompt.context.semantic_summarizer
     started = time.monotonic()
-    answer = agent.ask(
+    outcome = agent.ask(
         ab_prompt(),
         task_kind="modify",
         requires_workspace_change=True,
         requires_verification=True,
     )
     wall_duration_ms = int((time.monotonic() - started) * 1000)
-    events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    events = agent.dependencies.run_store.read_events(outcome.run_id)
     analysis = analyze_run(events, agent.run.task)
     visible = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
     hidden = run_command(workspace, args.sandbox_image, HIDDEN_COMMAND)
@@ -137,7 +137,7 @@ def run_variant(args, variant, api_key, base_url, run_group):
             for index in range(1, EVIDENCE_COUNT + 1)
         ],
         "token_not_in_working_state": not token_in_working_state,
-        "critical_token_retained": CRITICAL_TOKEN in answer,
+        "critical_token_retained": CRITICAL_TOKEN in outcome.answer,
         "single_successful_mutation": analysis["successful_mutation_count"] == 1,
         "visible_verifier_passed": visible["ok"],
         "hidden_verifier_passed": hidden["ok"],
@@ -146,9 +146,9 @@ def run_variant(args, variant, api_key, base_url, run_group):
     }
     result = {
         "variant": variant,
-        "run_id": agent.run.projection.run_id,
+        "run_id": outcome.run_id,
         "wall_duration_ms": wall_duration_ms,
-        "final_answer": answer,
+        "final_answer": outcome.answer,
         "analysis": analysis,
         "summary_calls": summarizer.calls if summarizer is not None else [],
         "checks": checks,

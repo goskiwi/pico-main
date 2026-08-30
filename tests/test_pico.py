@@ -1,5 +1,7 @@
 import json
 import threading
+from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -9,9 +11,11 @@ from pico import (
     ModelAction,
     Pico,
     PicoConfig,
+    RunOutcome,
     SessionStore,
     ToolRuntime,
     WorkspaceContext,
+    cli,
 )
 from pico.contracts import ToolCall
 from pico.providers.clients import OpenAICompatibleModelClient, _action_from_response
@@ -48,7 +52,8 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
         ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 2}),
         ModelAction.final("Read successfully."),
     ])
-    assert agent.ask("Read hello", **READ_TASK) == "Read successfully."
+    outcome = agent.ask("Read hello", **READ_TASK)
+    assert outcome.answer == "Read successfully."
     assert [entry.kind for entry in agent.run.run_log.context_events()] == [
         "user_message", "assistant_tool_call", "tool_result", "assistant_final"
     ]
@@ -58,6 +63,47 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
     assert isinstance(agent.tools, ToolRuntime)
     assert not hasattr(agent.tools, "executor")
     assert not hasattr(agent, "services")
+
+    replayed = agent.dependencies.run_store.replay(outcome.run_id)
+    assert outcome.status == replayed.status == "completed"
+    assert outcome.answer == replayed.final_answer
+    assert outcome.stop_reason == replayed.stop_reason
+    assert outcome.final_diff == replayed.final_diff
+    assert outcome.metrics == replayed.metrics.to_dict()
+
+
+def test_run_outcome_is_frozen_and_keeps_detached_metrics_snapshot(tmp_path):
+    agent = build_agent(tmp_path, [ModelAction.final("Done.")])
+
+    outcome = agent.ask("Finish", **NO_CHANGE_TASK)
+    projection = agent.run.projection
+    snapshot = outcome.to_dict()
+
+    projection.metrics.kind_counts["late"] = 1
+    snapshot["metrics"]["kind_counts"]["caller"] = 1
+    assert "late" not in outcome.metrics["kind_counts"]
+    assert "caller" not in outcome.metrics["kind_counts"]
+    assert outcome.to_dict()["final_diff"] == outcome.final_diff.to_dict()
+    with pytest.raises(FrozenInstanceError):
+        outcome.status = "stopped"
+
+
+def test_run_outcome_rejects_nonterminal_projection():
+    with pytest.raises(ValueError, match="terminal Run projection"):
+        RunOutcome(RunProjection())
+
+
+def test_cli_prints_only_run_outcome_answer(monkeypatch, capsys):
+    agent = SimpleNamespace(
+        model_client=SimpleNamespace(model="fake-model"),
+        ask=lambda *_args, **_kwargs: SimpleNamespace(answer="plain answer"),
+    )
+    monkeypatch.setattr(cli, "build_agent", lambda _args: agent)
+    monkeypatch.setattr(cli, "build_welcome", lambda *_args, **_kwargs: "welcome")
+
+    assert cli.main(["--task-kind", "read_only", "inspect"]) == 0
+
+    assert capsys.readouterr().out == "welcome\n\nplain answer\n"
 
 
 def test_memory_and_repo_map_remain_enabled_by_default(tmp_path):
@@ -108,7 +154,7 @@ def test_working_state_tool_is_durable_and_replayable(tmp_path):
         ],
     )
 
-    assert agent.ask("Fix the login timeout", **NO_CHANGE_TASK) == "Working state recorded."
+    assert agent.ask("Fix the login timeout", **NO_CHANGE_TASK).answer == "Working state recorded."
     state = agent.run.task.working
     assert agent.run.task.contract.goal == "Fix the login timeout"
     assert state.constraints == ("Keep Python 3.10 compatibility",)
@@ -133,7 +179,7 @@ def test_rejected_working_state_update_does_not_change_projection(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect the API", **NO_CHANGE_TASK) == "Rejected update left state unchanged."
+    assert agent.ask("Inspect the API", **NO_CHANGE_TASK).answer == "Rejected update left state unchanged."
     assert agent.run.task.working.constraints == ()
     results = [
         event
@@ -281,7 +327,7 @@ def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path)
     agent.reset()
     agent.model_client.outputs.append(ModelAction.final("new answer"))
 
-    assert agent.ask("new task", **NO_CHANGE_TASK) == "new answer"
+    assert agent.ask("new task", **NO_CHANGE_TASK).answer == "new answer"
     assert agent.run.projection.run_id != old_run_id
     assert agent.run.task.contract.goal == "new task"
     old_projection = agent.dependencies.run_store.replay(old_run_id)
@@ -315,7 +361,7 @@ def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
 
     def ask_in_thread():
         try:
-            result["answer"] = agent.ask("Create late.txt", **NO_CHANGE_TASK)
+            result["outcome"] = agent.ask("Create late.txt", **NO_CHANGE_TASK)
         except BaseException as exc:  # noqa: BLE001 - thread assertion handoff
             result["error"] = exc
 
@@ -331,7 +377,11 @@ def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
 
     assert not thread.is_alive()
     assert "error" not in result
-    assert result["answer"].endswith("user_reset.")
+    outcome = result["outcome"]
+    assert outcome.answer.endswith("user_reset.")
+    assert outcome.run_id == run_id
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == "user_reset"
     assert (tmp_path / "late.txt").read_text(encoding="utf-8") == (
         "tracked side effect\n"
     )
@@ -340,6 +390,9 @@ def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
     assert events[-2].affected_paths == ("late.txt",)
     assert events[-1].kind == "run_stopped"
     replayed = agent.dependencies.run_store.replay(run_id)
+    assert outcome.answer == replayed.final_answer
+    assert outcome.final_diff == replayed.final_diff
+    assert outcome.metrics == replayed.metrics.to_dict()
     assert replayed.evidence.changed_paths == ["late.txt"]
     assert replayed.stop_reason == "user_reset"
     assert agent.session.data["active_run_id"] == ""

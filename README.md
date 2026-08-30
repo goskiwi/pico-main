@@ -113,14 +113,19 @@ agent = Pico(
     config=PicoConfig(approval_policy="auto", max_tool_executions=40),
 )
 
-answer = agent.ask(
+outcome = agent.ask(
     "inspect the failing test",
     task_kind="read_only",
     requires_workspace_change=False,
     requires_verification=False,
 )
+answer = outcome.answer
 state = agent.run.task
 ```
+
+`ask()` 只返回终态 `RunOutcome`：包含 `run_id`、`status`、`answer`、
+`stop_reason`、`final_diff` 和一份独立的 Metrics 快照。它是调用方视图，不写回
+Run Log；需要审计时仍以 `RunStore.replay(outcome.run_id)` 为事实源。
 
 单次请求的控制逻辑也按职责分开：`AgentLoop` 只编排模型轮次、工具轮次和
 Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；

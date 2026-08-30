@@ -12,7 +12,7 @@ from .delivery import (
 )
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
-from .run_projection import RunProjection
+from .run_projection import RunOutcome, RunProjection
 from .runtime_state import ActiveRunState
 from .task_state import TaskContract
 
@@ -285,7 +285,7 @@ class RunLifecycle:
             return str(exc) or "user_cancelled"
         return ""
 
-    def finish_success(self, loop_state, final):
+    def finish_success(self, loop_state, final) -> RunOutcome:
         runtime = self.runtime
         final_diff = build_final_diff_descriptor(runtime)
         runtime.apply_run_event(
@@ -297,15 +297,16 @@ class RunLifecycle:
                 ),
             )
         )
+        outcome = RunOutcome(runtime.run.projection)
         try:
             runtime.session.set_active_run("")
         finally:
             execution = runtime.run.execution_context
             if execution is not None:
                 runtime.run.execution_context = None
-        return final
+        return outcome
 
-    def finish_stopped(self, loop_state):
+    def finish_stopped(self, loop_state) -> RunOutcome:
         final, stop_reason = self._stopped_result(loop_state.execution_stop)
         final_diff = build_stopped_final_diff_descriptor(self.runtime)
         self.runtime.apply_run_event(
@@ -319,6 +320,7 @@ class RunLifecycle:
             )
         )
         runtime = self.runtime
+        outcome = RunOutcome(runtime.run.projection)
         try:
             runtime.session.set_active_run("")
         finally:
@@ -326,7 +328,7 @@ class RunLifecycle:
         if stop_reason == "user_reset":
             runtime.run = ActiveRunState()
             runtime.model_client.reset_action_session()
-        return final
+        return outcome
 
     @staticmethod
     def _stopped_result(stop):

@@ -155,7 +155,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             task_kind="read_only",
             requires_workspace_change=False,
             requires_verification=False,
-        ) == "Done."
+        ).answer == "Done."
         provider_result = client.recorded_action_results[0][1]
         event = next(
             item for item in agent.run.run_log.events if item.kind == "tool_result"

@@ -181,7 +181,7 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory.json")):
             SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(approval_policy="auto", verification_command=""),
         )
-        answer = agent.ask(
+        outcome = agent.ask(
             "Remember and recall the stable project test command.",
             task_kind="modify",
             requires_workspace_change=False,
@@ -224,10 +224,10 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory.json")):
                     card.source_run_id
                     and card.source_tool_call_id == store_call.call_id
                 ),
-                "run_completed": agent.run.task.lifecycle.status == "completed"
-                and answer == "Stored and recalled project memory.",
+                "run_completed": outcome.status == "completed"
+                and outcome.answer == "Stored and recalled project memory.",
                 "no_pending_call": agent.dependencies.run_store.replay(
-                    agent.run.projection.run_id
+                    outcome.run_id
                 ).summary()["pending_call_id"]
                 is None,
             },

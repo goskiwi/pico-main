@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
+from typing import Any
 
 from .delivery import FinalDiffDescriptor
 from .evidence import RunEvidence
@@ -184,4 +186,47 @@ class RunProjection:
             "pending_call_id": self.pending_call_id,
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "run_cursor": self.last_cursor.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RunOutcome:
+    """Frozen public result envelope captured from one terminal Run projection.
+
+    Metrics are a detached dictionary snapshot rather than deeply immutable
+    state.  The terminal Run Log and its replayed :class:`RunProjection` remain
+    the source of truth.
+    """
+
+    run_id: str
+    status: str
+    answer: str
+    stop_reason: str
+    final_diff: FinalDiffDescriptor
+    metrics: dict[str, Any]
+
+    def __init__(self, projection: RunProjection):
+        if not isinstance(projection, RunProjection):
+            raise TypeError("RunOutcome requires a RunProjection")
+        if not projection.terminal:
+            raise ValueError("RunOutcome requires a terminal Run projection")
+        if projection.final_diff is None:
+            raise ValueError("terminal Run projection requires a final Diff")
+        object.__setattr__(self, "run_id", projection.run_id)
+        object.__setattr__(self, "status", projection.status)
+        object.__setattr__(self, "answer", projection.final_answer)
+        object.__setattr__(self, "stop_reason", projection.stop_reason)
+        object.__setattr__(self, "final_diff", projection.final_diff)
+        object.__setattr__(self, "metrics", projection.metrics.to_dict())
+
+    def to_dict(self):
+        """Return a detached view; the terminal Run Log remains authoritative."""
+
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "answer": self.answer,
+            "stop_reason": self.stop_reason,
+            "final_diff": self.final_diff.to_dict(),
+            "metrics": deepcopy(self.metrics),
         }

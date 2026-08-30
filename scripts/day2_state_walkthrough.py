@@ -68,13 +68,13 @@ def main():
             ),
         )
 
-        answer = agent.ask(
+        outcome = agent.ask(
             "Inspect README without changing the workspace",
             task_kind="read_only",
             requires_workspace_change=False,
             requires_verification=False,
         )
-        run_id = agent.run.projection.run_id
+        run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
         replayed_task = replayed.task.to_dict()
@@ -95,7 +95,7 @@ def main():
         assert session_on_disk["active_run_id"] == ""
         assert replayed.terminal is True
 
-        print_section("最终回答", answer)
+        print_section("最终回答", outcome.answer)
         print_section("持久化事件序列", event_rows(events))
         print_section(
             "Live TaskState 与 replay 结果",

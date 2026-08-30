@@ -199,9 +199,9 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
         ],
     )
 
-    answer = parent.ask("Inspect auth and cache in parallel", **READ_TASK)
+    outcome = parent.ask("Inspect auth and cache in parallel", **READ_TASK)
 
-    assert answer == "Parent synthesized both results."
+    assert outcome.answer == "Parent synthesized both results."
     tool_result = parent.model_client.recorded_action_results[0][1]
     payload = json.loads(tool_result)
     receipts = payload["structured"]["tasks"]
@@ -981,9 +981,9 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
         ],
     )
 
-    answer = parent.ask("Implement feature.py using a child", **VERIFIED_MODIFY_TASK)
+    outcome = parent.ask("Implement feature.py using a child", **VERIFIED_MODIFY_TASK)
 
-    assert answer == "implemented and verified"
+    assert outcome.answer == "implemented and verified"
     assert (root / "feature.py").read_text() == "value = 1\n"
     assert parent.run.evidence.changed_paths == ["feature.py"]
     assert parent.run.evidence.verifications[-1]["status"] == "passed"
@@ -1026,9 +1026,9 @@ def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind
         verification_command="",
     )
 
-    answer = parent.ask("Delegate despite a dirty workspace", **NO_CHANGE_TASK)
+    outcome = parent.ask("Delegate despite a dirty workspace", **NO_CHANGE_TASK)
 
-    assert answer == "delegation was rejected"
+    assert outcome.answer == "delegation was rejected"
     assert parent.dependencies.subagents.completion_issue() == ""
     run_id = parent.run.projection.run_id
     assert not (parent.dependencies.run_store.run_dir(run_id) / "subtasks.json").exists()

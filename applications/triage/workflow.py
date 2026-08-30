@@ -76,13 +76,13 @@ class TriageWorkflow:
             sandbox_factory=self.sandbox_factory,
             subagent_model_client_factory=self.subagent_model_client_factory,
         )
-        answer = agent.ask(
+        outcome = agent.ask(
             build_triage_prompt(case),
             task_kind="modify",
             requires_workspace_change=True,
             requires_verification=True,
         )
         events = agent.dependencies.run_store.read_events(
-            agent.run.projection.run_id
+            outcome.run_id
         )
-        return build_triage_report(case, answer, events)
+        return build_triage_report(case, outcome.answer, events)

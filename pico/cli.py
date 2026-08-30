@@ -345,7 +345,7 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt, **_ask_kwargs(args)))
+                print(agent.ask(prompt, **_ask_kwargs(args)).answer)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -380,6 +380,6 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input, **_ask_kwargs(args)))
+            print(agent.ask(user_input, **_ask_kwargs(args)).answer)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

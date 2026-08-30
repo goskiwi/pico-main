@@ -100,7 +100,7 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     assert resumed.run.run_log.events == snapshots[0][0]
     assert resumed.run.projection.last_cursor.event_id == snapshots[0][0][-1].event_id
     assert resumed.run.resumable is True
-    assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.projection.run_id == projection.run_id
     assert resumed.run.task.contract.goal == "Inspect"
     assert resumed.run.projection.pending_call_id is None
@@ -122,7 +122,7 @@ def test_incremental_working_state_restores_from_tool_events(tmp_path):
     assert agent.tools.execute(call).status == "success"
 
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.task.contract.goal == projection.task.contract.goal
     assert resumed.run.task.working.constraints == ("Keep schema",)
     assert resumed.run.task.working.decisions == ("Fix refresh",)
@@ -197,7 +197,7 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
         config=narrower_config,
     )
 
-    assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.task.contract.allowed_write_paths == ("README.md",)
     tool_result = next(
         event for event in resumed.run.run_log.events if event.kind == "tool_result"
@@ -241,7 +241,7 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
         "complete_action",
         complete_with_durable_pointer,
     )
-    assert agent.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert agent.run.projection.run_id == captured
 
 
@@ -312,7 +312,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
         range(1, len(agent.run.run_log.events) + 1)
     )
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     replayed = agent.dependencies.run_store.replay(run_id)
     assert agent.run.projection.summary() == replayed.summary()
 
@@ -359,7 +359,7 @@ def test_ambiguous_append_retries_reload_after_transient_load_failure(
     assert agent.run.reload_required is True
     assert agent.run.resumable is True
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     replayed = original_load(run_id)[1]
     assert agent.run.reload_required is False
     assert agent.run.projection.summary() == replayed.summary()
@@ -457,7 +457,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
     agent.reset()
 
     agent.model_client.outputs.append(ModelAction.final("Retried."))
-    assert agent.ask("Inspect", **NO_CHANGE_TASK) == "Retried."
+    assert agent.ask("Inspect", **NO_CHANGE_TASK).answer == "Retried."
 
 
 def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path):
@@ -475,7 +475,7 @@ def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path
     assert agent.run.resumable is True
     agent.model_client.outputs.append(ModelAction.final("Recovered."))
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert agent.run.projection.run_id == run_id
 
 
@@ -498,7 +498,7 @@ def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("Finish", **NO_CHANGE_TASK) == "Done."
+    assert agent.ask("Finish", **NO_CHANGE_TASK).answer == "Done."
     terminal_run_id = agent.run.projection.run_id
     agent.session.set_active_run(terminal_run_id)
 
@@ -516,7 +516,7 @@ def test_terminal_candidate_clears_temporary_reload_state(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("Finish", **NO_CHANGE_TASK) == "Done."
+    assert agent.ask("Finish", **NO_CHANGE_TASK).answer == "Done."
     terminal_log = agent.run.run_log
     agent.run = ActiveRunState(run_log=terminal_log, reload_required=True)
 
@@ -554,10 +554,10 @@ def test_terminal_run_starts_a_new_run(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("First", **NO_CHANGE_TASK) == "First."
+    assert agent.ask("First", **NO_CHANGE_TASK).answer == "First."
     first_run = agent.run.projection.run_id
     resumed = resumed_agent(agent, agent.session.store, [ModelAction.final("Second.")])
-    assert resumed.ask("Second", **NO_CHANGE_TASK) == "Second."
+    assert resumed.ask("Second", **NO_CHANGE_TASK).answer == "Second."
     assert resumed.run.projection.run_id != first_run
 
 
@@ -566,7 +566,7 @@ def test_persisted_call_without_start_is_not_replayed(tmp_path):
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
     log.append_tool_call(call)
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     result = next(
         event
         for event in resumed.run.run_log.events
@@ -589,7 +589,7 @@ def test_started_unchanged_path_recovers_as_no_effect_error(tmp_path):
         ],
     )
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK) == "Recovered."
+    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     result = next(event for event in resumed.run.run_log.events if event.call_id == "write" and event.kind == "tool_result")
     assert result.outcome_status == "error"
     assert result.side_effect_state == "none"

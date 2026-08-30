@@ -132,13 +132,13 @@ def main():
             sandbox=sandbox,
         )
 
-        answer = agent.ask(
+        outcome = agent.ask(
             "Fix calculator.add so the existing addition test passes",
             task_kind="modify",
             requires_workspace_change=True,
             requires_verification=True,
         )
-        run_id = agent.run.projection.run_id
+        run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
         evidence = replayed.evidence
@@ -178,7 +178,7 @@ def main():
             if path.is_file()
         )
 
-        assert answer == "Fixed calculator.add and verified the change."
+        assert outcome.answer == "Fixed calculator.add and verified the change."
         assert "return left + right" in target.read_text(encoding="utf-8")
         assert replayed.status == "completed"
         assert replayed.task.working.next_steps == ()
@@ -201,7 +201,7 @@ def main():
         print_section(
             "最终结果",
             {
-                "answer": answer,
+                "answer": outcome.answer,
                 "task_status": replayed.status,
                 "calculator.py": target.read_text(encoding="utf-8"),
                 "working_state": replayed.task.working.to_dict(),

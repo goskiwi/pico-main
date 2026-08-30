@@ -61,9 +61,9 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
         ],
     )
 
-    answer = AgentLoop(agent).run("Inspect hello.txt", **READ_TASK)
+    outcome = AgentLoop(agent).run("Inspect hello.txt", **READ_TASK)
 
-    assert answer == "Done."
+    assert outcome.answer == "Done."
     assert agent.run.task.lifecycle.status == "completed"
 
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
@@ -76,7 +76,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("Facade works.")])
 
-    assert agent.ask("Use facade", **NO_CHANGE_TASK) == "Facade works."
+    assert agent.ask("Use facade", **NO_CHANGE_TASK).answer == "Facade works."
 
 
 def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
@@ -150,11 +150,11 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         sandbox=RecordingVerificationSandbox(),
     )
 
-    answer = agent.ask(
+    outcome = agent.ask(
         "Replace alpha without losing concurrent edits", **VERIFIED_MODIFY_TASK
     )
 
-    assert answer == "Recovered safely."
+    assert outcome.answer == "Recovered safely."
     assert target.read_text(encoding="utf-8") == "agent\nexternal\n"
     assert verified_contents == ["agent\nexternal\n"]
 
@@ -209,12 +209,18 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
         [ModelAction.invalid("Return one valid action.") for _ in range(8)],
     )
 
-    answer = agent.ask("Inspect the repository", **READ_TASK)
+    outcome = agent.ask("Inspect the repository", **READ_TASK)
 
-    assert answer == (
+    assert outcome.answer == (
         "Stopped after too many invalid model outputs without a valid tool call "
         "or final answer."
     )
+    replayed = agent.dependencies.run_store.replay(outcome.run_id)
+    assert outcome.status == replayed.status == "stopped"
+    assert outcome.answer == replayed.final_answer
+    assert outcome.stop_reason == replayed.stop_reason == "invalid_output_limit"
+    assert outcome.final_diff == replayed.final_diff
+    assert outcome.metrics == replayed.metrics.to_dict()
     assert agent.run.task.lifecycle.stop_reason == "invalid_output_limit"
     assert agent.run.metrics.model_request_count == 8
 
@@ -250,9 +256,9 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
         sandbox=FailingSandbox(),
     )
 
-    answer = agent.ask("Create subject.txt", **VERIFIED_MODIFY_TASK)
+    outcome = agent.ask("Create subject.txt", **VERIFIED_MODIFY_TASK)
 
-    assert answer == "Stopped after repeated rejected completion attempts."
+    assert outcome.answer == "Stopped after repeated rejected completion attempts."
     assert agent.run.task.lifecycle.stop_reason == "completion_block_limit"
     events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert sum(entry.kind == "completion_blocked" for entry in events) == 3
@@ -268,7 +274,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect hello", **READ_TASK) == "Done."
+    assert agent.ask("Inspect hello", **READ_TASK).answer == "Done."
     assert len(agent.model_client.prompts) == 2
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     assert agent.model_client.recorded_action_results[0][0] == "tool"
@@ -327,7 +333,7 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello", **READ_TASK) == "Done after reset."
+    assert agent.ask("Inspect hello", **READ_TASK).answer == "Done after reset."
     assert client.prompts[0] != client.prompts[1]
     assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
@@ -394,7 +400,7 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello", **READ_TASK) == "Done without reset."
+    assert agent.ask("Inspect hello", **READ_TASK).answer == "Done without reset."
     assert client.prompts[0] == client.prompts[1]
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert not any(
@@ -436,7 +442,7 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
         300 if "Runtime instruction:" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello", **READ_TASK) == "Done after guided reset."
+    assert agent.ask("Inspect hello", **READ_TASK).answer == "Done after guided reset."
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     reset = next(
         entry for entry in entries if entry.kind == "provider_session_reset"
@@ -490,7 +496,10 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         ),
     )
 
-    assert agent.ask("Read both files and finish", **READ_TASK) == "Recovered after compaction."
+    assert (
+        agent.ask("Read both files and finish", **READ_TASK).answer
+        == "Recovered after compaction."
+    )
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert sum(entry.kind == "compaction" for entry in entries) == 0
     resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
@@ -569,9 +578,9 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt", **READ_TASK)
 
-    assert answer == "Done at the tool boundary."
+    assert outcome.answer == "Done at the tool boundary."
     assert agent.run.metrics.executed_tool_count == 1
     assert agent.run.task.lifecycle.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
@@ -589,9 +598,9 @@ def test_default_loop_has_no_tool_execution_limit(tmp_path):
     outputs.append(ModelAction.final("Completed seven reads."))
     agent = build_agent(tmp_path, outputs)
 
-    answer = agent.ask("Read seven distinct lines", **READ_TASK)
+    outcome = agent.ask("Read seven distinct lines", **READ_TASK)
 
-    assert answer == "Completed seven reads."
+    assert outcome.answer == "Completed seven reads."
     assert agent.config.max_tool_executions is None
     assert agent.run.metrics.executed_tool_count == 7
 
@@ -607,8 +616,14 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect hello.txt", **READ_TASK) == "First run completed."
-    assert agent.ask("Summarize the prior run", **NO_CHANGE_TASK) == "Second run completed."
+    assert (
+        agent.ask("Inspect hello.txt", **READ_TASK).answer
+        == "First run completed."
+    )
+    assert (
+        agent.ask("Summarize the prior run", **NO_CHANGE_TASK).answer
+        == "Second run completed."
+    )
 
     second_run_prompt = agent.model_client.prompts[2]
     assert "Inspect hello.txt" not in second_run_prompt
@@ -630,9 +645,11 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt", **READ_TASK)
 
-    assert answer == "Stopped after reaching the tool execution limit without a final answer."
+    assert outcome.answer == (
+        "Stopped after reaching the tool execution limit without a final answer."
+    )
     assert agent.run.metrics.executed_tool_count == 1
     finished_tools = [
         entry.name
@@ -655,9 +672,9 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt", **READ_TASK)
 
-    assert answer == "Recovered after correcting the call."
+    assert outcome.answer == "Recovered after correcting the call."
     assert agent.run.metrics.executed_tool_count == 1
     assert agent.run.metrics.model_request_count == 3
     results = [
@@ -691,7 +708,7 @@ def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
         how_to_apply="Use staging unless the user overrides it.",
         source_run_id="bootstrap",
     )
-    assert agent.ask("What is the deploy target?", **READ_TASK) == "staging"
+    assert agent.ask("What is the deploy target?", **READ_TASK).answer == "staging"
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     recall_call = next(
         entry
@@ -730,7 +747,7 @@ def test_memory_recall_rejects_unavailable_filenames(tmp_path):
         how_to_apply="test",
         source_run_id="bootstrap",
     )
-    assert agent.ask("Inspect memory", **NO_CHANGE_TASK) == "Done."
+    assert agent.ask("Inspect memory", **NO_CHANGE_TASK).answer == "Done."
     result = next(
         entry
         for entry in agent.run.run_log.events

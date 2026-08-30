@@ -362,8 +362,9 @@ class SubagentManager:
                 + str(self.parent.config.verification_command).strip()
             )
         child_error = None
+        child_outcome = None
         try:
-            child.ask(
+            child_outcome = child.ask(
                 prompt,
                 task_kind=(
                     "read_only" if record.spec.kind == "explore" else "modify"
@@ -373,9 +374,11 @@ class SubagentManager:
             )
         except Exception as exc:  # noqa: BLE001 - preserve diff before classifying failure
             child_error = exc
-        state = child.run.task
         projection = None
-        if state is not None:
+        if child_outcome is not None:
+            record.child_run_id = child_outcome.run_id
+            projection = child.dependencies.run_store.replay(record.child_run_id)
+        elif child.run.task is not None:
             record.child_run_id = child.run.projection.run_id
             projection = child.dependencies.run_store.replay(record.child_run_id)
 

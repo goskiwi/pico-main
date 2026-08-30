@@ -59,13 +59,13 @@ def main():
             content="Read the target revision before applying one exact patch.",
             source_run_id="bootstrap",
         )
-        answer = agent.ask(
+        outcome = agent.ask(
             "Read sample.txt and replace alpha with beta.",
             task_kind="modify",
             requires_workspace_change=True,
             requires_verification=False,
         )
-        run_id = agent.run.projection.run_id
+        run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         projection = agent.dependencies.run_store.replay(run_id)
         evidence = projection.evidence
@@ -90,7 +90,7 @@ def main():
             entry.call_id: entry for entry in events if entry.kind == "tool_result"
         }
         print(json.dumps({
-            "answer": answer,
+            "answer": outcome.answer,
             "completion": {
                 "status": agent.run.task.lifecycle.status,
                 "stop_reason": agent.run.task.lifecycle.stop_reason,

@@ -64,7 +64,7 @@ Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作
 | 8 | `ToolRuntime.execute` | 准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result` |
 | 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换 |
 | 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
-| 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，并写入 `final_diff` 与 `assistant_final` |
+| 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
 
 恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读：
 

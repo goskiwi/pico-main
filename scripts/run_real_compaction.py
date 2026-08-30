@@ -248,13 +248,13 @@ def main(argv=None):
     )
     # This runner remains the deterministic baseline for semantic-compaction A/B.
     agent.prompt.context.semantic_summarizer = None
-    answer = agent.ask(
+    outcome = agent.ask(
         build_prompt(),
         task_kind="modify",
         requires_workspace_change=True,
         requires_verification=True,
     )
-    run_id = agent.run.projection.run_id
+    run_id = outcome.run_id
     events = agent.dependencies.run_store.read_events(run_id)
     analysis = analyze_run(events, agent.run.task)
     visible = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
@@ -296,7 +296,7 @@ def main(argv=None):
             "run_timeout_seconds": args.run_timeout_seconds,
         },
         "run_id": run_id,
-        "final_answer": answer,
+        "final_answer": outcome.answer,
         "analysis": analysis,
         "checks": checks,
         "verification": {"visible": visible, "hidden": hidden},

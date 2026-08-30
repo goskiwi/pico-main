@@ -14,6 +14,7 @@ from .project_memory import ProjectMemoryStore
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
 from .run_lifecycle import load_resumable_run, reload_current_run
+from .run_projection import RunOutcome
 from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
@@ -25,7 +26,7 @@ from .tool_runtime import ToolRuntime
 from .verification import run_verification
 from .workspace_tracker import WorkspaceTracker
 
-__all__ = ["Pico", "PicoConfig", "SessionStore"]
+__all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
 
 class Pico:
@@ -141,7 +142,7 @@ class Pico:
         task_kind,
         requires_workspace_change,
         requires_verification,
-    ):
+    ) -> RunOutcome:
         from .agent_loop import AgentLoop
 
         return AgentLoop(self).run(
