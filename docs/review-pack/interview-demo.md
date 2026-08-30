@@ -73,20 +73,27 @@ Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 
 
 ## 5 分钟现场 Demo `[Core + 默认上下文增强]`
 
-### 1. 运行确定性演示
+### 1. 运行纯 Core Capstone
+
+```bash
+uv run python scripts/day7_runtime_capstone.py
+```
+
+指出输出中的：
+
+- `RunOutcome`：公开终态结果包含状态、答案、停止原因、Final Diff 和 Metrics；
+- `Final Diff`：receipt 指向经过校验的真实 Diff Artifact；
+- `working_state`：当前 Run 的约束、决定和已清空 Next Steps；
+- `tool_transactions`：每个调用都有 Call/Started/Result；
+- `outcome_matches_replay`：返回值与 durable Replay 的终态一致。
+
+如需补充默认上下文增强，再运行：
 
 ```bash
 uv run python scripts/demo_runtime.py
 ```
 
-指出输出中的：
-
-- `memory_recalls`：Project Memory 通过显式 Tool Call/Result Recall；
-- `working_state`：当前 Run 的约束、决定和已清空 Next Steps；
-- `tool_transactions`：每个调用都有 Call/Started/Result；
-- `evidence_effects`：Patch 的精确路径和副作用；
-- `completion`：Runtime 终态；
-- `pending_call_id: null`：没有悬空工具事务。
+只讲 `Memory Catalog → memory_recall → Card 正文`，不要把它混进 Core Patch 主线。
 
 ### 2. 运行机制评测 `[默认上下文增强 + Context Pressure]`
 

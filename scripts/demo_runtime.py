@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run compact native-action Runtime demonstrations."""
+"""Demonstrate default Memory Catalog plus explicit Memory Recall."""
 
 import json
 import tempfile
@@ -22,30 +22,49 @@ def main():
         target = root / "sample.txt"
         target.write_text("alpha\n", encoding="utf-8")
         revision = file_revision(target)
-        agent = Pico(
-            FakeModelClient([
-                ModelAction.tool("memory_recall", {
-                    "filenames": ["reference_safe_edit.md"],
-                }),
-                ModelAction.tool("update_working_state", {
-                    "add_constraints": ["Only edit sample.txt"],
-                    "add_next_steps": ["Read sample.txt"],
-                }),
-                ModelAction.tool("read_file", {"path": "sample.txt", "start_line": 1, "end_line": 20}),
-                ModelAction.tool("update_working_state", {
-                    "add_decisions": ["The exact source text is alpha"],
-                    "remove_next_steps": ["Read sample.txt"],
-                    "add_next_steps": ["Replace alpha with beta"],
-                }),
-                ModelAction.tool("edit_file", {
-                    "path": "sample.txt", "old_text": "alpha", "new_text": "beta",
-                    "expected_revision": revision,
-                }),
-                ModelAction.tool("update_working_state", {
-                    "remove_next_steps": ["Replace alpha with beta"],
-                }),
+        model = FakeModelClient(
+            [
+                ModelAction.tool(
+                    "memory_recall",
+                    {"filenames": ["reference_safe_edit.md"]},
+                ),
+                ModelAction.tool(
+                    "update_working_state",
+                    {
+                        "add_constraints": ["Only edit sample.txt"],
+                        "add_next_steps": ["Read sample.txt"],
+                    },
+                ),
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "sample.txt", "start_line": 1, "end_line": 20},
+                ),
+                ModelAction.tool(
+                    "update_working_state",
+                    {
+                        "add_decisions": ["The exact source text is alpha"],
+                        "remove_next_steps": ["Read sample.txt"],
+                        "add_next_steps": ["Replace alpha with beta"],
+                    },
+                ),
+                ModelAction.tool(
+                    "edit_file",
+                    {
+                        "path": "sample.txt",
+                        "old_text": "alpha",
+                        "new_text": "beta",
+                        "expected_revision": revision,
+                    },
+                ),
+                ModelAction.tool(
+                    "update_working_state",
+                    {"remove_next_steps": ["Replace alpha with beta"]},
+                ),
                 ModelAction.final("Updated sample.txt."),
-            ]),
+            ]
+        )
+        agent = Pico(
+            model,
             WorkspaceContext.build(root),
             SessionStore(root / ".pico/sessions"),
             config=PicoConfig(approval_policy="auto", verification_command=""),
@@ -68,72 +87,72 @@ def main():
         run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         projection = agent.dependencies.run_store.replay(run_id)
-        evidence = projection.evidence
-        turns = [entry for entry in events if entry.kind == "turn_metrics"]
-        recall_calls = [
+        recall_call = next(
             entry
             for entry in events
             if entry.kind == "assistant_tool_call" and entry.name == "memory_recall"
-        ]
-        recall_results = {
-            entry.call_id: entry
+        )
+        recall_result = next(
+            entry
             for entry in events
-            if entry.kind == "tool_result" and entry.name == "memory_recall"
+            if entry.kind == "tool_result" and entry.call_id == recall_call.call_id
+        )
+        catalog_in_initial_prompt = "reference_safe_edit.md" in model.prompts[0]
+        recalled_card = {
+            "requested_filenames": list(recall_call.args["filenames"]),
+            "included_filenames": recall_result.payload["outcome"]["structured"][
+                "included_filenames"
+            ],
+            "status": recall_result.outcome_status,
+            "card_content_returned_to_model": recall_result.payload["outcome"][
+                "content"
+            ],
         }
-        tool_calls = [
-            entry for entry in events if entry.kind == "assistant_tool_call"
+        replay_matches = all(
+            (
+                outcome.run_id == projection.run_id,
+                outcome.status == projection.status,
+                outcome.answer == projection.final_answer,
+                outcome.stop_reason == projection.stop_reason,
+                outcome.final_diff == projection.final_diff,
+                outcome.metrics == projection.metrics.to_dict(),
+            )
+        )
+
+        assert catalog_in_initial_prompt is True
+        assert recalled_card["included_filenames"] == [
+            "reference_safe_edit.md"
         ]
-        tool_started = {
-            entry.call_id: entry for entry in events if entry.kind == "tool_started"
-        }
-        tool_results = {
-            entry.call_id: entry for entry in events if entry.kind == "tool_result"
-        }
-        print(json.dumps({
-            "answer": outcome.answer,
-            "completion": {
-                "status": agent.run.task.lifecycle.status,
-                "stop_reason": agent.run.task.lifecycle.stop_reason,
-            },
-            "content": target.read_text(encoding="utf-8"),
-            "provider_conversation_mode": agent.model_client.conversation_mode,
-            "provider_prompt_reused": [
-                entry.payload["prompt_reused"] for entry in turns
-            ],
-            "context_generation": agent.run.run_log.generation,
-            "run_log_schema": events[0].to_dict()["schema_version"],
-            "evidence_effects": evidence.effects,
-            "working_state": projection.task.working.to_dict(),
-            "memory_recalls": [
+        assert "Read the target revision" in recalled_card[
+            "card_content_returned_to_model"
+        ]
+        assert outcome.status == "completed"
+        assert replay_matches is True
+
+        print(
+            json.dumps(
                 {
-                    "filenames": call.args["filenames"],
-                    "status": recall_results[call.call_id].outcome_status,
-                }
-                for call in recall_calls
-            ],
-            "tool_transactions": [
-                {
-                    "tool": call.name,
-                    "call_id": call.call_id,
-                    "events": [
-                        call.kind,
-                        tool_started[call.call_id].kind,
-                        tool_results[call.call_id].kind,
-                    ],
-                    "status": tool_results[call.call_id].outcome_status,
-                    "side_effect_state": tool_results[
-                        call.call_id
-                    ].side_effect_state,
-                    "affected_paths": list(
-                        tool_results[call.call_id].affected_paths
-                    ),
-                }
-                for call in tool_calls
-            ],
-            "run_event_count": len(events),
-            "pending_call_id": projection.summary()["pending_call_id"],
-            "run_dir": str(agent.dependencies.run_store.run_dir(run_id)),
-        }, indent=2, ensure_ascii=False))
+                    "demo_kind": "default Memory enhancement",
+                    "memory_enhancement": {
+                        "catalog_visible_in_initial_prompt": (
+                            catalog_in_initial_prompt
+                        ),
+                        "recall": recalled_card,
+                    },
+                    "final_file": target.read_text(encoding="utf-8"),
+                    "run_outcome": {
+                        "run_id": outcome.run_id,
+                        "status": outcome.status,
+                        "answer": outcome.answer,
+                        "stop_reason": outcome.stop_reason,
+                        "final_diff": outcome.final_diff.to_dict(),
+                    },
+                    "replay_matches": replay_matches,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
 
 
 if __name__ == "__main__":

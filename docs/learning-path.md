@@ -46,7 +46,9 @@ uv run pico \
 uv run python scripts/day7_runtime_capstone.py
 ```
 
-Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作为完整 Capstone 使用。
+Day 7 是不执行 `memory_store` 或其他 Memory Tool transaction 的纯 Core Capstone；Runtime
+默认初始化生成的 Memory Catalog 不算任务中的 Memory 副作用。显式 Recall 另由
+`scripts/demo_runtime.py` 集中展示。
 
 ## 一次请求的逐步调用 Trace
 
@@ -66,13 +68,19 @@ Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作
 | 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
 
-恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读：
+恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读。构造期只加载并安装 dormant
+Run；真正的中断对账发生在下一次 `ask()` 初始化时：
 
 ```text
-load_resumable_run
+Pico.__init__
+  -> load_resumable_run
   -> RunStore.load_run
   -> replay_events
   -> RunProjection.apply_event
+  -> install dormant ActiveRunState
+
+Pico.ask
+  -> RunLifecycle.initialize
   -> RunLog.reconcile_interrupted
   -> run_resumed
 ```
@@ -104,8 +112,11 @@ Subagent 实现。
 ### Day 1：从 CLI 到 AgentLoop
 
 - 从上面的真实 CLI 命令进入 `cli.py`，沿步骤 1～4 阅读。
-- 运行 `scripts/day1_runtime_walkthrough.py` 查看八个顶层组件；这个脚本是程序化组合实验，
-  不替代前一步真实 CLI 的参数解析与 `build_agent()` 阅读。
+- 运行 `scripts/day1_runtime_walkthrough.py`：它使用真实
+  `build_arg_parser -> build_agent -> ask` 路径，只用 `FakeModelClient` 替换网络 Provider；
+  依次展示 CLI 任务要求、八个顶层组件、全新 Session 的恢复探测和完整 `RunOutcome`。
+- 确认 `RunOutcome` 是终态 Projection 的非持久化返回快照；Run Log 中没有第二种
+  `run_outcome` Fact。
 - Memory 与 RepoMap 此时只需要知道“默认存在”，不要打开其实现。
 
 完成标准：能用 30 秒讲清用户请求如何进入 `AgentLoop`。
@@ -113,8 +124,13 @@ Subagent 实现。
 ### Day 2：State、Fact 与 Projection
 
 - 阅读 TaskContract、六字段 add/remove WorkingState、RunLog v15 和 RunProjection。
-- 运行 `scripts/day2_state_walkthrough.py`，比较 Live 与 `RunStore.replay`。
-- 再阅读恢复侧支中的 `load_run`、单 Pending Call 和 interrupted reconciliation。
+- 运行 `scripts/day2_state_walkthrough.py` 的三段实验：
+  1. 查看原始 v15 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
+  2. Replay 合法 Event 前缀，观察单 Pending Call 在 Call、Started、Result 之间的变化；
+  3. 用新 `Pico` 加载无副作用的中断调用，在下一次 `ask()` 自动对账且不盲目重放 Runner。
+- `reload_required` 是未处理异常后的进程内缓存可信度标记。Day 6 先学习真实 Crash Resume
+  和 Active Reset；需要故障注入细节时，再阅读 `tests/test_resume_runtime.py` 中的 ambiguous
+  append / transient reload 回归。
 
 完成标准：能解释 Fact 与 Projection 的区别，以及为什么不保存第二份 Task 快照。
 
@@ -123,7 +139,8 @@ Subagent 实现。
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
 - 理解 Provider Adapter 如何把结构化 Context Overflow 转成唯一的
   `ProviderContextOverflow`；AgentLoop 不读取厂商错误文案，只允许一次重建重试。
-- 运行 `scripts/day3_prompt_provider_walkthrough.py`。
+- 运行 `scripts/day3_prompt_provider_walkthrough.py` 的四段实验：三通道分离、单 Pending
+  续接与多 Call 拒绝、Incomplete 伪 Final 拒绝、Typed Context Overflow 的一次重建重试。
 - 只确认 Prompt 中存在 Memory Catalog 与 RepoMap，不在今天学习 Card 或图算法。
 
 完成标准：能画出一次 Function Call 及其 Output 的 Provider 会话。
@@ -131,38 +148,50 @@ Subagent 实现。
 ### Day 4：ToolRuntime 与一次安全 Edit
 
 - 阅读步骤 7～10：ToolRuntime、私有 tool-execution helpers、ToolContext、文件 Runner 和 Mutation Service。
-- 运行 `scripts/day4_tool_boundary_walkthrough.py`。
-- 用一个 `timeout=30 -> timeout=60` 例子解释 Revision Conflict、Preimage 与原子提交。
+- 运行 `scripts/day4_tool_boundary_walkthrough.py`，跟踪 `alpha -> agent`，同时保留外部追加的
+  `external` 内容。
+- 对照输出解释 stale Revision、v15 ToolOutcome、Preimage、PathTransition、Unified Diff，以及
+  Approval Deny 为什么只有 Call/Result 而没有 Started。
 
 完成标准：能说明模型为什么不能直接写文件。
 
-### Day 5：Context、Memory 与 Compaction（分两段）
+### Day 5：Context、Memory 与 Compaction（分三段）
 
-运行同一个 `scripts/day5_context_memory_walkthrough.py`，但分两次学习：
+运行同一个 `scripts/day5_context_memory_walkthrough.py`，但按三个独立实验学习：
 
 1. **默认上下文增强**：先看 RepoMap 结果、Memory Catalog 和显式 `memory_recall`；确认两者
    默认启用，但完整 Card 不会自动塞进 Prompt。
-2. **Context Pressure**：再看 Context Budget、`prepare_compaction`、Semantic Summary 和
-   bounded transaction fallback。
+2. **Context Pressure / Fallback**：无 Semantic Summarizer 时不写 Compaction Fact，只保留一对
+   完整 Call/Result；`tool_started` 仍只存在于 durable log。
+3. **Context Pressure / Semantic Success**：注入确定性 Summarizer，比较物理原 Events、
+   Compaction Fact 与模型可见的 RunLog History View；它不是第二个 `RunProjection`。
 
 完成标准：能区分“默认上下文输入”和“只有压力下才发生的压缩路径”。
 
 ### Day 6：Completion、Recovery 与 Subagents 附录
 
-- 先学习 `scripts/day6_completion_recovery_subagents_walkthrough.py` 中的
-  `completion_experiment` 和 `recovery_experiment`。
-- 理解净变化、Verification Freshness、Partial/Unknown 与“不盲目重放”。
-- 最后的 `subagent_dag_experiment` 属于 **Orchestration Appendix**；Core 第一遍可以跳过，
-  完成单 Agent 路径后再回来。
+- 先运行 `completion_experiment`：Evidence 只展示净变化和当前 Verification，是否允许完成只
+  由 CompletionController 决定。
+- 再运行真实 `recovery_experiment`：构造期安装 dormant ActiveRunState，下一次 `ask()` 才
+  reconcile、修复 Partial、验证并返回 RunOutcome；Run 的创建与恢复都走生产 RunLifecycle，
+  只有硬崩溃点的 Call/Started 与已观察文件副作用是合成夹具，原 Tool Call 不盲目重放。
+- `active_reset_experiment` 展示 active Runner 先落 `tool_result`，随后才写 `run_stopped` 并
+  清理状态。
+- 最后的 `subagent_dag_experiment` 属于 **Orchestration Appendix**，额外展示父 TaskContract
+  与当前 Config 的有效写范围如何同时约束 delegate/apply；Apply 越界使用明确标注的
+  corrupted-or-reloaded receipt 防御夹具，正常 Delegate 不会产生它。Core 第一遍可以跳过。
 
 完成标准：能解释为什么模型说“完成”不等于 Runtime 接受完成。
 
 ### Day 7：Capstone 与面试表达
 
 - 运行 `scripts/day7_runtime_capstone.py`，把前六天串成一条完整请求。
+- 直接核对 `RunOutcome.to_dict()`、Final Diff Artifact、Metrics 与 `RunStore.replay()` 的终态
+  一致性；该脚本不执行 `memory_store`。
 - 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和
   10 分钟三种表达。
-- `scripts/demo_runtime.py` 是 Memory Recall 增强 Demo，不作为第一条 Core Demo。
+- `scripts/demo_runtime.py` 是默认 Memory Catalog → 显式 Recall → Card 正文的增强 Demo，
+  不作为第一条 Core Demo。
 - 最后再进入 **Applications**：`applications/triage/workflow.py`、`report.py` 与相关 Evals。
 
 完成标准：不用枚举所有类，也能先讲清 Core；面试官追问时再进入 Enhancement、Pressure、

@@ -1,87 +1,37 @@
-"""Day 1: inspect Pico's eight top-level components before and after ask()."""
+"""Day 1: follow real CLI parsing and assembly into one Pico request.
+
+The experiment uses the production ``build_arg_parser -> build_agent -> ask``
+path. Only the network model adapter is replaced by ``FakeModelClient`` so the
+walkthrough is deterministic and never sends a request to a provider.
+"""
 
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
-from pico import (
-    FakeModelClient,
-    ModelAction,
-    Pico,
-    PicoConfig,
-    SessionStore,
-    WorkspaceContext,
-)
-
-
-def component_snapshot(agent):
-    """Return a small, beginner-friendly view of Pico's eight components."""
-    task = agent.run.task
-    run_log = agent.run.run_log
-    return {
-        "1_model_client": {
-            "type": type(agent.model_client).__name__,
-            "queued_actions": len(agent.model_client.outputs),
-            "prompts_received": len(agent.model_client.prompts),
-            "tool_results_received": len(agent.model_client.recorded_action_results),
-        },
-        "2_config": {
-            "approval_policy": agent.config.approval_policy,
-            "verification_command": agent.config.verification_command,
-            "max_new_tokens": agent.config.max_new_tokens,
-        },
-        "3_workspace": {
-            "root": str(agent.workspace.root),
-            "snapshot": agent.workspace.context.state(),
-        },
-        "4_session": {
-            "id": agent.session.data["id"],
-            "active_run_id": agent.session.data["active_run_id"],
-        },
-        "5_run": {
-            "has_task_state": task is not None,
-            "has_run_log": run_log is not None,
-            "status": task.lifecycle.status if task is not None else None,
-            "resumable": agent.run.resumable,
-            "reload_required": agent.run.reload_required,
-            "model_requests": agent.run.metrics.model_request_count,
-            "executed_tools": agent.run.metrics.executed_tool_count,
-        },
-        "6_dependencies": {
-            "run_store": type(agent.dependencies.run_store).__name__,
-            "artifact_store": type(agent.dependencies.artifacts).__name__,
-            "project_memory": type(agent.dependencies.project_memory).__name__,
-            "mutation_service": type(agent.dependencies.mutations).__name__,
-            "sandbox": type(agent.dependencies.sandbox).__name__,
-            "repo_map": type(agent.dependencies.repo_map).__name__,
-        },
-        "7_tools": {
-            "type": type(agent.tools).__name__,
-            "visible_tools": sorted(agent.tools.surface),
-        },
-        "8_prompt": {
-            "type": type(agent.prompt).__name__,
-            "instruction_characters": len(agent.prompt.instructions),
-        },
-    }
-
-
-def event_snapshot(agent):
-    """Show the durable event sequence produced by this demonstration."""
-    return [
-        {
-            "sequence": event.sequence,
-            "kind": event.kind,
-            "tool": event.name,
-            "status": event.outcome_status,
-        }
-        for event in agent.run.run_log.events
-    ]
+from pico import FakeModelClient, ModelAction, RunOutcome
+from pico import cli as pico_cli
 
 
 def print_section(title, value):
     print(f"\n=== {title} ===")
     print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def component_snapshot(agent):
+    """Show the eight public objects assembled around one Pico runtime."""
+
+    return {
+        "1_model_client": type(agent.model_client).__name__,
+        "2_config": type(agent.config).__name__,
+        "3_workspace": type(agent.workspace).__name__,
+        "4_run": type(agent.run).__name__,
+        "5_session": type(agent.session).__name__,
+        "6_dependencies": type(agent.dependencies).__name__,
+        "7_tools": type(agent.tools).__name__,
+        "8_prompt": type(agent.prompt).__name__,
+    }
 
 
 def main():
@@ -91,41 +41,91 @@ def main():
             "# Demo project\n\nThis README is read by Pico's file tool.\n",
             encoding="utf-8",
         )
+        argv = [
+            "--task-kind",
+            "read_only",
+            "--approval",
+            "auto",
+            "--cwd",
+            str(root),
+            "请读取 README.md，然后告诉我是否读取成功。",
+        ]
+        args = pico_cli.build_arg_parser().parse_args(argv)
+        ask_kwargs = pico_cli._ask_kwargs(args)
+        user_message = " ".join(args.prompt).strip()
 
         fake_model = FakeModelClient(
             [
                 ModelAction.tool(
                     "read_file",
                     {"path": "README.md", "start_line": 1, "end_line": 20},
+                    call_id="call_readme",
                 ),
                 ModelAction.final("README 已读取，文件工具工作正常。"),
             ]
         )
-        agent = Pico(
-            model_client=fake_model,
-            workspace=WorkspaceContext.build(root),
-            session_store=SessionStore(root / ".pico" / "sessions"),
-            config=PicoConfig(
-                approval_policy="auto",
-                verification_command="",
-            ),
-        )
+        with patch("pico.cli._build_model_client", return_value=fake_model):
+            agent = pico_cli.build_agent(args)
 
-        print_section("ask() 之前", component_snapshot(agent))
+        assert agent.model_client is fake_model
+        assert ask_kwargs == {
+            "task_kind": "read_only",
+            "requires_workspace_change": False,
+            "requires_verification": False,
+        }
 
-        outcome = agent.ask(
-            "请读取 README.md，然后告诉我是否读取成功。",
-            task_kind="read_only",
-            requires_workspace_change=False,
-            requires_verification=False,
-        )
-
-        print_section("最终回答", outcome.answer)
-        print_section("ask() 之后", component_snapshot(agent))
-        print_section("Run Log 事件", event_snapshot(agent))
         print_section(
-            "FakeModelClient 收到的工具结果",
-            [result for _kind, result in fake_model.recorded_action_results],
+            "1. CLI 输入如何变成任务要求",
+            {
+                "argv": argv,
+                "prompt": user_message,
+                "ask_kwargs": ask_kwargs,
+                "provider_note": (
+                    "FakeModelClient 只替代网络 Provider；CLI 解析、build_agent "
+                    "和 Runtime 都使用真实代码"
+                ),
+            },
+        )
+        print_section("2. build_agent 组装出的八个顶层组件", component_snapshot(agent))
+        print_section(
+            "3. 启动时的恢复探测（这是一个全新 Session）",
+            {
+                "active_run_id": agent.session.data["active_run_id"],
+                "projection_run_id": agent.run.projection.run_id,
+                "resumable": agent.run.resumable,
+                "reload_required": agent.run.reload_required,
+            },
+        )
+
+        outcome = agent.ask(user_message, **ask_kwargs)
+        assert isinstance(outcome, RunOutcome)
+        assert outcome.status == "completed"
+        assert outcome.answer == "README 已读取，文件工具工作正常。"
+        assert agent.session.data["active_run_id"] == ""
+
+        events = agent.run.run_log.events
+        event_rows = [
+            {"sequence": event.sequence, "kind": event.kind}
+            for event in events
+        ]
+        assert outcome.run_id == agent.run.projection.run_id
+        assert not any(event.kind == "run_outcome" for event in events)
+
+        print_section(
+            "4. ask 返回完整 RunOutcome",
+            {"run_outcome": outcome.to_dict()},
+        )
+        print_section(
+            "5. 终态 Session 与 Run Log",
+            {
+                "session_active_run_id": agent.session.data["active_run_id"],
+                "events": event_rows,
+                "run_outcome_is_persisted_fact": False,
+                "explanation": (
+                    "RunOutcome 是从终态 RunProjection 截取的返回值；"
+                    "持久化事实仍然是 Run Log events"
+                ),
+            },
         )
 
 

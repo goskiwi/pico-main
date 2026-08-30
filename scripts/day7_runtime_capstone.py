@@ -92,21 +92,6 @@ def main():
                     call_id="call_edit",
                 ),
                 ModelAction.tool(
-                    "memory_store",
-                    {
-                        "action": "create",
-                        "filename": "reference_calculator_verification.md",
-                        "name": "Calculator verification",
-                        "description": "Command used to verify calculator changes.",
-                        "memory_type": "reference",
-                        "content": verify_command,
-                        "why": "",
-                        "how_to_apply": "",
-                        "expires_at": "",
-                    },
-                    call_id="call_memory",
-                ),
-                ModelAction.tool(
                     "update_working_state",
                     {
                         "add_decisions": [
@@ -177,10 +162,21 @@ def main():
             for path in (root / ".pico").rglob("*")
             if path.is_file()
         )
+        diff_descriptor, diff_bytes = agent.dependencies.artifacts.read_internal(
+            run_id,
+            outcome.final_diff.diff_artifact_id,
+            expected_kind="final_workspace_diff",
+        )
+        final_diff_text = diff_bytes.decode("utf-8")
 
         assert outcome.answer == "Fixed calculator.add and verified the change."
         assert "return left + right" in target.read_text(encoding="utf-8")
-        assert replayed.status == "completed"
+        assert outcome.run_id == replayed.run_id
+        assert outcome.status == replayed.status == "completed"
+        assert outcome.answer == replayed.final_answer
+        assert outcome.stop_reason == replayed.stop_reason
+        assert outcome.final_diff == replayed.final_diff
+        assert outcome.metrics == replayed.metrics.to_dict()
         assert replayed.task.working.next_steps == ()
         assert evidence.changed_paths == ["calculator.py"]
         assert evidence.latest_verification_for_state(
@@ -190,21 +186,25 @@ def main():
         assert len(sandbox.calls) == 1
         assert "source_tool_call_id" not in verification_events[0]
         assert "calculator.py" in model.prompts[0]
-        assert (
-            root
-            / ".pico"
-            / "memory"
-            / "cards"
-            / "reference_calculator_verification.md"
-        ).is_file()
+        assert "memory_store" not in {item["tool"] for item in transactions}
+        assert diff_descriptor["size_bytes"] == outcome.final_diff.diff_bytes
+        assert "-    return left - right" in final_diff_text
+        assert "+    return left + right" in final_diff_text
 
         print_section(
-            "最终结果",
+            "RunOutcome：ask() 的公开终态结果",
             {
-                "answer": outcome.answer,
-                "task_status": replayed.status,
+                "run_outcome": outcome.to_dict(),
                 "calculator.py": target.read_text(encoding="utf-8"),
                 "working_state": replayed.task.working.to_dict(),
+            },
+        )
+        print_section(
+            "Final Diff：终态 receipt 指向的 Artifact 正文",
+            {
+                "receipt": outcome.final_diff.to_dict(),
+                "artifact_descriptor": diff_descriptor,
+                "content": final_diff_text,
             },
         )
         print_section(
@@ -218,8 +218,15 @@ def main():
             },
         )
         print_section(
-            "上下文与持久化",
+            "Replay、上下文与持久化",
             {
+                "outcome_matches_replay": {
+                    "status": outcome.status == replayed.status,
+                    "answer": outcome.answer == replayed.final_answer,
+                    "stop_reason": outcome.stop_reason == replayed.stop_reason,
+                    "final_diff": outcome.final_diff == replayed.final_diff,
+                    "metrics": outcome.metrics == replayed.metrics.to_dict(),
+                },
                 "prompt_reused_by_turn": turn_reuse,
                 "repo_map_in_initial_prompt": "calculator.py"
                 in model.prompts[0],
