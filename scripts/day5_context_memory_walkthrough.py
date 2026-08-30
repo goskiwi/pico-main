@@ -109,8 +109,8 @@ def main():
             agent.dependencies.run_store,
         )
         agent.run.run_log = run_log
-        run_log.append_user(contract)
-        agent.run.projection = RunProjection.from_events(run_log.events)
+        first = run_log.append_user(contract)
+        agent.run.projection = RunProjection().apply_event(first)
         for index in range(6):
             append_historical_read(agent, index)
 

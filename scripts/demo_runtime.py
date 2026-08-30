@@ -13,7 +13,6 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
-from pico.evidence import RunEvidence
 from pico.mutations import file_revision
 
 
@@ -69,7 +68,7 @@ def main():
         run_id = agent.run.projection.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         projection = agent.dependencies.run_store.replay(run_id)
-        evidence = RunEvidence.from_events(events)
+        evidence = projection.evidence
         turns = [entry for entry in events if entry.kind == "turn_metrics"]
         recall_calls = [
             entry

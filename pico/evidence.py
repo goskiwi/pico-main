@@ -238,13 +238,6 @@ class RunEvidence:
     verifications: list[dict] = field(default_factory=list)
     change_set: RunChangeSet = field(default_factory=RunChangeSet)
 
-    @classmethod
-    def from_events(cls, events):
-        evidence = cls()
-        for event in events:
-            evidence.apply_event(event)
-        return evidence
-
     def apply_event(self, event):
         if event.kind == "verification_result":
             self.verifications.append(dict(event.payload))

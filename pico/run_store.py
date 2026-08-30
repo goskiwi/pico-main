@@ -147,9 +147,12 @@ class RunStore:
         self._cursors[run_id] = RunCursor(sequence, entry.event_id)
         return entry
 
-    def replay(self, run_id):
+    def load_run(self, run_id):
+        """Read and project one Run from a single validated Event snapshot."""
+
         run_id = _run_id(run_id)
-        projection = replay_events(self.read_events(run_id))
+        events = tuple(self.read_events(run_id))
+        projection = replay_events(events)
         final_diff = projection.final_diff
         if final_diff is not None and final_diff.diff_artifact_id:
             descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
@@ -159,6 +162,10 @@ class RunStore:
             )
             if int(descriptor["size_bytes"]) != final_diff.diff_bytes:
                 raise ValueError("terminal final Diff descriptor size mismatch")
+        return events, projection
+
+    def replay(self, run_id):
+        _events, projection = self.load_run(run_id)
         return projection
 
     def find_active_run(self, session_id):
@@ -169,18 +176,17 @@ class RunStore:
             if directory.is_symlink() or not directory.is_dir():
                 continue
             try:
-                events = self.read_events(directory.name)
+                events, projection = self.load_run(directory.name)
             except (OSError, ValueError):
                 continue
             if not events or events[0].session_id != str(session_id):
                 continue
-            projection = replay_events(events)
             if not projection.terminal:
                 candidates.append(
                     (
                         events[-1].timestamp,
                         directory.name,
-                        tuple(events),
+                        events,
                         projection,
                     )
                 )

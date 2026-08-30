@@ -15,7 +15,7 @@ pico CLI
   -> build_agent() 构造 Pico、默认 Project Memory 与 RepoMap
   -> RuntimeRecovery 根据 Session.active_run_id 查找 Run Log
   -> 新 Run：RunLifecycle 先写 user_message + TaskContract，再写 Session 指针
-  -> 恢复 Run：校验 Run Log v15，使用 RunProjection 重放全部 Fact
+  -> 恢复 Run：RunStore.load_run 单次读取并校验 Run Log v15、终态 Artifact，重放全部 Fact
   -> 若尾部存在未完成 Tool Call：RunLog.reconcile_interrupted() 追加确定性结果
   -> 写 run_started / run_resumed，重置 Provider action session
   -> AgentLoop
@@ -59,7 +59,10 @@ ModelAction.final
   `tool_started`、Tool Result、Verification 与终态。Workspace、Memory Card 和
   Artifact 内容仍由各自 Store 持有，不叫 Run Fact。
 - **Projection**：`RunProjection` 对 Fact 的内存归约结果，可重建 Task、Evidence、
-  Metrics、单 Pending Call 与 Final Diff receipt；它不是第二份持久化状态。
+  Metrics、单 Pending Call 与 Final Diff receipt；Live 只调用 `apply_event`；持久 Run
+  由 `RunStore.load_run` 返回同一次读取的 Events 与 Projection，`RunStore.replay` 委托它
+  并只返回 Projection；已有完整 Event 序列才使用 `replay_events`。Projection 不是第二份
+  持久化状态。
 - **Evidence**：`RunEvidence` 从 Tool Result 和 Verification Fact 派生的 Observation、
   Side Effect、RunChangeSet 与验证记录。
 - **Completion**：`CompletionController` 基于 TaskContract、Evidence 和当前 Workspace

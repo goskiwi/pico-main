@@ -13,7 +13,7 @@ from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_log import RunLog, replay_events
+from .run_log import RunLog
 from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
@@ -186,7 +186,9 @@ class Pico:
                     self.dependencies.run_store,
                     events,
                 )
-                projection = recovery_state.get("projection") or replay_events(events)
+                projection = recovery_state.get("projection") or (
+                    self.dependencies.run_store.replay(first.run_id)
+                )
         if run_log is not None and not projection.terminal:
             self.run.run_log = run_log
             self.run.projection = projection

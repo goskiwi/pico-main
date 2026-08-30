@@ -19,6 +19,13 @@ MODIFY_TASK = {
 }
 
 
+def project_evidence(events):
+    evidence = RunEvidence()
+    for item in events:
+        evidence.apply_event(item)
+    return evidence
+
+
 def event(kind, payload, sequence=1):
     return RunEvent(
         event_id=f"run:event:{sequence:06d}",
@@ -96,7 +103,7 @@ def verification(sequence, path_state="sha256:b", status="passed"):
 def test_live_and_replay_build_same_small_evidence():
     result = tool_event(1, call_id="edit")
     live = RunEvidence().apply_event(result)
-    replayed = RunEvidence.from_events([result])
+    replayed = project_evidence([result])
 
     assert replayed.to_dict() == live.to_dict()
     assert replayed.changed_paths == ["src/app.py"]
@@ -112,7 +119,7 @@ def test_observation_count_only_counts_successful_observations():
         "none",
         "read",
     )
-    evidence = RunEvidence.from_events(
+    evidence = project_evidence(
         [
             event(
                 "tool_result",
@@ -126,7 +133,7 @@ def test_observation_count_only_counts_successful_observations():
 
 
 def test_a_to_b_to_a_is_touched_but_not_net_changed():
-    evidence = RunEvidence.from_events(
+    evidence = project_evidence(
         [
             tool_event(1, call_id="ab", before="a", after="b"),
             tool_event(2, call_id="ba", before="b", after="a"),
@@ -145,7 +152,7 @@ def test_verification_freshness_is_derived_not_persisted():
 
 
 def test_partial_requires_repair_and_current_passing_verification():
-    evidence = RunEvidence.from_events(
+    evidence = project_evidence(
         [
             tool_event(
                 1,
@@ -186,7 +193,7 @@ def test_repaired_project_memory_partial_does_not_require_workspace_verification
         affected_paths=(path,),
         effect_scope="project_memory",
     )
-    evidence = RunEvidence.from_events(
+    evidence = project_evidence(
         [
             event(
                 "tool_result",
@@ -211,7 +218,7 @@ def test_repaired_project_memory_partial_does_not_require_workspace_verification
 
 
 def test_unknown_effect_is_never_cleared_by_verification():
-    evidence = RunEvidence.from_events(
+    evidence = project_evidence(
         [
             tool_event(
                 1,

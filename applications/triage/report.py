@@ -8,7 +8,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pico.evidence import RunEvidence
 from pico.run_log import replay_events
 from pico.workspace import clip
 
@@ -161,7 +160,8 @@ def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
         results,
     )
 
-    run_evidence = RunEvidence.from_events(events)
+    projection = replay_events(events)
+    run_evidence = projection.evidence
     verification_event = next(
         (entry for entry in reversed(events) if entry.kind == "verification_result"),
         None,
@@ -185,7 +185,6 @@ def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
             "A fixed Triage report requires reproduction, a patch, and passed verification"
         )
 
-    projection = replay_events(events)
     return TriageReport(
         incident_id=case.incident_id,
         repository_revision=case.revision,

@@ -36,6 +36,9 @@ Invariants:
 - `tool_result` is the only durable completion fact for a Tool call.
 - Context includes TaskContract, WorkingState, repository projections and Run Log facts; Prompt build is read-only.
 - Live execution and replay use the same RunProjection reducer.
+- Live code applies one Fact with `RunProjection.apply_event`; `RunStore.load_run` owns the single
+  persisted read that returns Events plus Projection, and `RunStore.replay` is its Projection-only
+  facade; `replay_events` is reserved for an already complete Event sequence.
 - TaskContract, incremental WorkingState, TaskLifecycle, Evidence and Metrics can be rebuilt from the Run Log.
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.

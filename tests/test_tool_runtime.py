@@ -439,6 +439,8 @@ def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
     (artifact_root / f"{final_diff.diff_artifact_id}.txt").unlink()
 
     with pytest.raises(ValueError, match="internal artifact is missing"):
+        agent.dependencies.run_store.load_run("run_tool_test")
+    with pytest.raises(ValueError, match="internal artifact is missing"):
         agent.dependencies.run_store.replay("run_tool_test")
 
 

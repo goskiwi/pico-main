@@ -157,6 +157,17 @@ def test_task_contract_rejects_inconsistent_requirements():
         TaskContract("Inspect", "missing", False, False)
 
 
+def test_replay_events_validates_protocol_before_reducing():
+    orphan_call = event(
+        1,
+        "assistant_tool_call",
+        {"name": "read_file", "args": {"path": "README.md"}, "call_id": "read"},
+    )
+
+    with pytest.raises(ValueError, match="must begin with user_message"):
+        replay_events([orphan_call])
+
+
 @pytest.mark.parametrize(
     "value, message",
     [

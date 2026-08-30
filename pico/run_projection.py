@@ -93,13 +93,6 @@ class RunProjection:
     final_diff: FinalDiffDescriptor | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
-    @classmethod
-    def from_events(cls, events):
-        projection = cls()
-        for event in events:
-            projection.apply_event(event)
-        return projection
-
     def apply_event(self, event):
         self.identity.observe(event)
         if event.kind == "user_message":

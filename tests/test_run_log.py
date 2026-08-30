@@ -88,6 +88,19 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["run_cursor"]["sequence"] == 4
 
 
+def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    append(store, "run", "user_message", {"content": "inspect"})
+    append(store, "run", "run_started", {"task_id": "task", "workspace_root": "/w"})
+
+    events, loaded = store.load_run("run")
+    replayed = store.replay("run")
+
+    assert events == tuple(store.read_events("run"))
+    assert loaded.summary() == replayed.summary()
+    assert loaded.last_cursor.event_id == events[-1].event_id
+
+
 def test_projection_tracks_exactly_one_pending_call(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     append(store, "run", "user_message", {"content": "inspect"})

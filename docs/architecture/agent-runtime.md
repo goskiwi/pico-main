@@ -11,7 +11,8 @@ CLI build_agent
   -> Pico composition root
   -> RuntimeRecovery reads Session.active_run_id
   -> new: RunLifecycle appends user_message + TaskContract before the Session pointer
-  -> resume: RunStore validates Run Log v15 and RunProjection replays its Facts
+  -> resume: RunStore.load_run reads once, validates Run Log v15 / terminal Artifact,
+     and returns that Event snapshot with its Projection
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> run_started / run_resumed
   -> Provider action session reset
@@ -62,7 +63,9 @@ controlled stop
   Result, Verification, Compaction and terminal events are Facts. Workspace files, Memory Cards
   and Artifact contents remain facts of their own stores, not duplicated Run Facts.
 - **Projection**: the rebuildable in-memory `RunProjection` produced by reducing Facts. It is not
-  a second persistence format.
+  a second persistence format. Live execution calls `apply_event`; `RunStore.load_run` returns one
+  validated Event snapshot and its Projection, while `RunStore.replay` delegates to it and returns
+  only the Projection. Only callers that already own a complete Event sequence use `replay_events`.
 - **Evidence**: `RunEvidence`, derived from Tool Result and Verification Facts. It contains
   observations, side effects, final net changes and verification records.
 - **Completion**: the `CompletionController` decision about whether final submission is allowed.

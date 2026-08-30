@@ -12,7 +12,6 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
-from pico.evidence import RunEvidence
 from pico.mutations import file_revision
 from pico.sandbox import SandboxResult
 
@@ -142,7 +141,7 @@ def main():
         run_id = agent.run.projection.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
-        evidence = RunEvidence.from_events(events)
+        evidence = replayed.evidence
         calls = {
             event.call_id: event
             for event in events

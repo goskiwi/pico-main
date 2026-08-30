@@ -60,6 +60,9 @@ Session 只保存 `active_run_id`。重启时 Runtime 重放 RunLog；未完成�
 而是比较声明路径的 before/current state，追加 `not_started`、`error`、`partial` 或
 `unknown` ToolOutcome。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
 Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
+持久 Run ID 由 `RunStore.load_run` 单次读取并返回 Events + Projection；
+`RunStore.replay` 只是 Projection-only 委托。Live 路径只对新 Fact 调用
+`RunProjection.apply_event`，不会再暴露额外的 `from_events` 回放入口。
 
 ### 2:30～3:00：完成权
 

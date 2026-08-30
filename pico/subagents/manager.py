@@ -6,7 +6,6 @@ import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from ..run_log import replay_events
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import WorkspaceContext, clip
@@ -255,10 +254,10 @@ class SubagentManager:
         if not record.child_run_id:
             raise ValueError(f"subtask has no child run receipt: {record.spec.task_id}")
         run_store = self._child_run_store(run_id, record)
-        entries = run_store.read_events(record.child_run_id)
+        entries, projection = run_store.load_run(record.child_run_id)
         if not entries:
             raise ValueError(f"subtask Run Log is missing: {record.spec.task_id}")
-        return replay_events(entries)
+        return projection
 
     def _receipt(self, run_id, record):
         projection = (

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .run_log import replay_events
-
 if TYPE_CHECKING:
     from .runtime import Pico
 
@@ -36,10 +34,9 @@ class RuntimeRecovery:
                 and not events
                 and runtime.dependencies.run_store.has_events(active_run_id)
             ):
-                events = tuple(
-                    runtime.dependencies.run_store.read_events(active_run_id)
+                events, projection = runtime.dependencies.run_store.load_run(
+                    active_run_id
                 )
-                projection = replay_events(events)
         resumable = bool(
             projection is not None
             and projection.session_id == runtime.session.data["id"]

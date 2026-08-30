@@ -391,7 +391,10 @@ class RunEvent:
 
 def replay_events(events):
     validate_run_events(events)
-    return RunProjection.from_events(events)
+    projection = RunProjection()
+    for event in events:
+        projection.apply_event(event)
+    return projection
 
 
 class RunLog:

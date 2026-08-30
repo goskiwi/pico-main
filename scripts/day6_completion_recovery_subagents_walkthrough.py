@@ -64,8 +64,8 @@ def activate(
         agent.dependencies.run_store,
     )
     agent.run.run_log = run_log
-    run_log.append_user(contract)
-    agent.run.projection = RunProjection.from_events(run_log.events)
+    first = run_log.append_user(contract)
+    agent.run.projection = RunProjection().apply_event(first)
     return agent.run.task, run_log
 
 

@@ -12,7 +12,6 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
-from pico.evidence import RunEvidence
 
 
 def print_section(title, value):
@@ -80,7 +79,7 @@ def main():
         replayed = agent.dependencies.run_store.replay(run_id)
         replayed_task = replayed.task.to_dict()
         live_task = agent.run.task.to_dict()
-        replayed_evidence = RunEvidence.from_events(events)
+        replayed_evidence = replayed.evidence
         session_on_disk = store.load(agent.session.data["id"])
         persisted_files = sorted(
             path.relative_to(root).as_posix()
