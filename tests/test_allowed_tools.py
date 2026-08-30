@@ -16,6 +16,7 @@ from pico.task_state import TaskContract
 
 
 def build_agent(tmp_path, allowed_tools=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     return Pico(
         FakeModelClient([ModelAction.final("Done.")]),
@@ -44,6 +45,19 @@ def test_allowed_tools_filter_prompt_and_execution(tmp_path):
 def test_unknown_allowed_tool_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="unknown allowed tool"):
         build_agent(tmp_path, ["missing"])
+
+
+def test_allowed_tool_schema_order_is_registry_stable(tmp_path):
+    first = build_agent(tmp_path / "first", ["edit_file", "read_file"])
+    second = build_agent(tmp_path / "second", ["read_file", "edit_file"])
+
+    first_names = [tool["name"] for tool in first.tools.action_schemas]
+    second_names = [tool["name"] for tool in second.tools.action_schemas]
+    assert first_names == second_names == [
+        "read_file",
+        "edit_file",
+        "submit_final",
+    ]
 
 
 def test_read_only_surface_and_direct_execution_both_reject_mutators(tmp_path):

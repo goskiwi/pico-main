@@ -1,3 +1,5 @@
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from pico.contracts import ToolOutcome
@@ -155,6 +157,13 @@ def test_task_contract_rejects_inconsistent_requirements():
         TaskContract("Inspect", "read_only", True, False)
     with pytest.raises(ValueError, match="invalid task kind"):
         TaskContract("Inspect", "missing", False, False)
+
+
+def test_task_contract_is_immutable_after_validation():
+    task_contract = contract()
+
+    with pytest.raises(FrozenInstanceError):
+        task_contract.goal = "Changed"  # type: ignore[misc]
 
 
 def test_replay_events_validates_protocol_before_reducing():

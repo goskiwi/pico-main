@@ -3,7 +3,7 @@
 Pico is a compact, single-protocol local multi-agent coding Runtime.
 
 - `pico.contracts`: provider-neutral Runtime contracts after native Responses parsing.
-- `pico.run_log` / `pico.context_manager`: single-source causal state, compaction and Token governance.
+- `pico.run_log` / `pico.context_manager`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
 - `pico.features.memory` / `pico.project_memory`: RunLog-projected WorkingState constraints, decisions and next steps plus cross-Run Markdown cards recalled through explicit, audited Tool transactions. Goal belongs to TaskContract.
 - `pico.tool_runtime` / `pico.mutations` / `pico.sandbox`: staged admission, atomic edits and Docker execution.
@@ -15,6 +15,17 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
   `pico.runtime.Pico` is the small composition root.
 - `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,
   durable Run lifecycle and completion authority have separate owners.
+
+Prompt/Provider review uses three explicit Tool surfaces: complete native `declared_tools`, dynamic
+`allowed_tool_names`, and Token-accounted `wire_tools`. Verified backends can keep complete schemas
+stable and restrict `tool_choice.allowed_tools` during ordinary execution. The final-only boundary
+physically narrows the wire schema to `submit_final` and rebuilds the Provider session; cache evidence
+comes from Provider usage fields.
+
+The review demo's seven-category Effective Recovery Context is a teaching/observability composition,
+not a seven-section summary. Semantic Compaction generates and persists only Progress and Critical
+Context. Goal comes from TaskContract, constraints/decisions/next steps from WorkingState, and
+execution evidence from RunEvidence; the composed view is neither durable state nor completion input.
 
 ## 30-second interview framing
 

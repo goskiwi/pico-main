@@ -39,7 +39,7 @@ def test_workspace_git_status_excludes_pico_from_nested_cwd(tmp_path):
     assert "user.txt" in context.git_status
 
 
-def test_workspace_context_does_not_preload_symlinked_project_docs(tmp_path):
+def test_workspace_context_does_not_preload_symlinked_document_names(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
     outside.write_text("OUTSIDE-SECRET\n", encoding="utf-8")
     (tmp_path / "README.md").symlink_to(outside)
@@ -47,7 +47,8 @@ def test_workspace_context_does_not_preload_symlinked_project_docs(tmp_path):
     context = WorkspaceContext.build(tmp_path, repo_root_override=tmp_path)
 
     assert "OUTSIDE-SECRET" not in context.text()
-    assert context.project_docs == {}
+    assert context.document_names == ()
+    assert context.repository_conventions == {}
 
 
 def test_model_workspace_panel_never_exposes_host_absolute_paths(tmp_path):
@@ -59,5 +60,15 @@ def test_model_workspace_panel_never_exposes_host_absolute_paths(tmp_path):
 
     assert str(tmp_path) not in text
     assert "- cwd: src/package" in text
-    assert "- repo_root: ." in text
-    assert "- shell_cwd: /workspace" in text
+    assert "repo_root" not in text
+    assert "shell_cwd" not in text
+    assert not hasattr(context, "default_branch")
+    assert not hasattr(context, "recent_commits")
+    assert set(context.state()) == {
+        "cwd",
+        "repo_root",
+        "branch",
+        "git_status",
+        "document_names",
+        "repository_conventions",
+    }

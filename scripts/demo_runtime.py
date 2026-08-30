@@ -16,6 +16,92 @@ from pico import (
 from pico.mutations import file_revision
 
 
+def effective_recovery_context(projection, events, recalled_card, final_file):
+    """Compose seven teaching categories from their real owners."""
+    working = projection.task.working
+    evidence = projection.evidence.to_dict()
+    successful_results = [
+        event.name
+        for event in events
+        if event.kind == "tool_result" and event.outcome_status == "success"
+    ]
+    categories = {
+        "Goal": {
+            "source": "TaskContract from the first user_message",
+            "value": projection.task.contract.goal,
+            "semantic_llm_generated": False,
+        },
+        "Constraints & Preferences": {
+            "source": (
+                "RunProjection.task.working.constraints from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.constraints),
+            "semantic_llm_generated": False,
+        },
+        "Progress": {
+            "source": (
+                "RunProjection lifecycle plus durable Tool Result Facts; "
+                "no Semantic Compaction occurred"
+            ),
+            "value": {
+                "run_status": projection.status,
+                "successful_tool_results": successful_results,
+            },
+            "semantic_llm_generated": False,
+        },
+        "Key Decisions": {
+            "source": (
+                "RunProjection.task.working.decisions from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.decisions),
+            "semantic_llm_generated": False,
+        },
+        "Next Steps": {
+            "source": (
+                "RunProjection.task.working.next_steps from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.next_steps),
+            "semantic_llm_generated": False,
+        },
+        "Critical Context": {
+            "source": (
+                "current Workspace content plus explicit memory_recall "
+                "Tool Result; no Semantic Compaction occurred"
+            ),
+            "value": {
+                "sample.txt": final_file,
+                "recalled_filenames": recalled_card["included_filenames"],
+            },
+            "semantic_llm_generated": False,
+        },
+        "Execution Evidence": {
+            "source": (
+                "RunEvidence projected from durable Tool Result and Verification Facts"
+            ),
+            "value": {
+                "successful_observation_count": evidence[
+                    "successful_observation_count"
+                ],
+                "change_set": evidence["change_set"],
+                "verification_count": len(evidence["verifications"]),
+            },
+            "semantic_llm_generated": False,
+        },
+    }
+    return {
+        "view_kind": "teaching_observability_composition",
+        "semantic_compaction_present": False,
+        "semantic_llm_generated_categories": [],
+        "persisted_as_one_view": False,
+        "sent_as_seven_section_prompt": False,
+        "used_by_completion_controller": False,
+        "categories": categories,
+    }
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="pico-demo-") as directory:
         root = Path(directory)
@@ -108,6 +194,12 @@ def main():
                 "content"
             ],
         }
+        working_state_updates = [
+            dict(event.args)
+            for event in events
+            if event.kind == "assistant_tool_call"
+            and event.name == "update_working_state"
+        ]
         replay_matches = all(
             (
                 outcome.run_id == projection.run_id,
@@ -118,16 +210,37 @@ def main():
                 outcome.metrics == projection.metrics.to_dict(),
             )
         )
+        final_file = target.read_text(encoding="utf-8")
+        recovery_context = effective_recovery_context(
+            projection,
+            events,
+            recalled_card,
+            final_file,
+        )
 
         assert catalog_in_initial_prompt is True
-        assert recalled_card["included_filenames"] == [
-            "reference_safe_edit.md"
-        ]
-        assert "Read the target revision" in recalled_card[
-            "card_content_returned_to_model"
-        ]
+        assert recalled_card["included_filenames"] == ["reference_safe_edit.md"]
+        assert (
+            "Read the target revision"
+            in recalled_card["card_content_returned_to_model"]
+        )
         assert outcome.status == "completed"
         assert replay_matches is True
+        assert len(working_state_updates) == 3
+        assert all(event.kind != "compaction" for event in events)
+        assert list(recovery_context["categories"]) == [
+            "Goal",
+            "Constraints & Preferences",
+            "Progress",
+            "Key Decisions",
+            "Next Steps",
+            "Critical Context",
+            "Execution Evidence",
+        ]
+        assert recovery_context["semantic_llm_generated_categories"] == []
+        assert recovery_context["persisted_as_one_view"] is False
+        assert recovery_context["sent_as_seven_section_prompt"] is False
+        assert recovery_context["used_by_completion_controller"] is False
 
         print(
             json.dumps(
@@ -139,7 +252,10 @@ def main():
                         ),
                         "recall": recalled_card,
                     },
-                    "final_file": target.read_text(encoding="utf-8"),
+                    "working_state_updates": working_state_updates,
+                    "final_working_state": projection.task.working.to_dict(),
+                    "effective_recovery_context": recovery_context,
+                    "final_file": final_file,
                     "run_outcome": {
                         "run_id": outcome.run_id,
                         "status": outcome.status,

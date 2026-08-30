@@ -315,9 +315,7 @@ class ToolRuntime:
             or agent.run.task is None
         ):
             return {}
-        evidence = getattr(getattr(agent.run, "projection", None), "evidence", None)
-        evidence = evidence or getattr(agent.run, "evidence", None)
-        existing_changes = getattr(getattr(evidence, "change_set", None), "files", {})
+        existing_changes = agent.run.evidence.change_set.files
         artifacts = {}
         for logical, path in paths:
             before_state = states.get(logical, "absent")

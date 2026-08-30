@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pico import (
-    FakeModelClient,
     ModelAction,
     OpenAICompatibleModelClient,
     Pico,
@@ -60,10 +59,10 @@ def print_section(title, value):
 
 
 def new_client():
-    """Build the real adapter; urlopen is patched in each experiment."""
+    """Build the verified-capability adapter; urlopen is always patched."""
     return OpenAICompatibleModelClient(
         model="gpt-demo",
-        base_url="https://example.test/v1",
+        base_url="https://www.rightapi.ai/v1",
         api_key="not-sent-to-a-network",
         temperature=None,
         timeout=5,
@@ -112,8 +111,9 @@ def context_overflow_http_error():
 
 def build_prompt_fixture(root):
     """Build Prompt and schemas inside a real read-only Run."""
+    client = new_client()
     bootstrap = Pico(
-        model_client=FakeModelClient([]),
+        model_client=client,
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "prompt-session"),
         config=PicoConfig(
@@ -123,17 +123,42 @@ def build_prompt_fixture(root):
         ),
     )
     RunLifecycle(bootstrap).initialize("Read README.md", **READ_ONLY_TASK)
-    prompt, metadata = bootstrap.prompt.build("Read README.md")
-    action_tools = bootstrap.tools.model_action_tools()
-    tool_names = {tool["name"] for tool in action_tools}
-    assert "Task contract (Runtime-owned):\n- unavailable" not in prompt.input_text
-    assert "- goal: Read README.md" in prompt.input_text
-    assert "- kind: read_only" in prompt.input_text
-    assert {"write_file", "edit_file", "memory_store"}.isdisjoint(tool_names)
-    return prompt, metadata, action_tools
+    action_tools = tuple(bootstrap.tools.action_schemas)
+    allowed_tool_names = tuple(
+        tool["name"] for tool in bootstrap.tools.model_action_tools()
+    )
+    prompt, metadata = bootstrap.prompt.build(
+        "Read README.md",
+        action_tools=action_tools,
+    )
+    declared_names = {tool["name"] for tool in action_tools}
+    allowed_names = set(allowed_tool_names)
+    expected_tool_tokens = client.estimate_action_tool_tokens(
+        action_tools,
+        bootstrap.prompt.context.tokenizer.count,
+    )
+
+    assert metadata["section_order"] == [
+        "runtime_policy",
+        "untrusted_context",
+        "task_request",
+    ]
+    assert metadata["included_context_sections"] == ["workspace"]
+    assert "latest_user_request" not in prompt.input_text
+    assert prompt.input_text.count("Read README.md") == 1
+    assert '"task_kind": "read_only"' in prompt.input_text
+    assert metadata["tool_schema_tokens"] == expected_tool_tokens
+    assert {"write_file", "edit_file", "memory_store"}.issubset(declared_names)
+    assert {"write_file", "edit_file", "memory_store"}.isdisjoint(allowed_names)
+    return prompt, metadata, action_tools, allowed_tool_names
 
 
-def experiment_channels_and_pending(prompt, metadata, action_tools):
+def experiment_channels_and_pending(
+    prompt,
+    metadata,
+    action_tools,
+    allowed_tool_names,
+):
     """A + B: show the three channels and one native continuation."""
     client = new_client()
     requests = []
@@ -155,12 +180,23 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
                     "input_tokens": 240,
                     "output_tokens": 18,
                     "total_tokens": 258,
+                    "input_tokens_details": {
+                        "cached_tokens": 0,
+                    },
                 },
             )
         return response_with_call(
             "submit_final",
             "call_final",
             {"answer": "README was read through Responses."},
+            usage={
+                "input_tokens": 280,
+                "output_tokens": 16,
+                "total_tokens": 296,
+                "input_tokens_details": {
+                    "cached_tokens": 220,
+                },
+            },
         )
 
     with patch("urllib.request.urlopen", urlopen):
@@ -169,8 +205,10 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
             prompt_cache_key=metadata["prompt_cache_key"],
         )
+        first_cache_metrics = dict(client.last_completion_metadata)
         pending_timeline.append(
             {
                 "moment": "收到 read_file function_call 后",
@@ -192,16 +230,16 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
             prompt_cache_key=metadata["prompt_cache_key"],
         )
+        continued_cache_metrics = dict(client.last_completion_metadata)
 
     first_payload = requests[0]["payload"]
     continued_payload = requests[1]["payload"]
     first_input = first_payload["input"]
     continued_input = continued_payload["input"]
-    read_schema = next(
-        tool for tool in action_tools if tool["name"] == "read_file"
-    )
+    read_schema = next(tool for tool in action_tools if tool["name"] == "read_file")
 
     assert action.kind == "tool"
     assert action.tool_call.name == "read_file"
@@ -226,38 +264,58 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
     ]
     assert "替换 Prompt" not in json.dumps(continued_input, ensure_ascii=False)
     assert first_payload["parallel_tool_calls"] is False
+    assert first_payload["tools"] == continued_payload["tools"]
+    assert [tool["name"] for tool in first_payload["tools"]] == [
+        tool["name"] for tool in action_tools
+    ]
+    assert first_payload["prompt_cache_key"] == metadata["prompt_cache_key"]
+    assert continued_payload["prompt_cache_key"] == metadata["prompt_cache_key"]
+    assert first_payload["tool_choice"] == continued_payload["tool_choice"]
+    assert first_payload["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "function", "name": name} for name in allowed_tool_names],
+    }
+    assert first_cache_metrics["cached_tokens"] == 0
+    assert continued_cache_metrics["cached_tokens"] == 220
+    assert continued_cache_metrics["uncached_input_tokens"] == 60
 
     print_section(
         "A. instructions / input / tools 是三个独立通道",
         {
-            "flow": "固定规则 → instructions | 动态上下文 → input | 动作接口 → tools",
+            "flow": (
+                "稳定规则 → instructions | 最小首轮上下文 → input | "
+                "稳定原生 Schema → tools | 动态准入 → allowed_tools"
+            ),
             "instructions": {
                 "characters": len(prompt.instructions),
                 "sha256_prefix": hashlib.sha256(
                     prompt.instructions.encode("utf-8")
                 ).hexdigest()[:12],
                 "same_across_two_turns": (
-                    first_payload["instructions"]
-                    == continued_payload["instructions"]
+                    first_payload["instructions"] == continued_payload["instructions"]
                 ),
             },
             "input": {
                 "section_order": metadata["section_order"],
+                "included_context_sections": metadata["included_context_sections"],
                 "first_item_types": input_item_types(first_input),
-                "current_request": "Read README.md",
-                "task_requirements": {
-                    "available": True,
-                    "kind": "read_only",
-                    "goal": "Read README.md",
-                },
+                "task_request": "Read README.md",
+                "task_request_occurrences": prompt.input_text.count("Read README.md"),
+                "latest_user_request_present": False,
             },
             "tools": {
-                "names": [tool["name"] for tool in action_tools],
-                "excluded_by_read_only_contract": [
+                "declared_names": [tool["name"] for tool in action_tools],
+                "allowed_names": list(allowed_tool_names),
+                "declared_but_disallowed_by_read_only_contract": [
                     "write_file",
                     "edit_file",
                     "memory_store",
                 ],
+                "wire_schema_stable_across_continuation": (
+                    first_payload["tools"] == continued_payload["tools"]
+                ),
+                "wire_schema_tokens": metadata["tool_schema_tokens"],
                 "read_file_strict": read_schema["strict"],
                 "read_file_required": read_schema["parameters"]["required"],
                 "additional_properties": read_schema["parameters"][
@@ -265,6 +323,18 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
                 ],
                 "tool_choice": first_payload["tool_choice"],
                 "parallel_tool_calls": first_payload["parallel_tool_calls"],
+            },
+            "cache": {
+                "prompt_cache_key_stable": (
+                    first_payload["prompt_cache_key"]
+                    == continued_payload["prompt_cache_key"]
+                ),
+                "first_turn": first_cache_metrics,
+                "continued_turn": continued_cache_metrics,
+                "continued_cache_hit_ratio": (
+                    continued_cache_metrics["cached_tokens"]
+                    / continued_cache_metrics["input_tokens"]
+                ),
             },
         },
     )
@@ -283,7 +353,11 @@ def experiment_channels_and_pending(prompt, metadata, action_tools):
     client.reset_action_session()
 
 
-def experiment_multiple_calls_are_rejected(prompt, action_tools):
+def experiment_multiple_calls_are_rejected(
+    prompt,
+    action_tools,
+    allowed_tool_names,
+):
     """B: prove that two function calls cannot leave one orphan pending call."""
     client = new_client()
     payload = {
@@ -311,6 +385,7 @@ def experiment_multiple_calls_are_rejected(prompt, action_tools):
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
         )
 
     retained_function_calls = [
@@ -335,7 +410,11 @@ def experiment_multiple_calls_are_rejected(prompt, action_tools):
     )
 
 
-def experiment_incomplete_is_rejected(prompt, action_tools):
+def experiment_incomplete_is_rejected(
+    prompt,
+    action_tools,
+    allowed_tool_names,
+):
     """C: an incomplete response cannot smuggle in a complete-looking final."""
     client = new_client()
     requests = []
@@ -368,6 +447,7 @@ def experiment_incomplete_is_rejected(prompt, action_tools):
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
         )
         pending_after_incomplete = client._pending_call_id
         retained_after_incomplete = [
@@ -381,6 +461,7 @@ def experiment_incomplete_is_rejected(prompt, action_tools):
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
         )
 
     correction_item = requests[1]["input"][-1]
@@ -511,9 +592,7 @@ def experiment_context_overflow(root):
 
     failure_resets = reset_events(failure_agent)
     assert isinstance(caught, ProviderContextOverflow)
-    assert str(caught) == (
-        "OpenAI-compatible error: provider context window exceeded"
-    )
+    assert str(caught) == ("OpenAI-compatible error: provider context window exceeded")
     assert "provider-private" not in str(caught)
     assert len(failure_requests) == 2
     assert [event.payload["reason"] for event in failure_resets] == [
@@ -545,11 +624,29 @@ def main():
             "# Provider demo\n\nRead this file through a native function call.\n",
             encoding="utf-8",
         )
-        prompt, metadata, action_tools = build_prompt_fixture(root)
+        (
+            prompt,
+            metadata,
+            action_tools,
+            allowed_tool_names,
+        ) = build_prompt_fixture(root)
 
-        experiment_channels_and_pending(prompt, metadata, action_tools)
-        experiment_multiple_calls_are_rejected(prompt, action_tools)
-        experiment_incomplete_is_rejected(prompt, action_tools)
+        experiment_channels_and_pending(
+            prompt,
+            metadata,
+            action_tools,
+            allowed_tool_names,
+        )
+        experiment_multiple_calls_are_rejected(
+            prompt,
+            action_tools,
+            allowed_tool_names,
+        )
+        experiment_incomplete_is_rejected(
+            prompt,
+            action_tools,
+            allowed_tool_names,
+        )
         experiment_context_overflow(root)
 
         print("\nDay 3 完成：所有断言通过，整个实验没有访问真实网络。")

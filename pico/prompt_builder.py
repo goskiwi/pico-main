@@ -23,9 +23,7 @@ class ModelPrompt:
 class PromptBuilder:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
-        self.instructions_state = build_prompt_instructions(
-            enable_project_memory=runtime.dependencies.project_memory is not None
-        )
+        self.instructions_state = build_prompt_instructions()
         self.context = ContextManager(runtime)
 
     @property
@@ -66,11 +64,13 @@ class PromptBuilder:
         *,
         provider_context_tokens=None,
         provider_overhead_tokens=0,
+        action_tools=None,
     ):
         return self.context.prepare_compaction(
             user_message,
             provider_context_tokens=provider_context_tokens,
             provider_overhead_tokens=provider_overhead_tokens,
+            action_tools=action_tools,
         )
 
     def build(
@@ -81,6 +81,7 @@ class PromptBuilder:
         provider_overhead_tokens=0,
         compaction_metadata=None,
         history_override=None,
+        action_tools=None,
     ):
         input_text, metadata = self.context.build(
             user_message,
@@ -88,6 +89,7 @@ class PromptBuilder:
             provider_overhead_tokens=provider_overhead_tokens,
             compaction_metadata=compaction_metadata,
             history_override=history_override,
+            action_tools=action_tools,
         )
         metadata["prompt_cache_key"] = self.instructions_state.content_hash
         return ModelPrompt(self.instructions, input_text), metadata

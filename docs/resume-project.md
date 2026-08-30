@@ -16,7 +16,7 @@ Session 只保存 `active_run_id`。副作用前 fsync `tool_started`，记录�
 
 ## 长上下文治理
 
-稳定 Runtime 规则进入 Responses `instructions`；Workspace、TaskContract、WorkingState、RepoMap、Project Memory、History 与当前请求进入 `input`；Function Schema 只进入 `tools`。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 只总结历史 Progress 与 Critical Context。Summary 失败或不够短时不提交事件，使用近期完整事务的有界投影继续。
+稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 只包含 Runtime task policy、非空的有界不可信 Context 与 Task Request，恢复请求改变时才追加 latest request。空 RepoMap、Memory、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；普通阶段在受支持 Backend 上以 `allowed_tools` 动态收窄名称，final-only 边界则把 Wire Schema 物理缩成 `submit_final` 并重建 Provider Session。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
 
 ## 工具安全
 

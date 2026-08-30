@@ -28,6 +28,7 @@ from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.real_case_support import git_metadata, require_clean_runtime
 
 EVIDENCE_COUNT = 12
+CONTROLLED_CONTEXT_LIMIT = 28_000
 TARGET_PATH = "src/normalizer.py"
 VISIBLE_COMMAND = (
     "PYTHONPATH=. python -c \"from src.normalizer import normalize_label; "
@@ -235,7 +236,7 @@ def main(argv=None):
             max_tool_executions=18,
             max_new_tokens=1024,
             run_timeout_seconds=args.run_timeout_seconds,
-            provider_context_limit_tokens=32000,
+            provider_context_limit_tokens=CONTROLLED_CONTEXT_LIMIT,
             compaction_reserve_tokens=8192,
             compaction_keep_recent_tokens=8000,
             sandbox_image=args.sandbox_image,
@@ -246,8 +247,6 @@ def main(argv=None):
             DockerSandboxConfig(image=args.sandbox_image),
         ),
     )
-    # This runner remains the deterministic baseline for semantic-compaction A/B.
-    agent.prompt.context.semantic_summarizer = None
     outcome = agent.ask(
         build_prompt(),
         task_kind="modify",
@@ -290,7 +289,7 @@ def main(argv=None):
         "model": args.model,
         "policy": {
             "provider_base_url": base_url,
-            "provider_context_limit_tokens": 32000,
+            "provider_context_limit_tokens": CONTROLLED_CONTEXT_LIMIT,
             "compaction_reserve_tokens": 8192,
             "compaction_keep_recent_tokens": 8000,
             "run_timeout_seconds": args.run_timeout_seconds,

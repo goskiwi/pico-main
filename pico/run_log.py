@@ -636,7 +636,7 @@ class RunLog:
             active = [entry, *active[len(covered) :]]
         return tuple(active)
 
-    def compact(self, *, retain_tokens, token_counter, summary_builder):
+    def compact(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
         units = []
         index = 0
@@ -655,17 +655,36 @@ class RunLog:
                 raise RuntimeError("Run Log contains an orphan tool result")
             units.append((entry,))
             index += 1
-        retained_tokens = 0
-        retained_units = 0
+
+        def render(candidate_units, *, summary=""):
+            events = tuple(
+                event for unit in candidate_units for event in unit
+            )
+            visible = self._without_projected_state(events)
+            lines = ["Current run events:"]
+            if summary:
+                lines.append(f"[compaction] {summary}")
+            lines.extend(self._render_event(event) for event in visible)
+            if len(lines) == 1:
+                lines.append("- empty")
+            return "\n".join(lines)
+
+        retained = []
         limit = max(1, int(retain_tokens))
         for unit in reversed(units):
-            text = "\n".join(self._render_event(item) for item in unit)
-            unit_tokens = max(1, int(token_counter(text)))
-            if retained_units and retained_tokens + unit_tokens > limit:
+            candidate = [unit, *retained]
+            candidate_tokens = max(
+                1,
+                int(history_token_counter(render(candidate))),
+            )
+            if retained and candidate_tokens > limit:
                 break
-            retained_tokens += unit_tokens
-            retained_units += 1
-        cut = max(0, len(units) - retained_units)
+            retained = candidate
+        retained_tokens = max(
+            1,
+            int(history_token_counter(render(retained))),
+        )
+        cut = max(0, len(units) - len(retained))
         compacted = tuple(item for unit in units[:cut] for item in unit)
         if not compacted:
             return None
@@ -673,8 +692,9 @@ class RunLog:
         if not summary_events:
             return None
         summary = summary_builder(summary_events)
-        source = "\n".join(self._render_event(entry) for entry in summary_events)
-        if token_counter(summary) >= token_counter(source):
+        before = render(units)
+        after = render(retained, summary=summary)
+        if history_token_counter(after) >= history_token_counter(before):
             return None
         event = self._commit_compaction(
             summary,
@@ -685,7 +705,7 @@ class RunLog:
             "covered_events": len(compacted),
             "retained_events": sum(len(unit) for unit in units[cut:]),
             "retained_tokens": retained_tokens,
-            "summary_tokens": token_counter(summary),
+            "summary_tokens": history_token_counter(render((), summary=summary)),
         }
 
     def _commit_compaction(self, content, covered_event_ids):

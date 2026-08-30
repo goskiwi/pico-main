@@ -221,7 +221,6 @@ def test_tool_result_rejects_workspace_revision_and_correction_fields(tmp_path):
     log = RunLog("run", "task", "session", store)
     log.append_user(TaskContract("inspect", **READ_TASK))
     log.append_model_instruction("historical fact that must be summarized")
-    log.append_model_instruction("historical fact that must be summarized")
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     log.append_tool_call(call)
     log.append_tool_started(call, risky=False, effect_scope="none", potential_effects=[])
@@ -356,7 +355,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
 
     result = log.compact(
         retain_tokens=1,
-        token_counter=lambda text: max(1, len(text)),
+        history_token_counter=lambda text: max(1, len(text)),
         summary_builder=summarize,
     )
     assert result is not None
@@ -364,6 +363,36 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     assert [event.kind for event in seen] == ["model_instruction"]
     assert seen[0].content == "historical fact that must be summarized"
     assert len(compacted.covered_event_ids) == 4
+
+
+def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(TaskContract("inspect", **READ_TASK))
+    log.append_model_instruction("historical " * 30)
+    recent_one = log.append_model_instruction("recent one")
+    recent_two = log.append_model_instruction("recent two")
+
+    def wire_tokens(text):
+        return 100 + len(text)
+
+    recent_projection = "\n".join(
+        (
+            "Current run events:",
+            log._render_event(recent_one),
+            log._render_event(recent_two),
+        )
+    )
+    result = log.compact(
+        retain_tokens=wire_tokens(recent_projection),
+        history_token_counter=wire_tokens,
+        summary_builder=lambda _events: "short",
+    )
+
+    assert result is not None
+    _event, metadata = result
+    assert metadata["retained_events"] == 2
+    assert metadata["retained_tokens"] == wire_tokens(recent_projection)
 
 
 def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):

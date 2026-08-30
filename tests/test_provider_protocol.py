@@ -905,10 +905,119 @@ def test_official_prompt_cache_uses_key_without_model_specific_retention_paramet
     assert "prompt_cache_options" not in captured
 
 
+def test_allowed_tools_capability_keeps_declared_wire_tools_and_restricts_choice():
+    instance = OpenAICompatibleModelClient(
+        "gpt-5.6", "https://www.rightapi.ai/v1", "secret", None, 3
+    )
+    captured = {}
+
+    def urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        return tool_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        action = instance.complete_action(
+            "prompt",
+            32,
+            action_tools=TOOLS,
+            allowed_tool_names=("read_file",),
+            prompt_cache_key="stable-prefix",
+        )
+
+    assert action.kind == "tool"
+    assert captured["tools"] == TOOLS
+    assert captured["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "function", "name": "read_file"}],
+    }
+    assert captured["prompt_cache_key"] == "stable-prefix"
+
+
+def test_single_wire_tool_uses_plain_required_choice():
+    instance = OpenAICompatibleModelClient(
+        "gpt-5.6", "https://www.rightapi.ai/v1", "secret", None, 3
+    )
+    captured = {}
+
+    def urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        return final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        action = instance.complete_action(
+            "prompt",
+            32,
+            action_tools=(TOOLS[-1],),
+            allowed_tool_names=("submit_final",),
+        )
+
+    assert action.kind == "final"
+    assert captured["tools"] == [TOOLS[-1]]
+    assert captured["tool_choice"] == "required"
+
+
+def test_wire_declared_but_runtime_disallowed_function_is_rejected():
+    output = json.loads(tool_response().payload)["output"]
+
+    action = _action_from_response(
+        {"output": output},
+        TOOLS,
+        allowed_tool_names=("submit_final",),
+    )
+
+    assert action.kind == "invalid"
+    assert "unknown function call: read_file" in action.content
+
+
+def test_disallowed_wire_function_does_not_leave_provider_pending_call():
+    instance = OpenAICompatibleModelClient(
+        "gpt-5.6", "https://www.rightapi.ai/v1", "secret", None, 3
+    )
+    with patch("urllib.request.urlopen", return_value=tool_response()):
+        action = instance.complete_action(
+            "prompt",
+            32,
+            action_tools=TOOLS,
+            allowed_tool_names=("submit_final",),
+        )
+
+    assert action.kind == "invalid"
+    assert instance._pending_call_id is None
+
+
+def test_manual_replay_keeps_original_input_when_wire_tools_shrink():
+    instance = client()
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append(json.loads(request.data))
+        return tool_response() if len(requests) == 1 else final_response()
+
+    with patch("urllib.request.urlopen", urlopen):
+        action = instance.complete_action("original prompt", 32, action_tools=TOOLS)
+        instance.record_action_result(action, '{"status":"success"}')
+        final = instance.complete_action(
+            "replacement prompt must be ignored",
+            32,
+            action_tools=(TOOLS[-1],),
+        )
+
+    assert final.kind == "final"
+    assert requests[1]["tools"] == [TOOLS[-1]]
+    assert requests[1]["input"][0]["content"][0]["text"] == "original prompt"
+    assert [item.get("type", item.get("role")) for item in requests[1]["input"]] == [
+        "user",
+        "function_call",
+        "function_call_output",
+    ]
+
+
 @pytest.mark.parametrize(
     ("base_url", "supported"),
     [
         ("https://api.openai.com/v1", True),
+        ("https://www.rightapi.ai/v1", True),
         ("https://www.right.codes/codex/v1", True),
         ("https://openai.com.evil.example/v1", False),
     ],
@@ -923,3 +1032,24 @@ def test_prompt_cache_support_uses_hostname_boundaries(base_url, supported):
     )
 
     assert instance.supports_prompt_cache is supported
+
+
+@pytest.mark.parametrize(
+    ("base_url", "supported"),
+    [
+        ("https://api.openai.com/v1", True),
+        ("https://www.rightapi.ai/v1", True),
+        ("https://rightapi.ai.evil.example/v1", False),
+        ("https://www.right.codes/codex/v1", False),
+    ],
+)
+def test_allowed_tools_support_uses_exact_verified_hostnames(base_url, supported):
+    instance = OpenAICompatibleModelClient(
+        "gpt-test",
+        base_url,
+        "secret",
+        None,
+        3,
+    )
+
+    assert instance.supports_allowed_tools is supported

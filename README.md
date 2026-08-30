@@ -138,9 +138,10 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 
 核心实现：
 
-- 原生 function calling：稳定 Runtime 规则进入 Responses `instructions`，动态 Workspace、TaskContract、WorkingState、Memory、RepoMap、History 与当前请求进入 `input`，严格 Function Schema 只进入 `tools`。一次响应只接受一个函数调用；Provider、Run Protocol 和 Projection 都只保存一个 `pending_call_id`。
+- 原生 function calling：稳定角色/执行/Tool/WorkingState/完成规则进入 Responses `instructions`；首轮动态 `input` 只发送 Runtime task policy、非空的有界不可信 Context 与 Task Request，Resume 请求改变时才追加 latest request。空 RepoMap、Memory、WorkingState、History 不渲染；普通工具续接只追加原生 Call/Output。严格 Function Schema 只进入 `tools`。支持 `allowed_tools` 的 Provider 在普通执行阶段获得稳定完整 Schema 和动态允许名称；进入 final-only 边界时，wire schema 也物理缩成 `submit_final` 并重建 Provider Session。解析层和 ToolRuntime 都复验允许名称，一次响应只接受一个函数调用。
 - Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。首个 User Event 保存 Runtime-owned `TaskContract`；实时执行与恢复共用一个 `RunProjection`，统一重建 Task、Evidence、Metrics 和 Pending Call。终态只额外保存最终 `final_diff` receipt，不保存第二份终态报告。
-- 长上下文治理：Prompt 使用配置的 Context Window 和固定 section caps，History 获得剩余预算。显式 `prepare_compaction` 在只读 Prompt build 前运行；独立模型 Session 只总结历史 Progress 与 Critical Context，不复述 TaskContract 或 WorkingState。OpenAI-compatible Adapter 将结构化 Context Overflow 归一化为 `ProviderContextOverflow`；AgentLoop 只对该类型重建一次 Session/Prompt，连续第二次直接抛出，不再匹配错误字符串。Provider、结构或长度失败时不提交 Compaction Event，Runtime 使用近期完整 Tool 事务的有界投影继续。
+- 长上下文治理：Prompt 使用配置的 Context Window 和固定 section caps，按真实 `wire_tools` 计入 Schema Token，History 获得剩余预算。显式 `prepare_compaction` 在只读 Prompt build 前运行；独立模型 Session 读取经过转义的规范 Event payload，完整保留 ToolOutcome 事实，持久 Summary 始终只有 `Progress`、`Critical Context` 两段，不复述 TaskContract 或 WorkingState。只有替换前后的最终 escaped History Wire 确实缩小时才提交。所谓七类 Effective Recovery Context 只是把 TaskContract Goal、WorkingState Constraints/Decisions/Next Steps、这两段 Summary 与 RunEvidence 并排展示的教学/观测视图；它不是七段 LLM 输出、第二状态或 Completion 依据。Provider、结构或长度失败时不提交 Compaction Event，Runtime 使用近期完整 Tool 事务的有界投影继续。结构化 Context Overflow 只允许一次 Session/Prompt 重建重试。
+- KV Cache：稳定 instructions hash 在已验证支持的 Backend 上作为 `prompt_cache_key`；每轮 `turn_metrics.completion_metadata` 记录 `input_tokens`、`cached_tokens` 与 uncached input。Provider capability 按明确 Host 配置，不在生产请求中自动探测，也不保留旧 Prompt/Tool 协议兼容分支。
 - Workspace 新鲜度：文件工具返回真实 Unified Diff 和 before/after path transitions。每个路径只在本 Run 第一次修改前保存完整 preimage；`RunChangeSet` 计算最终净变化，因此 `A -> B -> A` 不算完成所需的修改。外部漂移会阻止成功提交；用户取消或重置仍可受控停止，并以 `unavailable_reason=workspace_drift` 明确说明此时无法生成可信 Final Diff。Verifier 只保存命令结果及其 mutation/path states，current/stale 在查询时派生。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层状态：`TaskContract` 保存目标、任务类型、写入范围与完成要求，模型不能修改；WorkingState 继续使用原有 add/remove 增量协议，只保存约束、已确认决定和下一步。Project Memory 与 RepoMap 保持默认开启。Memory Catalog 在初始化、store、forget 或显式 refresh 时重建，Prompt build 不写磁盘。
@@ -269,7 +270,7 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Python tests | 全部通过 | Runtime contracts、恢复、安全、上下文与工具边界 |
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
-| Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控 32k 窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier |
+| Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier；当前 runner 在 Prompt 精简后使用 28k，已发布 Artifact 记录其捕获时的 32k 配置 |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
@@ -280,8 +281,9 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 真实 Compaction Artifact 见 `artifacts/real-compaction.json` 与
 `artifacts/real-compaction.patch`。模型按顺序各读取一次 12 份证据，最大单次 Input 为
 31,713 Token；Runtime 在估算下一轮达到 33,662 Token 时重建 Provider Session，将旧的
-13 个事件摘要为 624 Token，并保留 7,732 Token 近期事务。Compaction 后 Goal、Constraints、
-Decisions 与 Next Steps 仍在，模型只执行一次 Mutation，最终可见与停止后 Hidden Verifier
+13 个事件摘要为 624 Token，并保留 7,732 Token 近期事务。624 Token Summary 只包含 Progress
+与 Critical Context；Compaction 后 Goal 仍来自 TaskContract，Constraints、Decisions 与 Next
+Steps 仍来自 WorkingState。模型只执行一次 Mutation，最终可见与停止后 Hidden Verifier
 均通过。该测试通过降低Runtime配置窗口来验证真实LLM续接，不冒充自然消耗272k上下文，
 也不代表已经验证跨进程Resume。
 

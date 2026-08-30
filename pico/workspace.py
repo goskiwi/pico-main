@@ -5,11 +5,9 @@
 """
 
 import subprocess
-import textwrap
 from pathlib import Path, PurePosixPath
 
-# 这些文件最可能直接影响 agent 的行动方式。
-# 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
+# 普通项目文件只暴露名称；AGENTS.md 正文单独作为 repository conventions。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 
@@ -43,14 +41,21 @@ def middle(text, limit):
 
 
 class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, git_status, recent_commits, project_docs):
+    def __init__(
+        self,
+        cwd,
+        repo_root,
+        branch,
+        git_status,
+        document_names,
+        repository_conventions,
+    ):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
-        self.default_branch = default_branch
         self.git_status = git_status
-        self.recent_commits = recent_commits
-        self.project_docs = project_docs
+        self.document_names = tuple(document_names)
+        self.repository_conventions = dict(repository_conventions)
 
     @classmethod
     def build(cls, cwd, repo_root_override=None):
@@ -75,7 +80,8 @@ class WorkspaceContext:
             if repo_root_override is not None
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
-        docs = {}
+        document_names = []
+        repository_conventions = {}
         # 同时扫描 repo_root 和 cwd，这样在子目录启动时也能看到本地文档；
         # 但用相对路径做 key，避免同一份文档被重复收集。
         for base in (repo_root, cwd):
@@ -88,21 +94,19 @@ class WorkspaceContext:
                     key = resolved.relative_to(repo_root).as_posix()
                 except ValueError:
                     continue
-                if key in docs:
+                if key in document_names:
                     continue
-                docs[key] = clip(
-                    resolved.read_text(encoding="utf-8", errors="replace"),
-                    1200,
-                )
+                document_names.append(key)
+                if name == "AGENTS.md":
+                    repository_conventions[key] = clip(
+                        resolved.read_text(encoding="utf-8", errors="replace"),
+                        1200,
+                    )
 
-        default_branch = git(
-            ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main"
-        ).removeprefix("origin/") or "main"
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=default_branch,
             git_status=clip(
                 git(
                     [
@@ -117,43 +121,35 @@ class WorkspaceContext:
                 or "clean",
                 1500,
             ),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
-            project_docs=docs,
+            document_names=document_names,
+            repository_conventions=repository_conventions,
         )
 
     def text(self):
-        # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
-        commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
-        docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
         try:
             logical_cwd = Path(self.cwd).relative_to(Path(self.repo_root)).as_posix()
         except ValueError:
             logical_cwd = "."
         logical_cwd = logical_cwd or "."
-        return textwrap.dedent(
-            f"""\
-            Workspace:
-            - cwd: {logical_cwd}
-            - repo_root: .
-            - shell_cwd: /workspace
-            - branch: {self.branch}
-            - default_branch: {self.default_branch}
-            - status:
-            {self.git_status}
-            - recent_commits:
-            {commits}
-            - project_docs:
-            {docs}
-            """
-        ).strip()
+        status = str(self.git_status or "clean").splitlines() or ["clean"]
+        documents = list(self.document_names) or ["none"]
+        lines = [
+            "Workspace:",
+            f"- cwd: {logical_cwd}",
+            f"- branch: {self.branch}",
+            "- status:",
+            *(f"  {line}" for line in status),
+            "- document_names:",
+            *(f"  - {name}" for name in documents),
+        ]
+        return "\n".join(lines)
 
     def state(self):
         return {
             "cwd": self.cwd,
             "repo_root": self.repo_root,
             "branch": self.branch,
-            "default_branch": self.default_branch,
             "git_status": self.git_status,
-            "recent_commits": list(self.recent_commits),
-            "project_docs": dict(self.project_docs),
+            "document_names": list(self.document_names),
+            "repository_conventions": dict(self.repository_conventions),
         }

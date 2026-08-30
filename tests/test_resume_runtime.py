@@ -104,6 +104,16 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     assert resumed.run.projection.run_id == projection.run_id
     assert resumed.run.task.contract.goal == "Inspect"
     assert resumed.run.projection.pending_call_id is None
+    prompt = resumed.model_client.prompts[0]
+    assert prompt.count('latest_user_request:\n"Continue"') == 1
+    assert "Resume request: Continue" not in prompt
+    assert sum(
+        event.kind == "run_resumed" for event in resumed.run.run_log.events
+    ) == 1
+    assert not any(
+        event.kind == "model_instruction"
+        for event in resumed.run.run_log.events
+    )
 
 
 def test_incremental_working_state_restores_from_tool_events(tmp_path):

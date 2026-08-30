@@ -1,7 +1,9 @@
 """Day 5: separate default context enhancement from Context Pressure."""
 
 import json
+import re
 import tempfile
+from html import unescape
 from pathlib import Path
 
 from pico import (
@@ -22,6 +24,9 @@ QUERY = "Where is calculate_invoice_total used?"
 MEMORY_FILENAME = "reference_invoice_checks.md"
 MEMORY_LITERAL = "RUN_ONLY_THE_TARGETED_INVOICE_TEST_FIRST"
 SUMMARY_MARKER = "SEMANTIC-SUMMARY-MARKER"
+WORKING_CONSTRAINT = "Prefer the targeted invoice test first"
+WORKING_DECISION = "calculate_invoice_total is called by create_invoice"
+WORKING_NEXT_STEP = "Inspect the newest invoice evidence"
 
 
 def print_section(title, value):
@@ -131,10 +136,101 @@ def call_transaction(agent, call_id):
     ]
 
 
-def repo_map_section(input_text):
-    start = "Repository map (task-ranked Python signatures; use read_file for details):"
-    section = input_text.split(start, 1)[1].split("\n\nRun working state:", 1)[0]
-    return start + section
+def untrusted_context(input_text):
+    marker = '<untrusted_context trust="untrusted_data">\n'
+    if marker not in input_text:
+        return {}
+    body = input_text.split(marker, 1)[1].split(
+        "\n</untrusted_context>",
+        1,
+    )[0]
+    return {
+        name: unescape(value)
+        for name, value in re.findall(
+            r'<section name="([a-z_]+)">\n(.*?)\n</section>',
+            body,
+            flags=re.DOTALL,
+        )
+    }
+
+
+def semantic_section(summary, title):
+    marker = f"## {title}\n"
+    content = str(summary).split(marker, 1)[1]
+    return content.split("\n\n## ", 1)[0].strip()
+
+
+def effective_recovery_context(agent, summary):
+    """Compose a teaching view without creating Prompt or durable state."""
+    projection = agent.run.projection
+    task = projection.task
+    working = task.working
+    evidence = projection.evidence.to_dict()
+    categories = {
+        "Goal": {
+            "source": "TaskContract from the first user_message",
+            "value": task.contract.goal,
+            "semantic_llm_generated": False,
+        },
+        "Constraints & Preferences": {
+            "source": (
+                "RunProjection.task.working.constraints from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.constraints),
+            "semantic_llm_generated": False,
+        },
+        "Progress": {
+            "source": "Compaction Fact content: ## Progress",
+            "value": semantic_section(summary, "Progress"),
+            "semantic_llm_generated": True,
+        },
+        "Key Decisions": {
+            "source": (
+                "RunProjection.task.working.decisions from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.decisions),
+            "semantic_llm_generated": False,
+        },
+        "Next Steps": {
+            "source": (
+                "RunProjection.task.working.next_steps from successful "
+                "update_working_state Tool transactions"
+            ),
+            "value": list(working.next_steps),
+            "semantic_llm_generated": False,
+        },
+        "Critical Context": {
+            "source": "Compaction Fact content: ## Critical Context",
+            "value": semantic_section(summary, "Critical Context"),
+            "semantic_llm_generated": True,
+        },
+        "Execution Evidence": {
+            "source": (
+                "RunEvidence projected from durable Tool Result and Verification Facts"
+            ),
+            "value": {
+                "successful_observation_count": evidence[
+                    "successful_observation_count"
+                ],
+                "changed_paths": evidence["change_set"]["net_changed_paths"],
+                "verification_count": len(evidence["verifications"]),
+            },
+            "semantic_llm_generated": False,
+        },
+    }
+    return {
+        "view_kind": "teaching_observability_composition",
+        "semantic_llm_generated_categories": [
+            "Progress",
+            "Critical Context",
+        ],
+        "persisted_as_one_view": False,
+        "sent_as_seven_section_prompt": False,
+        "used_by_completion_controller": False,
+        "categories": categories,
+    }
 
 
 def fallback_entry_headers(history):
@@ -171,11 +267,12 @@ def default_context_experiment(root):
         content=MEMORY_LITERAL,
         source_run_id="bootstrap",
     )
-    run_log = activate(agent, "run_day5_default", "Inspect invoice totals")
+    run_log = activate(agent, "run_day5_default", QUERY)
 
     prompt, metadata = agent.prompt.build(QUERY)
     input_text = prompt.input_text
-    rendered_repo_map = repo_map_section(input_text)
+    context = untrusted_context(input_text)
+    rendered_repo_map = context["repo_map"]
 
     recall_call = ToolCall(
         "memory_recall",
@@ -190,8 +287,18 @@ def default_context_experiment(root):
     assert agent.dependencies.repo_map is not None
     assert metadata["compaction"] is None
     assert all(event.kind != "compaction" for event in run_log.events)
-    assert MEMORY_FILENAME in input_text
-    assert MEMORY_LITERAL not in input_text
+    assert metadata["section_order"] == [
+        "runtime_policy",
+        "untrusted_context",
+        "task_request",
+    ]
+    assert metadata["included_context_sections"] == [
+        "workspace",
+        "repo_map",
+        "memory_catalog",
+    ]
+    assert MEMORY_FILENAME in context["memory_catalog"]
+    assert MEMORY_LITERAL not in context["memory_catalog"]
     assert "calculate_invoice_total" in rendered_repo_map
     assert MEMORY_LITERAL in recall_outcome.content
     assert recall_transaction == [
@@ -211,10 +318,23 @@ def default_context_experiment(root):
                 agent.config.provider_context_limit_tokens
             ),
             "compaction_metadata": metadata["compaction"],
+            "minimal_input": {
+                "section_order": metadata["section_order"],
+                "included_context_sections": metadata["included_context_sections"],
+                "empty_working_state_omitted": "working_state" not in context,
+                "empty_history_omitted": "history" not in context,
+                "latest_user_request_omitted": (
+                    "latest_user_request" not in prompt.input_text
+                ),
+            },
             "repo_map_section": rendered_repo_map,
             "memory": {
-                "catalog_contains_filename": MEMORY_FILENAME in input_text,
-                "prompt_contains_full_card": MEMORY_LITERAL in input_text,
+                "catalog_contains_filename": (
+                    MEMORY_FILENAME in context["memory_catalog"]
+                ),
+                "prompt_contains_full_card": (
+                    MEMORY_LITERAL in context["memory_catalog"]
+                ),
                 "recall_transaction": recall_transaction,
                 "recall_status": recall_outcome.status,
                 "recall_contains_full_card": MEMORY_LITERAL in recall_outcome.content,
@@ -226,7 +346,20 @@ def default_context_experiment(root):
 def build_pressure_fixture(root, run_id):
     create_repository(root)
     agent = build_agent(root, pressure_window=True)
-    run_log = activate(agent, run_id, "Inspect invoice history under pressure")
+    run_log = activate(agent, run_id, QUERY)
+    state_call = ToolCall(
+        "update_working_state",
+        {
+            "add_constraints": [WORKING_CONSTRAINT],
+            "add_decisions": [WORKING_DECISION],
+            "add_next_steps": [WORKING_NEXT_STEP],
+        },
+        f"call_state_{run_id}",
+    )
+    agent.apply_run_event(run_log.append_tool_call(state_call))
+    state_outcome = agent.tools.execute(state_call)
+    assert state_outcome.status == "success"
+    assert agent.run.task.working.constraints == (WORKING_CONSTRAINT,)
     for index in range(6):
         append_synthetic_historical_transaction(agent, index)
     return agent, run_log
@@ -248,6 +381,7 @@ def bounded_fallback_experiment(root):
         history_override=history_override,
     )
     physical_events = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
+    context = untrusted_context(prompt.input_text)
     headers = fallback_entry_headers(history_override)
     physical_counts = durable_kind_counts(physical_events)
 
@@ -263,14 +397,15 @@ def bounded_fallback_experiment(root):
     assert [event.event_id for event in physical_events] == original_ids
     assert all(event.kind != "compaction" for event in physical_events)
     assert physical_counts == {
-        "assistant_tool_call": 6,
-        "tool_started": 6,
-        "tool_result": 6,
+        "assistant_tool_call": 7,
+        "tool_started": 7,
+        "tool_result": 7,
         "compaction": 0,
     }
     assert run_log.generation == 1
     assert prompt_metadata["within_budget"] is True
-    assert "Current run events (bounded fallback):" in prompt.input_text
+    assert "Current run events (bounded fallback):" in context["history"]
+    assert context["working_state"].startswith("constraints:")
 
     print_section(
         "B. Context Pressure：失败后保留完整 Call/Result 对",
@@ -306,9 +441,13 @@ class DeterministicSummarizer:
     def __init__(self):
         self.calls = []
         self.seen_event_kinds = []
+        self.seen_tool_names = []
 
     def summarize(self, events, **_kwargs):
         self.seen_event_kinds = [event.kind for event in events]
+        self.seen_tool_names = [
+            event.name for event in events if event.kind == "assistant_tool_call"
+        ]
         self.calls.append(
             {
                 "duration_ms": 0,
@@ -345,6 +484,14 @@ def semantic_compaction_experiment(root):
     physical_after = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
     history_view_after = tuple(run_log.active_events())
     physical_counts = durable_kind_counts(physical_after)
+    compaction_event = physical_after[-1]
+    summary = compaction_event.content
+    summary_headings = [
+        line.removeprefix("## ")
+        for line in summary.splitlines()
+        if line.startswith("## ")
+    ]
+    recovery_context = effective_recovery_context(agent, summary)
 
     assert compaction["mode"] == "semantic_history"
     assert compaction["degraded"] is False
@@ -362,21 +509,47 @@ def semantic_compaction_experiment(root):
         original_ids
     )
     assert physical_after[-1].kind == "compaction"
+    assert summary_headings == ["Progress", "Critical Context"]
+    assert "update_working_state" not in summarizer.seen_tool_names
     assert any(event.kind == "tool_started" for event in physical_after)
     assert all(event.kind != "tool_started" for event in history_view_after)
     assert physical_counts == {
-        "assistant_tool_call": 6,
-        "tool_started": 6,
-        "tool_result": 6,
+        "assistant_tool_call": 7,
+        "tool_started": 7,
+        "tool_result": 7,
         "compaction": 1,
     }
+    assert list(recovery_context["categories"]) == [
+        "Goal",
+        "Constraints & Preferences",
+        "Progress",
+        "Key Decisions",
+        "Next Steps",
+        "Critical Context",
+        "Execution Evidence",
+    ]
+    assert recovery_context["semantic_llm_generated_categories"] == [
+        "Progress",
+        "Critical Context",
+    ]
+    assert recovery_context["persisted_as_one_view"] is False
+    assert recovery_context["sent_as_seven_section_prompt"] is False
+    assert recovery_context["used_by_completion_controller"] is False
+    assert agent.run.task.working.constraints == (WORKING_CONSTRAINT,)
+    assert agent.run.task.working.decisions == (WORKING_DECISION,)
+    assert agent.run.task.working.next_steps == (WORKING_NEXT_STEP,)
 
     print_section(
         "C. Context Pressure：Semantic Summary 成功提交",
         {
             "compaction": compaction,
             "summary_marker_in_prompt": SUMMARY_MARKER in prompt.input_text,
+            "semantic_summary_contract": {
+                "headings": summary_headings,
+                "llm_generated_section_count": len(summary_headings),
+            },
             "summarizer_input_kinds": summarizer.seen_event_kinds,
+            "summarizer_input_tool_names": summarizer.seen_tool_names,
             "generation": run_log.generation,
             "active_history_view": {
                 "meaning": "model-visible RunLog History View, not RunProjection",
@@ -395,6 +568,7 @@ def semantic_compaction_experiment(root):
                 "durable_counts": physical_counts,
             },
             "history_projection": prompt_metadata["history_projection"],
+            "effective_recovery_context": recovery_context,
         },
     )
 

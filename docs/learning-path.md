@@ -6,7 +6,7 @@
 顺序阅读，不改变任何 Runtime 默认行为。
 
 Project Memory 与 RepoMap 从 `Pico` 初始化开始就默认启用。第一遍遇到它们时，先把它们
-当成 Prompt 中两份有界上下文；到 Day 5 再阅读内部实现。Semantic Compaction、Subagents
+当成两份“非空才进入 Prompt”的有界上下文；到 Day 5 再阅读内部实现。Semantic Compaction、Subagents
 和 Triage 也都不是理解一次普通单 Agent 请求的前置条件。
 
 ## 六个核心 Ownership 文件
@@ -60,7 +60,7 @@ Day 7 是不执行 `memory_store` 或其他 Memory Tool transaction 的纯 Core 
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 Memory、RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
 | 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先写 `user_message.contract`；恢复 Run 保持同一 TaskContract |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
-| 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`，动态上下文进 `input`，Schema 进 `tools`；Memory/RepoMap 暂按不透明输入处理 |
+| 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；最小 Runtime policy、按需上下文和任务请求进首轮 `input`；原生 Schema 进 `tools`，支持时用 `allowed_tools` 动态限名 |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |
 | 7 | `AgentLoop._handle_tool_action` | Tool 执行前先持久化 `assistant_tool_call` Fact |
 | 8 | `ToolRuntime.execute` | 准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result` |
@@ -93,7 +93,7 @@ Projection 的委托。Live 路径只调用 `apply_event`。
 | 层级 | 内容 | 第一次是否必学 |
 |---|---|---|
 | Core | 上述 CLI Trace、TaskContract、增量 WorkingState、单 Pending、工具安全、恢复、Completion 与 Final Diff | 是 |
-| 默认上下文增强 | RepoMap 自动仓库导航；Memory Catalog 常驻 Prompt、Card 正文显式 Recall | 功能始终启用；内部实现第二遍再学 |
+| 默认上下文增强 | 非空 RepoMap 自动仓库导航；非空 Memory Catalog 按需进入 Prompt、Card 正文显式 Recall | 功能始终启用；空投影不发送；内部实现第二遍再学 |
 | Context Pressure | Token Budget、Provider Session Rotation、Semantic Compaction、失败后的事务级 Fallback | 仅超长任务需要 |
 | Orchestration Appendix | Explore/Implement DAG、Child Pico、Git Worktree、PatchIntegrator | 单 Agent Core 完成后选学 |
 | Applications | Triage Workflow、Report、真实 Fixture 与 Evals | 最后学习 |
@@ -137,11 +137,18 @@ Subagent 实现。
 ### Day 3：Prompt 与 Provider
 
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
+- 区分 `declared_tools / allowed_tool_names / wire_tools`：支持 `allowed_tools` 的 Provider
+  在普通阶段接收稳定完整 native schemas，只动态改变允许名称；final-only 边界会物理缩成
+  `submit_final` 并重建 Session。Prompt Token 预算按真实 wire surface 计算。
+- 首轮动态 Input 只保留 Runtime policy、非空的有界 Context 与 Task Request；普通 Tool 续接
+  只追加 Call/Output，不重发另一份 Workspace/Memory/History。观察 `prompt_cache_key`、
+  `cached_tokens` 与 uncached input，而不是只凭请求相似猜缓存命中。
 - 理解 Provider Adapter 如何把结构化 Context Overflow 转成唯一的
   `ProviderContextOverflow`；AgentLoop 不读取厂商错误文案，只允许一次重建重试。
-- 运行 `scripts/day3_prompt_provider_walkthrough.py` 的四段实验：三通道分离、单 Pending
-  续接与多 Call 拒绝、Incomplete 伪 Final 拒绝、Typed Context Overflow 的一次重建重试。
-- 只确认 Prompt 中存在 Memory Catalog 与 RepoMap，不在今天学习 Card 或图算法。
+- 运行 `scripts/day3_prompt_provider_walkthrough.py` 的四段实验：最小三通道与稳定 Tool
+  Surface、单 Pending 续接与多 Call 拒绝、Incomplete 伪 Final 拒绝、Typed Context Overflow
+  的一次重建重试。
+- 只确认非空 Memory Catalog 与 RepoMap 会进入首轮 Context，不在今天学习 Card 或图算法。
 
 完成标准：能画出一次 Function Call 及其 Output 的 Provider 会话。
 
@@ -164,7 +171,13 @@ Subagent 实现。
 2. **Context Pressure / Fallback**：无 Semantic Summarizer 时不写 Compaction Fact，只保留一对
    完整 Call/Result；`tool_started` 仍只存在于 durable log。
 3. **Context Pressure / Semantic Success**：注入确定性 Summarizer，比较物理原 Events、
-   Compaction Fact 与模型可见的 RunLog History View；它不是第二个 `RunProjection`。
+   Compaction Fact 与模型可见的 RunLog History View；Summary 始终只有 `Progress` 与
+   `Critical Context`，它不是第二个 `RunProjection`。
+
+第三段最后会额外打印七类 **Effective Recovery Context**：Goal、Constraints & Preferences、
+Progress、Key Decisions、Next Steps、Critical Context、Execution Evidence，并逐项标明来自
+TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类是教学/观测组合视图；
+不是七段 LLM 摘要，不持久化为第二状态，也不参与 CompletionController 判断。
 
 完成标准：能区分“默认上下文输入”和“只有压力下才发生的压缩路径”。
 
@@ -191,7 +204,8 @@ Subagent 实现。
 - 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和
   10 分钟三种表达。
 - `scripts/demo_runtime.py` 是默认 Memory Catalog → 显式 Recall → Card 正文的增强 Demo，
-  不作为第一条 Core Demo。
+  同时用一个无 Compaction 的七类 Effective Recovery Context 说明各类信息可来自现有 Fact；
+  它不作为第一条 Core Demo，也不制造七段摘要。
 - 最后再进入 **Applications**：`applications/triage/workflow.py`、`report.py` 与相关 Evals。
 
 完成标准：不用枚举所有类，也能先讲清 Core；面试官追问时再进入 Enhancement、Pressure、

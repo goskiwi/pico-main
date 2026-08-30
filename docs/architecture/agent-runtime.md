@@ -141,7 +141,73 @@ Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunne
 
 ## Context and compaction
 
-Stable Runtime policy is sent through Responses `instructions`; dynamic Workspace, TaskContract, WorkingState, Memory, RepoMap, History and current request enter `input`; Function Schemas remain in `tools`. Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare Compaction: an isolated Provider session summarizes only historical Progress and Critical Context, while TaskContract and WorkingState remain canonical. Invalid, failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool Call/Result transactions. Original events remain durable.
+Stable role, execution, Tool protocol, WorkingState and completion rules are sent through
+Responses `instructions`. The first request of a Provider action session sends a small dynamic
+`input` with two always-present parts, Runtime task policy and the original task request. It adds an
+untrusted-context envelope only when at least one bounded projection is non-empty, and adds a
+differing latest request only on Resume. The envelope can include minimal Workspace facts and
+document names, WorkingState,
+`AGENTS.md` repository conventions, RepoMap, Memory Catalog and History. Empty RepoMap, Memory,
+WorkingState and History sections are not rendered; project-document bodies are not preloaded.
+Normal Tool continuation appends the native `function_call` and `function_call_output` to the same
+manual Responses replay instead of rebuilding or resending the dynamic suffix.
+
+Native Function Schemas remain in the Responses `tools` field rather than being copied into
+instructions. AgentLoop resolves three surfaces for every fresh model turn:
+
+- `declared_tools`: the complete Runtime-native action schemas;
+- `allowed_tool_names`: the subset admitted by the current TaskContract, Runtime policy and Tool
+  budget;
+- `wire_tools`: the schemas actually used for Provider Token accounting and the request.
+
+For a backend with verified `allowed_tools` support, `wire_tools` stays equal to the stable complete
+schema set while `tool_choice.allowed_tools` carries the dynamic names during normal execution. The
+final-only boundary is intentionally stricter: when only `submit_final` remains allowed, `wire_tools`
+also shrinks to that one schema. On a backend without `allowed_tools`, the request always sends the
+already-narrowed schemas. Response parsing and ToolRuntime both enforce the allowed-name subset.
+Provider capabilities are selected explicitly by backend host; Pico does not probe production
+requests or maintain a legacy Prompt/Tool protocol.
+
+The stable instructions hash is also the `prompt_cache_key` on verified cache-capable backends.
+Turn metrics distinguish `input_tokens`, `cached_tokens` and derived uncached input, so cache reuse
+is measured rather than inferred. Context budgeting charges the actual
+`wire_tools`, not an unrelated superset or subset.
+
+Ordinary Call/Output continuation reuses the Provider session. If the wire or allowed Tool surface
+changes—for example, the execution budget leaves only `submit_final`—AgentLoop resets that Provider
+session and rebuilds from RunLog before the next request. Changing only the request field inside an
+existing continuation is not treated as a reliable capability boundary.
+
+Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare
+Compaction: an isolated Provider session summarizes historical facts into exactly two semantic
+sections, `Progress` and `Critical Context`. Its input is escaped compact JSON built from each
+canonical Event payload, so ToolOutcome status, execution, side-effect, failure, path and artifact
+facts stay together without opening a second trust boundary. The persisted Compaction Fact contains
+that two-section summary plus coverage metadata; it never contains a seven-part generated summary.
+TaskContract, WorkingState, Project Memory and RunEvidence keep their existing owners. A Summary is
+committed only when replacing the covered prefix reduces the final escaped History Wire. Invalid,
+failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool
+Call/Result transactions. Semantic Summary uses one strict request; any failure takes that existing
+fallback path. Transport retry remains Provider-owned. Original events remain durable.
+
+Day 5 and the demo may assemble the following **Effective Recovery Context** for teaching and
+observation. This is a read-only view over existing owners, not a second state object or an extra
+Prompt payload:
+
+| Effective category | Source |
+|---|---|
+| Goal | Immutable TaskContract from the first `user_message` |
+| Constraints & Preferences | Run WorkingState constraints; explicitly recalled Project Memory only when relevant |
+| Progress | Semantic `Progress` after Compaction, otherwise retained complete History facts |
+| Key Decisions | Run WorkingState decisions |
+| Next Steps | Run WorkingState next steps |
+| Critical Context | Semantic `Critical Context` after Compaction, otherwise retained Tool Results/current data |
+| Execution Evidence | RunEvidence projected from Tool Result and Verification Facts |
+
+Only Progress and Critical Context can come from the semantic summarizer. The seven-category view is
+not persisted, is not fed back as another seven-section suffix, and is not an input to completion.
+`CompletionController` continues to decide from TaskContract, RunEvidence, Subagent state,
+verification and the current Workspace.
 
 The OpenAI-compatible adapter classifies structured HTTP/JSON/SSE context failures as
 `ProviderContextOverflow` without retaining raw provider error objects or response bodies. AgentLoop

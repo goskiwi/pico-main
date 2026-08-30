@@ -12,11 +12,11 @@ def evaluation_failures(results):
     context = results["context"]["summary"]
     required_context_rates = (
         "within_budget_rate",
-        "current_request_preserved_rate",
+        "task_request_preserved_rate",
         "compaction_commit_rate",
         "tool_transaction_integrity_rate",
         "original_event_preservation_rate",
-        "working_state_preservation_rate",
+        "task_contract_preservation_rate",
     )
     if any(context[name] != 1.0 for name in required_context_rates):
         failures.append("context governance invariant failed")

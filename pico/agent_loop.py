@@ -22,6 +22,18 @@ class ModelTurn:
     provider_total_tokens: int | None
 
 
+@dataclass(frozen=True)
+class ActionToolSurface:
+    """One turn's wire-visible and Runtime-allowed tool surface."""
+
+    wire_tools: tuple[dict[str, Any], ...]
+    allowed_names: tuple[str, ...]
+
+    @property
+    def wire_names(self):
+        return tuple(str(tool["name"]) for tool in self.wire_tools)
+
+
 class AgentLoop:
     def __init__(self, agent: Pico):
         self.agent = agent
@@ -80,7 +92,8 @@ class AgentLoop:
 
     def _next_model_turn(self, loop_state):
         agent = self.agent
-        prompt, prompt_metadata = self._prepare_prompt(loop_state)
+        tool_surface = self._resolve_action_tool_surface()
+        prompt, prompt_metadata = self._prepare_prompt(loop_state, tool_surface)
         agent.emit_event(
             "model_requested",
             {
@@ -88,7 +101,10 @@ class AgentLoop:
             },
         )
         action, completion_metadata = self._request_action(
-            loop_state, prompt, prompt_metadata
+            loop_state,
+            prompt,
+            prompt_metadata,
+            tool_surface,
         )
         provider_input_tokens = completion_metadata.get("input_tokens")
         provider_output_tokens = completion_metadata.get("output_tokens")
@@ -101,14 +117,61 @@ class AgentLoop:
             provider_total_tokens=provider_total_tokens,
         )
 
-    def _prepare_prompt(self, loop_state):
+    def _resolve_action_tool_surface(self):
         agent = self.agent
+        declared_tools = tuple(agent.tools.action_schemas)
+        allowed_tools = tuple(agent.tools.model_action_tools())
+        if (
+            agent.config.max_tool_executions is not None
+            and agent.run.metrics.executed_tool_count
+            >= agent.config.max_tool_executions
+        ):
+            allowed_tools = tuple(
+                tool for tool in allowed_tools if tool["name"] == "submit_final"
+            )
+        allowed_names = tuple(str(tool["name"]) for tool in allowed_tools)
+        final_only = allowed_names == ("submit_final",)
+        wire_tools = (
+            declared_tools
+            if getattr(agent.model_client, "supports_allowed_tools", False)
+            and not final_only
+            else allowed_tools
+        )
+        return ActionToolSurface(
+            wire_tools=wire_tools,
+            allowed_names=allowed_names,
+        )
+
+    def _prepare_prompt(self, loop_state, tool_surface):
+        agent = self.agent
+        if loop_state.prompt_snapshot is not None:
+            _prompt, snapshot_metadata = loop_state.prompt_snapshot
+            prior_wire = tuple(snapshot_metadata.get("wire_tool_names", ()))
+            prior_allowed = tuple(
+                snapshot_metadata.get("allowed_tool_names", ())
+            )
+            if (
+                prior_wire != tool_surface.wire_names
+                or prior_allowed != tool_surface.allowed_names
+            ):
+                agent.model_client.reset_action_session()
+                loop_state.prompt_snapshot = None
+                loop_state.provider_context_tokens = None
+                agent.emit_event(
+                    "provider_session_reset",
+                    {
+                        "reason": "tool_surface_changed",
+                        "wire_tool_names": list(tool_surface.wire_names),
+                        "allowed_tool_names": list(tool_surface.allowed_names),
+                    },
+                )
         prompt_reused = loop_state.prompt_snapshot is not None
         if loop_state.prompt_snapshot is None:
             compaction_metadata, history_override = agent.prompt.prepare_compaction(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 provider_overhead_tokens=loop_state.provider_overhead_tokens,
+                action_tools=tool_surface.wire_tools,
             )
             prompt, prompt_metadata = agent.prompt.build(
                 loop_state.user_message,
@@ -116,39 +179,41 @@ class AgentLoop:
                 provider_overhead_tokens=loop_state.provider_overhead_tokens,
                 compaction_metadata=compaction_metadata,
                 history_override=history_override,
+                action_tools=tool_surface.wire_tools,
+            )
+            prompt_metadata["wire_tool_names"] = list(tool_surface.wire_names)
+            prompt_metadata["allowed_tool_names"] = list(
+                tool_surface.allowed_names
             )
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
         else:
             prompt, original_metadata = loop_state.prompt_snapshot
             prompt_metadata = dict(original_metadata)
+        prompt_metadata["wire_tool_names"] = list(tool_surface.wire_names)
+        prompt_metadata["allowed_tool_names"] = list(tool_surface.allowed_names)
         prompt_metadata["prompt_reused"] = prompt_reused
         return prompt, prompt_metadata
 
-    def _request_action(self, loop_state, prompt, prompt_metadata):
+    def _request_action(
+        self,
+        loop_state,
+        prompt,
+        prompt_metadata,
+        tool_surface,
+    ):
         agent = self.agent
         prompt_cache_key = (
             prompt_metadata.get("prompt_cache_key")
             if getattr(agent.model_client, "supports_prompt_cache", False)
             else None
         )
-        available_action_tools = agent.tools.model_action_tools()
-        action_tools = (
-            [
-                tool
-                for tool in available_action_tools
-                if tool["name"] == "submit_final"
-            ]
-            if agent.config.max_tool_executions is not None
-            and agent.run.metrics.executed_tool_count
-            >= agent.config.max_tool_executions
-            else available_action_tools
-        )
         action = agent.model_client.complete_action(
             prompt.input_text,
             agent.config.max_new_tokens,
             instructions=prompt.instructions,
-            action_tools=action_tools,
+            action_tools=tool_surface.wire_tools,
+            allowed_tool_names=tool_surface.allowed_names,
             prompt_cache_key=prompt_cache_key,
             request_timeout=agent.run.execution_context.bounded_timeout(),
         )
@@ -205,6 +270,8 @@ class AgentLoop:
             "provider_overhead_tokens",
             "estimated_input_tokens",
             "observed_provider_overhead_tokens",
+            "wire_tool_names",
+            "allowed_tool_names",
         )
         return {key: prompt_metadata.get(key) for key in keys}
 

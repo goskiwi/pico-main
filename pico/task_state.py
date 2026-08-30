@@ -15,7 +15,7 @@ TASK_KINDS = frozenset({"read_only", "modify"})
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 
 
-@dataclass
+@dataclass(frozen=True)
 class TaskContract:
     """Immutable goal, write scope, and completion requirements for one Run."""
 
@@ -35,12 +35,14 @@ class TaskContract:
                 raise TypeError("allowed_write_paths must be a sequence or null")
             if any(not isinstance(path, str) for path in self.allowed_write_paths):
                 raise TypeError("allowed_write_paths entries must be strings")
-        self.allowed_write_paths = (
+        object.__setattr__(
+            self,
+            "allowed_write_paths",
             None
             if self.allowed_write_paths is None
             else tuple(
                 normalize_relative_file(path) for path in self.allowed_write_paths
-            )
+            ),
         )
         self.validate()
 

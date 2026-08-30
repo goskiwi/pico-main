@@ -1,18 +1,42 @@
+import hashlib
+
 from pico.prompt_instructions import build_prompt_instructions
 
 
-def test_stable_instructions_exclude_dynamic_context_and_tool_listing():
+def test_stable_instructions_have_only_the_five_runtime_sections():
     instructions = build_prompt_instructions()
 
-    assert "You are pico" in instructions.text
-    assert "Workspace:" not in instructions.text
-    assert "Tools:" not in instructions.text
-    assert "memory_recall" not in instructions.text
-    assert instructions.content_hash
+    headings = [
+        line.removesuffix(":")
+        for line in instructions.text.splitlines()
+        if line.endswith(":") and not line.startswith("-")
+    ]
+    assert headings == ["Role", "Execution", "Tools", "Working state", "Completion"]
+    assert instructions.text.count("You are pico") == 1
 
 
-def test_project_memory_rules_are_explicitly_enabled():
-    instructions = build_prompt_instructions(enable_project_memory=True)
+def test_stable_instructions_exclude_dynamic_context_and_specific_tools():
+    instructions = build_prompt_instructions()
 
-    assert "memory_recall" in instructions.text
-    assert "memory_store" in instructions.text
+    for dynamic_text in (
+        "Workspace:",
+        "Task contract",
+        "Current user request",
+        "RepoMap",
+        "Project Memory",
+        "AGENTS.md",
+        "memory_recall",
+        "memory_store",
+        "write_file",
+        "edit_file",
+        "submit_final",
+    ):
+        assert dynamic_text not in instructions.text
+
+
+def test_stable_instructions_are_deterministic_and_content_addressed():
+    first = build_prompt_instructions()
+    second = build_prompt_instructions()
+
+    assert second == first
+    assert first.content_hash == hashlib.sha256(first.text.encode("utf-8")).hexdigest()

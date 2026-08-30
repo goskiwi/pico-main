@@ -584,6 +584,158 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     assert agent.run.metrics.executed_tool_count == 1
     assert agent.run.task.lifecycle.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
+    turns = [
+        event for event in agent.run.run_log.events if event.kind == "turn_metrics"
+    ]
+    assert turns[-1].payload["prompt_reused"] is False
+    assert turns[-1].payload["prompt_metadata"]["wire_tool_names"] == [
+        "submit_final"
+    ]
+    resets = [
+        event
+        for event in agent.run.run_log.events
+        if event.kind == "provider_session_reset"
+    ]
+    assert [event.payload["reason"] for event in resets] == [
+        "tool_surface_changed"
+    ]
+
+
+def test_allowed_tools_provider_keeps_wire_schema_stable_for_read_only_run(
+    tmp_path,
+):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    class SchemaCountingClient(FakeModelClient):
+        @staticmethod
+        def estimate_action_tool_tokens(action_tools, _token_counter):
+            return len(action_tools)
+
+    client = SchemaCountingClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "hello.txt", "start_line": 1, "end_line": 1},
+            ),
+            ModelAction.final("Done."),
+        ]
+    )
+    client.supports_allowed_tools = True
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    assert agent.ask("Inspect hello.txt", **READ_TASK).answer == "Done."
+
+    declared_names = tuple(tool["name"] for tool in agent.tools.action_schemas)
+    assert client.action_tool_surfaces == [declared_names, declared_names]
+    assert client.allowed_tool_name_surfaces[0] == (
+        client.allowed_tool_name_surfaces[1]
+    )
+    assert "read_file" in client.allowed_tool_name_surfaces[0]
+    assert "submit_final" in client.allowed_tool_name_surfaces[0]
+    assert "write_file" not in client.allowed_tool_name_surfaces[0]
+    assert "memory_store" not in client.allowed_tool_name_surfaces[0]
+    turns = [
+        event
+        for event in agent.run.run_log.events
+        if event.kind == "turn_metrics"
+    ]
+    assert all(
+        event.payload["prompt_metadata"]["tool_schema_tokens"]
+        == len(declared_names)
+        for event in turns
+    )
+    assert all(
+        tuple(event.payload["prompt_metadata"]["wire_tool_names"])
+        == declared_names
+        for event in turns
+    )
+
+
+def test_allowed_tools_provider_uses_physical_final_only_wire_schema(
+    tmp_path,
+):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    client = FakeModelClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "hello.txt", "start_line": 1, "end_line": 1},
+            ),
+            ModelAction.final("Done at the boundary."),
+        ]
+    )
+    client.supports_allowed_tools = True
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            max_tool_executions=1,
+        ),
+    )
+
+    assert agent.ask("Inspect hello.txt", **READ_TASK).answer == (
+        "Done at the boundary."
+    )
+
+    declared_names = tuple(tool["name"] for tool in agent.tools.action_schemas)
+    assert client.action_tool_surfaces == [declared_names, ("submit_final",)]
+    assert client.allowed_tool_name_surfaces[-1] == ("submit_final",)
+    resets = [
+        event
+        for event in agent.run.run_log.events
+        if event.kind == "provider_session_reset"
+    ]
+    assert [event.payload["reason"] for event in resets] == [
+        "tool_surface_changed"
+    ]
+
+
+def test_unsupported_provider_uses_run_fixed_read_only_wire_surface(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    class SchemaCountingClient(FakeModelClient):
+        @staticmethod
+        def estimate_action_tool_tokens(action_tools, _token_counter):
+            return len(action_tools)
+
+    client = SchemaCountingClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "hello.txt", "start_line": 1, "end_line": 1},
+            ),
+            ModelAction.final("Done."),
+        ]
+    )
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    assert agent.ask("Inspect hello.txt", **READ_TASK).answer == "Done."
+
+    assert client.action_tool_surfaces[0] == client.action_tool_surfaces[1]
+    assert client.action_tool_surfaces == client.allowed_tool_name_surfaces
+    assert "read_file" in client.action_tool_surfaces[0]
+    assert "write_file" not in client.action_tool_surfaces[0]
+    assert "memory_store" not in client.action_tool_surfaces[0]
+    turns = [
+        event
+        for event in agent.run.run_log.events
+        if event.kind == "turn_metrics"
+    ]
+    assert all(
+        event.payload["prompt_metadata"]["tool_schema_tokens"]
+        == len(client.action_tool_surfaces[0])
+        for event in turns
+    )
 
 
 def test_default_loop_has_no_tool_execution_limit(tmp_path):
@@ -629,8 +781,10 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     assert "Inspect hello.txt" not in second_run_prompt
     assert "First run completed." not in second_run_prompt
     assert "unique-tool-output" not in second_run_prompt
-    assert "Current run events:\n- empty" in second_run_prompt
-    assert second_run_prompt.endswith("Current user request:\nSummarize the prior run")
+    assert "Current run events" not in second_run_prompt
+    assert second_run_prompt.endswith(
+        'task_request:\n"Summarize the prior run"'
+    )
     assert agent.session.data["active_run_id"] == ""
 
 

@@ -12,6 +12,18 @@ from ..contracts import ModelAction
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
 
+_HOST_CAPABILITIES = {
+    # Official Responses endpoint.
+    "api.openai.com": frozenset({"allowed_tools", "prompt_cache_key"}),
+    # Preserve the existing default gateway's prompt-cache key behavior. Its
+    # allowed_tools support is not assumed without a successful probe.
+    "www.right.codes": frozenset({"prompt_cache_key"}),
+    # Verified against the configured Responses endpoint on 2026-08-30:
+    # allowed_tools/required restricted the call and repeated prompt_cache_key
+    # input reported cached_tokens.
+    "www.rightapi.ai": frozenset({"allowed_tools", "prompt_cache_key"}),
+}
+
 
 class ProviderContextOverflow(RuntimeError):
     """The provider rejected an input that exceeded its context window."""
@@ -152,7 +164,9 @@ class FakeModelClient:
         self.prompts = []
         self.instruction_prompts = []
         self.action_tool_surfaces = []
+        self.allowed_tool_name_surfaces = []
         self.supports_prompt_cache = False
+        self.supports_allowed_tools = False
         self.last_completion_metadata = {}
         self.reset_action_session()
 
@@ -181,15 +195,27 @@ class FakeModelClient:
         *,
         instructions,
         action_tools,
+        allowed_tool_names=None,
         **kwargs,
     ):
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
+        self.allowed_tool_name_surfaces.append(
+            tuple(
+                tool["name"] for tool in action_tools
+            )
+            if allowed_tool_names is None
+            else tuple(str(name) for name in allowed_tool_names)
+        )
         self.instruction_prompts.append(str(instructions))
         output = self.complete(input_text, max_new_tokens, **kwargs)
         if isinstance(output, ModelAction):
             return output
         if isinstance(output, dict):
-            return _action_from_response(output, action_tools)
+            return _action_from_response(
+                output,
+                action_tools,
+                allowed_tool_names=allowed_tool_names,
+            )
         raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
 
 
@@ -287,7 +313,7 @@ def _extract_usage_cache_details(data):
     }
 
 
-def _action_from_response(data, action_tools):
+def _action_from_response(data, action_tools, *, allowed_tool_names=None):
     if data.get("status") == "incomplete":
         details = data.get("incomplete_details") or {}
         reason = str(details.get("reason", ""))
@@ -308,7 +334,14 @@ def _action_from_response(data, action_tools):
         return ModelAction.invalid(
             "provider returned malformed response output"
         )
-    allowed = {str(item["name"]) for item in action_tools}
+    declared = {str(item["name"]) for item in action_tools}
+    allowed = (
+        declared
+        if allowed_tool_names is None
+        else {str(name) for name in allowed_tool_names}
+    )
+    if not allowed.issubset(declared):
+        raise ValueError("allowed tool names must be declared in action_tools")
     calls = [
         item for item in output if item.get("type") == "function_call"
     ]
@@ -361,10 +394,9 @@ class OpenAICompatibleModelClient:
         hostname = (
             urllib.parse.urlparse(self.base_url).hostname or ""
         ).lower().rstrip(".")
-        self.supports_prompt_cache = any(
-            hostname == domain or hostname.endswith("." + domain)
-            for domain in ("openai.com", "right.codes")
-        )
+        capabilities = _HOST_CAPABILITIES.get(hostname, frozenset())
+        self.supports_prompt_cache = "prompt_cache_key" in capabilities
+        self.supports_allowed_tools = "allowed_tools" in capabilities
         self.backend_hostname = hostname or "unknown"
         self.last_completion_metadata = {}
         self.reset_action_session()
@@ -418,8 +450,21 @@ class OpenAICompatibleModelClient:
         instructions,
         prompt_cache_key,
         action_tools,
+        allowed_tool_names,
         input_items,
     ):
+        declared_names = tuple(str(tool["name"]) for tool in action_tools)
+        allowed_names = (
+            declared_names
+            if allowed_tool_names is None
+            else tuple(str(name) for name in allowed_tool_names)
+        )
+        if len(set(declared_names)) != len(declared_names):
+            raise ValueError("action tool names must be unique")
+        if len(set(allowed_names)) != len(allowed_names):
+            raise ValueError("allowed tool names must be unique")
+        if not set(allowed_names).issubset(declared_names):
+            raise ValueError("allowed tool names must be declared in action_tools")
         payload = {
             "model": self.model,
             "instructions": str(instructions),
@@ -429,7 +474,18 @@ class OpenAICompatibleModelClient:
             "store": False,
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
-            "tool_choice": "required",
+            "tool_choice": (
+                {
+                    "type": "allowed_tools",
+                    "mode": "required",
+                    "tools": [
+                        {"type": "function", "name": name}
+                        for name in allowed_names
+                    ],
+                }
+                if self.supports_allowed_tools and len(declared_names) > 1
+                else "required"
+            ),
             "parallel_tool_calls": False,
         }
         if self.temperature is not None:
@@ -580,7 +636,7 @@ class OpenAICompatibleModelClient:
 
     def complete_action(
         self, input_text, max_new_tokens, *, instructions, action_tools,
-        prompt_cache_key=None, request_timeout=None,
+        allowed_tool_names=None, prompt_cache_key=None, request_timeout=None,
     ):
         if not self._action_input:
             self._action_input.append(
@@ -597,12 +653,17 @@ class OpenAICompatibleModelClient:
             instructions=instructions,
             prompt_cache_key=prompt_cache_key,
             action_tools=action_tools,
+            allowed_tool_names=allowed_tool_names,
             input_items=self._action_input,
         )
         body_text, content_type = self._request_with_retry(payload, request_timeout)
         response_data = self._decode_response(body_text, content_type)
         self.last_completion_metadata = _extract_usage_cache_details(response_data)
-        action = _action_from_response(response_data, action_tools)
+        action = _action_from_response(
+            response_data,
+            action_tools,
+            allowed_tool_names=allowed_tool_names,
+        )
         output = response_data["output"]
         function_calls = [
             item for item in output if item.get("type") == "function_call"
@@ -613,7 +674,7 @@ class OpenAICompatibleModelClient:
             and response_data.get("status") != "incomplete"
             else ""
         )
-        if pending_call_id:
+        if pending_call_id and action.kind != "invalid":
             self._action_input.extend(output)
             self._pending_call_id = pending_call_id
         else:

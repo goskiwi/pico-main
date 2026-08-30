@@ -599,9 +599,13 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
     assert (worktrees[1] / "cache.py").exists()
     assert not (worktrees[1] / "auth.py").exists()
     assert all("Do not run git commands" in client.prompts[0] for client in clients)
-    assert all(
-        "Configured verification command:\npython -m pytest -q" in client.prompts[0]
+    child_requests = [
+        json.loads(client.prompts[0].rsplit("task_request:\n", 1)[1])
         for client in clients
+    ]
+    assert all(
+        "Configured verification command:\npython -m pytest -q" in request
+        for request in child_requests
     )
 
     applied = parent.dependencies.subagents.integration.apply(

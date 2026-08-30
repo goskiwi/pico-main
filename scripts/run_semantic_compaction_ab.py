@@ -26,6 +26,7 @@ from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.sandbox import DockerSandbox, DockerSandboxConfig
 from scripts.real_case_support import git_metadata, require_clean_runtime
 from scripts.run_real_compaction import (
+    CONTROLLED_CONTEXT_LIMIT,
     EVIDENCE_COUNT,
     HIDDEN_COMMAND,
     TARGET_PATH,
@@ -96,7 +97,7 @@ def run_variant(args, variant, api_key, base_url, run_group):
             max_tool_executions=18,
             max_new_tokens=1024,
             run_timeout_seconds=args.run_timeout_seconds,
-            provider_context_limit_tokens=32000,
+            provider_context_limit_tokens=CONTROLLED_CONTEXT_LIMIT,
             compaction_reserve_tokens=8192,
             compaction_keep_recent_tokens=8000,
             sandbox_image=args.sandbox_image,

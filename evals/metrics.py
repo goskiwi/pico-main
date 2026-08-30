@@ -89,7 +89,7 @@ def run_context_governance_evaluation(
                 total_budget=1200,
                 section_caps={
                     "workspace": 300,
-                    "task_requirements": 80,
+                    "repository_conventions": 80,
                     "memory_catalog": 60,
                     "repo_map": 80,
                     "working_state": 100,
@@ -98,7 +98,7 @@ def run_context_governance_evaluation(
                 compaction_keep_recent_tokens=300,
             )
             raw_history_tokens = manager.tokenizer.count(
-                manager._history_text(request)
+                manager._history_text()
             )
             original_event_ids = {event.event_id for event in run_log.events}
             compaction, history_override = manager.prepare_compaction(request)
@@ -125,12 +125,12 @@ def run_context_governance_evaluation(
                     "raw_tokens": raw_history_tokens,
                     "governed_tokens": governed_history_tokens,
                     "within_budget": metadata["within_budget"],
-                    "request_preserved": request in prompt,
+                    "task_request_preserved": request in prompt,
                     "compaction_committed": metadata["compaction"] is not None,
                     "tool_transactions_intact": active_calls == active_results,
                     "original_events_preserved": original_event_ids
                     <= {event.event_id for event in run_log.events},
-                    "working_state_preserved": (
+                    "task_contract_preserved": (
                         agent.run.task.contract.goal == request
                     ),
                 }
@@ -140,11 +140,15 @@ def run_context_governance_evaluation(
         "rows": rows,
         "summary": {
             "within_budget_rate": sum(row["within_budget"] for row in rows) / len(rows),
-            "current_request_preserved_rate": sum(row["request_preserved"] for row in rows) / len(rows),
+            "task_request_preserved_rate": sum(
+                row["task_request_preserved"] for row in rows
+            ) / len(rows),
             "compaction_commit_rate": sum(row["compaction_committed"] for row in rows) / len(rows),
             "tool_transaction_integrity_rate": sum(row["tool_transactions_intact"] for row in rows) / len(rows),
             "original_event_preservation_rate": sum(row["original_events_preserved"] for row in rows) / len(rows),
-            "working_state_preservation_rate": sum(row["working_state_preserved"] for row in rows) / len(rows),
+            "task_contract_preservation_rate": sum(
+                row["task_contract_preserved"] for row in rows
+            ) / len(rows),
             "mean_token_reduction": sum(row["raw_tokens"] - row["governed_tokens"] for row in rows) / len(rows),
         },
     })
@@ -273,11 +277,11 @@ def write_runtime_report(
         f"- Within-budget rate: {harness['summary']['within_budget_rate']:.1%}", "",
         "## Context governance", "",
         f"- Within-budget rate: {context['summary']['within_budget_rate']:.1%}",
-        f"- Current-request preservation: {context['summary']['current_request_preserved_rate']:.1%}",
+        f"- Task-request preservation: {context['summary']['task_request_preserved_rate']:.1%}",
         f"- Compaction commit rate: {context['summary']['compaction_commit_rate']:.1%}",
         f"- Tool-transaction integrity: {context['summary']['tool_transaction_integrity_rate']:.1%}",
         f"- Original-event preservation: {context['summary']['original_event_preservation_rate']:.1%}",
-        f"- WorkingState preservation: {context['summary']['working_state_preservation_rate']:.1%}", "",
+        f"- TaskContract preservation: {context['summary']['task_contract_preservation_rate']:.1%}", "",
         "## Project memory", "",
         f"- Catalog generated: {project['summary']['catalog_generated']}",
         f"- Explicit Store transaction: {project['summary']['store_transaction_recorded']}",

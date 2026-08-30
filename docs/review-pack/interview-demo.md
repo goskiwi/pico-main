@@ -93,7 +93,8 @@ uv run python scripts/day7_runtime_capstone.py
 uv run python scripts/demo_runtime.py
 ```
 
-只讲 `Memory Catalog → memory_recall → Card 正文`，不要把它混进 Core Patch 主线。
+只讲 `Memory Catalog → memory_recall → Card 正文`，以及输出中的七类 Effective Recovery
+Context 来源；不要把它混进 Core Patch 主线，也不要把该教学视图称为七段压缩结果。
 
 ### 2. 运行机制评测 `[默认上下文增强 + Context Pressure]`
 
@@ -125,14 +126,27 @@ Session 指针、Workspace 内容、Project Memory Card 和 Artifact 各有独�
 
 ### 2. Context 治理 `[Context Pressure]`
 
-固定 Runtime policy 进入 `instructions`；动态 Workspace、TaskContract、Memory Catalog、RepoMap、WorkingState、History 和 Current Request 进入 `input`。Prompt build 只读；Compaction 在 build 前准备，只总结历史 Progress/Critical Context，失败时使用近期完整事务的 bounded fallback。
+固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
+只包含 Runtime task policy、非空的有界不可信 Context 和 Task Request；仅 Resume 且请求改变时
+才追加 latest request。空 RepoMap/Memory/WorkingState/History 不渲染，普通 Function Call 续接
+只追加 Call/Output。原生 Function Schema 只在 `tools`；支持 `allowed_tools` 的 Provider 在
+普通阶段获得稳定完整 Schema 和动态允许名称，final-only 边界则物理缩成 `submit_final` 并
+重建 Provider Session。Runtime 的 Token 预算按实际 wire tools 计算。稳定
+instructions hash 用作受支持 Provider 的 `prompt_cache_key`，并记录 cached/uncached
+Token 指标。
+
+Prompt build 只读；Compaction 在 build 前准备，独立 LLM 的输出与持久 Summary 始终只有
+`Progress`、`Critical Context` 两段，失败时使用近期完整事务的 bounded fallback。演示中可把
+TaskContract Goal、WorkingState Constraints/Decisions/Next Steps、这两段 Summary 与
+RunEvidence 组合成七类 Effective Recovery Context。七类只是逐项标来源的教学/观测视图，
+不是七段 LLM 输出，不是第二状态，也不参与 Completion Gate。
 
 Provider Context Overflow 由 Adapter 归一化为一个类型；AgentLoop 只允许一次重建重试，不通过厂商错误字符串猜测控制流。
 
 ### 3. WorkingState 与 Project Memory `[Core + 默认上下文增强]`
 
 TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；成功的增量 `update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；
-Catalog 常驻 Prompt，主模型按描述显式调用 `memory_recall`，Card 作为不可信历史数据
+非空 Catalog 才进入首轮 Prompt，主模型按描述显式调用 `memory_recall`，Card 作为不可信历史数据
 返回，不能改变工具权限或代替 Workspace 当前事实。
 
 ### 4. RepoMap `[默认上下文增强]`
@@ -164,6 +178,13 @@ Worktree 中执行并返回 Patch receipt。PatchIntegrator 在独立 Integratio
 
 快照会与 Tool 结果、Evidence 和运行统计形成多份可变状态。Pico 保存原始事件并按需投影；
 Compaction 只改变模型 Context，不删除审计事实。
+
+### 七类恢复信息是否等于七段 Compaction Summary？
+
+不等于。Semantic Summarizer 只生成 `Progress` 与 `Critical Context`。Goal 来自 TaskContract，
+Constraints/Decisions/Next Steps 来自 WorkingState，Execution Evidence 来自 RunEvidence；演示只是
+把这些既有来源并排展示。它不会被持久化或再次发送成七段 Prompt，也不替代
+CompletionController。
 
 ### 为什么模型没有最终完成权？
 

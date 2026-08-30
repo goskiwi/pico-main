@@ -13,12 +13,12 @@ def test_context_governance_evaluation_uses_real_runtime(tmp_path):
         tmp_path / "context.json",
     )
     assert artifact["summary"]["within_budget_rate"] == 1.0
-    assert artifact["summary"]["current_request_preserved_rate"] == 1.0
+    assert artifact["summary"]["task_request_preserved_rate"] == 1.0
     assert artifact["summary"]["mean_token_reduction"] > 0
     assert artifact["summary"]["compaction_commit_rate"] == 1.0
     assert artifact["summary"]["tool_transaction_integrity_rate"] == 1.0
     assert artifact["summary"]["original_event_preservation_rate"] == 1.0
-    assert artifact["summary"]["working_state_preservation_rate"] == 1.0
+    assert artifact["summary"]["task_contract_preservation_rate"] == 1.0
     assert len(artifact["rows"]) == 3
 
 
