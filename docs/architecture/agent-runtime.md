@@ -143,6 +143,11 @@ Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunne
 
 Stable Runtime policy is sent through Responses `instructions`; dynamic Workspace, TaskContract, WorkingState, Memory, RepoMap, History and current request enter `input`; Function Schemas remain in `tools`. Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare Compaction: an isolated Provider session summarizes only historical Progress and Critical Context, while TaskContract and WorkingState remain canonical. Invalid, failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool Call/Result transactions. Original events remain durable.
 
+The OpenAI-compatible adapter classifies structured HTTP/JSON/SSE context failures as
+`ProviderContextOverflow` without retaining raw provider error objects or response bodies. AgentLoop
+handles only that type: the first overflow resets the Provider session and rebuilds the Prompt; a
+second consecutive overflow propagates. Other `RuntimeError` values never enter the overflow path.
+
 ## Resume
 
 Session stores only `active_run_id`. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, rebuilds Context, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced; a transient reload failure leaves the process-local `reload_required` cache-validity bit set so the next request retries before using Task state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.

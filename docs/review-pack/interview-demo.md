@@ -120,6 +120,8 @@ Session 指针、Workspace 内容、Project Memory Card 和 Artifact 各有独�
 
 固定 Runtime policy 进入 `instructions`；动态 Workspace、TaskContract、Memory Catalog、RepoMap、WorkingState、History 和 Current Request 进入 `input`。Prompt build 只读；Compaction 在 build 前准备，只总结历史 Progress/Critical Context，失败时使用近期完整事务的 bounded fallback。
 
+Provider Context Overflow 由 Adapter 归一化为一个类型；AgentLoop 只允许一次重建重试，不通过厂商错误字符串猜测控制流。
+
 ### 3. WorkingState 与 Project Memory `[Core + 默认上下文增强]`
 
 TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；成功的增量 `update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；

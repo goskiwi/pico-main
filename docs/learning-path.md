@@ -121,6 +121,8 @@ Subagent 实现。
 ### Day 3：Prompt 与 Provider
 
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
+- 理解 Provider Adapter 如何把结构化 Context Overflow 转成唯一的
+  `ProviderContextOverflow`；AgentLoop 不读取厂商错误文案，只允许一次重建重试。
 - 运行 `scripts/day3_prompt_provider_walkthrough.py`。
 - 只确认 Prompt 中存在 Memory Catalog 与 RepoMap，不在今天学习 Card 或图算法。
 
