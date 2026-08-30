@@ -297,6 +297,10 @@ def _action_from_response(data, action_tools):
                 "producing one complete function call. Return exactly "
                 "one concise function call."
             )
+        return ModelAction.invalid(
+            "The provider returned an incomplete response. Return exactly "
+            "one complete function call."
+        )
     output = data.get("output")
     if not isinstance(output, list) or any(
         not isinstance(item, dict) for item in output
@@ -606,6 +610,7 @@ class OpenAICompatibleModelClient:
         pending_call_id = (
             str(function_calls[0].get("call_id") or "")
             if len(function_calls) == 1
+            and response_data.get("status") != "incomplete"
             else ""
         )
         if pending_call_id:

@@ -705,6 +705,59 @@ def test_incomplete_max_token_response_reports_output_truncation():
     assert "one concise function call" in action.content
 
 
+@pytest.mark.parametrize("reason", ["", "content_filter"])
+def test_incomplete_response_never_accepts_a_complete_looking_final_call(reason):
+    data = {
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason} if reason else {},
+        "output": [
+            {
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_partial_final",
+                "arguments": {"answer": "must not be accepted"},
+            }
+        ],
+    }
+
+    action = _action_from_response(data, TOOLS)
+
+    assert action.kind == "invalid"
+    assert "incomplete response" in action.content
+
+
+def test_incomplete_sse_call_is_not_retained_as_pending_provider_state():
+    event = {
+        "type": "response.incomplete",
+        "response": {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call_partial_read",
+                    "arguments": {"path": "README.md"},
+                }
+            ]
+        },
+    }
+    body = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n"
+    instance = client()
+
+    with patch(
+        "urllib.request.urlopen",
+        return_value=Response(body, "text/event-stream"),
+    ):
+        action = instance.complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert action.kind == "invalid"
+    assert instance._pending_call_id is None
+    assert all(
+        item.get("type") != "function_call"
+        for item in instance._action_input
+        if isinstance(item, dict)
+    )
+
+
 @pytest.mark.parametrize(
     ("output", "message"),
     [
