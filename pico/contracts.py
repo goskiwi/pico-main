@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -21,16 +20,12 @@ RECOVERY_CONDITIONS = frozenset(
         "no_retry",
     }
 )
-CORRECTION_ACTIONS = frozenset(
-    {
-        "continue",
-        "repair",
-        "replan",
-        "wait",
-        "request_user_action",
-        "stop_route",
-    }
-)
+RECOVERY_ACTIONS = {
+    "retry_after_change": "repair",
+    "retry_after_wait": "wait",
+    "user_action_required": "request_user_action",
+    "no_retry": "stop_route",
+}
 
 
 def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
@@ -48,16 +43,6 @@ def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
         return
     if effect_scope == "none":
         raise ValueError("unknown side effects require an effect scope")
-
-
-def tool_call_hash(name: str, args: dict[str, Any]) -> str:
-    payload = json.dumps(
-        {"name": str(name), "args": dict(args)},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -154,6 +139,12 @@ class FailureInfo:
             recovery=str(value["recovery"]),
         )
 
+    @property
+    def correction_action(self):
+        if self.code == "repeated_identical_call":
+            return "replan"
+        return RECOVERY_ACTIONS[self.recovery]
+
 
 class ToolFailureError(RuntimeError):
     """Typed pre-effect failure raised before a Tool commits side effects."""
@@ -181,7 +172,6 @@ class ToolOutcome:
     execution_state: str
     side_effect_state: str
     content: str
-    correction_action: str = "continue"
     structured: dict[str, Any] = field(default_factory=dict)
     failure: FailureInfo | None = None
     affected_paths: tuple[str, ...] = ()
@@ -197,10 +187,6 @@ class ToolOutcome:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
         if self.effect_scope not in EFFECT_SCOPES:
             raise ValueError(f"invalid effect scope: {self.effect_scope}")
-        if self.correction_action not in CORRECTION_ACTIONS:
-            raise ValueError(
-                f"invalid correction action: {self.correction_action}"
-            )
         if not isinstance(self.structured, dict):
             raise TypeError("tool outcome structured result must be an object")
         if self.status == "success" and self.execution_state != "completed":
@@ -219,6 +205,10 @@ class ToolOutcome:
     def artifact_id(self):
         return str(self.artifact.get("artifact_id", ""))
 
+    @property
+    def correction_action(self):
+        return self.failure.correction_action if self.failure is not None else "continue"
+
     def to_dict(self):
         return {
             "tool_call_id": self.tool_call_id,
@@ -227,7 +217,6 @@ class ToolOutcome:
             "execution_state": self.execution_state,
             "side_effect_state": self.side_effect_state,
             "content": self.content,
-            "correction_action": self.correction_action,
             "structured": dict(self.structured),
             "failure": self.failure.to_dict() if self.failure else None,
             "affected_paths": list(self.affected_paths),
@@ -244,7 +233,6 @@ class ToolOutcome:
             "execution_state",
             "side_effect_state",
             "content",
-            "correction_action",
             "structured",
             "failure",
             "affected_paths",
@@ -267,7 +255,6 @@ class ToolOutcome:
             execution_state=str(value["execution_state"]),
             side_effect_state=str(value["side_effect_state"]),
             content=str(value["content"]),
-            correction_action=str(value["correction_action"]),
             structured=dict(value["structured"]),
             failure=FailureInfo.from_dict(failure) if failure is not None else None,
             affected_paths=tuple(str(item) for item in value["affected_paths"]),

@@ -2,36 +2,11 @@
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 from .sandbox import shell_argv
 from .workspace import normalize_relative_file
 from .workspace_tracker import WorkspaceTracker
-
-
-def changed_python_syntax_issues(agent):
-    issues = []
-    for relative in agent.run.evidence.changed_paths:
-        if not relative.endswith(".py"):
-            continue
-        path = agent.workspace.resolve_path(relative)
-        if not path.exists():
-            continue
-        try:
-            ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        except (SyntaxError, UnicodeDecodeError) as exc:
-            issues.append(f"{relative}:{getattr(exc, 'lineno', 1) or 1}: {exc}")
-    return issues
-
-
-def discover_verification_command(root):
-    root = Path(root)
-    if (root / "pyproject.toml").is_file():
-        return "python -m pytest -q"
-    if (root / "package.json").is_file():
-        return "npm test -- --runInBand"
-    return ""
 
 
 def capture_changed_path_states(root, changed_paths):
@@ -66,7 +41,6 @@ def verify_workspace(
     record = {
         "command": command,
         "status": "infrastructure_error",
-        "freshness": "current",
         "started_workspace_mutation_sequence": before,
         "finished_workspace_mutation_sequence": before,
         "started_changed_path_states": started_changed_path_states,
@@ -100,9 +74,6 @@ def verify_workspace(
     finished_changed_path_states = capture_changed_path_states(root, changed_paths)
     record["finished_workspace_mutation_sequence"] = after
     record["finished_changed_path_states"] = finished_changed_path_states
-    if before != after or started_changed_path_states != finished_changed_path_states:
-        record["status"] = "stale"
-        record["freshness"] = "stale"
     return record
 
 

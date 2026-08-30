@@ -13,9 +13,10 @@ from pico import (
     WorkspaceContext,
 )
 from pico.completion_controller import CompletionController
-from pico.evidence import RunEvidence
+from pico.evidence import verification_is_current
 from pico.mutations import file_revision
 from pico.run_log import RunLog
+from pico.run_projection import RunProjection
 from pico.sandbox import SandboxResult
 from pico.subagents.contracts import SubtaskRecord, SubtaskSpec
 from pico.subagents.dag import (
@@ -23,7 +24,8 @@ from pico.subagents.dag import (
     ready_task_ids,
     validate_graph,
 )
-from pico.task_state import TaskState
+from pico.task_state import TaskContract
+from pico.verification import capture_changed_path_states
 
 
 class SequenceSandbox:
@@ -41,18 +43,30 @@ def print_section(title, value):
     print(json.dumps(value, indent=2, ensure_ascii=False))
 
 
-def activate(agent, task_id, run_id, goal):
-    state = TaskState.create(task_id, goal, run_id=run_id)
+def activate(
+    agent,
+    task_id,
+    run_id,
+    goal,
+    *,
+    requires_verification=False,
+):
+    contract = TaskContract(
+        goal=goal,
+        task_kind="modify",
+        requires_workspace_change=False,
+        requires_verification=requires_verification,
+    )
     run_log = RunLog(
-        state.run_id,
-        state.task_id,
+        run_id,
+        task_id,
         agent.session.data["id"],
         agent.dependencies.run_store,
     )
-    agent.run.task_state = state
     agent.run.run_log = run_log
-    agent.apply_run_event(run_log.append_user(goal))
-    return state, run_log
+    run_log.append_user(contract)
+    agent.run.projection = RunProjection.from_events(run_log.events)
+    return agent.run.task, run_log
 
 
 def apply_edit(agent, call_id, old_text, new_text):
@@ -95,6 +109,7 @@ def completion_experiment(root):
         "task_day6_completion",
         "run_day6_completion",
         "Change value and verify it",
+        requires_verification=True,
     )
 
     first_edit = apply_edit(agent, "call_edit_first", "return 1", "return 2")
@@ -102,15 +117,24 @@ def completion_experiment(root):
     first_cursor = agent.run.evidence.last_workspace_mutation_sequence
 
     second_edit = apply_edit(agent, "call_edit_second", "return 2", "return 3")
-    stale_after_second_edit = agent.run.evidence.verifications[0]["freshness"]
+    prior_verification = agent.run.evidence.verifications[0]
     second_cursor = agent.run.evidence.last_workspace_mutation_sequence
+    current_states = capture_changed_path_states(
+        agent.workspace.root,
+        agent.run.evidence.changed_paths,
+    )
+    stale_after_second_edit = not verification_is_current(
+        prior_verification,
+        second_cursor,
+        current_states,
+    )
     second_assessment = CompletionController(agent).assess("second final")
 
     assert first_edit.status == "success"
     assert first_assessment.allowed is True
     assert second_edit.status == "success"
     assert second_cursor > first_cursor
-    assert stale_after_second_edit == "stale"
+    assert stale_after_second_edit is True
     assert second_assessment.allowed is False
     assert second_assessment.status == "verification_failed"
     assert len(sandbox.calls) == 2
@@ -121,7 +145,7 @@ def completion_experiment(root):
             "mutation_sequence": first_cursor,
         },
         "after_second_mutation": {
-            "old_verification_freshness": stale_after_second_edit,
+            "old_verification_is_stale": stale_after_second_edit,
             "new_mutation_sequence": second_cursor,
             "completion_allowed": second_assessment.allowed,
             "completion_status": second_assessment.status,
@@ -138,19 +162,18 @@ def recovery_experiment(root):
         session_store=store,
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    state, run_log = activate(
+    _state, run_log = activate(
         original,
         "task_day6_recovery",
         "run_day6_recovery",
         "Create interrupted.txt",
     )
-    original.session.set_active_run(state.run_id)
+    original.session.set_active_run(original.run.projection.run_id)
     call = ToolCall(
         "write_file",
         {
             "path": "interrupted.txt",
             "content": "side effect happened\n",
-            "expected_revision": "absent",
         },
         "call_interrupted_write",
     )
@@ -161,7 +184,11 @@ def recovery_experiment(root):
             risky=True,
             effect_scope="workspace",
             potential_effects=[
-                {"path": "interrupted.txt", "before_state": "absent"}
+                {
+                    "path": "interrupted.txt",
+                    "before_state": "absent",
+                    "before_artifact_id": "",
+                }
             ],
         )
     )
@@ -179,10 +206,12 @@ def recovery_experiment(root):
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
     projection = resumed.recovery.state["projection"]
-    restored = RunLog.restore(state.run_id, resumed.dependencies.run_store)
-    resumed.run.task_state = TaskState.from_dict(projection.task_state())
+    restored = RunLog.restore(
+        original.run.projection.run_id,
+        resumed.dependencies.run_store,
+    )
+    resumed.run.projection = projection
     resumed.run.run_log = restored
-    resumed.run.evidence = RunEvidence.from_events(restored.events)
     reconciled = restored.reconcile_interrupted(resumed)
     for _outcome, event in reconciled:
         resumed.apply_run_event(event)

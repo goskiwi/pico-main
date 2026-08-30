@@ -56,7 +56,7 @@
     {
       "answer": "Completed and verified by the fixed Harness.",
       "category": "governance",
-      "executed_tool_count": 2,
+      "executed_tool_count": 4,
       "failure_category": "",
       "fixture_copy": ".pico/evals/repeated_read_recovery",
       "id": "repeated_read_recovery",

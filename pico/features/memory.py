@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-WORKING_STATE_SCHEMA_VERSION = "run-working-state-v1"
+WORKING_STATE_SCHEMA_VERSION = "run-working-state-v2"
 WORKING_STATE_UPDATE_FIELDS = (
     "add_constraints",
     "remove_constraints",
@@ -72,9 +72,8 @@ def _updated_items(current, *, additions, removals, field_name):
 
 @dataclass
 class WorkingState:
-    """Current task goal, constraints, decisions, and next steps."""
+    """Model-maintained constraints, decisions, and next steps for one Run."""
 
-    goal: str = ""
     constraints: tuple[str, ...] = ()
     decisions: tuple[str, ...] = ()
     next_steps: tuple[str, ...] = ()
@@ -85,7 +84,6 @@ class WorkingState:
     )
 
     def __post_init__(self):
-        self.goal = str(self.goal)
         self.constraints = _normalize_items(
             self.constraints, field_name="constraints"
         )
@@ -104,7 +102,6 @@ class WorkingState:
             raise TypeError("working state must be an object")
         expected = {
             "schema_version",
-            "goal",
             "constraints",
             "decisions",
             "next_steps",
@@ -113,13 +110,10 @@ class WorkingState:
             raise ValueError("invalid working state fields")
         if value.get("schema_version") != WORKING_STATE_SCHEMA_VERSION:
             raise ValueError("unsupported working state schema")
-        if not isinstance(value["goal"], str):
-            raise TypeError("working state goal must be text")
         for field_name in ("constraints", "decisions", "next_steps"):
             if not isinstance(value[field_name], list):
                 raise TypeError(f"working state {field_name} must be a list")
         return cls(
-            goal=value["goal"],
             constraints=tuple(value["constraints"]),
             decisions=tuple(value["decisions"]),
             next_steps=tuple(value["next_steps"]),
@@ -128,7 +122,6 @@ class WorkingState:
     def to_dict(self):
         return {
             "schema_version": WORKING_STATE_SCHEMA_VERSION,
-            "goal": self.goal,
             "constraints": list(self.constraints),
             "decisions": list(self.decisions),
             "next_steps": list(self.next_steps),
@@ -137,7 +130,6 @@ class WorkingState:
     def updated(self, update):
         normalized = normalize_working_update(update)
         return WorkingState(
-            goal=self.goal,
             constraints=_updated_items(
                 self.constraints,
                 additions=normalized["add_constraints"],
@@ -167,9 +159,7 @@ class WorkingState:
 
     def apply_event(self, event):
         payload = dict(event.payload)
-        if event.kind == "user_message" and not self.goal:
-            self.goal = str(payload.get("content", ""))
-        elif event.kind == "assistant_tool_call" and event.name == "update_working_state":
+        if event.kind == "assistant_tool_call" and event.name == "update_working_state":
             self._pending_updates[event.call_id] = dict(event.args)
         elif event.kind == "tool_result":
             update = self._pending_updates.pop(event.call_id, None)
@@ -186,10 +176,8 @@ class WorkingState:
             lines.append("- none")
         return lines
 
-    def render_panel(self, *, include_goal=True):
+    def render_panel(self):
         lines = ["Run working state:"]
-        if include_goal:
-            lines.extend(["Goal:", f"- {self.goal or '-'}"])
         lines.extend(self._section("Constraints", self.constraints))
         lines.extend(self._section("Decisions", self.decisions))
         lines.extend(self._section("Next steps", self.next_steps))

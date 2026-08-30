@@ -15,6 +15,17 @@ TOOLS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def default_runtime_instructions(monkeypatch):
+    original = OpenAICompatibleModelClient.complete_action
+
+    def complete_action(instance, *args, **kwargs):
+        kwargs.setdefault("instructions", "stable runtime rules")
+        return original(instance, *args, **kwargs)
+
+    monkeypatch.setattr(OpenAICompatibleModelClient, "complete_action", complete_action)
+
+
 class Response:
     def __init__(self, payload, content_type="application/json"):
         self.payload = payload
@@ -301,6 +312,47 @@ def test_invalid_function_call_shapes_are_invalid_actions(output, message):
     action = _action_from_response({"output": output}, TOOLS)
     assert action.kind == "invalid"
     assert message in action.content
+
+
+def test_multiple_function_calls_with_one_call_id_leave_no_pending_or_orphan():
+    instance = client()
+    response = Response(
+        json.dumps(
+            {
+                "output": [
+                    {"type": "reasoning", "encrypted_content": "opaque"},
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call_read",
+                        "arguments": {"path": "README.md"},
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "arguments": {"path": "README.md"},
+                    },
+                ]
+            }
+        )
+    )
+
+    with patch("urllib.request.urlopen", return_value=response):
+        action = instance.complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert action.kind == "invalid"
+    assert instance._pending_call_id is None
+    assert all(
+        item.get("type") != "function_call"
+        for item in instance._action_input
+        if isinstance(item, dict)
+    )
+
+    instance.record_action_result(action, "return exactly one function call")
+    assert instance._action_input[-1]["role"] == "user"
+    assert instance._action_input[-1]["content"][0]["text"] == (
+        "return exactly one function call"
+    )
 
 
 def test_usage_and_cache_metadata_are_optional_and_normalized():

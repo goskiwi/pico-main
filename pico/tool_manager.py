@@ -6,12 +6,21 @@ import json
 from typing import TYPE_CHECKING
 
 from . import tools as toolkit
-from .contracts import ToolCall
+from .contracts import ToolCall, ToolFailureError
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
 
 if TYPE_CHECKING:
     from .runtime import Pico
+
+
+def intersect_write_scopes(contract_paths, policy_paths):
+    if contract_paths is None:
+        return policy_paths
+    if policy_paths is None:
+        return contract_paths
+    policy = set(policy_paths)
+    return tuple(path for path in contract_paths if path in policy)
 
 
 class ToolManager:
@@ -42,20 +51,61 @@ class ToolManager:
 
     def validate(self, name, args):
         runtime = self.runtime
-        if name in toolkit.BASE_TOOL_SPECS:
-            validated = toolkit.validate_tool(self.context(), name, args)
-        else:
-            tool = self.registry.get(name)
-            if tool is None:
-                raise ValueError(f"unknown tool: {name}")
-            validated = tool["args_schema"].model_validate(args or {}).model_dump()
-        allowed_paths = runtime.config.allowed_write_paths
+        task = runtime.run.task
+        tool = self.registry.get(name)
+        contract = getattr(task, "contract", None)
+        if (
+            contract is not None
+            and contract.task_kind == "read_only"
+            and tool is not None
+            and tool.get("state_mutating", False)
+        ):
+            raise ToolFailureError(
+                "read_only_task",
+                f"task requirements do not allow state-mutating tool: {name}",
+                "no_retry",
+            )
+        if tool is None:
+            raise ValueError(f"unknown tool: {name}")
+        validated = tool["args_schema"].model_validate(args or {}).model_dump()
+        validator = tool.get("validate")
+        if validator is not None:
+            validated = validator(validated)
+        if (
+            contract is not None
+            and contract.task_kind == "read_only"
+            and name == "delegate_tasks"
+            and any(item.get("kind") == "implement" for item in validated["tasks"])
+        ):
+            raise ToolFailureError(
+                "read_only_task",
+                "read-only task may delegate explore tasks only",
+                "no_retry",
+            )
+        allowed_paths = intersect_write_scopes(
+            getattr(contract, "allowed_write_paths", None),
+            runtime.config.allowed_write_paths,
+        )
         if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
             if relative not in set(allowed_paths):
                 raise ValueError(f"write path outside allowed scope: {relative}")
         return validated
+
+    def model_action_tools(self):
+        task = self.runtime.run.task
+        contract = getattr(task, "contract", None)
+        if contract is None or contract.task_kind != "read_only":
+            return list(self.action_schemas)
+        return [
+            schema
+            for schema in self.action_schemas
+            if schema["name"] == "submit_final"
+            or not self.registry.get(schema["name"], {}).get(
+                "state_mutating", False
+            )
+        ]
 
     def context(self):
         runtime = self.runtime
@@ -67,7 +117,7 @@ class ToolManager:
             project_memory=runtime.dependencies.project_memory,
             artifact_store=runtime.dependencies.artifacts,
             run_id_provider=lambda: str(
-                getattr(runtime.run.task_state, "run_id", "") or "manual"
+                runtime.run.projection.run_id or "manual"
             ),
             tool_call_id_provider=lambda: (
                 runtime.run.run_log.pending_call_id()
@@ -75,8 +125,8 @@ class ToolManager:
                 else ""
             ),
             working_state_provider=lambda: (
-                runtime.run.task_state.working_state
-                if runtime.run.task_state is not None
+                runtime.run.task.working
+                if runtime.run.task is not None
                 else None
             ),
             token_counter_provider=lambda text: runtime.prompt.context.tokenizer.count(
@@ -93,8 +143,6 @@ class ToolManager:
 
     def approve(self, name, args):
         config = self.runtime.config
-        if config.read_only:
-            return False
         if config.approval_policy == "auto":
             return True
         if config.approval_policy == "deny":

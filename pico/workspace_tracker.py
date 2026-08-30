@@ -16,15 +16,6 @@ class WorkspaceTracker:
         self.context = workspace
         self.root = Path(workspace.repo_root).resolve()
         self.invocation_cwd = Path(workspace.cwd).resolve()
-        self._revision = 0
-
-    @property
-    def revision(self) -> int:
-        return self._revision
-
-    def mark_changed(self) -> None:
-        """Invalidate derived state after a Runtime-observed workspace mutation."""
-        self._revision += 1
 
     @staticmethod
     def path_state(path) -> str:
@@ -45,8 +36,6 @@ class WorkspaceTracker:
             repo_root_override=self.root,
         )
         changed = refreshed.state() != self.context.state()
-        if changed:
-            self.mark_changed()
         if force or changed:
             self.context = refreshed
         return force or changed

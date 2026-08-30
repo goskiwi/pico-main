@@ -2,17 +2,27 @@
 
 from dataclasses import dataclass, field
 
-from .evidence import RunEvidence
 from .execution import ExecutionContext
 from .run_log import RunLog
-from .task_state import TaskState
+from .run_projection import RunProjection
 
 
 @dataclass(slots=True)
 class ActiveRunState:
     """Run-scoped state kept separate from long-lived runtime dependencies."""
 
-    task_state: TaskState | None = None
+    projection: RunProjection = field(default_factory=RunProjection)
     execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
-    evidence: RunEvidence = field(default_factory=RunEvidence)
+
+    @property
+    def task(self):
+        return self.projection.task
+
+    @property
+    def evidence(self):
+        return self.projection.evidence
+
+    @property
+    def metrics(self):
+        return self.projection.metrics

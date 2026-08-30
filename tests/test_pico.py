@@ -13,8 +13,21 @@ from pico import (
 )
 from pico.contracts import ToolCall
 from pico.providers.clients import OpenAICompatibleModelClient, _action_from_response
+from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.task_state import TaskState
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
+
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
 
 
 def build_agent(tmp_path, outputs, **kwargs):
@@ -33,14 +46,23 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
         ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 2}),
         ModelAction.final("Read successfully."),
     ])
-    assert agent.ask("Read hello") == "Read successfully."
+    assert agent.ask("Read hello", **READ_TASK) == "Read successfully."
     assert [entry.kind for entry in agent.run.run_log.context_events()] == [
         "user_message", "assistant_tool_call", "tool_result", "assistant_final"
     ]
-    assert "Read hello" in agent.run.task_state.working_state.render_panel()
-    assert agent.run.task_state.status == "completed"
+    assert agent.run.task.contract.goal == "Read hello"
+    assert agent.run.task.lifecycle.status == "completed"
     assert agent.dependencies.run_store is not None
     assert not hasattr(agent, "services")
+
+
+def test_memory_and_repo_map_remain_enabled_by_default(tmp_path):
+    agent = build_agent(tmp_path, [])
+    tool_names = {tool["name"] for tool in agent.tools.action_schemas}
+
+    assert agent.dependencies.project_memory is not None
+    assert agent.dependencies.repo_map is not None
+    assert {"memory_recall", "memory_store", "memory_forget"} <= tool_names
 
 
 def test_emit_event_requires_one_consistent_active_run(tmp_path):
@@ -48,9 +70,14 @@ def test_emit_event_requires_one_consistent_active_run(tmp_path):
     with pytest.raises(RuntimeError, match="active TaskState and RunLog"):
         agent.emit_event("model_requested")
 
-    agent.run.task_state = TaskState.create(
-        "task_active", "Inspect", run_id="run_active"
+    active_log = RunLog(
+        "run_active",
+        "task_active",
+        agent.session.data["id"],
+        agent.dependencies.run_store,
     )
+    first = active_log.append_user(TaskContract(goal="Inspect", **READ_TASK))
+    agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = RunLog(
         "run_other",
         "task_active",
@@ -77,14 +104,14 @@ def test_working_state_tool_is_durable_and_replayable(tmp_path):
         ],
     )
 
-    assert agent.ask("Fix the login timeout") == "Working state recorded."
-    state = agent.run.task_state.working_state
-    assert state.goal == "Fix the login timeout"
+    assert agent.ask("Fix the login timeout", **NO_CHANGE_TASK) == "Working state recorded."
+    state = agent.run.task.working
+    assert agent.run.task.contract.goal == "Fix the login timeout"
     assert state.constraints == ("Keep Python 3.10 compatibility",)
     assert state.decisions == ("The timeout is in token refresh",)
     assert state.next_steps == ("Add a concurrent refresh test",)
-    replayed = agent.dependencies.run_store.replay(agent.run.task_state.run_id)
-    assert replayed.working_state.to_dict() == state.to_dict()
+    replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    assert replayed.task.working.to_dict() == state.to_dict()
 
 
 def test_rejected_working_state_update_does_not_change_projection(tmp_path):
@@ -102,8 +129,8 @@ def test_rejected_working_state_update_does_not_change_projection(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect the API") == "Rejected update left state unchanged."
-    assert agent.run.task_state.working_state.constraints == ()
+    assert agent.ask("Inspect the API", **NO_CHANGE_TASK) == "Rejected update left state unchanged."
+    assert agent.run.task.working.constraints == ()
     results = [
         event
         for event in agent.run.run_log.events
@@ -115,7 +142,14 @@ def test_rejected_working_state_update_does_not_change_projection(tmp_path):
 def test_fake_client_refuses_legacy_text_protocol(tmp_path):
     agent = build_agent(tmp_path, ["legacy text"])
     with pytest.raises(TypeError, match="ModelAction"):
-        agent.ask("do it")
+        agent.ask("do it", **NO_CHANGE_TASK)
+
+
+def test_ask_requires_explicit_task_requirements(tmp_path):
+    agent = build_agent(tmp_path, [ModelAction.final("unused")])
+
+    with pytest.raises(TypeError, match="task_kind"):
+        agent.ask("legacy untyped task")
 
 
 def test_response_action_parser_requires_one_allowed_function():
@@ -163,7 +197,9 @@ def test_openai_client_sends_strict_native_tools_and_parses_action(tmp_path):
         return Response(json.dumps(response))
 
     with patch("urllib.request.urlopen", urlopen):
-        action = client.complete_action("prompt", 32, action_tools=tools)
+        action = client.complete_action(
+            "prompt", 32, instructions="runtime rules", action_tools=tools
+        )
     assert action == ModelAction.final("ok")
     assert captured["payload"]["tool_choice"] == "required"
     assert captured["payload"]["parallel_tool_calls"] is False
@@ -180,19 +216,26 @@ def test_openai_sse_completed_function_call_is_parsed():
     with patch("urllib.request.urlopen", return_value=Response(
         "data: " + json.dumps(event) + "\n\ndata: [DONE]\n", "text/event-stream"
     )):
-        action = client.complete_action("prompt", 32, action_tools=tools)
+        action = client.complete_action(
+            "prompt", 32, instructions="runtime rules", action_tools=tools
+        )
     assert action == ModelAction.final("stream ok")
 
 
 def test_revision_conflict_is_a_tool_error(tmp_path):
     agent = build_agent(tmp_path, [])
-    read = agent.tools.run(ToolCall("read_file", {"path": "hello.txt"}, "read"))
+    RunLifecycle(agent).initialize("Edit hello", **NO_CHANGE_TASK)
+    read_call = ToolCall("read_file", {"path": "hello.txt"}, "read")
+    agent.apply_run_event(agent.run.run_log.append_tool_call(read_call))
+    read = agent.tools.run(read_call)
     revision = read.content.split("revision: ", 1)[1].splitlines()[0]
     (tmp_path / "hello.txt").write_text("external\n")
-    outcome = agent.tools.run(ToolCall("edit_file", {
+    edit_call = ToolCall("edit_file", {
         "path": "hello.txt", "old_text": "external", "new_text": "lost",
         "expected_revision": revision,
-    }, "patch"))
+    }, "patch")
+    agent.apply_run_event(agent.run.run_log.append_tool_call(edit_call))
+    outcome = agent.tools.run(edit_call)
     assert outcome.status == "error"
     assert "revision conflict" in outcome.content
 
@@ -228,15 +271,15 @@ def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp
 def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("old task")
-    old_run_id = agent.run.task_state.run_id
+        agent.ask("old task", **NO_CHANGE_TASK)
+    old_run_id = agent.run.projection.run_id
 
     agent.reset()
     agent.model_client.outputs.append(ModelAction.final("new answer"))
 
-    assert agent.ask("new task") == "new answer"
-    assert agent.run.task_state.run_id != old_run_id
-    assert agent.run.task_state.working_state.goal == "new task"
+    assert agent.ask("new task", **NO_CHANGE_TASK) == "new answer"
+    assert agent.run.projection.run_id != old_run_id
+    assert agent.run.task.contract.goal == "new task"
     old_projection = agent.dependencies.run_store.replay(old_run_id)
     assert old_projection.terminal is True
     assert old_projection.stop_reason == "user_reset"
@@ -245,7 +288,7 @@ def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path)
 def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monkeypatch):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("old task")
+        agent.ask("old task", **NO_CHANGE_TASK)
 
     def fail_session_reset():
         raise OSError("session persistence failed")
@@ -255,11 +298,11 @@ def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monke
     with pytest.raises(OSError, match="session persistence failed"):
         agent.reset()
 
-    assert agent.run.task_state.status == "stopped"
-    assert agent.run.task_state.stop_reason == "user_reset"
+    assert agent.run.task.lifecycle.status == "stopped"
+    assert agent.run.task.lifecycle.stop_reason == "user_reset"
     assert (
-        agent.dependencies.run_store.replay(agent.run.task_state.run_id).task_state()
-        == agent.run.task_state.to_dict()
+        agent.dependencies.run_store.replay(agent.run.projection.run_id).task.to_dict()
+        == agent.run.task.to_dict()
     )
 
 
@@ -277,20 +320,21 @@ def test_terminal_run_closes_execution_when_session_pointer_save_fails(
     monkeypatch.setattr(agent.session, "set_active_run", fail_terminal_pointer)
 
     with pytest.raises(OSError, match="terminal pointer failed"):
-        agent.ask("Finish")
+        agent.ask("Finish", **NO_CHANGE_TASK)
 
-    assert agent.run.task_state.status == "completed"
+    assert agent.run.task.lifecycle.status == "completed"
     assert agent.run.execution_context is None
-    assert agent.dependencies.run_store.replay(agent.run.task_state.run_id).terminal
+    assert agent.dependencies.run_store.replay(agent.run.projection.run_id).terminal
 
 
-def test_custom_prompt_prefix_rebuilds_its_cache_hash(tmp_path):
+def test_custom_instructions_rebuild_their_cache_hash(tmp_path):
     agent = build_agent(tmp_path, [])
-    original_hash = agent.prompt.prefix_state.content_hash
+    original_hash = agent.prompt.instructions_state.content_hash
 
-    agent.prompt.prefix = "custom interview rules"
+    agent.prompt.instructions = "custom interview rules"
     prompt, metadata = agent.prompt.build("inspect")
 
-    assert "custom interview rules" in prompt
-    assert agent.prompt.prefix_state.content_hash != original_hash
-    assert metadata["prompt_cache_key"] == agent.prompt.prefix_state.content_hash
+    assert prompt.instructions == "custom interview rules"
+    assert "custom interview rules" not in prompt.input_text
+    assert agent.prompt.instructions_state.content_hash != original_hash
+    assert metadata["prompt_cache_key"] == agent.prompt.instructions_state.content_hash

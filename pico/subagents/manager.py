@@ -74,8 +74,11 @@ class SubagentManager:
         atexit.register(self.cleanup)
 
     def _parent_run_id(self):
-        state = self.parent.run.task_state
-        return str(state.run_id if state is not None else "manual")
+        return str(
+            self.parent.run.projection.run_id
+            if self.parent.run.task is not None
+            else "manual"
+        )
 
     def _run_root(self, run_id):
         return self.parent.dependencies.run_store.run_dir(run_id) / "subagents"
@@ -295,7 +298,6 @@ class SubagentManager:
             approval_policy="auto",
             max_tool_executions=record.spec.max_tool_executions,
             max_new_tokens=self.parent.config.max_new_tokens,
-            read_only=record.spec.kind == "explore",
             shell_env_allowlist=self.parent.config.shell_env_allowlist,
             secret_env_names=self.parent.config.secret_env_names,
             allowed_tools=(
@@ -362,14 +364,21 @@ class SubagentManager:
             )
         child_error = None
         try:
-            child.ask(prompt)
+            child.ask(
+                prompt,
+                task_kind=(
+                    "read_only" if record.spec.kind == "explore" else "modify"
+                ),
+                requires_workspace_change=record.spec.kind == "implement",
+                requires_verification=record.spec.kind == "implement",
+            )
         except Exception as exc:  # noqa: BLE001 - preserve diff before classifying failure
             child_error = exc
-        state = child.run.task_state
+        state = child.run.task
         projection = None
         if state is not None:
-            record.child_run_id = state.run_id
-            projection = child.dependencies.run_store.replay(state.run_id)
+            record.child_run_id = child.run.projection.run_id
+            projection = child.dependencies.run_store.replay(record.child_run_id)
 
         if record.spec.kind == "implement":
             handle = self._worktrees[(run_id, record.spec.task_id)]

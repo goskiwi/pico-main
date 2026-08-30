@@ -48,3 +48,16 @@ def test_workspace_context_does_not_preload_symlinked_project_docs(tmp_path):
 
     assert "OUTSIDE-SECRET" not in context.text()
     assert context.project_docs == {}
+
+
+def test_model_workspace_panel_never_exposes_host_absolute_paths(tmp_path):
+    nested = tmp_path / "src" / "package"
+    nested.mkdir(parents=True)
+    context = WorkspaceContext.build(nested, repo_root_override=tmp_path)
+
+    text = context.text()
+
+    assert str(tmp_path) not in text
+    assert "- cwd: src/package" in text
+    assert "- repo_root: ." in text
+    assert "- shell_cwd: /workspace" in text

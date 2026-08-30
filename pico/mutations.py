@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import os
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import ToolFailureError
@@ -14,6 +16,17 @@ ABSENT_REVISION = "absent"
 MAX_TEXT_FILE_BYTES = 2_000_000
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
+
+
+@dataclass(frozen=True)
+class MutationReceipt:
+    before_revision: str
+    after_revision: str
+    diff: str
+
+    @property
+    def changed(self):
+        return self.before_revision != self.after_revision
 
 
 def content_revision(payload: bytes) -> str:
@@ -75,6 +88,39 @@ class AmbiguousTextMatch(ToolFailureError):
         )
 
 
+class ExistingFileRequiresEdit(ToolFailureError):
+    def __init__(self, path, revision):
+        logical_path = Path(path).as_posix()
+        super().__init__(
+            "existing_file_requires_edit",
+            "write_file only creates new files; read the current file and use edit_file",
+            structured={
+                "path": logical_path,
+                "actual_revision": str(revision),
+                "recommended_next_tool": "read_file",
+            },
+        )
+
+
+def unified_text_diff(path, before, after, *, before_exists=True, after_exists=True):
+    logical_path = Path(path).as_posix()
+    if not before_exists and not str(after):
+        return f"--- /dev/null\n+++ b/{logical_path}\n"
+    lines = difflib.unified_diff(
+        str(before).splitlines(keepends=True),
+        str(after).splitlines(keepends=True),
+        fromfile=f"a/{logical_path}" if before_exists else "/dev/null",
+        tofile=f"b/{logical_path}" if after_exists else "/dev/null",
+        lineterm="\n",
+    )
+    rendered = []
+    for line in lines:
+        rendered.append(line)
+        if not line.endswith(("\n", "\r")):
+            rendered.append("\n\\ No newline at end of file\n")
+    return "".join(rendered)
+
+
 def _workspace_lock(root: Path):
     key = str(root.resolve())
     with _LOCKS_GUARD:
@@ -116,17 +162,27 @@ class WorkspaceMutationService:
             ),
         )
 
-    def write(self, path, content, expected_revision):
+    def write(self, path, content):
         target = self._target(path)
         logical_path = target.relative_to(self.root)
         payload = str(content).encode("utf-8")
         self._check_payload(payload)
         with self._lock:
-            actual = self._require_revision(target, logical_path, expected_revision)
+            actual = file_revision(target)
+            if actual != ABSENT_REVISION:
+                raise ExistingFileRequiresEdit(logical_path, actual)
             after = content_revision(payload)
-            if actual != after:
-                self._commit(target, logical_path, payload, expected_revision)
-        return actual, after
+            self._commit(target, logical_path, payload, ABSENT_REVISION)
+        return MutationReceipt(
+            before_revision=ABSENT_REVISION,
+            after_revision=after,
+            diff=unified_text_diff(
+                logical_path,
+                "",
+                payload.decode("utf-8"),
+                before_exists=False,
+            ),
+        )
 
     def edit(self, path, old_text, new_text, expected_revision):
         target = self._target(path)
@@ -149,4 +205,12 @@ class WorkspaceMutationService:
             after = content_revision(payload)
             if actual != after:
                 self._commit(target, logical_path, payload, expected_revision)
-        return actual, after
+        return MutationReceipt(
+            before_revision=actual,
+            after_revision=after,
+            diff=(
+                unified_text_diff(logical_path, text, payload.decode("utf-8"))
+                if actual != after
+                else ""
+            ),
+        )

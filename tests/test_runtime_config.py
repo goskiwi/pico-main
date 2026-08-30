@@ -13,7 +13,7 @@ def test_default_and_explicit_empty_shell_allowlists_are_distinct():
 
 def test_runtime_context_defaults_match_cli():
     config = PicoConfig.build()
-    args = build_arg_parser().parse_args([])
+    args = build_arg_parser().parse_args(["--task-kind", "read_only"])
 
     assert config.max_new_tokens == args.max_new_tokens == 1024
     assert (
@@ -32,6 +32,8 @@ def test_runtime_context_defaults_match_cli():
 def test_cli_accepts_custom_max_new_tokens():
     args = build_arg_parser().parse_args(
         [
+            "--task-kind",
+            "read_only",
             "--max-new-tokens",
             "2048",
             "--compaction-reserve-tokens",
@@ -48,7 +50,9 @@ def test_cli_accepts_custom_max_new_tokens():
 
 def test_approval_policy_uses_explicit_deny_name():
     config = PicoConfig.build(approval_policy="deny")
-    args = build_arg_parser().parse_args(["--approval", "deny"])
+    args = build_arg_parser().parse_args(
+        ["--task-kind", "read_only", "--approval", "deny"]
+    )
 
     assert config.approval_policy == args.approval == "deny"
     with pytest.raises(ValueError, match="approval_policy must be ask, auto, or deny"):
@@ -99,6 +103,11 @@ def test_valid_custom_reserve_is_not_clamped_to_a_context_ratio():
 def test_feature_flags_are_not_a_runtime_configuration_surface():
     with pytest.raises(TypeError, match="unknown Pico configuration: feature_flags"):
         PicoConfig.build(feature_flags={"context_reduction": False})
+
+
+def test_read_only_is_owned_by_task_contract_not_runtime_config():
+    with pytest.raises(TypeError, match="unknown Pico configuration: read_only"):
+        PicoConfig.build(read_only=True)
 
 
 @pytest.mark.parametrize(

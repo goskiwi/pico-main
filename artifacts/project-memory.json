@@ -3,7 +3,7 @@
   "summary": {
     "catalog_generated": true,
     "markdown_source_of_truth": true,
-    "no_pending_operations": true,
+    "no_pending_call": true,
     "recall_transaction_recorded": true,
     "recalled_body_returned": true,
     "run_completed": true,

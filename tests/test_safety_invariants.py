@@ -2,12 +2,16 @@ import os
 from unittest.mock import patch
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico.contracts import ToolCall
+from pico.run_log import RunLog
+from pico.run_projection import RunProjection
 from pico.sandbox import (
     DockerSandbox,
     SandboxResult,
     docker_exit_is_infrastructure,
     shell_argv,
 )
+from pico.task_state import TaskContract
 
 
 class FakeSandbox:
@@ -28,6 +32,29 @@ def build_agent(tmp_path, **kwargs):
                 sandbox=sandbox, **kwargs)
 
 
+def run_active(agent, call):
+    run_log = agent.run.run_log
+    if run_log is None:
+        run_log = RunLog(
+            "run_safety_test",
+            "task_safety_test",
+            agent.session.data["id"],
+            agent.dependencies.run_store,
+        )
+        first = run_log.append_user(
+            TaskContract(
+                goal="Exercise path safety",
+                task_kind="modify",
+                requires_workspace_change=False,
+                requires_verification=False,
+            )
+        )
+        agent.run.projection = RunProjection().apply_event(first)
+        agent.run.run_log = run_log
+    agent.apply_run_event(run_log.append_tool_call(call))
+    return agent.tools.run(call)
+
+
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.write_text("secret")
@@ -46,21 +73,21 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
         "read_file",
         {"path": ".git/config", "start_line": 1, "end_line": 10},
     )
-    write_pico = agent.tools.run(
-        "write_file",
-        {
-            "path": ".pico/injected.txt",
-            "content": "injected\n",
-            "expected_revision": "absent",
-        },
+    write_pico = run_active(
+        agent,
+        ToolCall(
+            "write_file",
+            {"path": ".pico/injected.txt", "content": "injected\n"},
+            "call_write_pico",
+        ),
     )
-    write_gitignore = agent.tools.run(
-        "write_file",
-        {
-            "path": ".gitignore",
-            "content": ".pico/\n",
-            "expected_revision": "absent",
-        },
+    write_gitignore = run_active(
+        agent,
+        ToolCall(
+            "write_file",
+            {"path": ".gitignore", "content": ".pico/\n"},
+            "call_write_gitignore",
+        ),
     )
 
     assert read_git.status == "rejected"

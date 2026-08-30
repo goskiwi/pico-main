@@ -1,17 +1,38 @@
 import pytest
 
 from pico.contracts import ToolOutcome
+from pico.delivery import FinalDiffDescriptor
 from pico.features.memory import WorkingState
 from pico.run_log import RunEvent, replay_events
-from pico.task_state import TaskState
+from pico.task_state import TaskContract, TaskLifecycle, TaskState
+
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": False,
+}
+
+
+def contract(goal="Inspect"):
+    return TaskContract(goal=goal, **READ_TASK)
 
 
 def event(sequence, kind, payload=None):
     return RunEvent(
         event_id=f"run:event:{sequence:06d}",
         sequence=sequence,
-        run_id="run_running",
-        task_id="task_running",
+        run_id="run",
+        task_id="task",
         session_id="session",
         kind=kind,
         timestamp="2026-01-01T00:00:00+00:00",
@@ -19,82 +40,84 @@ def event(sequence, kind, payload=None):
     )
 
 
-def working_state(goal="Inspect"):
-    return WorkingState(goal=goal).to_dict()
-
-
-def test_task_state_accepts_explicit_consistent_states():
-    running = TaskState.create("task_running", "Inspect", run_id="run_running")
-    running.apply_event(event(1, "model_requested", {"prompt_cache_key": None}))
-    outcome = ToolOutcome(
-        tool_call_id="call_read",
-        tool_name="read_file",
-        status="success",
-        execution_state="completed",
-        side_effect_state="none",
-        content="read",
+def test_task_state_separates_contract_incremental_working_and_lifecycle():
+    task = TaskState.create(contract())
+    update = {
+        "add_constraints": ["Keep the API"],
+        "remove_constraints": [],
+        "add_decisions": ["Fix refresh"],
+        "remove_decisions": [],
+        "add_next_steps": ["Add a test"],
+        "remove_next_steps": [],
+    }
+    task.apply_event(
+        event(
+            1,
+            "assistant_tool_call",
+            {"name": "update_working_state", "args": update, "call_id": "state"},
+        )
     )
-    running.apply_event(
+    outcome = ToolOutcome(
+        "state",
+        "update_working_state",
+        "success",
+        "completed",
+        "none",
+        "accepted",
+    )
+    task.apply_event(
         event(
             2,
             "tool_result",
             {
-                "tool_call_id": "call_read",
-                "tool_name": "read_file",
-                "workspace_revision": 0,
+                "tool_call_id": "state",
+                "tool_name": "update_working_state",
                 "outcome": outcome.to_dict(),
             },
         )
     )
-
-    assert running.status == "running"
-    assert running.model_request_count == 1
-    assert running.executed_tool_count == 1
-
-    running.apply_event(
+    task.apply_event(
         event(
             3,
             "assistant_final",
             {
                 "content": "Done.",
                 "stop_reason": "final_answer_returned",
-                "run_duration_ms": 0,
+                "run_duration_ms": 1,
+                "final_diff": FinalDiffDescriptor().to_dict(),
             },
         )
     )
 
-    assert running.status == "completed"
-    assert running.stop_reason == "final_answer_returned"
-    assert running.final_answer == "Done."
+    assert task.contract.goal == "Inspect"
+    assert task.working.constraints == ("Keep the API",)
+    assert task.working.decisions == ("Fix refresh",)
+    assert task.lifecycle.status == "completed"
+    assert task.lifecycle.final_answer == "Done."
 
 
-def test_task_state_requires_runtime_owned_run_id():
-    with pytest.raises(TypeError, match="run_id"):
-        TaskState.create("task", "Inspect")
-
-
-def test_live_task_state_matches_run_log_replay():
-    outcome = ToolOutcome(
-        tool_call_id="call_read",
-        tool_name="read_file",
-        status="success",
-        execution_state="completed",
-        side_effect_state="none",
-        content="read",
+def test_live_projection_matches_replay_and_owns_metrics():
+    read = ToolOutcome(
+        "read",
+        "read_file",
+        "success",
+        "completed",
+        "none",
+        "read",
     )
     events = [
-        event(1, "user_message", {"content": "Inspect"}),
+        event(1, "user_message", {"contract": contract().to_dict()}),
         event(2, "model_requested", {"prompt_cache_key": None}),
         event(
             3,
             "assistant_tool_call",
-            {"name": "read_file", "args": {"path": "README.md"}, "call_id": "call_read"},
+            {"name": "read_file", "args": {"path": "README.md"}, "call_id": "read"},
         ),
         event(
             4,
             "tool_started",
             {
-                "tool_call_id": "call_read",
+                "tool_call_id": "read",
                 "tool_name": "read_file",
                 "risky": False,
                 "effect_scope": "none",
@@ -105,10 +128,9 @@ def test_live_task_state_matches_run_log_replay():
             5,
             "tool_result",
             {
-                "tool_call_id": "call_read",
+                "tool_call_id": "read",
                 "tool_name": "read_file",
-                "workspace_revision": 0,
-                "outcome": outcome.to_dict(),
+                "outcome": read.to_dict(),
             },
         ),
         event(
@@ -117,74 +139,56 @@ def test_live_task_state_matches_run_log_replay():
             {
                 "content": "Done.",
                 "stop_reason": "final_answer_returned",
-                "run_duration_ms": 0,
+                "run_duration_ms": 10,
+                "final_diff": FinalDiffDescriptor().to_dict(),
             },
         ),
     ]
-    live = TaskState.create("task_running", "Inspect", run_id="run_running")
+    projection = replay_events(events)
 
-    for item in events:
-        live.apply_event(item)
+    assert projection.task.contract == contract()
+    assert projection.task.lifecycle.status == "completed"
+    assert projection.metrics.model_request_count == 1
+    assert projection.metrics.executed_tool_count == 1
+    assert projection.pending_call_id is None
+    assert projection.final_diff == FinalDiffDescriptor()
 
-    assert live.to_dict() == replay_events(events).task_state()
+
+def test_task_contract_rejects_inconsistent_requirements():
+    with pytest.raises(ValueError, match="read-only"):
+        TaskContract("Inspect", "read_only", True, False)
+    with pytest.raises(ValueError, match="invalid task kind"):
+        TaskContract("Inspect", "missing", False, False)
 
 
 @pytest.mark.parametrize(
-    ("data", "message"),
+    "value, message",
     [
-        (
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "working_state": working_state(),
-                "status": "failed",
-                "stop_reason": "model_error",
-            },
-            "invalid task status",
-        ),
-        (
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "working_state": working_state(),
-                "status": "running",
-                "stop_reason": "model_error",
-            },
-            "running task cannot have stop_reason",
-        ),
-        (
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "working_state": working_state(),
-                "status": "completed",
-                "stop_reason": "final_answer_returned",
-                "final_answer": "",
-            },
-            "completed task requires final_answer",
-        ),
-        (
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "working_state": working_state(),
-                "model_request_count": -1,
-            },
-            "model_request_count cannot be negative",
-        ),
+        ({"goal": 123}, "goal must be a string"),
+        ({"task_kind": 123}, "task_kind must be a string"),
+        ({"allowed_write_paths": [123]}, "entries must be strings"),
     ],
 )
-def test_task_state_rejects_inconsistent_fields(data, message):
-    with pytest.raises(ValueError, match=message):
-        TaskState.from_dict(data)
+def test_task_contract_rejects_non_text_schema_values(value, message):
+    payload = contract().to_dict()
+    payload.update(value)
+
+    with pytest.raises(TypeError, match=message):
+        TaskContract.from_dict(payload)
 
 
-def test_task_state_rejects_legacy_user_request_shape():
-    with pytest.raises(ValueError, match="working_state.goal"):
-        TaskState.from_dict(
-            {
-                "run_id": "run",
-                "task_id": "task",
-                "user_request": "Inspect",
-            }
-        )
+def test_working_state_no_longer_owns_goal_but_keeps_incremental_protocol():
+    with pytest.raises(TypeError):
+        WorkingState(goal="duplicated")
+    state = WorkingState().apply_update({"add_next_steps": ["Inspect logs"]})
+    assert state.next_steps == ("Inspect logs",)
+
+
+def test_task_contract_rejects_old_untyped_shape():
+    with pytest.raises(ValueError, match="invalid task contract fields"):
+        TaskContract.from_dict({"goal": "old"})
+
+
+def test_lifecycle_rejects_completed_state_without_answer():
+    with pytest.raises(ValueError, match="requires final_answer"):
+        TaskLifecycle("completed", "final_answer_returned", "").validate()

@@ -1,19 +1,22 @@
-from pico.contracts import ToolOutcome
-from pico.evidence import RunEvidence
+from pico.contracts import FailureInfo, ToolOutcome
+from pico.evidence import RunEvidence, verification_is_current
 from pico.run_log import RunEvent
 
-
-def changed_outcome():
-    return ToolOutcome(
-        tool_call_id="call_1",
-        tool_name="edit_file",
-        status="success",
-        execution_state="completed",
-        side_effect_state="changed",
-        content="patched",
-        affected_paths=("src/app.py",),
-        effect_scope="workspace",
-    )
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": False,
+}
 
 
 def event(kind, payload, sequence=1):
@@ -29,127 +32,205 @@ def event(kind, payload, sequence=1):
     )
 
 
-def test_live_and_run_log_recovery_build_identical_evidence():
-    outcome = changed_outcome()
-    run_event = event(
+def tool_event(
+    sequence,
+    *,
+    call_id,
+    status="success",
+    side_effect_state="changed",
+    before="sha256:a",
+    after="sha256:b",
+    path="src/app.py",
+):
+    failure = (
+        None
+        if status == "success"
+        else FailureInfo("interrupted", "interrupted", "no_retry")
+    )
+    outcome = ToolOutcome(
+        call_id,
+        "edit_file",
+        status,
+        "completed" if status == "success" else "failed",
+        side_effect_state,
+        "patched",
+        structured={
+            "path_transitions": (
+                [
+                    {
+                        "path": path,
+                        "before_state": before,
+                        "after_state": after,
+                        "before_artifact_id": (
+                            "" if before == "absent" else "preimage_synthetic"
+                        ),
+                    }
+                ]
+                if side_effect_state != "unknown"
+                else []
+            )
+        },
+        failure=failure,
+        affected_paths=(path,) if side_effect_state != "unknown" else (),
+        effect_scope="workspace",
+    )
+    return event(
         "tool_result",
         {
-            "tool_call_id": outcome.tool_call_id,
-            "tool_name": outcome.tool_name,
-            "workspace_revision": 1,
+            "tool_call_id": call_id,
+            "tool_name": "edit_file",
             "outcome": outcome.to_dict(),
         },
-    )
-    live = RunEvidence()
-    live.apply_event(run_event)
-    restored = RunEvidence.from_events([run_event])
-
-    assert restored.effects == live.effects
-    assert restored.verifications == live.verifications
-    assert restored.last_workspace_mutation_sequence == run_event.sequence
-
-
-def test_workspace_fact_invalidates_current_verification():
-    evidence = RunEvidence()
-    evidence.apply_event(
-        event(
-            "verification_result",
-            {
-                "status": "passed",
-                "freshness": "current",
-                "started_workspace_mutation_sequence": 0,
-                "finished_workspace_mutation_sequence": 0,
-                "started_changed_path_states": {},
-                "finished_changed_path_states": {},
-            },
-        )
+        sequence,
     )
 
-    evidence.apply_event(
-        event(
-            "tool_result",
-                {
-                    "tool_call_id": "call_1",
-                    "tool_name": "edit_file",
-                    "workspace_revision": 1,
-                    "outcome": changed_outcome().to_dict(),
-            },
-            sequence=2,
-        )
-    )
 
-    assert evidence.verifications[0]["freshness"] == "stale"
-    assert evidence.last_workspace_mutation_sequence == 2
-
-
-def effect(call_id, status, side_effect_state, paths, scope="workspace"):
+def verification(sequence, path_state="sha256:b", status="passed"):
     return {
-        "tool_call_id": call_id,
         "status": status,
-        "side_effect_state": side_effect_state,
-        "effect_scope": scope,
-        "affected_paths": list(paths),
+        "started_workspace_mutation_sequence": sequence,
+        "finished_workspace_mutation_sequence": sequence,
+        "started_changed_path_states": {"src/app.py": path_state},
+        "finished_changed_path_states": {"src/app.py": path_state},
     }
 
 
-def test_completion_evidence_tracks_repair_and_verification_scope():
-    unresolved = RunEvidence(
-        effects=[effect("call_partial", "partial_success", "partial", ("x.py",))]
-    )
-    assert unresolved.assess_completion().allowed is False
+def test_live_and_replay_build_same_small_evidence():
+    result = tool_event(1, call_id="edit")
+    live = RunEvidence().apply_event(result)
+    replayed = RunEvidence.from_events([result])
 
-    repaired = RunEvidence(
-        effects=[
-            effect("call_partial", "partial_success", "partial", ("x.py",)),
-            effect("call_repair", "success", "changed", ("x.py",)),
+    assert replayed.to_dict() == live.to_dict()
+    assert replayed.changed_paths == ["src/app.py"]
+    assert replayed.last_workspace_mutation_sequence == 1
+
+
+def test_observation_count_only_counts_successful_observations():
+    success = ToolOutcome(
+        "read",
+        "read_file",
+        "success",
+        "completed",
+        "none",
+        "read",
+    )
+    evidence = RunEvidence.from_events(
+        [
+            event(
+                "tool_result",
+                {
+                    "tool_call_id": "read",
+                    "tool_name": "read_file",
+                    "outcome": success.to_dict(),
+                },
+            )
         ]
     )
-    assert repaired.assess_completion().allowed is True
+    assert evidence.successful_observation_count == 1
 
-    verification = {
-        "status": "passed",
-        "freshness": "current",
-        "started_workspace_mutation_sequence": 1,
-        "finished_workspace_mutation_sequence": 1,
-        "started_changed_path_states": {"x.py": "sha256:current"},
-        "finished_changed_path_states": {"x.py": "sha256:current"},
-    }
-    workspace_partial = RunEvidence(
-        effects=[effect("call_workspace", "partial_success", "partial", ("x.py",))],
-        verifications=[verification],
+
+def test_a_to_b_to_a_is_touched_but_not_net_changed():
+    evidence = RunEvidence.from_events(
+        [
+            tool_event(1, call_id="ab", before="a", after="b"),
+            tool_event(2, call_id="ba", before="b", after="a"),
+        ]
     )
-    assert workspace_partial.assess_completion(
-        1,
-        {"x.py": "sha256:current"},
-    ).allowed is True
+    assert evidence.touched_paths == ["src/app.py"]
+    assert evidence.changed_paths == []
+    assert evidence.has_net_workspace_change is False
 
-    memory_partial = RunEvidence(
-        effects=[
-            effect(
-                "call_memory",
-                "partial_success",
-                "partial",
-                (".pico/memory/MEMORY.md",),
-                scope="project_memory",
+
+def test_verification_freshness_is_derived_not_persisted():
+    record = verification(4)
+    assert "freshness" not in record
+    assert verification_is_current(record, 4, {"src/app.py": "sha256:b"})
+    assert not verification_is_current(record, 5, {"src/app.py": "sha256:b"})
+
+
+def test_partial_requires_repair_and_current_passing_verification():
+    evidence = RunEvidence.from_events(
+        [
+            tool_event(
+                1,
+                call_id="partial",
+                status="partial_success",
+                side_effect_state="partial",
+                before="a",
+                after="partial",
+            ),
+            tool_event(2, call_id="repair", before="partial", after="fixed"),
+        ]
+    )
+    assert not evidence.assess_completion().allowed
+    evidence.verifications.append(verification(2, "fixed"))
+    assert evidence.assess_completion(2, {"src/app.py": "fixed"}).allowed
+
+
+def test_repaired_project_memory_partial_does_not_require_workspace_verification():
+    path = ".pico/memory/cards/decision.md"
+    partial = ToolOutcome(
+        "memory_partial",
+        "memory_store",
+        "partial_success",
+        "failed",
+        "partial",
+        "memory write was interrupted",
+        failure=FailureInfo("interrupted", "interrupted", "no_retry"),
+        affected_paths=(path,),
+        effect_scope="project_memory",
+    )
+    repair = ToolOutcome(
+        "memory_repair",
+        "memory_store",
+        "success",
+        "completed",
+        "changed",
+        "memory card replaced",
+        affected_paths=(path,),
+        effect_scope="project_memory",
+    )
+    evidence = RunEvidence.from_events(
+        [
+            event(
+                "tool_result",
+                {
+                    "tool_call_id": partial.tool_call_id,
+                    "tool_name": partial.tool_name,
+                    "outcome": partial.to_dict(),
+                },
+                1,
+            ),
+            event(
+                "tool_result",
+                {
+                    "tool_call_id": repair.tool_call_id,
+                    "tool_name": repair.tool_name,
+                    "outcome": repair.to_dict(),
+                },
+                2,
+            ),
+        ]
+    )
+
+    assert evidence.repaired_partials_requiring_verification() == []
+    assert evidence.unresolved_effects() == []
+    assert evidence.assess_completion().allowed
+
+
+def test_unknown_effect_is_never_cleared_by_verification():
+    evidence = RunEvidence.from_events(
+        [
+            tool_event(
+                1,
+                call_id="unknown",
+                status="partial_success",
+                side_effect_state="unknown",
             )
-        ],
-        verifications=[verification],
+        ]
     )
-    assert memory_partial.assess_completion(
+    evidence.verifications.append(verification(1))
+    assert not evidence.assess_completion(
         1,
-        {"x.py": "sha256:current"},
-    ).allowed is False
-
-    memory_partial.effects.append(
-        effect(
-            "call_memory_repair",
-            "success",
-            "changed",
-            (".pico/memory/MEMORY.md",),
-            scope="project_memory",
-        )
-    )
-    assert memory_partial.assess_completion(
-        1,
-        {"x.py": "sha256:current"},
-    ).allowed is True
+        {"src/app.py": "sha256:b"},
+    ).allowed

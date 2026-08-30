@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pico import ModelAction, WorkingState
+from pico import ModelAction
 from pico.compaction_summary import (
     SUMMARY_TOOL,
     CompactionSummarizer,
@@ -14,32 +14,22 @@ from pico.compaction_summary import (
 
 def valid_summary():
     return {
-        "goal": "Fix normalization",
-        "constraints_preferences": ["Modify one file"],
         "progress": {
             "done": ["Read evidence"],
             "in_progress": ["Patch target"],
             "blocked": [],
         },
-        "key_decisions": ["Use split and join"],
-        "next_steps": ["Run verifier"],
         "critical_context": ["FINAL_RESPONSE_TOKEN: ORBIT-DELTA-7319"],
     }
 
 
-def test_semantic_summary_requires_and_renders_all_six_sections():
+def test_semantic_summary_contains_only_historical_sections():
     rendered = CompactionSummary.from_dict(valid_summary()).render()
 
-    assert rendered.count("\n## ") == 5
-    for heading in (
-        "Goal",
-        "Constraints & Preferences",
-        "Progress",
-        "Key Decisions",
-        "Next Steps",
-        "Critical Context",
-    ):
+    for heading in ("Progress", "Critical Context"):
         assert f"## {heading}" in rendered
+    for heading in ("Goal", "Constraints & Preferences", "Key Decisions", "Next Steps"):
+        assert f"## {heading}" not in rendered
     assert "ORBIT-DELTA-7319" in rendered
 
 
@@ -71,8 +61,17 @@ def test_summarizer_uses_isolated_structured_model_request():
         def __init__(self):
             self.last_completion_metadata = {"input_tokens": 100, "output_tokens": 20}
 
-        def complete_action(self, prompt, max_new_tokens, *, action_tools, **_kwargs):
+        def complete_action(
+            self,
+            prompt,
+            max_new_tokens,
+            *,
+            instructions,
+            action_tools,
+            **_kwargs,
+        ):
             assert "FINAL_RESPONSE_TOKEN" in prompt
+            assert "Do not restate" in instructions
             assert max_new_tokens == 2048
             assert action_tools == [SUMMARY_TOOL]
             return ModelAction.tool("submit_compaction_summary", valid_summary())
@@ -87,7 +86,6 @@ def test_summarizer_uses_isolated_structured_model_request():
 
     rendered = summarizer.summarize(
         (event,),
-        WorkingState(goal="Fix normalization"),
     )
 
     assert "## Critical Context" in rendered

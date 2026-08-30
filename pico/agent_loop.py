@@ -26,8 +26,20 @@ class AgentLoop:
         self.lifecycle = RunLifecycle(agent)
         self.completion = CompletionController(agent)
 
-    def run(self, user_message):
-        loop_state = self.lifecycle.initialize(user_message)
+    def run(
+        self,
+        user_message,
+        *,
+        task_kind,
+        requires_workspace_change,
+        requires_verification,
+    ):
+        loop_state = self.lifecycle.initialize(
+            user_message,
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=requires_verification,
+        )
         while True:
             loop_state.execution_stop = self.lifecycle.execution_stop()
             if loop_state.execution_stop:
@@ -78,10 +90,17 @@ class AgentLoop:
         agent = self.agent
         prompt_reused = loop_state.prompt_snapshot is not None
         if loop_state.prompt_snapshot is None:
+            compaction_metadata, history_override = agent.prompt.prepare_compaction(
+                loop_state.user_message,
+                provider_context_tokens=loop_state.provider_context_tokens,
+                provider_overhead_tokens=loop_state.provider_overhead_tokens,
+            )
             prompt, prompt_metadata = agent.prompt.build(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 provider_overhead_tokens=loop_state.provider_overhead_tokens,
+                compaction_metadata=compaction_metadata,
+                history_override=history_override,
             )
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
@@ -98,20 +117,22 @@ class AgentLoop:
             if getattr(agent.model_client, "supports_prompt_cache", False)
             else None
         )
+        available_action_tools = agent.tools.model_action_tools()
         action_tools = (
             [
                 tool
-                for tool in agent.tools.action_schemas
+                for tool in available_action_tools
                 if tool["name"] == "submit_final"
             ]
             if agent.config.max_tool_executions is not None
-            and agent.run.task_state.executed_tool_count
+            and agent.run.metrics.executed_tool_count
             >= agent.config.max_tool_executions
-            else agent.tools.action_schemas
+            else available_action_tools
         )
         action = agent.model_client.complete_action(
-            prompt,
+            prompt.input_text,
             agent.config.max_new_tokens,
+            instructions=prompt.instructions,
             action_tools=action_tools,
             prompt_cache_key=prompt_cache_key,
             request_timeout=agent.run.execution_context.bounded_timeout(),
@@ -163,6 +184,8 @@ class AgentLoop:
             "prompt_cache_key",
             "run_log_generation",
             "provider_context_tokens",
+            "instructions_tokens",
+            "input_text_tokens",
             "tool_schema_tokens",
             "provider_overhead_tokens",
             "estimated_input_tokens",
@@ -268,7 +291,7 @@ class AgentLoop:
         agent = self.agent
         if (
             agent.config.max_tool_executions is not None
-            and agent.run.task_state.executed_tool_count
+            and agent.run.metrics.executed_tool_count
             >= agent.config.max_tool_executions
         ):
             return "tool_execution_limit"
@@ -294,7 +317,7 @@ class AgentLoop:
         agent = self.agent
         if (
             agent.config.max_tool_executions is None
-            or agent.run.task_state.executed_tool_count
+            or agent.run.metrics.executed_tool_count
             < agent.config.max_tool_executions
         ):
             return ""

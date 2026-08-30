@@ -6,11 +6,15 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .evidence import RunEvidence
+from .delivery import (
+    build_final_diff_descriptor,
+    build_stopped_final_diff_descriptor,
+)
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
+from .run_projection import RunProjection
 from .runtime_recovery import RESUME_NONE, RESUME_READY
-from .task_state import TaskState
+from .task_state import TaskContract
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -20,7 +24,7 @@ if TYPE_CHECKING:
 class AgentLoopState:
     user_message: str
     run_started_at: float
-    prompt_snapshot: tuple[str, dict[str, Any]] | None = None
+    prompt_snapshot: tuple[Any, dict[str, Any]] | None = None
     provider_context_tokens: int | None = None
     provider_overhead_tokens: int = 0
     overflow_recovery_attempted: bool = False
@@ -33,15 +37,26 @@ class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def initialize(self, user_message):
+    def initialize(
+        self,
+        user_message,
+        *,
+        task_kind,
+        requires_workspace_change,
+        requires_verification,
+    ):
         runtime = self.runtime
         run_started_at = time.monotonic()
         runtime.recovery.evaluate()
-        task_state, run_log, resumed = self._restore_or_create_task(user_message)
-        runtime.run.task_state = task_state
+        projection, run_log, resumed = self._restore_or_create_run(
+            user_message,
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=requires_verification,
+        )
+        runtime.run.projection = projection
         runtime.run.run_log = run_log
         runtime.run.execution_context = self._root_execution()
-        runtime.run.evidence = RunEvidence.from_events(run_log.events)
 
         reconciled = run_log.reconcile_interrupted(runtime)
         for _outcome, entry in reconciled:
@@ -54,7 +69,7 @@ class RunLifecycle:
         runtime.emit_event(
             "run_resumed" if resumed else "run_started",
             {
-                "task_id": task_state.task_id,
+                "task_id": runtime.run.projection.task_id,
                 "workspace_root": str(runtime.workspace.root),
             },
         )
@@ -64,7 +79,14 @@ class RunLifecycle:
             run_started_at=run_started_at,
         )
 
-    def _restore_or_create_task(self, user_message):
+    def _restore_or_create_run(
+        self,
+        user_message,
+        *,
+        task_kind,
+        requires_workspace_change,
+        requires_verification,
+    ):
         runtime = self.runtime
         if runtime.recovery.state.get("status") == RESUME_READY:
             projection = runtime.recovery.state["projection"]
@@ -79,29 +101,52 @@ class RunLifecycle:
                 runtime.dependencies.run_store,
                 events,
             )
-            task_state = TaskState.from_dict(projection.task_state())
+            if projection.task is None:
+                raise RuntimeError("resumable Run task projection is unavailable")
+            contract = projection.task.contract
+            requested = (
+                str(task_kind),
+                bool(requires_workspace_change),
+                bool(requires_verification),
+            )
+            persisted = (
+                contract.task_kind,
+                contract.requires_workspace_change,
+                contract.requires_verification,
+            )
+            if requested != persisted:
+                raise ValueError(
+                    "resume task requirements do not match the persisted Run"
+                )
             runtime.recovery.state = {
                 "status": RESUME_NONE,
                 "active_run_id": "",
                 "projection": None,
                 "events": (),
             }
-            return task_state, run_log, True
+            return projection, run_log, True
 
-        task_state = TaskState.create(
-            run_id=runtime.new_run_id(),
-            task_id=runtime.new_task_id(),
-            user_request=user_message,
+        run_id = runtime.new_run_id()
+        task_id = runtime.new_task_id()
+        contract = TaskContract(
+            goal=user_message,
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=requires_verification,
+            allowed_write_paths=(
+                None if task_kind == "read_only" else runtime.config.allowed_write_paths
+            ),
         )
         run_log = RunLog(
-            task_state.run_id,
-            task_state.task_id,
+            run_id,
+            task_id,
             runtime.session.data["id"],
             runtime.dependencies.run_store,
         )
-        run_log.append_user(user_message)
-        runtime.session.set_active_run(task_state.run_id)
-        return task_state, run_log, False
+        first = run_log.append_user(contract)
+        projection = RunProjection().apply_event(first)
+        runtime.session.set_active_run(run_id)
+        return projection, run_log, False
 
     def _root_execution(self):
         runtime = self.runtime
@@ -126,9 +171,11 @@ class RunLifecycle:
 
     def finish_success(self, loop_state, final):
         runtime = self.runtime
+        final_diff = build_final_diff_descriptor(runtime)
         runtime.apply_run_event(
             runtime.run.run_log.append_final(
                 final,
+                final_diff,
                 run_duration_ms=int(
                     (time.monotonic() - loop_state.run_started_at) * 1000
                 ),
@@ -144,10 +191,12 @@ class RunLifecycle:
 
     def finish_stopped(self, loop_state):
         final, stop_reason = self._stopped_result(loop_state.execution_stop)
+        final_diff = build_stopped_final_diff_descriptor(self.runtime)
         self.runtime.apply_run_event(
             self.runtime.run.run_log.append_stopped(
                 final,
                 stop_reason,
+                final_diff,
                 run_duration_ms=int(
                     (time.monotonic() - loop_state.run_started_at) * 1000
                 ),

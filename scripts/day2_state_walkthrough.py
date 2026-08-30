@@ -69,12 +69,17 @@ def main():
             ),
         )
 
-        answer = agent.ask("Inspect README without changing the workspace")
-        run_id = agent.run.task_state.run_id
+        answer = agent.ask(
+            "Inspect README without changing the workspace",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
+        run_id = agent.run.projection.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
-        replayed_task = replayed.task_state()
-        live_task = agent.run.task_state.to_dict()
+        replayed_task = replayed.task.to_dict()
+        live_task = agent.run.task.to_dict()
         replayed_evidence = RunEvidence.from_events(events)
         session_on_disk = store.load(agent.session.data["id"])
         persisted_files = sorted(

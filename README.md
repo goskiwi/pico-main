@@ -10,7 +10,7 @@ OpenAI-compatible Responses 原生 function calling 提出下一步动作；上�
 
 ```text
 User request
-  -> Run Log v2
+  -> TaskContract + Run Log
   -> RepoMap + Run WorkingState + Project Memory Catalog
   -> Token-budgeted prompt projection
   -> Responses function_call -> ModelAction
@@ -30,13 +30,13 @@ User request
 Pico
   model_client   模型通信
   config         不变式、资源限额和工具策略
-  workspace      路径边界与 Runtime 观察到的工作区 revision
+  workspace      路径边界与按路径内容状态
   session        Session 身份与 active_run_id 指针
   run            当前或最近一次 Run 的可变状态
   dependencies   Store、Sandbox、RepoMap 和 Subagents
   tools          工具 Registry、模型 Surface、准入与执行
   recovery       active_run_id 与 Run Log tail 恢复
-  prompt         Prefix、ContextManager 和相关记忆选择
+  prompt         稳定 instructions、动态 ContextManager 和相关记忆选择
 ```
 
 程序化构造必须显式使用 `PicoConfig`；旧的平铺构造参数和
@@ -55,30 +55,34 @@ agent = Pico(
     config=PicoConfig(approval_policy="auto", max_tool_executions=40),
 )
 
-answer = agent.ask("inspect the failing test")
-state = agent.run.task_state
-outcome = agent.tools.run("read_file", {"path": "README.md"})
+answer = agent.ask(
+    "inspect the failing test",
+    task_kind="read_only",
+    requires_workspace_change=False,
+    requires_verification=False,
+)
+state = agent.run.task
 ```
 
 单次请求的控制逻辑也按职责分开：`AgentLoop` 只编排模型轮次、工具轮次和
 Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
-`CompletionController` 负责语法、Subagent、Verifier 与 Completion Gate。
+`CompletionController` 负责 TaskContract、Subagent、Verifier 与 Completion Gate。
 
 核心实现：
 
-- 原生 function calling：Pydantic 参数模型生成 strict function schema；Responses output items 与匹配的 function output 在任务内连续回放，一次响应只接受一个函数调用；Runtime 将状态、失败和工具特有事实作为紧凑结构化结果返回模型，最终回答也通过 `submit_final`。
-- Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。User、Tool Call、`tool_started`、Tool Result、Verification、Compaction 与终态均写入同一序列；WorkingState、TaskState、RunEvidence 和运行统计由同一事件 reducer 实时投影并可重建。Workspace、Project Memory 和 Artifact 分别持有其当前内容事实。
-- 长上下文治理：Prompt 使用配置的模型 Context Window；预算包含各 section、序列化 Tool Schema，并在 fresh Provider usage 返回后纳入已观测的协议开销。总上下文越过 `context window - reserve tokens` 时，Compaction 按 token 保留近期完整 Tool Call/Result 事务，并通过独立模型 Session 生成 Goal、Constraints、Progress、Key Decisions、Next Steps 和 Critical Context 六段式语义投影；WorkingState 与 Tool 事实仍为权威来源，Summary 超时、格式错误或不够短时回退确定性事务摘要。Provider 明确报告 context overflow 时只执行一次 compact-and-retry；原始 Run events 不删除。
-- Workspace 新鲜度：工具 runner 以结构化结果声明精确影响路径；RunEvidence 从 Run Log 投影最后一次 workspace mutation sequence。Verifier 同时绑定该 mutation cursor 与当前 Run changed paths 的开始/结束内容状态；验证期间发生变化会直接标记 stale，Completion 复用前的外部修改会触发重新验证。Pico 不扫描或逐文件 hash 整个工作区，未被当前 Run 修改的路径仍属于单写者边界之外。
+- 原生 function calling：稳定 Runtime 规则进入 Responses `instructions`，动态 Workspace、TaskContract、WorkingState、Memory、RepoMap、History 与当前请求进入 `input`，严格 Function Schema 只进入 `tools`。一次响应只接受一个函数调用；Provider、Run Protocol 和 Projection 都只保存一个 `pending_call_id`。
+- Run 流程事实源：每个 Run 只有一个 strict、连续 sequence、append-only、fsynced 的 `events.jsonl`。首个 User Event 保存 Runtime-owned `TaskContract`；实时执行与恢复共用一个 `RunProjection`，统一重建 Task、Evidence、Metrics 和 Pending Call。终态只额外保存最终 `final_diff` receipt，不保存第二份终态报告。
+- 长上下文治理：Prompt 使用配置的 Context Window 和固定 section caps，History 获得剩余预算。显式 `prepare_compaction` 在只读 Prompt build 前运行；独立模型 Session 只总结历史 Progress 与 Critical Context，不复述 TaskContract 或 WorkingState。Provider、结构或长度失败时不提交 Compaction Event，Runtime 使用近期完整 Tool 事务的有界投影继续。
+- Workspace 新鲜度：文件工具返回真实 Unified Diff 和 before/after path transitions。每个路径只在本 Run 第一次修改前保存完整 preimage；`RunChangeSet` 计算最终净变化，因此 `A -> B -> A` 不算完成所需的修改。外部漂移会阻止成功提交；用户取消或重置仍可受控停止，并以 `unavailable_reason=workspace_drift` 明确说明此时无法生成可信 Final Diff。Verifier 只保存命令结果及其 mutation/path states，current/stale 在查询时派生。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
-- 分层状态：Run WorkingState 由 `user_message` 和 `update_working_state` Tool 事务投影，保存目标、约束、已确认决定和下一步；Session 只保存 `active_run_id`。跨任务 Project Memory 以 Markdown Card 为唯一事实源，写入来源由 Run ID 和 Tool Call ID 定位；生成的 `MEMORY.md` Catalog 会从 Card 自愈并有界地常驻上下文。主模型按可见描述显式调用 `memory_recall`，Runtime 在独立预算内返回最多五张完整 Card，所有 Recall Call/Result 都进入正常 RunLog 与模型计量。文件事实始终从 Workspace、搜索和 Run Log 获取。
-- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；失败事实、恢复前提和当前纠错动作分离，只有等待型失败允许一次同状态重试，重复失败升级为 `replan`；write/edit 携带通常由 `read_file` 返回的 expected revision，新内容先写入同目录临时文件并 fsync，在 `os.replace` 的提交点立即复验 revision。冲突结果以结构化 expected/actual revision 提示模型重新读取，旧调用不会被 Runtime 盲目重放。
+- 分层状态：`TaskContract` 保存目标、任务类型、写入范围与完成要求，模型不能修改；WorkingState 继续使用原有 add/remove 增量协议，只保存约束、已确认决定和下一步。Project Memory 与 RepoMap 保持默认开启。Memory Catalog 在初始化、store、forget 或显式 refresh 时重建，Prompt build 不写磁盘。
+- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；Manual 模式只允许观察工具，mutation 必须属于 Active Run。`FailureInfo.recovery` 是唯一持久化纠错事实，模型可见 correction action 由它派生。Repeat guard 只阻止相同 `partial/unknown` 副作用的盲目重放。`write_file` 只创建 absent 文件，`edit_file` 只修改 existing 文件并携带 `read_file` Revision；提交点再次复验 Revision 后原子替换。
 - 最小 Shell 环境：未配置时使用默认白名单；显式空白名单保持为空，仅由 Shell 边界补充运行必需的 `PWD`/`PATH`。
 - 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
 - 隔离执行：`run_shell` 在临时 Docker 容器内通过 POSIX Shell 执行，支持 `&&`、管道、重定向、环境变量与 `cd`；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 崩溃恢复：Session 只保存 `active_run_id`。副作用前先 fsync `tool_started` 及精确潜在影响路径/before revision；结果完成后 fsync `tool_result`。恢复时若二者不配对，只检查声明路径并生成 interrupted error/partial，绝不盲目重放。最后一条未完成 JSONL 尾巴可截断，中间损坏直接报错。
 - 恢复配置：模型、预算、超时、Verifier、工具表面和权限策略均使用续跑时的当前配置，不冻结为 Resume identity。
-- 完成证据：观察、修改和结构化 verifier 结果写入 RunEvidence；变更 Python 先做 AST 校验，模型触发或 Runtime 自动执行的 Verifier 都绑定最后一次 Runtime workspace mutation sequence 与 changed-path states；未解决 partial/unknown 状态禁止成功结束。
+- 完成证据：TaskContract 明确 read-only/modify、是否必须产生净修改、是否必须验证。只读任务需要成功 Observation；要求修改的任务需要非空最终 RunChangeSet；要求验证的任务需要当前状态上的通过结果。没有通用 Python AST 隐式 Gate，也不会自动猜验证命令。未解决 partial/unknown 状态禁止成功结束。
 
 ## 多 Agent 协作
 
@@ -111,8 +115,10 @@ Parent 只接收 Child 的摘要、Run Log receipt 和 Patch 引用，不复制 
 ```bash
 uv sync
 docker build -f docker/sandbox.Dockerfile -t pico/sandbox:latest .
-uv run pico --cwd /path/to/repo
-uv run pico "inspect the failing test and implement a verified fix"
+uv run pico --task-kind read_only --cwd /path/to/repo
+uv run pico --task-kind modify --require-verification \
+  --verify-command "python -m pytest -q" \
+  "inspect the failing test and implement a verified fix"
 ```
 
 最小模型配置：
@@ -129,15 +135,15 @@ Responses Endpoint，必须显式覆盖 `PICO_OPENAI_API_BASE` 或传入 `--base
 常用运行参数：
 
 ```bash
-uv run pico --approval ask
-uv run pico --approval deny
-uv run pico --run-timeout 600
-uv run pico --max-tool-executions 40
-uv run pico --max-new-tokens 1024
-uv run pico --provider-context-limit 272000
-uv run pico --provider-context-limit 272000 --compaction-reserve-tokens 16384 --compaction-keep-recent-tokens 20000
-uv run pico --verify-command "python -m pytest -q"
-uv run pico --resume latest
+uv run pico --task-kind read_only --approval ask
+uv run pico --task-kind modify --approval deny
+uv run pico --task-kind read_only --run-timeout 600
+uv run pico --task-kind read_only --max-tool-executions 40
+uv run pico --task-kind read_only --max-new-tokens 1024
+uv run pico --task-kind read_only --provider-context-limit 272000
+uv run pico --task-kind read_only --provider-context-limit 272000 --compaction-reserve-tokens 16384 --compaction-keep-recent-tokens 20000
+uv run pico --task-kind modify --require-verification --verify-command "python -m pytest -q"
+uv run pico --task-kind modify --require-verification --verify-command "python -m pytest -q" --resume latest
 uv run pico run show <run_id> --cwd /path/to/repo
 uv run pico run events <run_id> --cwd /path/to/repo
 ```
@@ -145,9 +151,8 @@ uv run pico run events <run_id> --cwd /path/to/repo
 Risky Tool 的 Approval Policy 语义为：`ask` 交互确认、`auto` 自动批准、`deny`
 拒绝执行。`deny` 返回结构化 rejected ToolOutcome，不会启动对应 Tool Runner。
 
-`--verify-command ""` 可显式关闭自动 verifier。若未提供，Python/Node 项目会按仓库文件自动选择默认命令。
-模型通过 `run_shell` 成功执行完全相同的验证命令时，Runtime 会把结果绑定到当前 Run Log
-workspace mutation cursor 与 changed-path states；Completion Gate 只在两者仍匹配时复用。
+Pico 不根据仓库文件猜验证命令。任务设置 `--require-verification` 时必须显式提供
+`--verify-command`；Completion Gate 在最终提交时运行它并绑定当前 mutation/path states。
 
 `--max-new-tokens` 默认值为 `1024`。它传给 Responses API 的 `max_output_tokens`，统计 reasoning tokens、
 可见文本和 function-call arguments 的总输出，而不只是最终展示文本。
@@ -197,7 +202,6 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 | Native Harness | 5/5 | edit、recovery、safety、governance；失败时脚本非零退出 |
 | Context governance | 3/3 | 真实 ContextManager/RunLog Compaction；三个上下文规模下预算、事务、原事件与 WorkingState 均保持 |
 | Real Compaction | 1/1 | 真实 `gpt-5.6-luna` 在受控 32k 窗口触发 Session Reset + Compaction，继续完成单次 Patch 与 Hidden Verifier |
-| Semantic Compaction A/B | 1/1 | 同模型/Provider/任务下，确定性摘要丢失早期Literal，六段式摘要保留；两个变体均完成Patch与Hidden Verifier |
 | Project Memory | 全部通过 | 真实 `memory_store -> memory_recall -> final` Tool 事务与不可信数据边界 |
 | RepoMap | 全部通过 | tree-sitter 图、任务命中与 Token 预算 |
 | Pico Triage | 3/3 | 真实失败命令复现、责任文件定位、Patch 与 Verification 闭环 |
@@ -212,12 +216,6 @@ RepoMap。它们衡量 Runtime 机制，不冒充真实模型能力指标。
 Decisions 与 Next Steps 仍在，模型只执行一次 Mutation，最终可见与停止后 Hidden Verifier
 均通过。该测试通过降低Runtime配置窗口来验证真实LLM续接，不冒充自然消耗272k上下文，
 也不代表已经验证跨进程Resume。
-
-六段式摘要进入Core前使用`artifacts/semantic-compaction-ab.json`做真实A/B。确定性基线
-耗时90.4秒并完成任务，但只记住`FINAL_RESPONSE_TOKEN`标签，丢失具体值；Semantic变体
-耗时140.6秒，经过2次独立Summary请求后在最终答案中准确保留早期Literal。语义收益的
-代价是约50.2秒额外Wall Time，以及Summary请求合计41,944 Input / 3,213 Output Token。
-该Summary只作为派生上下文，不能覆盖WorkingState或Tool Result；失败时确定性摘要接管。
 
 ## Pico Triage
 

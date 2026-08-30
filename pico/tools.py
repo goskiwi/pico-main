@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .artifacts import ARTIFACT_ID_PATTERN
 from .contracts import FailureInfo, ToolFailureError, ToolRunnerResult
 from .features.memory import normalize_working_update
 from .project_memory import MEMORY_RECALL_MAX_CARDS
@@ -51,7 +52,7 @@ class ReadFileArgs(ToolArgs):
 
 
 class ReadArtifactArgs(ToolArgs):
-    artifact_id: str = Field(min_length=1, max_length=240)
+    artifact_id: str = Field(pattern=ARTIFACT_ID_PATTERN)
     offset: int = Field(default=0, ge=0)
     max_bytes: int = Field(default=8192, ge=1, le=8192)
 
@@ -69,10 +70,6 @@ class RunShellArgs(ToolArgs):
 class WriteFileArgs(ToolArgs):
     path: str = Field(min_length=1)
     content: str
-    expected_revision: str = Field(
-        pattern=r"^(?:absent|sha256:[a-f0-9]{64})$",
-        description="Revision returned by read_file, or 'absent' for a new file",
-    )
 
 
 class EditFileArgs(ToolArgs):
@@ -125,11 +122,13 @@ BASE_TOOL_SPECS = {
     "list_files": {
         "args_schema": ListFilesArgs,
         "risky": False,
+        "manual_observation": True,
         "description": "List files in the workspace.",
     },
     "read_file": {
         "args_schema": ReadFileArgs,
         "risky": False,
+        "manual_observation": True,
         "description": "Read a UTF-8 file by line range.",
     },
     "read_artifact": {
@@ -142,11 +141,13 @@ BASE_TOOL_SPECS = {
     "search": {
         "args_schema": SearchArgs,
         "risky": False,
+        "manual_observation": True,
         "description": "Search the workspace with rg or a simple fallback.",
     },
     "run_shell": {
         "args_schema": RunShellArgs,
         "risky": True,
+        "manual_observation": True,
         "description": (
             "Run a POSIX shell command inside the Docker sandbox at the repo root. "
             "Shell operators such as &&, pipes, redirects, environment assignments, "
@@ -157,12 +158,17 @@ BASE_TOOL_SPECS = {
         "args_schema": WriteFileArgs,
         "risky": True,
         "workspace_mutating": True,
-        "description": "Write a text file.",
+        "state_mutating": True,
+        "description": (
+            "Create a new UTF-8 text file. The target must not already exist; "
+            "read and use edit_file for every change to an existing file."
+        ),
     },
     "edit_file": {
         "args_schema": EditFileArgs,
         "risky": True,
         "workspace_mutating": True,
+        "state_mutating": True,
         "description": (
             "Replace one exact, unique text block in a file. Keep old_text as small as "
             "possible while still unique; do not include large unchanged regions. old_text "
@@ -182,6 +188,7 @@ BASE_TOOL_SPECS = {
     "memory_recall": {
         "args_schema": MemoryRecallArgs,
         "risky": False,
+        "manual_observation": True,
         "description": (
             "Recall one to five complete Project Memory cards by exact filename from the "
             "visible Catalog. Use only for relevant user preferences, prior feedback, stable "
@@ -192,6 +199,7 @@ BASE_TOOL_SPECS = {
     "memory_store": {
         "args_schema": MemoryStoreArgs,
         "risky": True,
+        "state_mutating": True,
         "description": (
             "Create or update one explicit Markdown project-memory card. Runtime adds source "
             "Run and Tool Call provenance; do not put provenance claims in memory content."
@@ -200,6 +208,7 @@ BASE_TOOL_SPECS = {
     "memory_forget": {
         "args_schema": MemoryForgetArgs,
         "risky": True,
+        "state_mutating": True,
         "description": "Delete one explicit Markdown project-memory card.",
     },
 }
@@ -208,10 +217,17 @@ BASE_TOOL_SPECS = {
 def build_tool_registry(context):
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
-    tools = {
-        name: {**spec, "run": partial(_TOOL_RUNNERS[name], context)}
-        for name, spec in BASE_TOOL_SPECS.items()
-    }
+    tools = {}
+    for name, spec in BASE_TOOL_SPECS.items():
+        tool = {
+            **spec,
+            "validate": partial(_TOOL_VALIDATORS[name], context),
+            "run": partial(_TOOL_RUNNERS[name], context),
+        }
+        planner = _TOOL_EFFECT_PLANNERS.get(name)
+        if planner is not None:
+            tool["potential_effects"] = partial(planner, context)
+        tools[name] = tool
     return tools
 
 
@@ -320,8 +336,17 @@ def _require_mutation_service(context):
 
 def _validate_write_file(context, args):
     path = context.path(args["path"])
-    if path.exists() and path.is_dir():
-        raise ToolFailureError("invalid_path_type", "path is a directory")
+    if path.exists():
+        if path.is_dir():
+            raise ToolFailureError("invalid_path_type", "path is a directory")
+        raise ToolFailureError(
+            "existing_file_requires_edit",
+            "write_file only creates new files; read the current file and use edit_file",
+            structured={
+                "path": path.relative_to(context.workspace_root).as_posix(),
+                "recommended_next_tool": "read_file",
+            },
+        )
     _require_mutation_service(context)
     return args
 
@@ -774,19 +799,29 @@ def tool_run_shell(context, args):
 def tool_write_file(context, args):
     path = context.path(args["path"])
     content = str(args["content"])
-    before, after = context.mutation_service.write(path, content, args["expected_revision"])
+    receipt = context.mutation_service.write(path, content)
     relative = path.relative_to(context.workspace_root).as_posix()
-    changed = before != after
+    changed = receipt.changed
     return ToolRunnerResult(
         content=(
             f"wrote {relative} ({len(content)} chars)\n"
-            f"before_revision: {before}\nafter_revision: {after}"
+            f"before_revision: {receipt.before_revision}\n"
+            f"after_revision: {receipt.after_revision}\n"
+            f"diff:\n{receipt.diff}"
         ),
         structured={
             "path": relative,
             "changed": changed,
-            "before_revision": before,
-            "after_revision": after,
+            "before_revision": receipt.before_revision,
+            "after_revision": receipt.after_revision,
+            "diff_bytes": len(receipt.diff.encode("utf-8")),
+            "path_transitions": [
+                {
+                    "path": relative,
+                    "before_state": receipt.before_revision,
+                    "after_state": receipt.after_revision,
+                }
+            ],
         },
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
@@ -796,19 +831,32 @@ def tool_write_file(context, args):
 def tool_edit_file(context, args):
     path = context.path(args["path"])
     old_text = str(args.get("old_text", ""))
-    before, after = context.mutation_service.edit(
+    receipt = context.mutation_service.edit(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
     relative = path.relative_to(context.workspace_root).as_posix()
-    changed = before != after
+    changed = receipt.changed
     return ToolRunnerResult(
-        content=f"edited {relative}\nbefore_revision: {before}\nafter_revision: {after}",
+        content=(
+            f"edited {relative}\n"
+            f"before_revision: {receipt.before_revision}\n"
+            f"after_revision: {receipt.after_revision}\n"
+            f"diff:\n{receipt.diff or '(no changes)'}"
+        ),
         structured={
             "path": relative,
             "changed": changed,
             "replacement_count": 1,
-            "before_revision": before,
-            "after_revision": after,
+            "before_revision": receipt.before_revision,
+            "after_revision": receipt.after_revision,
+            "diff_bytes": len(receipt.diff.encode("utf-8")),
+            "path_transitions": [
+                {
+                    "path": relative,
+                    "before_state": receipt.before_revision,
+                    "after_state": receipt.after_revision,
+                }
+            ],
         },
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",
@@ -869,11 +917,8 @@ def tool_memory_store(context, args):
     )
 
 
-def tool_update_working_state(_context, args):
-    return ToolRunnerResult(
-        "working state update accepted",
-        structured={"update": dict(args)},
-    )
+def tool_update_working_state(_context, _args):
+    return ToolRunnerResult("working state update accepted")
 
 
 def tool_memory_recall(context, args):
@@ -925,4 +970,33 @@ _TOOL_RUNNERS = {
     "memory_recall": tool_memory_recall,
     "memory_store": tool_memory_store,
     "memory_forget": tool_memory_forget,
+}
+
+
+def _workspace_file_effects(context, args):
+    path = context.path(args["path"])
+    logical = path.relative_to(context.workspace_root).as_posix()
+    return "workspace", ((logical, path),)
+
+
+def _project_memory_effects(context, args):
+    paths = (
+        context.project_memory.cards_root / args["filename"],
+        context.project_memory.index_path,
+    )
+    effects = []
+    for path in paths:
+        try:
+            logical = path.relative_to(context.workspace_root).as_posix()
+        except ValueError:
+            logical = path.as_posix()
+        effects.append((logical, path))
+    return "project_memory", tuple(effects)
+
+
+_TOOL_EFFECT_PLANNERS = {
+    "write_file": _workspace_file_effects,
+    "edit_file": _workspace_file_effects,
+    "memory_store": _project_memory_effects,
+    "memory_forget": _project_memory_effects,
 }

@@ -16,7 +16,7 @@ from pico import (
 
 def component_snapshot(agent):
     """Return a small, beginner-friendly view of Pico's nine components."""
-    task = agent.run.task_state
+    task = agent.run.task
     run_log = agent.run.run_log
     return {
         "1_model_client": {
@@ -32,7 +32,7 @@ def component_snapshot(agent):
         },
         "3_workspace": {
             "root": str(agent.workspace.root),
-            "revision": agent.workspace.revision,
+            "snapshot": agent.workspace.context.state(),
         },
         "4_session": {
             "id": agent.session.data["id"],
@@ -41,9 +41,9 @@ def component_snapshot(agent):
         "5_run": {
             "has_task_state": task is not None,
             "has_run_log": run_log is not None,
-            "status": task.status if task is not None else None,
-            "model_requests": task.model_request_count if task is not None else 0,
-            "executed_tools": task.executed_tool_count if task is not None else 0,
+            "status": task.lifecycle.status if task is not None else None,
+            "model_requests": agent.run.metrics.model_request_count,
+            "executed_tools": agent.run.metrics.executed_tool_count,
         },
         "6_dependencies": {
             "run_store": type(agent.dependencies.run_store).__name__,
@@ -60,7 +60,7 @@ def component_snapshot(agent):
         "8_recovery": dict(agent.recovery.state),
         "9_prompt": {
             "type": type(agent.prompt).__name__,
-            "prefix_characters": len(agent.prompt.prefix),
+            "instruction_characters": len(agent.prompt.instructions),
         },
     }
 
@@ -112,7 +112,12 @@ def main():
 
         print_section("ask() 之前", component_snapshot(agent))
 
-        answer = agent.ask("请读取 README.md，然后告诉我是否读取成功。")
+        answer = agent.ask(
+            "请读取 README.md，然后告诉我是否读取成功。",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
 
         print_section("最终回答", answer)
         print_section("ask() 之后", component_snapshot(agent))

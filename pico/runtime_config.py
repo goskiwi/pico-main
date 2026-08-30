@@ -13,6 +13,8 @@ DEFAULT_SHELL_ENV_ALLOWLIST = (
     "LC_CTYPE",
     "TERM",
 )
+
+
 def _allowed_tools(value):
     if value is None:
         return None
@@ -38,7 +40,6 @@ class PicoConfig:
     approval_policy: str = "ask"
     max_tool_executions: int | None = None
     max_new_tokens: int = 1024
-    read_only: bool = False
     shell_env_allowlist: tuple[str, ...] = DEFAULT_SHELL_ENV_ALLOWLIST
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
     allowed_tools: tuple[str, ...] | None = None
@@ -47,7 +48,7 @@ class PicoConfig:
     compaction_reserve_tokens: int = 16384
     compaction_keep_recent_tokens: int = 20000
     sandbox_image: str = "pico/sandbox:latest"
-    verification_command: str | None = None
+    verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
     subagent_max_workers: int = 3
 
@@ -63,6 +64,8 @@ class PicoConfig:
     def normalized(self) -> PicoConfig:
         if self.approval_policy not in {"ask", "auto", "deny"}:
             raise ValueError("approval_policy must be ask, auto, or deny")
+        if not isinstance(self.verification_command, str):
+            raise TypeError("verification_command must be a string")
         max_new_tokens = int(self.max_new_tokens)
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
@@ -106,7 +109,6 @@ class PicoConfig:
             approval_policy=str(self.approval_policy),
             max_tool_executions=max_tool_executions,
             max_new_tokens=max_new_tokens,
-            read_only=bool(self.read_only),
             shell_env_allowlist=tuple(self.shell_env_allowlist),
             secret_env_names=frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
@@ -117,11 +119,7 @@ class PicoConfig:
             compaction_reserve_tokens=compaction_reserve_tokens,
             compaction_keep_recent_tokens=compaction_keep_recent_tokens,
             sandbox_image=str(self.sandbox_image),
-            verification_command=(
-                None
-                if self.verification_command is None
-                else str(self.verification_command)
-            ),
+            verification_command=self.verification_command,
             allowed_write_paths=_allowed_write_paths(self.allowed_write_paths),
             subagent_max_workers=subagent_max_workers,
         )

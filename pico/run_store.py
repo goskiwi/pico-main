@@ -8,7 +8,9 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .run_log import RunCursor, RunEvent, replay_events, validate_run_events
+from .artifacts import ArtifactStore
+from .run_log import RunEvent, replay_events, validate_run_events
+from .run_projection import RunCursor
 
 RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -146,7 +148,18 @@ class RunStore:
         return entry
 
     def replay(self, run_id):
-        return replay_events(self.read_events(run_id))
+        run_id = _run_id(run_id)
+        projection = replay_events(self.read_events(run_id))
+        final_diff = projection.final_diff
+        if final_diff is not None and final_diff.diff_artifact_id:
+            descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
+                run_id,
+                final_diff.diff_artifact_id,
+                expected_kind="final_workspace_diff",
+            )
+            if int(descriptor["size_bytes"]) != final_diff.diff_bytes:
+                raise ValueError("terminal final Diff descriptor size mismatch")
+        return projection
 
     def find_active_run(self, session_id):
         if not self.root.exists():

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import security as securitylib
 from .artifacts import ArtifactStore
-from .evidence import RunEvidence
+from .delivery import build_stopped_final_diff_descriptor
 from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .prompt_builder import PromptBuilder
@@ -22,9 +22,8 @@ from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .sandbox import DockerSandbox, DockerSandboxConfig
 from .session_store import SessionStore
-from .task_state import TaskState
 from .tool_manager import ToolManager
-from .verification import discover_verification_command, run_verification
+from .verification import run_verification
 from .workspace_tracker import WorkspaceTracker
 
 __all__ = ["Pico", "PicoConfig", "SessionStore"]
@@ -74,14 +73,6 @@ class Pico:
             sandbox_config = DockerSandboxConfig(image=self.config.sandbox_image)
             sandbox_factory = lambda root: DockerSandbox(root, sandbox_config)
         effective_sandbox = sandbox or sandbox_factory(self.workspace.root)
-        if self.config.verification_command is None:
-            self.config = PicoConfig.build(
-                self.config,
-                verification_command=discover_verification_command(
-                    self.workspace.root
-                ),
-            )
-
         self.dependencies = RuntimeDependencies(
             run_store=effective_run_store,
             artifacts=artifacts,
@@ -126,31 +117,41 @@ class Pico:
         )
 
     def emit_event(self, event_type, payload=None):
-        task_state = self.run.task_state
+        task_state = self.run.task
         run_log = self.run.run_log
         if task_state is None or run_log is None:
             raise RuntimeError("Run event requires an active TaskState and RunLog")
-        if task_state.run_id != run_log.run_id:
+        if self.run.projection.run_id != run_log.run_id:
             raise RuntimeError("active TaskState and RunLog belong to different Runs")
         payload = self.redact_value(payload or {})
         entry = run_log.append(event_type, payload)
         return self.apply_run_event(entry)
 
     def apply_run_event(self, entry):
-        task_state = self.run.task_state
-        if task_state is not None and task_state.run_id == entry.run_id:
-            task_state.apply_event(entry)
-            self.run.evidence.apply_event(entry)
-
+        if self.run.task is None or self.run.projection.run_id != entry.run_id:
+            raise RuntimeError("Run event does not belong to the active projection")
+        self.run.projection.apply_event(entry)
         return entry
 
     def run_verification(self, started_workspace_mutation_sequence):
         return run_verification(self, started_workspace_mutation_sequence)
 
-    def ask(self, user_message):
+    def ask(
+        self,
+        user_message,
+        *,
+        task_kind,
+        requires_workspace_change,
+        requires_verification,
+    ):
         from .agent_loop import AgentLoop
 
-        return AgentLoop(self).run(user_message)
+        return AgentLoop(self).run(
+            user_message,
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=requires_verification,
+        )
 
     @staticmethod
     def new_task_id():
@@ -172,7 +173,7 @@ class Pico:
 
     def reset(self):
         run_log = self.run.run_log
-        task_state = self.run.task_state
+        projection = self.run.projection
         recovery_state = dict(self.recovery.state)
         if run_log is None and recovery_state.get("status") == RESUME_READY:
             events = tuple(recovery_state.get("events", ()))
@@ -186,17 +187,16 @@ class Pico:
                     events,
                 )
                 projection = recovery_state.get("projection") or replay_events(events)
-                task_state = TaskState.from_dict(projection.task_state())
-        if run_log is not None and not replay_events(run_log.events).terminal:
+        if run_log is not None and not projection.terminal:
             self.run.run_log = run_log
-            self.run.task_state = task_state
-            self.run.evidence = RunEvidence.from_events(run_log.events)
+            self.run.projection = projection
             for _outcome, event in run_log.reconcile_interrupted(self):
                 self.apply_run_event(event)
             self.apply_run_event(
                 run_log.append_stopped(
                     "Session reset by user.",
                     "user_reset",
+                    build_stopped_final_diff_descriptor(self),
                 )
             )
         if self.run.execution_context is not None:

@@ -60,9 +60,15 @@ def main():
             content="Read the target revision before applying one exact patch.",
             source_run_id="bootstrap",
         )
-        answer = agent.ask("Read sample.txt and replace alpha with beta.")
-        events = agent.dependencies.run_store.read_events(agent.run.task_state.run_id)
-        projection = agent.dependencies.run_store.replay(agent.run.task_state.run_id)
+        answer = agent.ask(
+            "Read sample.txt and replace alpha with beta.",
+            task_kind="modify",
+            requires_workspace_change=True,
+            requires_verification=False,
+        )
+        run_id = agent.run.projection.run_id
+        events = agent.dependencies.run_store.read_events(run_id)
+        projection = agent.dependencies.run_store.replay(run_id)
         evidence = RunEvidence.from_events(events)
         turns = [entry for entry in events if entry.kind == "turn_metrics"]
         recall_calls = [
@@ -87,8 +93,8 @@ def main():
         print(json.dumps({
             "answer": answer,
             "completion": {
-                "status": agent.run.task_state.status,
-                "stop_reason": agent.run.task_state.stop_reason,
+                "status": agent.run.task.lifecycle.status,
+                "stop_reason": agent.run.task.lifecycle.stop_reason,
             },
             "content": target.read_text(encoding="utf-8"),
             "provider_conversation_mode": agent.model_client.conversation_mode,
@@ -98,7 +104,7 @@ def main():
             "context_generation": agent.run.run_log.generation,
             "run_log_schema": events[0].to_dict()["schema_version"],
             "evidence_effects": evidence.effects,
-            "working_state": projection.working_state.to_dict(),
+            "working_state": projection.task.working.to_dict(),
             "memory_recalls": [
                 {
                     "filenames": call.args["filenames"],
@@ -126,8 +132,8 @@ def main():
                 for call in tool_calls
             ],
             "run_event_count": len(events),
-            "pending_operations": projection.summary()["pending_operations"],
-            "run_dir": str(agent.dependencies.run_store.run_dir(agent.run.task_state)),
+            "pending_call_id": projection.summary()["pending_call_id"],
+            "run_dir": str(agent.dependencies.run_store.run_dir(run_id)),
         }, indent=2, ensure_ascii=False))
 
 

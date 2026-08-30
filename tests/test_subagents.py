@@ -22,6 +22,22 @@ from pico.subagents.tools import DelegateTasksArgs
 from pico.subagents.worktree import GitWorktree, GitWorktreeError
 from pico.tools import function_schema
 
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+VERIFIED_MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": True,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+
 
 def git(root, *args):
     result = subprocess.run(
@@ -85,9 +101,27 @@ def build_parent(
     )
 
 
+def explore_outputs(final_answer):
+    return [
+        ModelAction.tool(
+            "read_file",
+            {"path": "README.md", "start_line": 1, "end_line": 20},
+        ),
+        ModelAction.final(final_answer),
+    ]
+
+
 class BarrierClient(FakeModelClient):
     def __init__(self, barrier, label):
-        super().__init__([ModelAction.final(label)])
+        super().__init__(
+            [
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "README.md", "start_line": 1, "end_line": 20},
+                ),
+                ModelAction.final(label),
+            ]
+        )
         self.barrier = barrier
 
     def complete_action(self, *args, **kwargs):
@@ -157,7 +191,7 @@ def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path
         ],
     )
 
-    answer = parent.ask("Inspect auth and cache in parallel")
+    answer = parent.ask("Inspect auth and cache in parallel", **READ_TASK)
 
     assert answer == "Parent synthesized both results."
     tool_result = parent.model_client.recorded_action_results[0][1]
@@ -220,7 +254,7 @@ def test_explore_handoff_feeds_separate_implement_delegation(tmp_path):
 
     def child_factory(spec):
         if spec.kind == "explore":
-            client = FakeModelClient([ModelAction.final("change feature.py line 1")])
+            client = FakeModelClient(explore_outputs("change feature.py line 1"))
         else:
             client = FakeModelClient(
                 [
@@ -229,7 +263,6 @@ def test_explore_handoff_feeds_separate_implement_delegation(tmp_path):
                         {
                             "path": "feature.py",
                             "content": "implemented\n",
-                            "expected_revision": "absent",
                         },
                     ),
                     ModelAction.final("implemented handoff"),
@@ -272,7 +305,7 @@ def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):
 
     class RecordingClient(FakeModelClient):
         def __init__(self, task_id, fail=False):
-            super().__init__([ModelAction.final(f"done-{task_id}")])
+            super().__init__(explore_outputs(f"done-{task_id}"))
             self.task_id = task_id
             self.fail = fail
 
@@ -417,7 +450,6 @@ def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_pat
                     {
                         "path": target,
                         "content": f"{spec.task_id}\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final(f"implemented {target}"),
@@ -490,7 +522,6 @@ def test_parallel_implementation_patches_must_be_applied_together(tmp_path):
                     {
                         "path": target,
                         "content": f"{spec.task_id}\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented"),
@@ -541,7 +572,6 @@ def test_write_scope_is_enforced_before_execution(tmp_path):
                     {
                         "path": "forbidden.py",
                         "content": "bad\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("done"),
@@ -603,7 +633,6 @@ def test_post_execution_diff_detects_an_out_of_scope_side_effect(tmp_path):
                     {
                         "path": "safe.py",
                         "content": "safe\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("done"),
@@ -635,7 +664,7 @@ def test_completed_task_id_is_reused_without_another_model_call(tmp_path):
     def child_factory(_spec):
         nonlocal calls
         calls += 1
-        return FakeModelClient([ModelAction.final("done")])
+        return FakeModelClient(explore_outputs("done"))
 
     parent = build_parent(root, child_factory)
     spec = SubtaskSpec(
@@ -667,7 +696,6 @@ def test_ordered_implement_dependency_receives_prior_patch_and_integrates(tmp_pa
                         {
                             "path": "shared.py",
                             "content": "first\n",
-                            "expected_revision": "absent",
                         },
                     ),
                     ModelAction.final("created shared.py"),
@@ -740,7 +768,6 @@ def test_failed_integrated_verification_does_not_modify_parent(tmp_path):
                     {
                         "path": "feature.py",
                         "content": "feature\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented"),
@@ -776,7 +803,6 @@ def test_dirty_parent_integration_error_names_the_integration_boundary(tmp_path)
                     {
                         "path": "feature.py",
                         "content": "feature\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented"),
@@ -824,7 +850,6 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
                     {
                         "path": "feature.py",
                         "content": "value = 1\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented feature.py"),
@@ -850,7 +875,7 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
         ],
     )
 
-    answer = parent.ask("Implement feature.py using a child")
+    answer = parent.ask("Implement feature.py using a child", **VERIFIED_MODIFY_TASK)
 
     assert answer == "implemented and verified"
     assert (root / "feature.py").read_text() == "value = 1\n"
@@ -859,7 +884,9 @@ def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_pat
     assert "delegate_tasks" not in child_clients[0].action_tool_surfaces[0]
     blocked = [
         entry
-        for entry in parent.dependencies.run_store.read_events(parent.run.task_state.run_id)
+        for entry in parent.dependencies.run_store.read_events(
+            parent.run.projection.run_id
+        )
         if entry.kind == "completion_blocked"
         and entry.payload["status"] == "subtasks_incomplete"
     ]
@@ -893,11 +920,11 @@ def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind
         verification_command="",
     )
 
-    answer = parent.ask("Delegate despite a dirty workspace")
+    answer = parent.ask("Delegate despite a dirty workspace", **NO_CHANGE_TASK)
 
     assert answer == "delegation was rejected"
     assert parent.dependencies.subagents.completion_issue() == ""
-    run_id = parent.run.task_state.run_id
+    run_id = parent.run.projection.run_id
     assert not (parent.dependencies.run_store.run_dir(run_id) / "subtasks.json").exists()
     blocked = [
         entry
@@ -918,7 +945,6 @@ def test_tampered_child_patch_is_rejected_before_integration(tmp_path):
                     {
                         "path": "safe.py",
                         "content": "safe\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented"),
@@ -967,7 +993,6 @@ def test_real_docker_verifies_child_and_integrated_worktrees(tmp_path):
                     {
                         "path": "feature.py",
                         "content": "ok\n",
-                        "expected_revision": "absent",
                     },
                 ),
                 ModelAction.final("implemented"),

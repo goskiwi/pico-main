@@ -11,6 +11,7 @@ from pico import PicoConfig
 from pico.contracts import ToolCall, ToolOutcome
 from pico.run_log import RunLog
 from pico.run_store import RunStore
+from pico.task_state import TaskContract
 
 
 def test_triage_case_resolves_repository_relative_to_case_file(tmp_path):
@@ -94,7 +95,14 @@ def test_triage_report_resolves_ordinal_call_references(tmp_path):
     )
     store = RunStore(tmp_path / ".pico" / "runs")
     run_log = RunLog("run", "task", "session", store)
-    run_log.append_user("diagnose")
+    run_log.append_user(
+        TaskContract(
+            goal="diagnose",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
+    )
     call = ToolCall("read_file", {"path": "src/app.py"}, "call_provider_real")
     run_log.append_tool_call(call)
     run_log.append_tool_started(
@@ -112,7 +120,6 @@ def test_triage_report_resolves_ordinal_call_references(tmp_path):
             side_effect_state="none",
             content="source",
         ),
-        workspace_revision=0,
     )
     answer = json.dumps(
         {

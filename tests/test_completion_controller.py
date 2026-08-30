@@ -2,296 +2,244 @@ import pytest
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
-from pico.contracts import FailureInfo, ToolCall, ToolRunnerResult
-from pico.mutations import file_revision
-from pico.run_log import RunLog
-from pico.task_state import TaskState
+from pico.contracts import FailureInfo, ToolCall, ToolOutcome
+from pico.mutations import content_revision, file_revision
+from pico.run_log import RunEvent, RunLog
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
 
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": False,
+}
+VERIFIED_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": True,
+}
 
-def active_agent(tmp_path):
-    target = tmp_path / "subject.txt"
-    target.write_text("alpha\n", encoding="utf-8")
+
+def active_agent(tmp_path, requirements, verification_command=""):
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = Pico(
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command="verify"),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command=verification_command,
+        ),
     )
-    state = TaskState.create("task_verify", "verify", run_id="run_verify")
-    agent.run.task_state = state
-    agent.run.run_log = RunLog(
-        state.run_id,
-        state.task_id,
+    contract = TaskContract("task", **requirements)
+    log = RunLog("run", "task", agent.session.data["id"], agent.dependencies.run_store)
+    first = log.append_user(contract)
+    agent.run.projection = RunProjection().apply_event(first)
+    agent.run.run_log = log
+    return agent
+
+
+def add_change(agent, path, before, after, sequence=1, status="success", side="changed"):
+    target = agent.workspace.resolve_path(path)
+
+    def state(value, *, apply=False):
+        value = str(value)
+        if value == "absent":
+            if apply and target.exists():
+                target.unlink()
+            return value
+        if value.startswith("sha256:"):
+            return value
+        payload = value.encode("utf-8")
+        if apply:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        return content_revision(payload)
+
+    before = state(before)
+    after = state(after, apply=True)
+    outcome = ToolOutcome(
+        f"change_{sequence}",
+        "edit_file",
+        status,
+        "completed" if status == "success" else "failed",
+        side,
+        "changed",
+        structured={
+            "path_transitions": [
+                {
+                    "path": path,
+                    "before_state": before,
+                    "after_state": after,
+                    "before_artifact_id": "preimage_synthetic",
+                }
+            ]
+        },
+        affected_paths=(path,),
+        effect_scope="workspace",
+        failure=(
+            None
+            if status == "success"
+            else FailureInfo("partial", "partial", "no_retry")
+        ),
+    )
+    event = RunEvent(
+        f"run:event:{sequence:06d}",
+        sequence,
+        "run",
+        "task",
         agent.session.data["id"],
-        agent.dependencies.run_store,
+        "tool_result",
+        "now",
+        {
+            "tool_call_id": outcome.tool_call_id,
+            "tool_name": outcome.tool_name,
+            "outcome": outcome.to_dict(),
+        },
     )
-    agent.run.run_log.append_user(state.working_state.goal)
-    return agent, target
+    agent.run.evidence.apply_event(event)
 
 
-def verification_payload(agent, sequence, *, status="passed", **extra):
+def verification_payload(agent, sequence, status="passed", output=""):
     states = capture_changed_path_states(
         agent.workspace.root,
         agent.run.evidence.changed_paths,
     )
     return {
         "status": status,
-        "freshness": "current",
         "started_workspace_mutation_sequence": sequence,
         "finished_workspace_mutation_sequence": sequence,
         "started_changed_path_states": states,
         "finished_changed_path_states": dict(states),
-        **extra,
+        "output": output,
     }
 
 
-def test_external_edit_of_changed_path_invalidates_and_reruns_verification(tmp_path):
-    agent, target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-            "event_sequence": 0,
-        }
-    )
-    agent.run.evidence.verifications.append(verification_payload(agent, 0))
-    target.write_text("beta\n", encoding="utf-8")
-    calls = []
+def test_read_only_requires_successful_observation(tmp_path):
+    agent = active_agent(tmp_path, READ_TASK)
+    assert CompletionController(agent).assess("done").status == "observation_required"
+    call = ToolCall("read_file", {"path": "README.md"}, "read")
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+    assert agent.tools.run(call).status == "success"
+    assert CompletionController(agent).assess("done").allowed
 
-    def verify(sequence):
-        calls.append(sequence)
-        return verification_payload(agent, sequence)
 
-    agent.run_verification = verify
-
+def test_required_change_uses_final_net_state(tmp_path):
+    agent = active_agent(tmp_path, MODIFY_TASK)
+    add_change(agent, "README.md", "a", "b", 1)
+    add_change(agent, "README.md", "b", "a", 2)
     assessment = CompletionController(agent).assess("done")
+    assert assessment.status == "workspace_change_required"
+    assert agent.run.evidence.touched_paths == ["README.md"]
+    assert agent.run.evidence.changed_paths == []
 
-    assert assessment.allowed is True
-    assert calls == [0]
-    assert len(agent.run.evidence.verifications) == 2
 
-
-def test_invalid_changed_python_blocks_completion_before_verification(tmp_path):
-    agent, _target = active_agent(tmp_path)
-    (tmp_path / "broken.py").write_text("def broken(:\n", encoding="utf-8")
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["broken.py"],
-        }
-    )
-    verification_calls = []
-    agent.run_verification = lambda _sequence: verification_calls.append(True)
-
+def test_required_verification_fails_closed_without_command(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK)
     assessment = CompletionController(agent).assess("done")
-
-    assert assessment.allowed is False
-    assert assessment.status == "syntax_invalid"
-    assert "broken.py" in assessment.instruction
-    assert verification_calls == []
-
-
-def test_later_runtime_mutation_invalidates_and_reruns_verification(tmp_path):
-    agent, target = active_agent(tmp_path)
-
-    def edit(call_id, old_text, new_text):
-        call = ToolCall(
-            "edit_file",
-            {
-                "path": "subject.txt",
-                "old_text": old_text,
-                "new_text": new_text,
-                "expected_revision": file_revision(target),
-            },
-            call_id,
-        )
-        agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-        return agent.tools.run(call)
-
-    assert edit("call_first_edit", "alpha", "beta").status == "success"
-    first_cursor = agent.run.evidence.last_workspace_mutation_sequence
-    agent.emit_event(
-        "verification_result",
-        verification_payload(agent, first_cursor),
-    )
-
-    assert edit("call_second_edit", "beta", "gamma").status == "success"
-    second_cursor = agent.run.evidence.last_workspace_mutation_sequence
-    assert second_cursor > first_cursor
-    assert agent.run.evidence.verifications[0]["freshness"] == "stale"
-    calls = []
-
-    def verify(sequence):
-        calls.append(sequence)
-        return verification_payload(agent, sequence)
-
-    agent.run_verification = verify
-
-    assessment = CompletionController(agent).assess("done")
-
-    assert assessment.allowed is True
-    assert calls == [second_cursor]
-
-
-def test_failed_verifier_records_result_and_blocks_completion(tmp_path):
-    agent, _target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-        }
-    )
-
-    def fail_verification(started_workspace_mutation_sequence):
-        return verification_payload(
-            agent,
-            started_workspace_mutation_sequence,
-            status="failed",
-            output="1 failed",
-        )
-
-    agent.run_verification = fail_verification
-
-    assessment = CompletionController(agent).assess("done")
-
-    assert assessment.allowed is False
     assert assessment.status == "verification_failed"
-    assert "1 failed" in assessment.instruction
-    verification_events = [
-        entry
-        for entry in agent.run.run_log.events
-        if entry.kind == "verification_result"
-    ]
-    assert len(verification_events) == 1
-    assert verification_events[0].payload["status"] == "failed"
+    assert "no verification command" in assessment.instruction
 
 
-def test_verifier_infrastructure_error_stops_instead_of_looping(tmp_path):
-    agent, _target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-        }
-    )
-    agent.run_verification = lambda started_workspace_mutation_sequence: (
-        verification_payload(
-            agent,
-            started_workspace_mutation_sequence,
-            status="infrastructure_error",
-            output="docker unavailable",
-        )
-    )
+def test_external_change_blocks_completion_before_verification(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    target = tmp_path / "README.md"
+    before = file_revision(target)
+    add_change(agent, "README.md", "sha256:prior", before, 1)
+    agent.run.evidence.verifications.append(verification_payload(agent, 1))
+    target.write_text("external\n", encoding="utf-8")
+    calls = []
 
-    with pytest.raises(RuntimeError, match="docker unavailable"):
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence)
+
+    agent.run_verification = verify
+    assessment = CompletionController(agent).assess("done")
+    assert assessment.allowed is False
+    assert assessment.status == "workspace_drift"
+    assert calls == []
+
+
+def test_runtime_has_no_language_specific_ast_gate(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    broken = tmp_path / "broken.py"
+    broken.write_text("def broken(:\n", encoding="utf-8")
+    add_change(agent, "broken.py", "sha256:prior", file_revision(broken), 1)
+    agent.run_verification = lambda sequence: verification_payload(agent, sequence)
+    assert CompletionController(agent).assess("done").allowed
+
+
+def test_failed_verification_can_retry_on_same_state(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    results = ["failed", "passed"]
+    calls = []
+
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence, results.pop(0), "failed")
+
+    agent.run_verification = verify
+    assert not CompletionController(agent).assess("done").allowed
+    assert CompletionController(agent).assess("done").allowed
+    assert calls == [0, 0]
+
+
+def test_infrastructure_error_can_retry_after_environment_recovers(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    statuses = ["infrastructure_error", "passed"]
+    calls = []
+
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence, statuses.pop(0), "offline")
+
+    agent.run_verification = verify
+    with pytest.raises(RuntimeError, match="offline"):
         CompletionController(agent).assess("done")
-
-    events = [
-        entry for entry in agent.run.run_log.events
-        if entry.kind == "verification_result"
-    ]
-    assert len(events) == 1
+    assert CompletionController(agent).assess("done").allowed
+    assert calls == [0, 0]
 
 
-def test_successful_matching_shell_command_satisfies_completion_gate(tmp_path):
-    agent, _target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-        }
-    )
-    agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
-        "exit_code: 0\nstdout:\n1 passed",
-        structured={"exit_code": 0},
-    )
-    call = ToolCall(
-        "run_shell",
-        {"command": "verify", "timeout_seconds": 20},
-        "call_verify",
-    )
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-
-    outcome = agent.tools.run(call)
+@pytest.mark.parametrize("side", ["unknown", "partial"])
+def test_unrepaired_uncertain_effect_does_not_run_a_meaningless_verifier(
+    tmp_path,
+    side,
+):
+    agent = active_agent(tmp_path, NO_CHANGE_TASK, "verify")
+    add_change(agent, "README.md", "a", "b", 1, status="error", side=side)
     agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
-        AssertionError("matching verification must not run twice")
+        AssertionError("unrepaired uncertainty must block before verification")
     )
+
     assessment = CompletionController(agent).assess("done")
 
-    assert outcome.status == "success"
-    assert assessment.allowed is True
-    verification = agent.run.evidence.verifications[-1]
-    assert verification["source_tool_call_id"] == "call_verify"
-    assert verification["status"] == "passed"
-    assert verification["started_workspace_mutation_sequence"] == verification[
-        "finished_workspace_mutation_sequence"
-    ]
-    assert verification["started_changed_path_states"] == verification[
-        "finished_changed_path_states"
-    ]
+    assert assessment.allowed is False
+    assert assessment.status == "partial"
 
 
-def test_failed_matching_shell_command_records_current_verification_failure(tmp_path):
-    agent, _target = active_agent(tmp_path)
-    agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
-        "exit_code: 1\nstderr:\n1 failed",
-        structured={"exit_code": 1},
-        failure=FailureInfo(
-            "command_failed",
-            "command exited with 1",
-            "retry_after_change",
-        ),
-    )
-    call = ToolCall(
-        "run_shell",
-        {"command": "verify", "timeout_seconds": 20},
-        "call_failed_verify",
-    )
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+def test_repaired_partial_requires_current_verification(tmp_path):
+    agent = active_agent(tmp_path, NO_CHANGE_TASK, "verify")
+    add_change(agent, "README.md", "a", "b", 1, status="error", side="partial")
+    add_change(agent, "README.md", "b", "c", 2)
+    calls = []
 
-    outcome = agent.tools.run(call)
-    verification = agent.run.evidence.verifications[-1]
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence)
 
-    assert outcome.status == "error"
-    assert verification["status"] == "failed"
-    assert verification["freshness"] == "current"
-    assert verification["exit_code"] == 1
+    agent.run_verification = verify
 
-
-def test_matching_shell_verification_is_stale_when_changed_path_changes(
-    tmp_path,
-):
-    agent, target = active_agent(tmp_path)
-    agent.run.evidence.effects.append(
-        {
-            "effect_scope": "workspace",
-            "affected_paths": ["subject.txt"],
-            "event_sequence": 0,
-        }
-    )
-
-    def verify(_args):
-        target.write_text("external\n", encoding="utf-8")
-        return ToolRunnerResult(
-            "exit_code: 0\nstdout:\n1 passed",
-            structured={"exit_code": 0},
-        )
-
-    agent.tools.registry["run_shell"]["run"] = verify
-    call = ToolCall(
-        "run_shell",
-        {"command": "verify", "timeout_seconds": 20},
-        "call_stale_verify",
-    )
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-
-    outcome = agent.tools.run(call)
-    verification = agent.run.evidence.verifications[-1]
-
-    assert outcome.status == "success"
-    assert verification["status"] == "stale"
-    assert verification["freshness"] == "stale"
-    assert verification["started_changed_path_states"] != verification[
-        "finished_changed_path_states"
-    ]
+    assert CompletionController(agent).assess("done").allowed
+    assert calls == [2]

@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 
-from .run_log import replay_events
 from .run_store import RunStore
 
 
@@ -23,7 +22,7 @@ def run_main(argv=None):
     if not events:
         raise SystemExit(f"Run Log not found for {args.run_id}")
     if args.command == "show":
-        print(json.dumps(replay_events(events).summary(), indent=2, sort_keys=True))
+        print(json.dumps(store.replay(args.run_id).summary(), indent=2, sort_keys=True))
         return 0
     for entry in events:
         print(json.dumps(entry.to_dict(), sort_keys=True))

@@ -48,7 +48,12 @@ def run_context_governance_evaluation(
                     verification_command="",
                 ),
             )
-            RunLifecycle(agent).initialize(request)
+            RunLifecycle(agent).initialize(
+                request,
+                task_kind="read_only",
+                requires_workspace_change=False,
+                requires_verification=False,
+            )
             run_log = agent.run.run_log
             chunk = "old noise " * max(1, size // 8)
             for index in range(8):
@@ -76,26 +81,18 @@ def run_context_governance_evaluation(
                             side_effect_state="none",
                             content=chunk,
                         ),
-                        workspace_revision=0,
                     )
                 )
 
             manager = ContextManager(
                 agent,
                 total_budget=1200,
-                section_budgets={
-                    "prefix": 300,
+                section_caps={
+                    "workspace": 300,
+                    "task_requirements": 80,
                     "memory_catalog": 60,
                     "repo_map": 80,
                     "working_state": 100,
-                    "history": 400,
-                },
-                section_floors={
-                    "prefix": 80,
-                    "memory_catalog": 10,
-                    "repo_map": 20,
-                    "working_state": 30,
-                    "history": 100,
                 },
                 compaction_reserve_tokens=200,
                 compaction_keep_recent_tokens=300,
@@ -104,7 +101,12 @@ def run_context_governance_evaluation(
                 manager._history_text(request)
             )
             original_event_ids = {event.event_id for event in run_log.events}
-            prompt, metadata = manager.build(request)
+            compaction, history_override = manager.prepare_compaction(request)
+            prompt, metadata = manager.build(
+                request,
+                compaction_metadata=compaction,
+                history_override=history_override,
+            )
             active = run_log.active_events()
             active_calls = {
                 event.call_id
@@ -129,7 +131,7 @@ def run_context_governance_evaluation(
                     "original_events_preserved": original_event_ids
                     <= {event.event_id for event in run_log.events},
                     "working_state_preserved": (
-                        agent.run.task_state.working_state.goal == request
+                        agent.run.task.contract.goal == request
                     ),
                 }
             )
@@ -179,7 +181,12 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory.json")):
             SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(approval_policy="auto", verification_command=""),
         )
-        answer = agent.ask("Remember and recall the stable project test command.")
+        answer = agent.ask(
+            "Remember and recall the stable project test command.",
+            task_kind="modify",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
         card = agent.dependencies.project_memory.recall("project_test_command.md")
         events = agent.run.run_log.events
         store_call = next(
@@ -217,11 +224,12 @@ def run_project_memory_evaluation(path=Path("artifacts/project-memory.json")):
                     card.source_run_id
                     and card.source_tool_call_id == store_call.call_id
                 ),
-                "run_completed": agent.run.task_state.status == "completed"
+                "run_completed": agent.run.task.lifecycle.status == "completed"
                 and answer == "Stored and recalled project memory.",
-                "no_pending_operations": not agent.dependencies.run_store.replay(
-                    agent.run.task_state.run_id
-                ).summary()["pending_operations"],
+                "no_pending_call": agent.dependencies.run_store.replay(
+                    agent.run.projection.run_id
+                ).summary()["pending_call_id"]
+                is None,
             },
         }
     return _write(path, payload)

@@ -273,8 +273,12 @@ class ProjectMemoryStore:
         return cards
 
     def index_text(self):
-        self.rebuild_index()
+        self._validate_storage_paths()
         return self.index_path.read_text(encoding="utf-8")
+
+    def refresh_index(self):
+        """Explicitly rebuild the catalog after out-of-band card changes."""
+        return self.rebuild_index()
 
     def rebuild_index(self):
         with self._lock:

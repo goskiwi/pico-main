@@ -1,4 +1,5 @@
 import os
+import time
 from unittest.mock import patch
 
 import pytest
@@ -12,10 +13,15 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
+from pico.delivery import build_final_diff_descriptor
+from pico.execution import ExecutionContext
 from pico.mutations import file_revision
+from pico.run_lifecycle import AgentLoopState, RunLifecycle
 from pico.run_log import RunLog
-from pico.task_state import TaskState
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
 
 
 def build_agent(tmp_path):
@@ -26,6 +32,32 @@ def build_agent(tmp_path):
         session_store=SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(approval_policy="auto"),
     )
+
+
+def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
+    run_log = RunLog(
+        run_id,
+        "task_tool_test",
+        agent.session.data["id"],
+        agent.dependencies.run_store,
+    )
+    first = run_log.append_user(
+        TaskContract(
+            goal=goal,
+            task_kind="modify",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
+    )
+    agent.run.projection = RunProjection().apply_event(first)
+    agent.run.run_log = run_log
+    return run_log
+
+
+def run_active(agent, call):
+    run_log = agent.run.run_log or start_run(agent)
+    agent.apply_run_event(run_log.append_tool_call(call))
+    return agent.tools.run(call)
 
 
 def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
@@ -46,7 +78,6 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
         "execution_state",
         "side_effect_state",
         "content",
-        "correction_action",
         "structured",
         "failure",
         "affected_paths",
@@ -77,7 +108,7 @@ def test_artifact_rejects_old_schema_and_detects_tampering(tmp_path):
     descriptor_path = root / f"{outcome.artifact_id}.json"
     descriptor = descriptor_path.read_text(encoding="utf-8")
     descriptor_path.write_text(
-        descriptor.replace("artifact-v2", "artifact-v1"), encoding="utf-8"
+        descriptor.replace("artifact-v3", "artifact-v2"), encoding="utf-8"
     )
     with pytest.raises(ValueError, match="unsupported artifact schema"):
         agent.dependencies.artifacts.read_slice(
@@ -118,12 +149,18 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
                 secret_env_names=frozenset({"CUSTOM_SECRET_NAME"}),
             ),
         )
-        assert agent.ask("Read secret.txt") == "Done."
+        assert agent.ask(
+            "Read secret.txt",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
+        ) == "Done."
         provider_result = client.recorded_action_results[0][1]
         event = next(
             item for item in agent.run.run_log.events if item.kind == "tool_result"
         )
         persisted = event.payload["outcome"]["content"]
+        agent.reset()
 
         def fail_with_secret(_args):
             raise RuntimeError(secret)
@@ -141,7 +178,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             tmp_path
             / ".pico"
             / "runs"
-            / agent.run.task_state.run_id
+            / "manual"
             / "artifacts"
             / f"{large.artifact_id}.txt"
         )
@@ -300,17 +337,119 @@ def test_tool_runner_rejects_legacy_string_result(tmp_path):
     assert outcome.failure.detail == "tool runner must return ToolRunnerResult"
 
 
+def test_manual_mutation_is_rejected_without_touching_workspace(tmp_path):
+    agent = build_agent(tmp_path)
+
+    outcome = agent.tools.run(
+        ToolCall(
+            "write_file",
+            {"path": "manual.txt", "content": "must not exist\n"},
+            "call_manual_write",
+        )
+    )
+
+    assert outcome.status == "rejected"
+    assert outcome.failure.code == "manual_mutation_forbidden"
+    assert not (tmp_path / "manual.txt").exists()
+
+
+def test_runtime_mutation_records_diff_transition_and_final_diff(tmp_path):
+    agent = build_agent(tmp_path)
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "write_file",
+            {"path": "created.txt", "content": "alpha\n"},
+            "call_create",
+        ),
+    )
+
+    transition = outcome.structured["path_transitions"][0]
+    assert outcome.status == "success"
+    assert "--- /dev/null" in outcome.content
+    assert "+alpha" in outcome.content
+    assert transition == {
+        "path": "created.txt",
+        "before_state": "absent",
+        "after_state": outcome.structured["after_revision"],
+        "before_artifact_id": "",
+    }
+    final_diff = build_final_diff_descriptor(agent)
+    assert final_diff.diff_artifact_id.startswith("diff_")
+    assert final_diff.diff_bytes > 0
+    assert "+alpha" in agent.dependencies.artifacts.read_internal_text(
+        "run_tool_test", final_diff.diff_artifact_id
+    )
+    agent.apply_run_event(
+        agent.run.run_log.append_final("created", final_diff)
+    )
+    replayed = agent.dependencies.run_store.replay("run_tool_test")
+    assert replayed.final_diff == final_diff
+
+
+def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
+    agent = build_agent(tmp_path)
+    run_active(
+        agent,
+        ToolCall(
+            "write_file",
+            {"path": "created.txt", "content": "alpha\n"},
+            "call_missing_final_diff",
+        ),
+    )
+    final_diff = build_final_diff_descriptor(agent)
+    agent.apply_run_event(agent.run.run_log.append_final("created", final_diff))
+    artifact_root = agent.dependencies.run_store.artifact_dir("run_tool_test")
+    (artifact_root / f"{final_diff.diff_artifact_id}.txt").unlink()
+
+    with pytest.raises(ValueError, match="internal artifact is missing"):
+        agent.dependencies.run_store.replay("run_tool_test")
+
+
+def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path):
+    target = tmp_path / "subject.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path)
+
+    first = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "alpha",
+                "new_text": "beta",
+                "expected_revision": file_revision(target),
+            },
+            "call_edit_first",
+        ),
+    )
+    second = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "beta",
+                "new_text": "gamma",
+                "expected_revision": file_revision(target),
+            },
+            "call_edit_second",
+        ),
+    )
+
+    first_artifact = first.structured["path_transitions"][0]["before_artifact_id"]
+    second_artifact = second.structured["path_transitions"][0]["before_artifact_id"]
+    assert first_artifact.startswith("preimage_")
+    assert second_artifact == ""
+    assert agent.dependencies.artifacts.read_internal_text(
+        "run_tool_test", first_artifact
+    ) == "alpha\n"
+
+
 def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
     agent = build_agent(tmp_path)
-    state = TaskState.create("task_memory", "Remember", run_id="run_memory")
-    agent.run.task_state = state
-    run_log = RunLog(
-        state.run_id,
-        state.task_id,
-        agent.session.data["id"],
-        agent.dependencies.run_store,
-    )
-    run_log.append_user("Remember the release command")
+    run_log = start_run(agent, run_id="run_memory", goal="Remember")
     call = ToolCall(
         "memory_store",
         {
@@ -326,20 +465,7 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         },
         "call_memory",
     )
-    agent.run.run_log = run_log
-    verification = run_log.append(
-        "verification_result",
-        {
-            "status": "passed",
-            "freshness": "current",
-            "started_workspace_mutation_sequence": 0,
-            "finished_workspace_mutation_sequence": 0,
-            "started_changed_path_states": {},
-            "finished_changed_path_states": {},
-        },
-    )
-    agent.run.evidence.apply_event(verification)
-    source = run_log.append_tool_call(call)
+    source = agent.apply_run_event(run_log.append_tool_call(call))
 
     outcome = agent.tools.run(call)
 
@@ -354,13 +480,12 @@ def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_p
         in agent.run.evidence.effects[-1]["affected_paths"]
     )
     assert agent.run.evidence.effects[-1]["effect_scope"] == "project_memory"
-    assert agent.run.evidence.verifications[0]["freshness"] == "current"
     assert source.call_id == call.call_id
-    assert card.source_run_id == state.run_id
+    assert card.source_run_id == "run_memory"
     assert card.source_tool_call_id == call.call_id
 
 
-def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
+def test_successful_identical_observation_is_allowed(tmp_path):
     agent = build_agent(tmp_path)
     args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
@@ -370,37 +495,37 @@ def test_successful_identical_call_is_blocked_until_state_changes(tmp_path):
     after_change = agent.tools.run(ToolCall("read_file", args, "call_read_3"))
 
     assert first.status == "success"
-    assert repeated.status == "rejected"
-    assert repeated.failure.code == "repeated_identical_call"
+    assert repeated.status == "success"
     assert after_change.status == "success"
     assert "changed" in after_change.content
 
 
-def test_unrelated_workspace_change_does_not_unlock_same_file_read(tmp_path):
+def test_repeated_read_remains_allowed_across_workspace_change(tmp_path):
     agent = build_agent(tmp_path)
     read_args = {"path": "README.md", "start_line": 1, "end_line": 1}
 
     first = agent.tools.run(ToolCall("read_file", read_args, "call_read_before"))
-    changed = agent.tools.run(
+    changed = run_active(
+        agent,
         ToolCall(
             "write_file",
             {
                 "path": "unrelated.txt",
                 "content": "new file\n",
-                "expected_revision": "absent",
             },
             "call_write_unrelated",
         )
     )
-    repeated = agent.tools.run(ToolCall("read_file", read_args, "call_read_after"))
+    repeated = run_active(
+        agent, ToolCall("read_file", read_args, "call_read_after")
+    )
 
     assert first.status == "success"
     assert changed.status == "success"
-    assert repeated.status == "rejected"
-    assert repeated.failure.code == "repeated_identical_call"
+    assert repeated.status == "success"
 
 
-def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
+def test_workspace_wide_observation_can_repeat_without_workspace_change(tmp_path):
     agent = build_agent(tmp_path)
     executions = []
     agent.tools.registry["run_shell"]["run"] = lambda _args: (
@@ -409,17 +534,6 @@ def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
     shell_args = {"command": "true", "timeout_seconds": 20}
 
     first = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_before"))
-    agent.tools.run(
-        ToolCall(
-            "write_file",
-            {
-                "path": "changed.txt",
-                "content": "changed\n",
-                "expected_revision": "absent",
-            },
-            "call_write_between_shells",
-        )
-    )
     second = agent.tools.run(ToolCall("run_shell", shell_args, "call_shell_after"))
 
     assert first.status == "success"
@@ -427,7 +541,7 @@ def test_workspace_wide_tool_can_rerun_after_workspace_change(tmp_path):
     assert len(executions) == 2
 
 
-def test_retry_after_wait_error_gets_one_identical_retry(tmp_path):
+def test_retry_after_wait_error_does_not_block_identical_retries(tmp_path):
     agent = build_agent(tmp_path)
     executions = []
 
@@ -453,12 +567,12 @@ def test_retry_after_wait_error_gets_one_identical_retry(tmp_path):
     assert first.correction_action == "wait"
     assert second.status == "error"
     assert second.correction_action == "wait"
-    assert third.status == "rejected"
-    assert third.correction_action == "replan"
-    assert len(executions) == 2
+    assert third.status == "error"
+    assert third.correction_action == "wait"
+    assert len(executions) == 3
 
 
-def test_retry_after_change_error_blocks_unchanged_retry(tmp_path):
+def test_retry_after_change_error_does_not_block_identical_retry(tmp_path):
     agent = build_agent(tmp_path)
     executions = []
 
@@ -475,38 +589,38 @@ def test_retry_after_change_error_blocks_unchanged_retry(tmp_path):
     assert first.status == "error"
     assert first.failure.recovery == "retry_after_change"
     assert first.correction_action == "repair"
-    assert second.status == "rejected"
-    assert second.correction_action == "replan"
-    assert len(executions) == 1
+    assert second.status == "error"
+    assert second.correction_action == "repair"
+    assert len(executions) == 2
 
 
-def test_workspace_mutation_increments_revision_once_when_refresh_detects_change(
+def test_workspace_mutation_forces_prompt_refresh(
     tmp_path,
     monkeypatch,
 ):
     agent = build_agent(tmp_path)
+    refresh_calls = []
 
     def changed_refresh(*, force=False):
-        if force:
-            agent.workspace.mark_changed()
+        refresh_calls.append(force)
         return force
 
     monkeypatch.setattr(agent.workspace, "refresh", changed_refresh)
 
-    outcome = agent.tools.run(
+    outcome = run_active(
+        agent,
         ToolCall(
             "write_file",
             {
                 "path": "created.txt",
                 "content": "created\n",
-                "expected_revision": "absent",
             },
             "write_refresh_change",
         )
     )
 
     assert outcome.status == "success"
-    assert agent.workspace.revision == 1
+    assert True in refresh_calls
 
 
 def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
@@ -515,18 +629,32 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
 
     def write_then_fail(args):
         executions.append(1)
-        (tmp_path / args["path"]).write_text(args["content"], encoding="utf-8")
-        raise RuntimeError("failed after write")
+        target = tmp_path / args["path"]
+        target.write_text(args["content"], encoding="utf-8")
+        return ToolRunnerResult(
+            "failed after write",
+            structured={
+                "path_transitions": [
+                    {
+                        "path": args["path"],
+                        "before_state": "absent",
+                        "after_state": file_revision(target),
+                    }
+                ]
+            },
+            affected_paths=(args["path"],),
+            effect_scope="workspace",
+            failure=FailureInfo("partial_write", "failed after write", "no_retry"),
+        )
 
     agent.tools.registry["write_file"]["run"] = write_then_fail
     args = {
         "path": "partial.txt",
         "content": "partial\n",
-        "expected_revision": "absent",
     }
 
-    first = agent.tools.run(ToolCall("write_file", args, "call_write_1"))
-    repeated = agent.tools.run(ToolCall("write_file", args, "call_write_2"))
+    first = run_active(agent, ToolCall("write_file", args, "call_write_1"))
+    repeated = run_active(agent, ToolCall("write_file", args, "call_write_2"))
 
     assert first.status == "partial_success"
     assert first.side_effect_state == "partial"
@@ -535,14 +663,154 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
     assert len(executions) == 1
 
 
+def test_unknown_runner_exception_after_write_records_replayable_transition(tmp_path):
+    agent = build_agent(tmp_path)
+
+    def write_then_raise(args):
+        (tmp_path / args["path"]).write_text(args["content"], encoding="utf-8")
+        raise RuntimeError("crashed after write")
+
+    agent.tools.registry["write_file"]["run"] = write_then_raise
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "write_file",
+            {"path": "partial.txt", "content": "partial\n"},
+            "call_partial_exception",
+        ),
+    )
+
+    assert outcome.status == "partial_success"
+    transition = outcome.structured["path_transitions"][0]
+    assert transition["before_state"] == "absent"
+    assert transition["after_state"] == file_revision(tmp_path / "partial.txt")
+    replayed = agent.dependencies.run_store.replay("run_tool_test")
+    assert replayed.evidence.touched_paths == ["partial.txt"]
+
+
+def test_external_drift_is_rejected_before_a_second_runtime_mutation(tmp_path):
+    target = tmp_path / "subject.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path)
+
+    first = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "alpha",
+                "new_text": "beta",
+                "expected_revision": file_revision(target),
+            },
+            "call_first_edit",
+        ),
+    )
+    target.write_text("external\n", encoding="utf-8")
+    second = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "external",
+                "new_text": "agent-second",
+                "expected_revision": file_revision(target),
+            },
+            "call_second_edit",
+        ),
+    )
+
+    assert first.status == "success"
+    assert second.status == "rejected"
+    assert second.execution_state == "not_started"
+    assert second.failure.code == "workspace_drift"
+    assert second.failure.recovery == "user_action_required"
+    assert second.structured["drift"][0]["path"] == "subject.txt"
+    assert target.read_text(encoding="utf-8") == "external\n"
+    assessment = CompletionController(agent).assess("done")
+    assert assessment.allowed is False
+    assert assessment.status == "workspace_drift"
+    second_events = [
+        event.kind
+        for event in agent.run.run_log.events
+        if event.call_id == "call_second_edit"
+    ]
+    assert second_events == ["assistant_tool_call", "tool_result"]
+    replayed = agent.dependencies.run_store.replay("run_tool_test")
+    assert replayed.evidence.change_set.files["subject.txt"].current_after_state == (
+        first.structured["after_revision"]
+    )
+
+
+@pytest.mark.parametrize("stop_mode", ["cancel", "reset"])
+def test_controlled_stop_survives_external_workspace_drift(tmp_path, stop_mode):
+    target = tmp_path / "subject.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    agent = build_agent(tmp_path)
+    run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "alpha",
+                "new_text": "beta",
+                "expected_revision": file_revision(target),
+            },
+            "call_first_edit",
+        ),
+    )
+    target.write_text("external\n", encoding="utf-8")
+    rejected = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {
+                "path": "subject.txt",
+                "old_text": "external",
+                "new_text": "agent-second",
+                "expected_revision": file_revision(target),
+            },
+            "call_second_edit",
+        ),
+    )
+    assert rejected.failure.code == "workspace_drift"
+    agent.session.set_active_run("run_tool_test")
+
+    if stop_mode == "reset":
+        agent.reset()
+    else:
+        agent.run.execution_context = ExecutionContext.root(max_seconds=30)
+        assert agent.cancel_current_run("user_cancelled") is True
+        loop_state = AgentLoopState(
+            "continue",
+            time.monotonic(),
+            execution_stop="user_cancelled",
+        )
+        RunLifecycle(agent).finish_stopped(loop_state)
+
+    replayed = agent.dependencies.run_store.replay("run_tool_test")
+    assert replayed.terminal
+    assert replayed.final_diff.unavailable_reason == "workspace_drift"
+    assert replayed.final_diff.diff_artifact_id == ""
+    assert replayed.final_diff.diff_bytes == 0
+    assert agent.session.data["active_run_id"] == ""
+    assert agent.run.execution_context is None
+    if stop_mode == "reset":
+        assert agent.run.task is None
+        assert replayed.stop_reason == "user_reset"
+    else:
+        assert agent.run.projection.summary() == replayed.summary()
+        assert replayed.stop_reason == "user_cancelled"
+
+
 def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
     tmp_path,
     monkeypatch,
 ):
     agent = build_agent(tmp_path)
     target = tmp_path / "subject.txt"
-    target.write_text("agent-read\n", encoding="utf-8")
-    revision = file_revision(target)
     original_replace = mutation_module.atomic_replace_bytes
 
     def drift_after_staging(path, payload, **options):
@@ -564,13 +832,13 @@ def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
         drift_after_staging,
     )
 
-    outcome = agent.tools.run(
+    outcome = run_active(
+        agent,
         ToolCall(
             "write_file",
             {
                 "path": "subject.txt",
                 "content": "agent-change\n",
-                "expected_revision": revision,
             },
             "call_commit_conflict",
         )
@@ -581,7 +849,6 @@ def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
     assert outcome.side_effect_state == "none"
     assert outcome.affected_paths == ()
     assert outcome.failure.code == "revision_conflict"
-    assert outcome.structured["expected_revision"] == revision
+    assert outcome.structured["expected_revision"] == "absent"
     assert outcome.structured["actual_revision"] == file_revision(target)
     assert target.read_text(encoding="utf-8") == "external-change\n"
-    assert agent.workspace.revision == 1

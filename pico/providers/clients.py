@@ -19,6 +19,7 @@ class FakeModelClient:
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.prompts = []
+        self.instruction_prompts = []
         self.action_tool_surfaces = []
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
@@ -42,9 +43,18 @@ class FakeModelClient:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
 
-    def complete_action(self, prompt, max_new_tokens, *, action_tools, **kwargs):
+    def complete_action(
+        self,
+        input_text,
+        max_new_tokens,
+        *,
+        instructions,
+        action_tools,
+        **kwargs,
+    ):
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
-        output = self.complete(prompt, max_new_tokens, **kwargs)
+        self.instruction_prompts.append(str(instructions))
+        output = self.complete(input_text, max_new_tokens, **kwargs)
         if isinstance(output, ModelAction):
             return output
         if isinstance(output, dict):
@@ -199,7 +209,7 @@ class OpenAICompatibleModelClient:
 
     def reset_action_session(self):
         self._action_input = []
-        self._pending_call_ids = []
+        self._pending_call_id = None
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
@@ -222,16 +232,15 @@ class OpenAICompatibleModelClient:
 
     def record_action_result(self, action, result):
         result = str(result)
-        if self._pending_call_ids:
-            self._action_input.extend(
+        if self._pending_call_id is not None:
+            self._action_input.append(
                 {
                     "type": "function_call_output",
-                    "call_id": call_id,
+                    "call_id": self._pending_call_id,
                     "output": result,
                 }
-                for call_id in self._pending_call_ids
             )
-            self._pending_call_ids = []
+            self._pending_call_id = None
             return
         self._action_input.append(
             {
@@ -244,12 +253,14 @@ class OpenAICompatibleModelClient:
         self,
         max_new_tokens,
         *,
+        instructions,
         prompt_cache_key,
         action_tools,
         input_items,
     ):
         payload = {
             "model": self.model,
+            "instructions": str(instructions),
             "input": list(input_items),
             "max_output_tokens": max_new_tokens,
             "stream": False,
@@ -368,21 +379,22 @@ class OpenAICompatibleModelClient:
         return response_data
 
     def complete_action(
-        self, prompt, max_new_tokens, *, action_tools,
+        self, input_text, max_new_tokens, *, instructions, action_tools,
         prompt_cache_key=None, request_timeout=None,
     ):
         if not self._action_input:
             self._action_input.append(
                 {
                     "role": "user",
-                    "content": [{"type": "input_text", "text": str(prompt)}],
+                    "content": [{"type": "input_text", "text": str(input_text)}],
                 }
             )
-        if self._pending_call_ids:
+        if self._pending_call_id is not None:
             raise RuntimeError("pending Responses function call has no recorded output")
         self.last_completion_metadata = {}
         payload = self._build_payload(
             max_new_tokens,
+            instructions=instructions,
             prompt_cache_key=prompt_cache_key,
             action_tools=action_tools,
             input_items=self._action_input,
@@ -392,11 +404,20 @@ class OpenAICompatibleModelClient:
         self.last_completion_metadata = _extract_usage_cache_details(response_data)
         action = _action_from_response(response_data, action_tools)
         output = response_data["output"]
-        self._action_input.extend(output)
-        self._pending_call_ids = [
-            str(item.get("call_id") or "")
-            for item in output
-            if item.get("type") == "function_call"
-            and str(item.get("call_id") or "")
+        function_calls = [
+            item for item in output if item.get("type") == "function_call"
         ]
+        pending_call_id = (
+            str(function_calls[0].get("call_id") or "")
+            if len(function_calls) == 1
+            else ""
+        )
+        if pending_call_id:
+            self._action_input.extend(output)
+            self._pending_call_id = pending_call_id
+        else:
+            self._action_input.extend(
+                item for item in output if item.get("type") != "function_call"
+            )
+            self._pending_call_id = None
         return action

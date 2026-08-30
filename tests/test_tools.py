@@ -7,8 +7,12 @@ import pico.mutations as mutation_module
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.contracts import ToolCall, ToolRunnerResult
 from pico.mutations import WorkspaceMutationService, file_revision
+from pico.run_log import RunLog
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
 from pico.tool_context import ToolContext
 from pico.tools import (
+    build_action_tools,
     build_tool_registry,
     tool_edit_file,
     tool_list_files,
@@ -16,6 +20,46 @@ from pico.tools import (
     tool_search,
     validate_tool,
 )
+
+
+def test_native_function_schemas_are_strict(tmp_path):
+    context = ToolContext(
+        workspace_root=tmp_path,
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=dict,
+    )
+
+    for definition in build_action_tools(build_tool_registry(context)):
+        schema = definition["parameters"]
+        assert definition["strict"] is True
+        assert schema["additionalProperties"] is False
+        assert set(schema["required"]) == set(schema["properties"])
+
+
+def start_run(agent):
+    run_log = RunLog(
+        "run_tool_test",
+        "task_tool_test",
+        agent.session.data["id"],
+        agent.dependencies.run_store,
+    )
+    first = run_log.append_user(
+        TaskContract(
+            goal="Exercise tools",
+            task_kind="modify",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
+    )
+    agent.run.projection = RunProjection().apply_event(first)
+    agent.run.run_log = run_log
+    return run_log
+
+
+def run_active(agent, call):
+    run_log = agent.run.run_log or start_run(agent)
+    agent.apply_run_event(run_log.append_tool_call(call))
+    return agent.tools.run(call)
 
 
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
@@ -121,33 +165,30 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         {"path": "missing.py", "start_line": 1, "end_line": 1},
     )
     revision = file_revision(target)
-    not_found = agent.tools.run(
-        "edit_file",
-        {
-            "path": "README.md",
-            "old_text": "missing",
-            "new_text": "beta",
-            "expected_revision": revision,
-        },
+    not_found = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {"path": "README.md", "old_text": "missing", "new_text": "beta", "expected_revision": revision},
+            "call_not_found",
+        ),
     )
-    ambiguous = agent.tools.run(
-        "edit_file",
-        {
-            "path": "README.md",
-            "old_text": "alpha",
-            "new_text": "beta",
-            "expected_revision": revision,
-        },
+    ambiguous = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {"path": "README.md", "old_text": "alpha", "new_text": "beta", "expected_revision": revision},
+            "call_ambiguous",
+        ),
     )
     target.write_text("external\n", encoding="utf-8")
-    conflict = agent.tools.run(
-        "edit_file",
-        {
-            "path": "README.md",
-            "old_text": "external",
-            "new_text": "beta",
-            "expected_revision": revision,
-        },
+    conflict = run_active(
+        agent,
+        ToolCall(
+            "edit_file",
+            {"path": "README.md", "old_text": "external", "new_text": "beta", "expected_revision": revision},
+            "call_conflict",
+        ),
     )
 
     assert (missing.failure.code, missing.failure.recovery) == (
@@ -155,8 +196,8 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         "retry_after_change",
     )
     assert missing.correction_action == "repair"
-    assert repeated_missing.failure.code == "repeated_identical_call"
-    assert repeated_missing.correction_action == "replan"
+    assert repeated_missing.failure.code == "missing_path"
+    assert repeated_missing.correction_action == "repair"
     assert (not_found.failure.code, not_found.failure.recovery) == (
         "text_not_found",
         "retry_after_change",
@@ -184,9 +225,13 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
     }
 
     (tmp_path / "missing.py").write_text("created\n", encoding="utf-8")
-    after_change = agent.tools.run(
-        "read_file",
-        {"path": "missing.py", "start_line": 1, "end_line": 1},
+    after_change = run_active(
+        agent,
+        ToolCall(
+            "read_file",
+            {"path": "missing.py", "start_line": 1, "end_line": 1},
+            "call_after_change",
+        ),
     )
     assert after_change.status == "success"
 
@@ -291,7 +336,8 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
     )
     source = "".join(f"line-{index:04d} " + "x" * 80 + "\n" for index in range(300))
     agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(source)
-    original = agent.tools.run(
+    original = run_active(
+        agent,
         ToolCall("list_files", {"path": "."}, "call_source")
     )
 
@@ -299,7 +345,7 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
         tmp_path
         / ".pico"
         / "runs"
-        / "manual"
+        / "run_tool_test"
         / "artifacts"
         / f"{original.artifact_id}.txt"
     )
@@ -312,7 +358,8 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
         return original_read_bytes(path)
 
     with patch.object(Path, "read_bytes", counted_read_bytes):
-        page = agent.tools.run(
+        page = run_active(
+            agent,
             ToolCall(
                 "read_artifact",
                 {
@@ -333,7 +380,8 @@ def test_read_artifact_is_scoped_to_current_run_and_paginated(tmp_path):
     other = agent.dependencies.artifacts.write_tool_output(
         "other-run", "call_other", "secret\n"
     )
-    rejected = agent.tools.run(
+    rejected = run_active(
+        agent,
         ToolCall(
             "read_artifact",
             {"artifact_id": other["artifact_id"], "offset": 0, "max_bytes": 8192},
@@ -384,16 +432,15 @@ def test_noop_mutations_do_not_replace_the_file(tmp_path, monkeypatch):
     )
     revision = file_revision(path)
 
-    assert service.write(path, "same\n", revision) == (revision, revision)
-    assert service.edit(path, "same", "same", revision) == (revision, revision)
+    receipt = service.edit(path, "same", "same", revision)
+    assert receipt.before_revision == receipt.after_revision == revision
+    assert receipt.diff == ""
     assert calls == []
 
 
 def test_write_revalidates_revision_at_atomic_commit(tmp_path, monkeypatch):
     path = tmp_path / "sample.txt"
-    path.write_text("agent-read\n", encoding="utf-8")
     service = WorkspaceMutationService(tmp_path)
-    revision = file_revision(path)
     original_replace = mutation_module.atomic_replace_bytes
 
     def drift_after_staging(target, payload, **options):
@@ -416,9 +463,9 @@ def test_write_revalidates_revision_at_atomic_commit(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="revision conflict") as failure:
-        service.write(path, "agent-change\n", revision)
+        service.write(path, "agent-change\n")
 
-    assert failure.value.structured["expected_revision"] == revision
+    assert failure.value.structured["expected_revision"] == "absent"
     assert failure.value.structured["actual_revision"] == file_revision(path)
     assert path.read_text(encoding="utf-8") == "external-change\n"
     assert list(tmp_path.glob("sample.txt.*.tmp")) == []

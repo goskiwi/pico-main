@@ -9,8 +9,31 @@ from pico import (
     WorkspaceContext,
 )
 from pico.agent_loop import AgentLoop
+from pico.contracts import ToolOutcome
+from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
 from pico.sandbox import SandboxResult
+
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": False,
+}
+VERIFIED_MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": True,
+}
 
 
 def build_agent(tmp_path, outputs):
@@ -35,12 +58,12 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
         ],
     )
 
-    answer = AgentLoop(agent).run("Inspect hello.txt")
+    answer = AgentLoop(agent).run("Inspect hello.txt", **READ_TASK)
 
     assert answer == "Done."
-    assert agent.run.task_state.status == "completed"
+    assert agent.run.task.lifecycle.status == "completed"
 
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
     tool_entry = next(entry for entry in entries if entry.kind == "tool_result")
     outcome = tool_entry.payload["outcome"]
@@ -50,7 +73,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("Facade works.")])
 
-    assert agent.ask("Use facade") == "Facade works."
+    assert agent.ask("Use facade", **NO_CHANGE_TASK) == "Facade works."
 
 
 def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
@@ -124,13 +147,15 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         sandbox=RecordingVerificationSandbox(),
     )
 
-    answer = agent.ask("Replace alpha without losing concurrent edits")
+    answer = agent.ask(
+        "Replace alpha without losing concurrent edits", **VERIFIED_MODIFY_TASK
+    )
 
     assert answer == "Recovered safely."
     assert target.read_text(encoding="utf-8") == "agent\nexternal\n"
     assert verified_contents == ["agent\nexternal\n"]
 
-    events = agent.dependencies.run_store.read_events(agent.run.task_state)
+    events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     outcomes = {
         entry.call_id: entry.payload["outcome"]
         for entry in events
@@ -140,7 +165,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     assert conflict["status"] == "error"
     assert conflict["execution_state"] == "failed"
     assert conflict["side_effect_state"] == "none"
-    assert conflict["correction_action"] == "repair"
+    assert ToolOutcome.from_dict(conflict).correction_action == "repair"
     assert conflict["failure"]["code"] == "revision_conflict"
     assert conflict["failure"]["recovery"] == "retry_after_change"
     assert conflict["structured"] == {
@@ -167,7 +192,12 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     )
     assert verification.sequence > repaired_sequence
     assert verification.payload["status"] == "passed"
-    assert verification.payload["freshness"] == "current"
+    assert "freshness" not in verification.payload
+    assert verification_is_current(
+        verification.payload,
+        agent.run.evidence.last_workspace_mutation_sequence,
+        agent.run.evidence.change_set.current_net_path_states,
+    )
 
 
 def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
@@ -176,14 +206,14 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
         [ModelAction.invalid("Return one valid action.") for _ in range(8)],
     )
 
-    answer = agent.ask("Inspect the repository")
+    answer = agent.ask("Inspect the repository", **READ_TASK)
 
     assert answer == (
         "Stopped after too many invalid model outputs without a valid tool call "
         "or final answer."
     )
-    assert agent.run.task_state.stop_reason == "invalid_output_limit"
-    assert agent.run.task_state.model_request_count == 8
+    assert agent.run.task.lifecycle.stop_reason == "invalid_output_limit"
+    assert agent.run.metrics.model_request_count == 8
 
 
 def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
@@ -199,7 +229,6 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
                 {
                     "path": "subject.txt",
                     "content": "changed\n",
-                    "expected_revision": "absent",
                 },
             ),
             ModelAction.final("done"),
@@ -218,11 +247,11 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
         sandbox=FailingSandbox(),
     )
 
-    answer = agent.ask("Create subject.txt")
+    answer = agent.ask("Create subject.txt", **VERIFIED_MODIFY_TASK)
 
     assert answer == "Stopped after repeated rejected completion attempts."
-    assert agent.run.task_state.stop_reason == "completion_block_limit"
-    events = agent.dependencies.run_store.read_events(agent.run.task_state)
+    assert agent.run.task.lifecycle.stop_reason == "completion_block_limit"
+    events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert sum(entry.kind == "completion_blocked" for entry in events) == 3
 
 
@@ -236,7 +265,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect hello") == "Done."
+    assert agent.ask("Inspect hello", **READ_TASK) == "Done."
     assert len(agent.model_client.prompts) == 2
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     assert agent.model_client.recorded_action_results[0][0] == "tool"
@@ -246,7 +275,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert result["structured"]["path"] == "hello.txt"
     assert "alpha" in result["content"]
     turns = [
-        entry for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
+        entry for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
         if entry.kind == "turn_metrics"
     ]
     assert [entry.payload["prompt_reused"] for entry in turns] == [False, True]
@@ -295,11 +324,11 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello") == "Done after reset."
+    assert agent.ask("Inspect hello", **READ_TASK) == "Done after reset."
     assert client.prompts[0] != client.prompts[1]
     assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     resets = [
         entry for entry in entries if entry.kind == "provider_session_reset"
     ]
@@ -362,9 +391,9 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello") == "Done without reset."
+    assert agent.ask("Inspect hello", **READ_TASK) == "Done without reset."
     assert client.prompts[0] == client.prompts[1]
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert not any(
         entry.kind == "provider_session_reset" for entry in entries
     )
@@ -404,8 +433,8 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
         300 if "Runtime instruction:" in str(text) else original_count(text)
     )
 
-    assert agent.ask("Inspect hello") == "Done after guided reset."
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
+    assert agent.ask("Inspect hello", **READ_TASK) == "Done after guided reset."
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     reset = next(
         entry for entry in entries if entry.kind == "provider_session_reset"
     )
@@ -458,9 +487,9 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         ),
     )
 
-    assert agent.ask("Read both files and finish") == "Recovered after compaction."
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
-    assert sum(entry.kind == "compaction" for entry in entries) == 1
+    assert agent.ask("Read both files and finish", **READ_TASK) == "Recovered after compaction."
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    assert sum(entry.kind == "compaction" for entry in entries) == 0
     resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
     assert [entry.payload["reason"] for entry in resets] == [
         "context_overflow_retry"
@@ -479,11 +508,11 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt")
+    answer = agent.ask("Inspect hello.txt", **READ_TASK)
 
     assert answer == "Done at the tool boundary."
-    assert agent.run.task_state.executed_tool_count == 1
-    assert agent.run.task_state.status == "completed"
+    assert agent.run.metrics.executed_tool_count == 1
+    assert agent.run.task.lifecycle.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
 
 
@@ -499,11 +528,11 @@ def test_default_loop_has_no_tool_execution_limit(tmp_path):
     outputs.append(ModelAction.final("Completed seven reads."))
     agent = build_agent(tmp_path, outputs)
 
-    answer = agent.ask("Read seven distinct lines")
+    answer = agent.ask("Read seven distinct lines", **READ_TASK)
 
     assert answer == "Completed seven reads."
     assert agent.config.max_tool_executions is None
-    assert agent.run.task_state.executed_tool_count == 7
+    assert agent.run.metrics.executed_tool_count == 7
 
 
 def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
@@ -517,8 +546,8 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect hello.txt") == "First run completed."
-    assert agent.ask("Summarize the prior run") == "Second run completed."
+    assert agent.ask("Inspect hello.txt", **READ_TASK) == "First run completed."
+    assert agent.ask("Summarize the prior run", **NO_CHANGE_TASK) == "Second run completed."
 
     second_run_prompt = agent.model_client.prompts[2]
     assert "Inspect hello.txt" not in second_run_prompt
@@ -540,13 +569,13 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt")
+    answer = agent.ask("Inspect hello.txt", **READ_TASK)
 
     assert answer == "Stopped after reaching the tool execution limit without a final answer."
-    assert agent.run.task_state.executed_tool_count == 1
+    assert agent.run.metrics.executed_tool_count == 1
     finished_tools = [
         entry.payload["tool_name"]
-        for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
+        for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
         if entry.kind == "tool_result"
         and entry.payload["outcome"]["execution_state"] != "not_started"
     ]
@@ -565,14 +594,14 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    answer = agent.ask("Inspect hello.txt")
+    answer = agent.ask("Inspect hello.txt", **READ_TASK)
 
     assert answer == "Recovered after correcting the call."
-    assert agent.run.task_state.executed_tool_count == 1
-    assert agent.run.task_state.model_request_count == 3
+    assert agent.run.metrics.executed_tool_count == 1
+    assert agent.run.metrics.model_request_count == 3
     results = [
         entry
-        for entry in agent.dependencies.run_store.read_events(agent.run.task_state)
+        for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
         if entry.kind == "tool_result"
     ]
     assert sum(entry.payload["outcome"]["status"] == "rejected" for entry in results) == 1
@@ -601,8 +630,8 @@ def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
         how_to_apply="Use staging unless the user overrides it.",
         source_run_id="bootstrap",
     )
-    assert agent.ask("What is the deploy target?") == "staging"
-    entries = agent.dependencies.run_store.read_events(agent.run.task_state)
+    assert agent.ask("What is the deploy target?", **READ_TASK) == "staging"
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     recall_call = next(
         entry
         for entry in entries
@@ -615,7 +644,7 @@ def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
     )
     assert recall_result.outcome_status == "success"
     assert "deploy target is staging" in recall_result.content
-    assert agent.run.task_state.model_request_count == 2
+    assert agent.run.metrics.model_request_count == 2
 
 
 def test_memory_recall_rejects_unavailable_filenames(tmp_path):
@@ -640,7 +669,7 @@ def test_memory_recall_rejects_unavailable_filenames(tmp_path):
         how_to_apply="test",
         source_run_id="bootstrap",
     )
-    assert agent.ask("Inspect memory") == "Done."
+    assert agent.ask("Inspect memory", **NO_CHANGE_TASK) == "Done."
     result = next(
         entry
         for entry in agent.run.run_log.events

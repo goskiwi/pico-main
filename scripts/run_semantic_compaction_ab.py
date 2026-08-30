@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare deterministic and six-section LLM compaction on one real task."""
+"""Compare bounded Runtime fallback and historical-only semantic compaction."""
 
 from __future__ import annotations
 
@@ -107,14 +107,19 @@ def run_variant(args, variant, api_key, base_url, run_group):
             DockerSandboxConfig(image=args.sandbox_image),
         ),
     )
-    if variant == "deterministic":
+    if variant == "fallback":
         agent.prompt.context.semantic_summarizer = None
     summarizer = agent.prompt.context.semantic_summarizer
     started = time.monotonic()
-    answer = agent.ask(ab_prompt())
+    answer = agent.ask(
+        ab_prompt(),
+        task_kind="modify",
+        requires_workspace_change=True,
+        requires_verification=True,
+    )
     wall_duration_ms = int((time.monotonic() - started) * 1000)
-    events = agent.dependencies.run_store.read_events(agent.run.task_state.run_id)
-    analysis = analyze_run(events, agent.run.task_state)
+    events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    analysis = analyze_run(events, agent.run.task)
     visible = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
     hidden = run_command(workspace, args.sandbox_image, HIDDEN_COMMAND)
     patch_text = _git(workspace, "diff", "--binary", "--unified=1", "HEAD")
@@ -124,7 +129,7 @@ def run_variant(args, variant, api_key, base_url, run_group):
     )
     checks = {
         "initial_failure_reproduced": not initial["ok"],
-        "compaction_triggered": analysis["compaction_count"] >= 1,
+        "context_reduction_triggered": bool(analysis["compactions"]),
         "provider_session_reset": analysis["provider_session_reset_count"] >= 1,
         "evidence_read_once_in_order": analysis["evidence_read_paths"]
         == [
@@ -141,7 +146,7 @@ def run_variant(args, variant, api_key, base_url, run_group):
     }
     result = {
         "variant": variant,
-        "run_id": agent.run.task_state.run_id,
+        "run_id": agent.run.projection.run_id,
         "wall_duration_ms": wall_duration_ms,
         "final_answer": answer,
         "analysis": analysis,
@@ -200,9 +205,7 @@ def main(argv=None):
         "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
     run_group = datetime.now(timezone.utc).strftime("run-%Y%m%d-%H%M%S")
-    baseline = run_variant(
-        args, "deterministic", api_key, base_url, run_group
-    )
+    baseline = run_variant(args, "fallback", api_key, base_url, run_group)
     partial = {
         "artifact_type": "pico-semantic-compaction-ab",
         "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -211,7 +214,7 @@ def main(argv=None):
         "provider_base_url": base_url,
         "critical_token": CRITICAL_TOKEN,
         "run_group": run_group,
-        "variants": {"deterministic": baseline},
+        "variants": {"fallback": baseline},
         "comparison": {"status": "semantic_pending"},
         "passed": False,
     }
@@ -246,7 +249,7 @@ def main(argv=None):
         "provider_base_url": base_url,
         "critical_token": CRITICAL_TOKEN,
         "run_group": run_group,
-        "variants": {"deterministic": baseline, "semantic": semantic},
+        "variants": {"fallback": baseline, "semantic": semantic},
         "comparison": comparison,
         "passed": passed,
     }

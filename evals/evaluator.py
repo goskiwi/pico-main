@@ -143,18 +143,27 @@ class BenchmarkEvaluator:
                 verification_command="",
             ),
         )
-        answer = agent.ask(task["prompt"])
+        answer = agent.ask(
+            task["prompt"],
+            task_kind="modify",
+            requires_workspace_change=True,
+            requires_verification=False,
+        )
         argv = shlex.split(task["verifier"])
         verified = subprocess.run(
             argv, cwd=fixture, capture_output=True, text=True, timeout=20, check=False
         ).returncode == 0
-        state = agent.run.task_state
-        within_budget = state.executed_tool_count <= int(task["step_budget"])
-        passed = state.status == "completed" and within_budget and verified
+        state = agent.run.task
+        within_budget = agent.run.metrics.executed_tool_count <= int(
+            task["step_budget"]
+        )
+        passed = state.lifecycle.status == "completed" and within_budget and verified
         return {
             "id": task["id"], "category": task["category"], "status": "pass" if passed else "fail",
             "passed": passed, "within_budget": within_budget, "verifier_passed": verified,
-            "executed_tool_count": state.executed_tool_count, "stop_reason": state.stop_reason, "answer": answer,
+            "executed_tool_count": agent.run.metrics.executed_tool_count,
+            "stop_reason": state.lifecycle.stop_reason,
+            "answer": answer,
             "fixture_copy": _portable_path(fixture),
             "failure_category": "" if passed else ("verifier_failed" if not verified else "runtime_failed"),
         }

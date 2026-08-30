@@ -3,7 +3,7 @@
   "rows": [
     {
       "compaction_committed": true,
-      "governed_tokens": 643,
+      "governed_tokens": 13,
       "original_events_preserved": true,
       "raw_tokens": 4492,
       "request_preserved": true,
@@ -14,7 +14,7 @@
     },
     {
       "compaction_committed": true,
-      "governed_tokens": 643,
+      "governed_tokens": 13,
       "original_events_preserved": true,
       "raw_tokens": 12492,
       "request_preserved": true,
@@ -25,7 +25,7 @@
     },
     {
       "compaction_committed": true,
-      "governed_tokens": 643,
+      "governed_tokens": 13,
       "original_events_preserved": true,
       "raw_tokens": 24492,
       "request_preserved": true,
@@ -38,7 +38,7 @@
   "summary": {
     "compaction_commit_rate": 1.0,
     "current_request_preserved_rate": 1.0,
-    "mean_token_reduction": 13182.333333333334,
+    "mean_token_reduction": 13812.333333333334,
     "original_event_preservation_rate": 1.0,
     "tool_transaction_integrity_rate": 1.0,
     "within_budget_rate": 1.0,

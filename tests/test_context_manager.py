@@ -1,82 +1,80 @@
 import pytest
 
-from pico import (
-    FakeModelClient,
-    ModelAction,
-    Pico,
-    PicoConfig,
-    SessionStore,
-    WorkspaceContext,
-)
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico.compaction_summary import SemanticCompactionError
 from pico.context_manager import ContextBudgetExceeded, ContextManager
-from pico.contracts import ToolCall, ToolOutcome
-from pico.features.memory import WorkingState
-from pico.run_log import RunLog, replay_events
-from pico.task_state import TaskState
+from pico.contracts import FailureInfo, ToolCall, ToolOutcome
+from pico.run_log import RunLog
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
+
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
 
 
 def build_agent(tmp_path, max_new_tokens=64):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     return Pico(
-        model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(tmp_path),
-        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(
-            approval_policy="auto",
-            max_new_tokens=max_new_tokens,
-        ),
+        FakeModelClient([]),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(approval_policy="auto", max_new_tokens=max_new_tokens),
     )
 
 
-def new_run_log(agent, state):
-    return RunLog(
-        state.run_id,
-        state.task_id,
+def activate(agent, goal="Inspect"):
+    contract = TaskContract(goal=goal, **READ_TASK)
+    run_log = RunLog(
+        "run_context",
+        "task_context",
         agent.session.data["id"],
         agent.dependencies.run_store,
     )
+    run_log.append_user(contract)
+    agent.run.run_log = run_log
+    agent.run.projection = RunProjection.from_events(run_log.events)
+    return run_log
 
 
-def set_working_state(agent, goal, **overrides):
-    state = TaskState.create("task_working", goal, run_id="run_working")
-    state.working_state = WorkingState(goal=goal, **overrides)
-    agent.run.task_state = state
-    return state
-
-
-def successful_outcome(call, content, *, artifact=None):
-    return ToolOutcome(
-        tool_call_id=call.call_id,
-        tool_name=call.name,
-        status="success",
-        execution_state="completed",
-        side_effect_state="none",
-        content=content,
-        artifact=dict(artifact or {}),
-    )
-
-
-def append_successful_result(run_log, call, outcome):
+def append_read(run_log, index, content):
+    call = ToolCall("read_file", {"path": f"file_{index}.py"}, f"call_{index}")
+    run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,
         risky=False,
         effect_scope="none",
         potential_effects=[],
     )
-    return run_log.append_tool_result(outcome, workspace_revision=0)
+    outcome = ToolOutcome(
+        tool_call_id=call.call_id,
+        tool_name=call.name,
+        status="success",
+        execution_state="completed",
+        side_effect_state="none",
+        content=content,
+    )
+    run_log.append_tool_result(outcome)
 
 
-def test_context_uses_token_budgets_and_preserves_request(tmp_path):
+def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
     agent = build_agent(tmp_path)
-    set_working_state(agent, "deploy key is red")
-    prompt, metadata = ContextManager(agent, total_budget=900).build("Where is the deploy key?")
+    activate(agent, "Inspect README")
 
-    assert prompt.rstrip().endswith("Current user request:\nWhere is the deploy key?")
-    assert metadata["within_budget"] is True
-    assert metadata["prompt_tokens"] + metadata["reserved_output_tokens"] <= 900
-    assert metadata["tokenizer"]
+    input_text, metadata = ContextManager(agent, total_budget=1800).build(
+        "Inspect README"
+    )
+
+    assert input_text.rstrip().endswith("Current user request:\nInspect README")
+    assert "Task contract (Runtime-owned):" in input_text
+    assert "- goal: Inspect README" in input_text
+    assert "Runtime rules:" not in input_text
+    assert metadata["instructions_tokens"] > 0
     assert metadata["section_order"] == [
-        "prefix",
+        "workspace",
+        "task_requirements",
         "memory_catalog",
         "repo_map",
         "working_state",
@@ -85,61 +83,224 @@ def test_context_uses_token_budgets_and_preserves_request(tmp_path):
     ]
 
 
-def test_context_budget_reserves_known_provider_request_overhead(tmp_path):
-    class ToolAwareClient(FakeModelClient):
-        @staticmethod
-        def estimate_action_tool_tokens(_action_tools, _token_counter):
-            return 120
-
-    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    agent = Pico(
-        ToolAwareClient([]),
-        WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(max_new_tokens=64),
-    )
-
-    _prompt, metadata = ContextManager(agent, total_budget=1200).build(
-        "Inspect the repository",
-        provider_overhead_tokens=80,
-    )
-
-    assert metadata["tool_schema_tokens"] == 120
-    assert metadata["provider_overhead_tokens"] == 80
-    assert metadata["estimated_input_tokens"] == metadata["prompt_tokens"] + 200
-    assert metadata["estimated_input_tokens"] + 64 <= 1200
-    assert metadata["within_budget"] is True
-
-
-def test_priority_reduction_is_recorded_in_tokens(tmp_path):
+def test_fixed_caps_leave_the_remaining_budget_to_history(tmp_path):
     agent = build_agent(tmp_path)
-    agent.prompt.prefix = "rules " + "A " * 800
-    state = set_working_state(agent, "large memory")
-    state.working_state.render_panel = lambda **_kwargs: "memory " + "B " * 400
+    run_log = activate(agent)
+    run_log.append_model_instruction("history " * 500)
     manager = ContextManager(
         agent,
-        total_budget=500,
-        section_budgets={
-            "prefix": 400,
-            "memory_catalog": 80,
-            "working_state": 180,
-            "history": 180,
-        },
-        section_floors={
-            "prefix": 100,
-            "memory_catalog": 20,
-            "working_state": 40,
-            "history": 50,
+        total_budget=1200,
+        section_caps={
+            "workspace": 100,
+            "task_requirements": 80,
+            "memory_catalog": 40,
+            "repo_map": 40,
+            "working_state": 80,
         },
     )
 
-    _, metadata = manager.build("keep this request")
+    _, metadata = manager.build("continue")
 
-    assert metadata["budget_reductions"]
-    assert metadata["budget_allocation"]["strategy"] == "floor_weighted_shared_pool"
-    reduced_sections = [item["section"] for item in metadata["budget_reductions"]]
-    assert reduced_sections == [section for section in manager.reduction_order if section in reduced_sections]
-    assert all("before_tokens" in item for item in metadata["budget_reductions"])
+    allocation = metadata["budget_allocation"]
+    assert allocation["strategy"] == "fixed_caps_history_remainder"
+    assert allocation["history_budget_tokens"] == metadata["sections"]["history"][
+        "budget_tokens"
+    ]
+    assert "borrowed_tokens" not in allocation
+
+
+def test_prompt_build_is_read_only_even_above_compaction_threshold(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    for index in range(5):
+        append_read(run_log, index, "result " + "x " * 400)
+    before = tuple(run_log.events)
+    generation = run_log.generation
+
+    _, metadata = ContextManager(
+        agent,
+        total_budget=1200,
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    ).build("continue", provider_context_tokens=1100)
+
+    assert tuple(run_log.events) == before
+    assert run_log.generation == generation
+    assert metadata["compaction"] is None
+
+
+def test_prepare_compaction_commits_before_read_only_build(tmp_path):
+    class Summary:
+        def __init__(self):
+            self.calls = []
+
+        def summarize(self, events, **_kwargs):
+            self.calls.append(
+                {"duration_ms": 1, "completion_metadata": {"input_tokens": 10}}
+            )
+            return (
+                "## Progress\n### Done\n- SEMANTIC-SUMMARY-MARKER\n\n"
+                "## Critical Context\n- none"
+            )
+
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    for index in range(5):
+        append_read(run_log, index, "result " + "x " * 300)
+    manager = ContextManager(
+        agent,
+        total_budget=900,
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    )
+    manager.semantic_summarizer = Summary()
+
+    compaction, history_override = manager.prepare_compaction("continue")
+    event_count = len(run_log.events)
+    input_text, metadata = manager.build(
+        "continue",
+        compaction_metadata=compaction,
+        history_override=history_override,
+    )
+
+    assert compaction["mode"] == "semantic_history"
+    assert compaction["committed"] is True
+    assert history_override is None
+    assert len(run_log.events) == event_count
+    assert any(
+        event.kind == "compaction"
+        and "SEMANTIC-SUMMARY-MARKER" in event.content
+        for event in run_log.events
+    )
+    assert "SEMANTIC-SUMMARY-MARKER" in input_text
+    assert metadata["sections"]["history"]["raw_tokens"] == metadata["sections"][
+        "history"
+    ]["rendered_tokens"]
+    assert (
+        metadata["history_projection"]["projection_mode"]
+        == "compacted_complete_transactions"
+    )
+    assert input_text.endswith("Current user request:\ncontinue")
+    assert metadata["compaction"] == compaction
+
+
+def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    for index in range(5):
+        append_read(run_log, index, "result " + "x " * 300)
+    manager = ContextManager(
+        agent,
+        total_budget=900,
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    )
+    raw = manager._raw_sections("continue")
+    overhead = manager.tokenizer.count(agent.prompt.instructions)
+    overhead += manager._tool_schema_tokens()
+    history_budget = manager._history_budget(raw, overhead)
+    prefix = "Current run events:\n[compaction] "
+    marker = " UNIQUE-END-MARKER"
+    candidates = []
+    for size in range(1000):
+        summary = "## Progress\n### Done\n- " + "x " * size + marker
+        tokens = manager.tokenizer.count(prefix + summary)
+        if tokens <= history_budget:
+            candidates.append((tokens, summary))
+        elif candidates:
+            break
+    _tokens, boundary_summary = max(candidates)
+
+    class Summary:
+        def __init__(self):
+            self.calls = []
+
+        def summarize(self, _events, **_kwargs):
+            self.calls.append({"duration_ms": 1, "completion_metadata": {}})
+            return boundary_summary
+
+    manager.semantic_summarizer = Summary()
+    before = tuple(run_log.events)
+
+    metadata, history = manager.prepare_compaction("continue")
+
+    assert metadata["degraded"] is True
+    assert metadata["committed"] is False
+    assert tuple(run_log.events) == before
+    assert "bounded fallback" in history
+
+
+def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_path):
+    class FailingSummary:
+        def __init__(self):
+            self.calls = []
+
+        def summarize(self, *_args, **_kwargs):
+            raise SemanticCompactionError("planned failure")
+
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    for index in range(5):
+        append_read(run_log, index, "result " + "x " * 300)
+    manager = ContextManager(
+        agent,
+        total_budget=900,
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=180,
+    )
+    manager.semantic_summarizer = FailingSummary()
+    before = tuple(run_log.events)
+
+    metadata, history = manager.prepare_compaction("continue")
+
+    assert tuple(run_log.events) == before
+    assert metadata["degraded"] is True
+    assert metadata["committed"] is False
+    assert "bounded fallback" in history
+    for call_id in {
+        event.call_id
+        for event in before
+        if event.kind == "assistant_tool_call"
+        and event.call_id in history
+    }:
+        assert history.count(call_id) == 2
+
+
+def test_pending_tool_call_skips_compaction(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    run_log.append_tool_call(
+        ToolCall("read_file", {"path": "pending.py"}, "call_pending")
+    )
+    manager = ContextManager(agent, total_budget=300)
+
+    assert manager.prepare_compaction("continue", provider_context_tokens=299) == (
+        None,
+        None,
+    )
+
+
+def test_memory_catalog_does_not_load_card_body(tmp_path):
+    agent = build_agent(tmp_path)
+    activate(agent, "Use selected memory")
+    agent.dependencies.project_memory.store(
+        action="create",
+        filename="project_selected.md",
+        name="Selected convention",
+        description="A stable convention.",
+        memory_type="project",
+        content="PRIVATE-CARD-BODY",
+        why="Stable across tasks.",
+        how_to_apply="Recall only when relevant.",
+        source_run_id="bootstrap",
+    )
+
+    input_text, _ = ContextManager(agent, total_budget=1800).build(
+        "Use selected memory"
+    )
+
+    assert "project_selected.md" in input_text
+    assert "PRIVATE-CARD-BODY" not in input_text
 
 
 def test_request_larger_than_runtime_budget_is_rejected(tmp_path):
@@ -148,542 +309,125 @@ def test_request_larger_than_runtime_budget_is_rejected(tmp_path):
         ContextManager(agent, total_budget=120).build("X " * 100)
 
 
-def test_runtime_context_uses_the_provider_window(tmp_path):
+def test_provider_overhead_is_reserved_in_the_input_budget(tmp_path):
+    agent = build_agent(tmp_path)
+    activate(agent)
+    _input, metadata = ContextManager(agent, total_budget=1800).build(
+        "Inspect",
+        provider_overhead_tokens=137,
+    )
+
+    assert metadata["provider_overhead_tokens"] == 137
+    assert metadata["estimated_input_tokens"] + metadata["reserved_output_tokens"] <= 1800
+
+
+def test_context_uses_the_configured_provider_window(tmp_path):
     agent = build_agent(tmp_path)
 
     assert agent.prompt.context.total_budget == 272_000
 
 
-def test_default_compaction_threshold_uses_exact_reserve(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_default_threshold", "inspect", run_id="run_default_threshold")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(12):
-        call = ToolCall("read_file", {"path": f"file_{index}.py"}, f"call_default_{index}")
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log, call, successful_outcome(call, "result " + "x " * 3000)
-        )
-    agent.run.run_log = run_log
-
-    _, at_threshold = agent.prompt.context.build(
-        "continue",
-        provider_context_tokens=255_616,
-    )
-    _, above_threshold = agent.prompt.context.build(
-        "continue",
-        provider_context_tokens=255_617,
-    )
-
-    assert at_threshold["compaction"] is None
-    assert above_threshold["compaction"]["trigger_threshold_tokens"] == 255_616
-    assert above_threshold["compaction"]["trigger_context_tokens"] == 255_617
-    assert above_threshold["compaction"]["retained_tokens"] <= 20_000
-
-
-def test_small_run_log_is_not_compacted_by_event_count(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_small", "inspect", run_id="run_small")
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(12):
-        run_log.append_model_instruction(f"small note {index}")
-    agent.run.run_log = run_log
-    summary_requested = False
-
-    def summarize(*args, **kwargs):
-        nonlocal summary_requested
-        summary_requested = True
-        return "must not run"
-
-    agent.model_client.complete = summarize
-    _, metadata = ContextManager(
-        agent,
-        total_budget=5000,
-        compaction_reserve_tokens=500,
-        compaction_keep_recent_tokens=1000,
-    ).build("continue")
-
-    assert len(run_log.active_events()) == 13
-    assert metadata["compaction"] is None
-    assert summary_requested is False
-
-
-def test_provider_usage_can_trigger_compaction_when_local_prompt_is_under_limit(
-    tmp_path,
-):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_provider_usage", "inspect", run_id="run_provider_usage")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(5):
-        call = ToolCall("read_file", {"path": f"file_{index}.py"}, f"call_{index}")
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log, call, successful_outcome(call, "result " + "x " * 500)
-        )
-    agent.run.run_log = run_log
-
-    _, metadata = ContextManager(
-        agent,
-        total_budget=10_000,
-        compaction_reserve_tokens=2_000,
-        compaction_keep_recent_tokens=100,
-    ).build("continue", provider_context_tokens=9_500)
-
-    assert metadata["compaction"] is not None
-    assert metadata["compaction"]["trigger_context_tokens"] == 9_500
-    assert metadata["compaction"]["local_context_tokens"] < 8_000
-
-
-def test_runtime_preserves_context_beyond_the_old_eight_thousand_token_cap(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_large", "inspect", run_id="run_large")
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    run_log.append_model_instruction("context " * 9000 + "END-OF-LARGE-CONTEXT")
-    agent.run.run_log = run_log
-
-    prompt, metadata = agent.prompt.context.build("continue")
-
-    assert metadata["prompt_tokens"] > 8000
-    assert metadata["compaction"] is None
-    assert "END-OF-LARGE-CONTEXT" in prompt
-
-
-def test_run_log_compaction_keeps_audit_entries_and_changes_active_projection(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_test", "inspect", run_id="run_test")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(5):
-        call = ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, f"call_{index}")
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log, call, successful_outcome(call, "result " + "x " * 100)
-        )
-    agent.run.run_log = run_log
-
-    _, metadata = ContextManager(
-        agent,
-        total_budget=800,
-        section_budgets={
-            "prefix": 300,
-            "memory_catalog": 60,
-            "working_state": 100,
-            "history": 120,
-        },
-        compaction_reserve_tokens=200,
-        compaction_keep_recent_tokens=100,
-    ).build("continue")
-
-    summary = next(entry for entry in run_log.events if entry.kind == "compaction")
-    assert run_log.generation == 2
-    assert summary.content.startswith("Earlier run summary:")
-    assert (
-        '- Tool transaction: read_file {"end_line": 1, "path": "README.md", '
-        '"start_line": 1} -> success'
-    ) in summary.content
-    assert "- Goal:" not in summary.content
-    assert len(run_log.active_events()) < len(run_log.events)
-    assert metadata["run_log_generation"] == 2
-    assert metadata["compaction"]["mode"] == "runtime_summary"
-    projection = replay_events(run_log.events)
-    assert projection.last_cursor.sequence == summary.sequence
-    assert projection.kind_counts["compaction"] == 1
-
-
-def test_real_client_capability_uses_semantic_six_section_compaction(tmp_path):
-    summary = {
-        "goal": "inspect",
-        "constraints_preferences": [],
-        "progress": {"done": [], "in_progress": [], "blocked": []},
-        "key_decisions": [],
-        "next_steps": [],
-        "critical_context": ["keep literal"],
-    }
-
-    class SummaryClient:
-        def __init__(self):
-            self.last_completion_metadata = {"input_tokens": 10, "output_tokens": 5}
-
-        def complete_action(self, *_args, **_kwargs):
-            return ModelAction.tool("submit_compaction_summary", summary)
-
-    class SummaryCapableClient(FakeModelClient):
-        @staticmethod
-        def new_isolated_client():
-            return SummaryClient()
-
-    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    agent = Pico(
-        SummaryCapableClient([]),
-        WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", max_new_tokens=64),
-    )
-    state = TaskState.create("task_semantic", "inspect", run_id="run_semantic")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(5):
-        call = ToolCall(
-            "read_file",
-            {"path": "README.md", "start_line": 1, "end_line": 1},
-            f"semantic_{index}",
-        )
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log,
-            call,
-            successful_outcome(call, "result " + "x " * 100),
-        )
-    agent.run.run_log = run_log
-
-    _, metadata = ContextManager(
-        agent,
-        total_budget=800,
-        section_budgets={
-            "prefix": 300,
-            "memory_catalog": 60,
-            "working_state": 100,
-            "history": 120,
-        },
-        compaction_reserve_tokens=200,
-        compaction_keep_recent_tokens=100,
-    ).build("continue")
-
-    summary = next(entry for entry in run_log.events if entry.kind == "compaction")
-    assert summary.content.startswith("## Goal")
-    assert "## Critical Context" in summary.content
-    assert metadata["compaction"]["mode"] == "semantic_six_section"
-    assert metadata["compaction"]["semantic_summary"]["status"] == "completed"
-
-
-def test_semantic_summary_failure_falls_back_to_deterministic_compaction(tmp_path):
-    class FailingSummarizer:
+def test_provider_usage_can_trigger_explicit_compaction(tmp_path):
+    class Summary:
         def __init__(self):
             self.calls = []
+            self.seen_events = []
 
-        @staticmethod
-        def summarize(*_args, **_kwargs):
-            raise TimeoutError("planned summary timeout")
+        def summarize(self, events, **_kwargs):
+            self.seen_events.append(tuple(events))
+            self.calls.append({"duration_ms": 1, "completion_metadata": {}})
+            return "## Progress\n### Done\n- inspected\n\n## Critical Context\n- none"
 
     agent = build_agent(tmp_path)
-    state = TaskState.create("task_fallback", "inspect", run_id="run_fallback")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
+    run_log = activate(agent)
     for index in range(5):
-        call = ToolCall(
-            "read_file",
-            {"path": "README.md", "start_line": 1, "end_line": 1},
-            f"fallback_{index}",
-        )
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log,
-            call,
-            successful_outcome(call, "result " + "x " * 100),
-        )
-    agent.run.run_log = run_log
-    manager = ContextManager(
-        agent,
-        total_budget=800,
-        section_budgets={
-            "prefix": 300,
-            "memory_catalog": 60,
-            "working_state": 100,
-            "history": 120,
-        },
-        compaction_reserve_tokens=200,
-        compaction_keep_recent_tokens=100,
-    )
-    manager.semantic_summarizer = FailingSummarizer()
-
-    _, metadata = manager.build("continue")
-
-    summary = next(entry for entry in run_log.events if entry.kind == "compaction")
-    assert summary.content.startswith("Earlier run summary:")
-    assert metadata["compaction"]["mode"] == "runtime_summary"
-    semantic = metadata["compaction"]["semantic_summary"]
-    assert semantic["status"] == "fallback"
-    assert "planned summary timeout" in semantic["error"]
-
-
-def test_repeated_compaction_keeps_completed_tool_arguments(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_steps", "read files", run_id="run_steps")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("read files")
-    agent.run.run_log = run_log
+        append_read(run_log, index, "result " + "x " * 500)
     manager = ContextManager(
         agent,
         total_budget=10_000,
         compaction_reserve_tokens=2_000,
         compaction_keep_recent_tokens=100,
     )
+    summary = Summary()
+    manager.semantic_summarizer = summary
 
-    paths = [f"noise_{label}.txt" for label in "abcde"]
-    for index, path in enumerate(paths):
-        call = ToolCall(
-            "read_file",
-            {"path": path, "start_line": 1, "end_line": 700},
-            f"call_step_{index}",
-        )
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log,
-            call,
-            successful_outcome(call, "irrelevant payload " + "x " * 1000),
-        )
-        manager.build("continue", provider_context_tokens=9_500)
-
-    history = manager._history_text("continue")
-
-    assert run_log.generation > 2
-    assert all(path in history for path in paths)
-
-
-def test_current_run_session_events_are_not_duplicated_with_run_log(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_dedupe", "inspect", run_id="run_dedupe")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    call = ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "call_dedupe")
-    run_log.append_tool_call(call)
-    append_successful_result(
-        run_log, call, successful_outcome(call, "unique-current-run-result")
+    metadata, history_override = manager.prepare_compaction(
+        "continue",
+        provider_context_tokens=9_500,
     )
-    agent.run.run_log = run_log
 
-    prompt, metadata = ContextManager(agent, total_budget=900).build("inspect")
-
-    assert prompt.count("unique-current-run-result") == 1
-    assert prompt.count("Current user request:\ninspect") == 1
-    assert metadata["history_projection"]["active_count"] == 3
-    assert metadata["history_projection"]["selected_count"] == 2
+    assert metadata["trigger_context_tokens"] == 9_500
+    assert metadata["committed"] is True
+    assert history_override is None
+    assert summary.seen_events
 
 
-def test_working_state_projection_replaces_successful_update_transcript(tmp_path):
+def test_large_history_is_not_clipped_to_a_legacy_eight_thousand_limit(tmp_path):
     agent = build_agent(tmp_path)
-    state = TaskState.create("task_working", "Fix login timeout", run_id="run_working")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user(state.working_state.goal)
-    agent.run.run_log = run_log
-    update = {
-        "add_constraints": ["Do not change the database schema"],
-        "add_decisions": ["The race is in token refresh"],
-        "add_next_steps": ["Add a concurrent refresh test"],
-    }
-    call = ToolCall("update_working_state", update, "call_working")
-    agent.apply_run_event(run_log.append_tool_call(call))
-    assert agent.tools.run(call).status == "success"
+    run_log = activate(agent)
+    run_log.append_model_instruction("context " * 9000 + "END-OF-LARGE-CONTEXT")
 
-    prompt, _metadata = ContextManager(agent, total_budget=1200).build(
-        "Fix login timeout"
-    )
-    history = agent.prompt.context._history_text("Fix login timeout")
+    input_text, metadata = agent.prompt.context.build("continue")
 
-    assert prompt.count("Fix login timeout") == 1
-    assert prompt.count("Do not change the database schema") == 1
-    assert prompt.count("The race is in token refresh") == 1
-    assert prompt.count("Add a concurrent refresh test") == 1
-    assert "update_working_state" not in history
-    assert "working state update accepted" not in history
+    assert metadata["input_text_tokens"] > 8_000
+    assert "END-OF-LARGE-CONTEXT" in input_text
 
 
-def test_rejected_working_state_update_remains_in_history(tmp_path):
+def test_history_omits_canonical_contract_and_successful_working_update(tmp_path):
     agent = build_agent(tmp_path)
-    state = TaskState.create("task_working", "Inspect", run_id="run_working")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user(state.working_state.goal)
-    agent.run.run_log = run_log
+    run_log = activate(agent, "Canonical goal")
     call = ToolCall(
         "update_working_state",
-        {
-            "add_constraints": ["Keep the API"],
-            "remove_constraints": ["Keep the API"],
-        },
-        "call_rejected_working",
+        {"add_constraints": ["Keep API"]},
+        "call_state",
     )
-    agent.apply_run_event(run_log.append_tool_call(call))
-    assert agent.tools.run(call).status == "rejected"
-
-    history = agent.prompt.context._history_text("Inspect")
-
-    assert "update_working_state" in history
-    assert "cannot add and remove" in history
-
-
-def test_shared_budget_lends_unused_tokens_to_history(tmp_path):
-    agent = build_agent(tmp_path)
-    agent.prompt.prefix = "short rules"
-    state = set_working_state(agent, "short")
-    state.working_state.render_panel = lambda **_kwargs: "Memory:\n- short"
-    run_log = new_run_log(agent, state)
-    run_log.append_user(state.working_state.goal)
-    run_log.append_final("long-context " * 160)
-    agent.run.run_log = run_log
-    manager = ContextManager(
-        agent,
-        total_budget=600,
-        section_budgets={
-            "prefix": 80,
-            "memory_catalog": 80,
-            "working_state": 80,
-            "history": 80,
-        },
-        section_floors={
-            "prefix": 20,
-            "memory_catalog": 20,
-            "working_state": 20,
-            "history": 20,
-        },
-    )
-
-    _, metadata = manager.build("continue")
-
-    allocation = metadata["budget_allocation"]
-    assert allocation["strategy"] == "floor_weighted_shared_pool"
-    assert allocation["allocated_tokens"]["history"] > 80
-    assert allocation["borrowed_tokens"]["history"] > 0
-
-
-def test_memory_catalog_does_not_automatically_load_card_bodies(tmp_path):
-    agent = build_agent(tmp_path)
-    set_working_state(agent, "unique-working-goal")
-    agent.dependencies.project_memory.store(
-        action="create",
-        filename="project_selected.md",
-        name="Selected convention",
-        description="A stable convention that may be recalled explicitly.",
-        memory_type="project",
-        content="PRIVATE-CARD-BODY",
-        why="It is stable across tasks.",
-        how_to_apply="Recall it only for a matching task.",
-        source_run_id="bootstrap",
-    )
-    manager = ContextManager(
-        agent,
-        total_budget=900,
-        section_budgets={
-            "prefix": 120,
-            "memory_catalog": 40,
-            "repo_map": 80,
-            "working_state": 80,
-            "history": 120,
-        },
-        section_floors={
-            "prefix": 40,
-            "memory_catalog": 10,
-            "repo_map": 20,
-            "working_state": 20,
-            "history": 30,
-        },
-    )
-
-    prompt, metadata = manager.build("use selected memory")
-
-    assert "project_selected.md" in prompt
-    assert "PRIVATE-CARD-BODY" not in prompt
-    assert prompt.count("unique-working-goal") == 1
-    assert "retrieved_memory" not in metadata
-
-
-def test_bounded_tool_result_uses_executor_projection_without_second_truncation(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_bounded", "inspect", run_id="run_bounded")
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    call = ToolCall("read_file", {"path": "large.log"}, "call_bounded")
-    run_log.append_tool_call(call)
-    bounded = (
-        "head\n" + "x" * 3900 + "\ntail\n"
-        "[Output truncated; use read_artifact artifact_id=tool_call_bounded_deadbeef]"
-    )
-    entry = append_successful_result(
-        run_log,
-        call,
-        successful_outcome(
-            call,
-            bounded,
-            artifact={
-                "artifact_id": "tool_call_bounded_deadbeef",
-                "size_bytes": 12000,
-            },
-        )
-    )
-
-    assert entry.content == bounded
-    assert entry.artifact_id == "tool_call_bounded_deadbeef"
-    assert entry.payload["outcome"]["artifact"]["size_bytes"] == 12000
-
-
-def test_pending_tool_call_prevents_compaction_and_summary_request(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_pending", "continue", run_id="run_pending")
-    agent.run.task_state = state
-    run_log = new_run_log(agent, state)
-    run_log.append_user("inspect")
-    for index in range(5):
-        call = ToolCall(
-            "read_file",
-            {"path": f"file_{index}.py"},
-            f"call_complete_{index}",
-        )
-        run_log.append_tool_call(call)
-        append_successful_result(
-            run_log, call, successful_outcome(call, "x " * 500)
-        )
-    run_log.append_tool_call(
-        ToolCall("read_file", {"path": "pending.py"}, "call_pending")
-    )
-    agent.run.run_log = run_log
-    summary_requested = False
-
-    def summarize(*args, **kwargs):
-        nonlocal summary_requested
-        summary_requested = True
-        return "must not run"
-
-    agent.model_client.complete = summarize
-    _, metadata = ContextManager(agent, total_budget=3000).build("continue")
-
-    assert run_log.generation == 1
-    assert run_log.pending_call_id() == "call_pending"
-    assert metadata["compaction"] is None
-    assert summary_requested is False
-
-
-def test_restore_reconciles_interrupted_operation_without_replay(tmp_path):
-    agent = build_agent(tmp_path)
-    state = TaskState.create("task_crash", "edit", run_id="run_crash")
-    run_log = new_run_log(agent, state)
-    run_log.append_user("edit")
-    call = ToolCall("edit_file", {"path": "README.md"}, "call_crash")
     run_log.append_tool_call(call)
     run_log.append_tool_started(
         call,
-        risky=True,
-        effect_scope="workspace",
+        risky=False,
+        effect_scope="none",
         potential_effects=[],
     )
-    restored = RunLog.restore(state.run_id, agent.dependencies.run_store)
-    agent.run.task_state = state
-    agent.run.run_log = restored
-    restored.reconcile_interrupted(agent)
+    run_log.append_tool_result(
+        ToolOutcome(
+            call.call_id,
+            call.name,
+            "success",
+            "completed",
+            "none",
+            "accepted",
+        )
+    )
 
-    assert restored.pending_call_id() == ""
-    result = restored.events[-1]
-    assert result.kind == "tool_result"
-    assert result.side_effect_state == "unknown"
-    assert "interrupted" in result.content
+    history, metadata = run_log.render_projection()
+
+    assert "Canonical goal" not in history
+    assert "update_working_state" not in history
+    assert metadata["omitted_count"] == 3
+
+
+def test_rejected_working_update_remains_visible_in_history(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    call = ToolCall(
+        "update_working_state",
+        {"add_constraints": ["Keep API"]},
+        "call_rejected_state",
+    )
+    run_log.append_tool_call(call)
+    run_log.append_tool_result(
+        ToolOutcome(
+            call.call_id,
+            call.name,
+            "rejected",
+            "not_started",
+            "none",
+            "rejected",
+            failure=FailureInfo("invalid_arguments", "planned", "retry_after_change"),
+        )
+    )
+
+    history, _metadata = run_log.render_projection()
+
+    assert "update_working_state" in history
+    assert "invalid_arguments" in history

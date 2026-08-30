@@ -12,6 +12,7 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.contracts import ToolOutcome
 from pico.mutations import content_revision, file_revision
 
 
@@ -21,24 +22,24 @@ def print_section(title, value):
 
 
 def outcomes(agent):
-    return [
-        {
-            "call_id": event.call_id,
-            "tool": event.name,
-            "status": event.outcome_status,
-            "execution_state": event.payload["outcome"]["execution_state"],
-            "side_effect_state": event.side_effect_state,
-            "failure": (
-                event.payload["outcome"].get("failure") or {}
-            ).get("code", ""),
-            "correction_action": event.payload["outcome"][
-                "correction_action"
-            ],
-            "affected_paths": list(event.affected_paths),
-        }
-        for event in agent.run.run_log.events
-        if event.kind == "tool_result"
-    ]
+    rows = []
+    for event in agent.run.run_log.events:
+        if event.kind != "tool_result":
+            continue
+        outcome = ToolOutcome.from_dict(event.payload["outcome"])
+        rows.append(
+            {
+                "call_id": event.call_id,
+                "tool": event.name,
+                "status": event.outcome_status,
+                "execution_state": outcome.execution_state,
+                "side_effect_state": event.side_effect_state,
+                "failure": outcome.failure.code if outcome.failure else "",
+                "correction_action": outcome.correction_action,
+                "affected_paths": list(event.affected_paths),
+            }
+        )
+    return rows
 
 
 def main():
@@ -103,7 +104,12 @@ def main():
                 verification_command="",
             ),
         )
-        answer = repaired.ask("Replace alpha without losing concurrent edits")
+        answer = repaired.ask(
+            "Replace alpha without losing concurrent edits",
+            task_kind="modify",
+            requires_workspace_change=True,
+            requires_verification=False,
+        )
         repair_outcomes = outcomes(repaired)
 
         denied_root = root / "denied"
@@ -116,7 +122,6 @@ def main():
                         {
                             "path": "created.txt",
                             "content": "must not be written\n",
-                            "expected_revision": "absent",
                         },
                         call_id="call_denied_write",
                     ),
@@ -130,7 +135,12 @@ def main():
                 verification_command="",
             ),
         )
-        denied_answer = denied.ask("Create created.txt")
+        denied_answer = denied.ask(
+            "Create created.txt",
+            task_kind="modify",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
         denied_outcomes = outcomes(denied)
         denied_started = [
             event.call_id

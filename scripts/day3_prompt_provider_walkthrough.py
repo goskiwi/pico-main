@@ -116,8 +116,9 @@ def main():
         )
         with patch("urllib.request.urlopen", urlopen):
             action = client.complete_action(
-                prompt,
+                prompt.input_text,
                 96,
+                instructions=prompt.instructions,
                 action_tools=action_tools,
                 prompt_cache_key=metadata["prompt_cache_key"],
             )
@@ -128,6 +129,7 @@ def main():
             final = client.complete_action(
                 "this replacement prompt must not enter an active continuation",
                 96,
+                instructions=prompt.instructions,
                 action_tools=action_tools,
                 prompt_cache_key=metadata["prompt_cache_key"],
             )
@@ -146,7 +148,8 @@ def main():
             "start_line",
             "end_line",
         }
-        assert first_input[0]["content"][0]["text"] == prompt
+        assert requests[0]["payload"]["instructions"] == prompt.instructions
+        assert first_input[0]["content"][0]["text"] == prompt.input_text
         assert continued_types == [
             "user",
             "function_call",
@@ -161,7 +164,7 @@ def main():
                 "sections": metadata["sections"],
                 "prompt_tokens": metadata["prompt_tokens"],
                 "reserved_output_tokens": metadata["reserved_output_tokens"],
-                "prompt_tail": prompt[-240:],
+                "input_tail": prompt.input_text[-240:],
             },
         )
         print_section(

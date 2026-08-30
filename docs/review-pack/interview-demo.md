@@ -4,15 +4,15 @@
 
 Pico 不是聊天 UI，而是 Coding Model 外围的本地 Runtime。模型每轮只能提出一个
 `ModelAction`；Runtime 负责 Context、工具准入、副作用、持久化、崩溃恢复、验证和
-最终完成权。每个 Run 的过程事实只写入一条 append-only RunLog，WorkingState、
-TaskState、Evidence 和运行统计都能由它重建。
+最终完成权。每个 Run 的过程事实只写入一条 append-only RunLog，实时与恢复共用一个
+RunProjection，重建 TaskContract、增量 WorkingState、Evidence、Metrics 和单 Pending Call。
 
 ```text
 User request
   -> ModelAction(tool / invalid / final)
   -> Tool transaction or Completion Gate
   -> RunLog
-  -> WorkingState / TaskState / RunEvidence projections
+  -> RunProjection(Task / Evidence / Metrics / Pending)
 ```
 
 ## 3 分钟主链路
@@ -47,21 +47,18 @@ assistant_tool_call
 -> tool_result + side-effect state
 ```
 
-写入携带通常由 `read_file` 返回的 expected revision；完整内容先写入同目录临时文件并 fsync，在 atomic replace 提交点复验 revision。外部编辑会形成包含 expected/actual revision 的显式
-冲突，不会被静默覆盖。
+`write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。
 
 ### 1:45～2:30：恢复与状态投影
 
 Session 只保存 `active_run_id`。重启时 Runtime 重放 RunLog；未完成工具不会盲目重试，
 而是比较声明路径的 before/current state，追加 `not_started`、`error`、`partial` 或
-`unknown` ToolOutcome。WorkingState 的 Goal、Constraints、Decisions 和 Next Steps 同样
-由 RunLog Tool 事务投影。
+`unknown` ToolOutcome。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
+Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
 
 ### 2:30～3:00：完成权
 
-打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 仍会检查 Python
-语法、当前 Workspace 验证、changed-path states、partial/unknown 副作用和未应用 Child Patch。模型负责建议，
-Runtime 负责事实和完成边界。
+打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 按 TaskContract 检查 Observation、最终净 RunChangeSet 和明确要求的 Verification，再检查 partial/unknown 副作用与未应用 Child Patch。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
 
 ## 5 分钟现场 Demo
 
@@ -78,7 +75,7 @@ uv run python scripts/demo_runtime.py
 - `tool_transactions`：每个调用都有 Call/Started/Result；
 - `evidence_effects`：Patch 的精确路径和副作用；
 - `completion`：Runtime 终态；
-- `pending_operations: []`：没有悬空工具事务。
+- `pending_call_id: null`：没有悬空工具事务。
 
 ### 2. 运行机制评测
 
@@ -110,15 +107,11 @@ Session 指针、Workspace 内容、Project Memory Card 和 Artifact 各有独�
 
 ### 2. Context 治理
 
-`ContextManager` 为 Prefix、Memory Catalog、RepoMap、WorkingState 和 History 分配共享
-Token Pool；Current Request 独立保留。Compaction 只覆盖旧 RunLog 精确前缀，不切断
-Tool Call/Result，原事件不删除。Provider continuation 接近窗口上限时才 rotation 并重建
-Prompt。
+固定 Runtime policy 进入 `instructions`；动态 Workspace、TaskContract、Memory Catalog、RepoMap、WorkingState、History 和 Current Request 进入 `input`。Prompt build 只读；Compaction 在 build 前准备，只总结历史 Progress/Critical Context，失败时使用近期完整事务的 bounded fallback。
 
 ### 3. WorkingState 与 Project Memory
 
-WorkingState 属于当前 Run，保存 Goal、Constraints、Decisions 和 Next Steps；成功的
-`update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；
+TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；成功的增量 `update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；
 Catalog 常驻 Prompt，主模型按描述显式调用 `memory_recall`，Card 作为不可信历史数据
 返回，不能改变工具权限或代替 Workspace 当前事实。
 
@@ -149,8 +142,8 @@ Compaction 只改变模型 Context，不删除审计事实。
 
 ### 为什么模型没有最终完成权？
 
-模型可能在语法错误、测试失败或副作用未知时声称完成。Completion Gate 使用 Runtime
-观察到的当前 Workspace 证据决定是否接受 `final`。
+模型可能在没有真实修改、验证失败或副作用未知时声称完成。Completion Gate 使用
+TaskContract 和 Runtime 观察到的当前 Workspace 证据决定是否接受 `final`。
 
 ### WorkingState 与 Project Memory 有什么区别？
 
@@ -175,6 +168,6 @@ Mailbox、跨进程 Child 调度恢复和通用 MCP/Skills 都明确不在范围
 ## 证据边界
 
 - 当前确定性证据：pytest、Native Harness、Context v5、Project Memory v2、RepoMap v1。
-- 当前真实模型证据：三个Triage案例与Semantic Compaction A/B；必须同时说明
+- 当前真实模型证据：三个 Triage 案例；必须同时说明
   它们绑定的 Runtime commit/fixture/model，不宣称是当前未提交工作树的实时成绩。
 - Docker 隔离、可选网络和模型后端仍是环境信任边界。

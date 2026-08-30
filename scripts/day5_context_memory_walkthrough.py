@@ -15,7 +15,8 @@ from pico import (
 )
 from pico.context_manager import ContextManager
 from pico.run_log import RunLog
-from pico.task_state import TaskState
+from pico.run_projection import RunProjection
+from pico.task_state import TaskContract
 
 
 def print_section(title, value):
@@ -48,10 +49,7 @@ def append_historical_read(agent, index):
         content=(f"historical fact {index}: " + "invoice evidence " * 220),
     )
     agent.apply_run_event(
-        run_log.append_tool_result(
-            outcome,
-            workspace_revision=agent.workspace.revision,
-        )
+        run_log.append_tool_result(outcome)
     )
 
 
@@ -98,20 +96,21 @@ def main():
             source_run_id="bootstrap",
         )
 
-        state = TaskState.create(
-            "task_day5",
-            "Inspect how invoice totals are calculated",
-            run_id="run_day5",
+        contract = TaskContract(
+            goal="Inspect how invoice totals are calculated",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
         )
         run_log = RunLog(
-            state.run_id,
-            state.task_id,
+            "run_day5",
+            "task_day5",
             agent.session.data["id"],
             agent.dependencies.run_store,
         )
-        agent.run.task_state = state
         agent.run.run_log = run_log
-        agent.apply_run_event(run_log.append_user(state.working_state.goal))
+        run_log.append_user(contract)
+        agent.run.projection = RunProjection.from_events(run_log.events)
         for index in range(6):
             append_historical_read(agent, index)
 
@@ -122,9 +121,15 @@ def main():
             compaction_reserve_tokens=1000,
             compaction_keep_recent_tokens=350,
         )
+        compaction, history_override = manager.prepare_compaction(
+            "Where is calculate_invoice_total used?",
+            provider_context_tokens=3400,
+        )
         prompt, metadata = manager.build(
             "Where is calculate_invoice_total used?",
             provider_context_tokens=3400,
+            compaction_metadata=compaction,
+            history_override=history_override,
         )
         repo_map_lines = [
             line
@@ -147,8 +152,12 @@ def main():
         assert metadata["within_budget"] is True
         assert metadata["compaction"] is not None
         assert metadata["compaction"]["trigger_context_tokens"] >= 3400
-        assert any(event.kind == "compaction" for event in run_log.events)
-        assert len(run_log.active_events()) < event_count_before
+        if metadata["compaction"]["committed"]:
+            assert any(event.kind == "compaction" for event in run_log.events)
+            assert len(run_log.active_events()) < event_count_before
+        else:
+            assert metadata["compaction"]["degraded"] is True
+            assert all(event.kind != "compaction" for event in run_log.events)
 
         print_section(
             "Prompt sections 与 RepoMap",

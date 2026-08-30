@@ -32,8 +32,8 @@ def _render_recalled(store, cards):
     return rendered
 
 
-def test_working_state_tracks_goal_constraints_decisions_and_next_steps():
-    state = WorkingState(goal="Fix the timeout")
+def test_working_state_tracks_constraints_decisions_and_next_steps():
+    state = WorkingState()
     state.apply_update(
         {
             "add_constraints": ["Keep Python 3.10 compatibility"],
@@ -43,8 +43,7 @@ def test_working_state_tracks_goal_constraints_decisions_and_next_steps():
     )
 
     assert state.to_dict() == {
-        "schema_version": "run-working-state-v1",
-        "goal": "Fix the timeout",
+        "schema_version": "run-working-state-v2",
         "constraints": ["Keep Python 3.10 compatibility"],
         "decisions": ["The race is in token refresh"],
         "next_steps": ["Add a concurrent refresh test"],
@@ -54,7 +53,6 @@ def test_working_state_tracks_goal_constraints_decisions_and_next_steps():
 
 def test_working_state_updates_are_incremental_and_idempotent():
     state = WorkingState(
-        goal="Fix the timeout",
         constraints=("Do not change the schema",),
         next_steps=("Inspect token refresh",),
     )
@@ -81,7 +79,7 @@ def test_markdown_card_is_source_of_truth_and_index_is_generated(tmp_path):
     assert "reference_test_command.md" in store.index_text()
 
 
-def test_catalog_self_heals_after_manual_card_edit(tmp_path):
+def test_catalog_refresh_after_manual_card_edit_is_explicit(tmp_path):
     store = ProjectMemoryStore(tmp_path / ".pico/memory")
     card, _ = _store(store)
     path = store.cards_root / card.filename
@@ -93,8 +91,12 @@ def test_catalog_self_heals_after_manual_card_edit(tmp_path):
         encoding="utf-8",
     )
 
+    stale_catalog = store.index_text()
+    store.refresh_index()
     catalog = store.index_text()
 
+    assert "Project test command" in stale_catalog
+    assert "Manually edited command" not in stale_catalog
     assert "Manually edited command" in catalog
     assert "Project test command" not in catalog
 

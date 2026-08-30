@@ -26,9 +26,11 @@ def build_agent(tmp_path, allowed_tools=None):
 
 def test_allowed_tools_filter_prompt_and_execution(tmp_path):
     agent = build_agent(tmp_path, ["read_file"])
-    prompt, _ = agent.prompt.build("Read")
-    assert "- read_file" in prompt
-    assert "- run_shell" not in prompt
+    agent.prompt.build("Read")
+    assert [tool["name"] for tool in agent.tools.action_schemas] == [
+        "read_file",
+        "submit_final",
+    ]
     outcome = agent.tools.run("run_shell", {"command": "echo hi", "timeout_seconds": 20})
     assert outcome.status == "rejected"
     assert outcome.failure.code == "tool_not_allowed"

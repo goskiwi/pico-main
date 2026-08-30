@@ -1,7 +1,24 @@
 from evals.pytest_output import parse_pytest_output
+from pico.evidence import verification_is_current
 from pico.mutations import file_revision
 from pico.sandbox import SandboxResult
 from pico.verification import verify_workspace
+
+READ_TASK = {
+    "task_kind": "read_only",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+NO_CHANGE_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": False,
+    "requires_verification": False,
+}
+MODIFY_TASK = {
+    "task_kind": "modify",
+    "requires_workspace_change": True,
+    "requires_verification": False,
+}
 
 
 def test_pytest_output_is_structured():
@@ -57,7 +74,6 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
     assert result == {
         "command": "MODE=test python -m pytest -q",
         "status": "passed",
-        "freshness": "current",
         "started_workspace_mutation_sequence": 7,
         "finished_workspace_mutation_sequence": 7,
         "started_changed_path_states": {},
@@ -93,7 +109,7 @@ def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
     assert "invalid mount config" in result["output"]
 
 
-def test_runtime_verification_is_stale_when_runtime_mutation_cursor_changes(
+def test_runtime_verification_records_mutation_cursor_drift(
     tmp_path,
 ):
     mutation_sequence = [7]
@@ -115,13 +131,14 @@ def test_runtime_verification_is_stale_when_runtime_mutation_cursor_changes(
         changed_paths=(),
     )
 
-    assert result["status"] == "stale"
-    assert result["freshness"] == "stale"
+    assert result["status"] == "passed"
+    assert "freshness" not in result
+    assert not verification_is_current(result, 9, {})
     assert result["started_workspace_mutation_sequence"] == 7
     assert result["finished_workspace_mutation_sequence"] == 9
 
 
-def test_runtime_verification_is_stale_when_changed_path_changes_during_run(
+def test_runtime_verification_records_changed_path_drift(
     tmp_path,
 ):
     target = tmp_path / "subject.txt"
@@ -145,9 +162,14 @@ def test_runtime_verification_is_stale_when_changed_path_changes_during_run(
         changed_paths=("subject.txt",),
     )
 
-    assert result["status"] == "stale"
-    assert result["freshness"] == "stale"
+    assert result["status"] == "passed"
+    assert "freshness" not in result
     assert result["started_changed_path_states"] == {"subject.txt": before}
     assert result["finished_changed_path_states"] == {
         "subject.txt": file_revision(target)
     }
+    assert not verification_is_current(
+        result,
+        7,
+        {"subject.txt": file_revision(target)},
+    )

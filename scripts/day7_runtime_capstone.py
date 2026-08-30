@@ -93,11 +93,6 @@ def main():
                     call_id="call_edit",
                 ),
                 ModelAction.tool(
-                    "run_shell",
-                    {"command": verify_command, "timeout_seconds": 20},
-                    call_id="call_verify",
-                ),
-                ModelAction.tool(
                     "memory_store",
                     {
                         "action": "create",
@@ -116,7 +111,7 @@ def main():
                     "update_working_state",
                     {
                         "add_decisions": [
-                            "add now returns left + right and verification passed"
+                            "add now returns left + right"
                         ],
                         "remove_next_steps": [
                             "Inspect and fix add, then verify"
@@ -139,9 +134,12 @@ def main():
         )
 
         answer = agent.ask(
-            "Fix calculator.add so the existing addition test passes"
+            "Fix calculator.add so the existing addition test passes",
+            task_kind="modify",
+            requires_workspace_change=True,
+            requires_verification=True,
         )
-        run_id = agent.run.task_state.run_id
+        run_id = agent.run.projection.run_id
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
         evidence = RunEvidence.from_events(events)
@@ -184,14 +182,14 @@ def main():
         assert answer == "Fixed calculator.add and verified the change."
         assert "return left + right" in target.read_text(encoding="utf-8")
         assert replayed.status == "completed"
-        assert replayed.working_state.next_steps == ()
+        assert replayed.task.working.next_steps == ()
         assert evidence.changed_paths == ["calculator.py"]
-        assert evidence.current_verification(
+        assert evidence.latest_verification_for_state(
             evidence.last_workspace_mutation_sequence,
             verification_events[-1]["finished_changed_path_states"],
         ) is not None
         assert len(sandbox.calls) == 1
-        assert verification_events[0]["source_tool_call_id"] == "call_verify"
+        assert "source_tool_call_id" not in verification_events[0]
         assert "calculator.py" in model.prompts[0]
         assert (
             root
@@ -207,7 +205,7 @@ def main():
                 "answer": answer,
                 "task_status": replayed.status,
                 "calculator.py": target.read_text(encoding="utf-8"),
-                "working_state": replayed.working_state.to_dict(),
+                "working_state": replayed.task.working.to_dict(),
             },
         )
         print_section(
@@ -216,9 +214,7 @@ def main():
                 "transactions": transactions,
                 "verification_events": verification_events,
                 "sandbox_calls": sandbox.calls,
-                "verification_was_reused_by_completion_gate": len(
-                    sandbox.calls
-                )
+                "verification_was_run_once_by_completion_gate": len(sandbox.calls)
                 == 1,
             },
         )

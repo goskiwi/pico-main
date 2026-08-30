@@ -2,6 +2,7 @@ from .contracts import ModelAction, ToolCall, ToolOutcome
 from .features.memory import WorkingState
 from .providers.clients import FakeModelClient, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
+from .task_state import TaskContract
 from .workspace import WorkspaceContext
 
 __all__ = [
@@ -11,6 +12,7 @@ __all__ = [
     "Pico",
     "PicoConfig",
     "SessionStore",
+    "TaskContract",
     "ToolCall",
     "ToolOutcome",
     "WorkingState",

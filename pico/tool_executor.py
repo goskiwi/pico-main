@@ -1,6 +1,6 @@
 """Staged tool admission and canonical outcome construction."""
 
-from pathlib import Path
+import json
 
 from .contracts import (
     FailureInfo,
@@ -8,20 +8,14 @@ from .contracts import (
     ToolFailureError,
     ToolOutcome,
     ToolRunnerResult,
-    tool_call_hash,
 )
-from .verification import capture_changed_path_states
 
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
 SHELL_TOOL_PREVIEW_BYTES = 16 * 1024
 
 
 def _tool_preview_limit(tool_name):
-    return (
-        SHELL_TOOL_PREVIEW_BYTES
-        if tool_name == "run_shell"
-        else DEFAULT_TOOL_PREVIEW_BYTES
-    )
+    return SHELL_TOOL_PREVIEW_BYTES if tool_name == "run_shell" else DEFAULT_TOOL_PREVIEW_BYTES
 
 
 def _complete_lines_within_budget(lines, budget, *, from_tail=False):
@@ -60,16 +54,79 @@ def model_tool_output(content, tool_name, descriptor):
     notice = (
         f"[Output truncated: showing lines {start_line}-{end_line} of {len(lines)}; "
         f"full_bytes={total_bytes}; artifact_id={descriptor['artifact_id']}. "
-        "Use read_artifact with this artifact_id and "
-        "offset=0 to inspect the full output in 8 KiB pages.]"
+        "Use read_artifact with this artifact_id and offset=0 to inspect the full "
+        "output in 8 KiB pages.]"
     )
     return "\n".join(part for part in (preview, notice) if part)
+
+
+def _run_id(agent):
+    return str(agent.run.projection.run_id or "manual")
 
 
 class ToolExecutor:
     def __init__(self, agent):
         self.agent = agent
-        self._outcomes_by_state = {}
+        self._repeat_outcomes = {}
+
+    @staticmethod
+    def _run_boundary_reason(agent, call_id):
+        task = agent.run.task
+        if task is None:
+            recovery_state = getattr(getattr(agent, "recovery", None), "state", None)
+            recovery_status = (
+                recovery_state.get("status", "")
+                if isinstance(recovery_state, dict)
+                else getattr(recovery_state, "status", "")
+            )
+            if recovery_status == "resumable":
+                return "a resumable Run must be resumed or reset before manual tools"
+            return ""
+        run_log = agent.run.run_log
+        if run_log is None:
+            return "active Run tool execution requires its Run Log"
+        if agent.run.projection.terminal:
+            return "terminal Run cannot execute additional tools"
+        pending = run_log.pending_call_id()
+        if not pending:
+            return "active Run tools require a persisted assistant_tool_call"
+        if pending != str(call_id):
+            return "tool execution does not match the pending Run call"
+        return ""
+
+    def _reject_out_of_protocol_call(self, call):
+        reason = self._run_boundary_reason(self.agent, call.call_id)
+        if not reason:
+            return None
+        return self._rejected(
+            call,
+            "run_protocol_violation",
+            reason,
+            "no_retry",
+            record=False,
+        )
+
+    def _resolve_tool(self, call):
+        tool = self.agent.tools.registry.get(call.name)
+        if tool is None:
+            return None, self._rejected(
+                call, "unknown_tool", "unknown tool", "retry_after_change"
+            )
+        allowed = self.agent.config.allowed_tools
+        if allowed is not None and call.name not in allowed:
+            return None, self._rejected(
+                call, "tool_not_allowed", "tool outside run surface"
+            )
+        if self.agent.run.task is None and not tool.get(
+            "manual_observation", False
+        ):
+            return None, self._rejected(
+                call,
+                "manual_mutation_forbidden",
+                "manual mode permits observation tools only; mutations require an active Run",
+                "no_retry",
+            )
+        return tool, None
 
     @staticmethod
     def _recorded_run_log(agent, call_id):
@@ -78,7 +135,7 @@ class ToolExecutor:
             return None
         pending = run_log.pending_call_id()
         if not pending:
-            return None
+            raise RuntimeError("active Run has no pending tool call")
         if pending != str(call_id):
             raise RuntimeError("tool execution does not match the pending Run call")
         return run_log
@@ -100,13 +157,7 @@ class ToolExecutor:
 
     @classmethod
     def _record_tool_started(
-        cls,
-        agent,
-        call,
-        *,
-        risky,
-        effect_scope,
-        potential_effects,
+        cls, agent, call, *, risky, effect_scope, potential_effects
     ):
         run_log = cls._recorded_run_log(agent, call.call_id)
         if run_log is None:
@@ -125,157 +176,40 @@ class ToolExecutor:
         run_log = cls._recorded_run_log(agent, outcome.tool_call_id)
         if run_log is None:
             return None
-        return agent.apply_run_event(
-            run_log.append_tool_result(
-                outcome,
-                workspace_revision=agent.workspace.revision,
+        return agent.apply_run_event(run_log.append_tool_result(outcome))
+
+    @staticmethod
+    def _repeat_key(run_id, name, args):
+        try:
+            args_signature = json.dumps(
+                dict(args),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             )
+        except (TypeError, ValueError):
+            return None
+        return str(run_id), str(name), args_signature
+
+    def _reject_repeated_call(self, call, repeat_key):
+        previous = self._repeat_outcomes.get(repeat_key, ()) if repeat_key else ()
+        if not previous or previous[-1].side_effect_state not in {"partial", "unknown"}:
+            return None
+        return self._rejected(
+            call,
+            "repeated_identical_call",
+            "same call previously left an uncertain side effect; inspect state before another action",
+            "retry_after_change",
         )
 
     @staticmethod
-    def _is_matching_verification(agent, call):
-        configured = str(agent.config.verification_command or "").strip()
-        command = str(call.args.get("command", "")).strip()
-        return bool(
-            call.name == "run_shell"
-            and configured
-            and command == configured
-        )
-
-    @classmethod
-    def _record_matching_verification(
-        cls,
-        agent,
-        call,
-        outcome,
-        result_entry,
-        started_mutation_sequence,
-        started_changed_path_states,
-    ):
-        if (
-            result_entry is None
-            or started_mutation_sequence is None
-            or started_changed_path_states is None
-            or not cls._is_matching_verification(agent, call)
-        ):
-            return
-        finished_mutation_sequence = (
-            agent.run.evidence.last_workspace_mutation_sequence
-        )
-        finished_changed_path_states = capture_changed_path_states(
-            agent.workspace.root,
-            agent.run.evidence.changed_paths,
-        )
-        stale = (
-            started_mutation_sequence != finished_mutation_sequence
-            or started_changed_path_states != finished_changed_path_states
-        )
-        if stale:
-            status = "stale"
-        elif outcome.status == "success":
-            status = "passed"
-        elif (
-            outcome.failure is not None
-            and outcome.failure.code == "sandbox_infrastructure_error"
-        ):
-            status = "infrastructure_error"
-        else:
-            status = "failed"
-        agent.emit_event(
-            "verification_result",
-            {
-                "command": str(call.args.get("command", "")).strip(),
-                "status": status,
-                "freshness": "stale" if stale else "current",
-                "started_workspace_mutation_sequence": started_mutation_sequence,
-                "finished_workspace_mutation_sequence": finished_mutation_sequence,
-                "started_changed_path_states": started_changed_path_states,
-                "finished_changed_path_states": finished_changed_path_states,
-                "exit_code": outcome.structured.get("exit_code"),
-                "output": outcome.content[-4000:],
-                "source_tool_call_id": call.call_id,
-            },
-        )
-
-    @classmethod
-    def _call_state(cls, agent, name, args):
-        paths = []
-        working_state = ()
-        workspace_revision = None
-        if name in {"read_file", "write_file", "edit_file"}:
-            paths.append(agent.workspace.resolve_tool_path(args["path"]))
-        elif name in {"list_files", "search"}:
-            paths.append(agent.workspace.resolve_tool_path(args.get("path", ".")))
-            workspace_revision = agent.workspace.revision
-        elif name == "run_shell":
-            workspace_revision = agent.workspace.revision
-        elif name in {"memory_store", "memory_forget"}:
-            memory = agent.dependencies.project_memory
-            paths.extend((memory.cards_root / args["filename"], memory.index_path))
-        elif name == "memory_recall":
-            memory = agent.dependencies.project_memory
-            paths.extend(memory.cards_root / filename for filename in args["filenames"])
-        elif name == "update_working_state" and agent.run.task_state is not None:
-            state = agent.run.task_state.working_state
-            working_state = (
-                state.constraints,
-                state.decisions,
-                state.next_steps,
-            )
-        elif agent.tools.registry.get(name, {}).get("workspace_mutating", False):
-            workspace_revision = agent.workspace.revision
+    def _potential_effects(tool, args):
+        planner = tool.get("potential_effects")
+        if planner is not None:
+            return planner(args)
         return (
-            workspace_revision,
-            tuple(
-                (path.as_posix(), agent.workspace.path_state(path))
-                for path in paths
-            ),
-            working_state,
-        )
-
-    @classmethod
-    def _repeat_key(cls, agent, run_id, name, args):
-        try:
-            call_state = cls._call_state(agent, name, args)
-            call_signature = tool_call_hash(name, args)
-        except (KeyError, TypeError, ValueError):
-            try:
-                call_signature = tool_call_hash(name, args)
-            except (TypeError, ValueError):
-                return None
-            call_state = (agent.workspace.revision, (), ())
-        policy_state = (
-            agent.config.approval_policy,
-            agent.config.read_only,
-            agent.config.allowed_tools,
-        )
-        return (
-            str(run_id),
-            call_signature,
-            call_state,
-            policy_state,
-        )
-
-    @staticmethod
-    def _logical_path(agent, path):
-        path = Path(path).resolve()
-        try:
-            return path.relative_to(agent.workspace.root).as_posix()
-        except ValueError:
-            return path.as_posix()
-
-    @classmethod
-    def _potential_effects(cls, agent, name, args, workspace_mutating):
-        if name in {"write_file", "edit_file"}:
-            path = agent.workspace.resolve_tool_path(args["path"])
-            return "workspace", ((cls._logical_path(agent, path), path),)
-        if name in {"memory_store", "memory_forget"}:
-            memory = agent.dependencies.project_memory
-            paths = (memory.cards_root / args["filename"], memory.index_path)
-            return "project_memory", tuple(
-                (cls._logical_path(agent, path), path) for path in paths
-            )
-        return ("workspace" if workspace_mutating else "none"), ()
+            "workspace" if tool.get("workspace_mutating", False) else "none"
+        ), ()
 
     @staticmethod
     def _effect_snapshot(agent, paths):
@@ -285,96 +219,108 @@ class ToolExecutor:
         }
 
     @staticmethod
-    def _effect_diff(before, after):
-        paths = []
-        for path in sorted(set(before) | set(after)):
-            old = before.get(path, "absent")
-            new = after.get(path, "absent")
-            if old == new:
+    def _tracked_workspace_drift(agent, states, effect_scope):
+        if effect_scope not in {"workspace", "mixed"}:
+            return ()
+        evidence = getattr(getattr(agent.run, "projection", None), "evidence", None)
+        evidence = evidence or getattr(agent.run, "evidence", None)
+        tracked = getattr(getattr(evidence, "change_set", None), "files", {})
+        drift = []
+        for path, actual_state in sorted(states.items()):
+            change = tracked.get(path)
+            if change is None:
                 continue
-            paths.append(path)
-        return paths
+            projected_state = str(change.current_after_state)
+            if projected_state != actual_state:
+                drift.append(
+                    {
+                        "path": path,
+                        "projected_state": projected_state,
+                        "actual_state": actual_state,
+                    }
+                )
+        return tuple(drift)
 
     @staticmethod
-    def _repeat_block_reason(previous):
-        if not previous:
-            return ""
-        last = previous[-1]
-        if last.side_effect_state in {"partial", "unknown"}:
-            return "same call previously left an uncertain side effect; inspect state before another action"
-        if last.status == "success":
-            if last.side_effect_state == "changed":
-                return "same mutation already committed in the current state"
-            return "same successful call already ran in the current state and produced no new evidence"
-        if last.status == "error":
-            recovery = (
-                last.failure is not None
-                and last.failure.recovery
+    def _preimage_artifacts(agent, call, paths, states, effect_scope):
+        if (
+            effect_scope not in {"workspace", "mixed"}
+            or agent.run.run_log is None
+            or agent.run.task is None
+        ):
+            return {}
+        evidence = getattr(getattr(agent.run, "projection", None), "evidence", None)
+        evidence = evidence or getattr(agent.run, "evidence", None)
+        existing_changes = getattr(getattr(evidence, "change_set", None), "files", {})
+        artifacts = {}
+        for logical, path in paths:
+            before_state = states.get(logical, "absent")
+            if before_state == "absent" or logical in existing_changes:
+                artifacts[logical] = ""
+                continue
+            if not path.is_file():
+                raise ValueError(f"workspace preimage is not a file: {logical}")
+            descriptor = agent.dependencies.artifacts.write_workspace_preimage(
+                _run_id(agent),
+                call.call_id,
+                logical,
+                path.read_text(encoding="utf-8"),
             )
-            if (
-                recovery == "retry_after_wait"
-                and sum(item.status == "error" for item in previous) < 2
-            ):
-                return ""
-            if recovery == "retry_after_change":
-                return "same failed call requires a changed parameter, workspace, or other precondition"
-            if recovery == "user_action_required":
-                return "same failed call requires user action before another attempt"
-            return "same failed call has no unchanged-state retry route"
-        return "same call already completed without a state change"
+            artifacts[logical] = descriptor["artifact_id"]
+        return artifacts
 
     @staticmethod
-    def _correction_action(failure):
-        if failure is None:
-            return "continue"
-        return {
-            "retry_after_change": "repair",
-            "retry_after_wait": "wait",
-            "user_action_required": "request_user_action",
-            "no_retry": "stop_route",
-        }[failure.recovery]
+    def _attach_preimage_artifacts(structured, preimages):
+        structured = dict(structured or {})
+        transitions = []
+        for item in structured.get("path_transitions", ()):
+            transition = dict(item)
+            path = str(transition.get("path", ""))
+            transition["before_artifact_id"] = str(
+                preimages[path]
+                if path in preimages
+                else transition.get("before_artifact_id", "")
+            )
+            transitions.append(transition)
+        if transitions:
+            structured["path_transitions"] = transitions
+        return structured
+
+    @staticmethod
+    def _effect_diff(before, after):
+        return [
+            path
+            for path in sorted(set(before) | set(after))
+            if before.get(path, "absent") != after.get(path, "absent")
+        ]
+
+    @staticmethod
+    def _path_transitions(before, after, preimages, paths):
+        return [
+            {
+                "path": path,
+                "before_state": before[path],
+                "after_state": after[path],
+                "before_artifact_id": preimages.get(path, ""),
+            }
+            for path in paths
+        ]
 
     def execute(self, call):
         agent = self.agent
         name, args = call.name, call.args
-        run_id = agent.run.task_state.run_id if agent.run.task_state else "manual"
-        admission_key = self._repeat_key(agent, run_id, name, args)
-        repeat_reason = self._repeat_block_reason(
-            self._outcomes_by_state.get(admission_key, ())
-            if admission_key is not None
-            else ()
-        )
-        if repeat_reason:
-            return self._rejected(
-                call,
-                "repeated_identical_call",
-                repeat_reason,
-                "retry_after_change",
-                correction_action="replan",
-                outcome_key=admission_key,
-            )
-
-        tool = agent.tools.registry.get(name)
-        if tool is None:
-            return self._rejected(
-                call,
-                "unknown_tool",
-                "unknown tool",
-                "retry_after_change",
-                outcome_key=admission_key,
-            )
+        boundary_rejection = self._reject_out_of_protocol_call(call)
+        if boundary_rejection is not None:
+            return boundary_rejection
+        run_id = _run_id(agent)
+        tool, admission_rejection = self._resolve_tool(call)
+        if admission_rejection is not None:
+            return admission_rejection
         workspace_mutating = bool(tool.get("workspace_mutating", False))
-
-        if (
-            agent.config.allowed_tools is not None
-            and name not in agent.config.allowed_tools
-        ):
-            return self._rejected(
-                call,
-                "tool_not_allowed",
-                "tool outside run surface",
-                outcome_key=admission_key,
-            )
+        raw_key = self._repeat_key(run_id, name, args)
+        repeated = self._reject_repeated_call(call, raw_key)
+        if repeated is not None:
+            return repeated
 
         try:
             args = agent.tools.validate(name, args)
@@ -385,88 +331,92 @@ class ToolExecutor:
                 exc.failure.detail,
                 exc.failure.recovery,
                 structured=exc.structured,
-                outcome_key=admission_key,
             )
-        except Exception as exc:  # noqa: BLE001 - admission converts validator failures to outcomes
-            detail = str(exc)
+        except Exception as exc:  # noqa: BLE001 - validator boundary
             return self._rejected(
                 call,
                 "invalid_arguments",
-                detail,
+                str(exc),
                 "retry_after_change",
-                outcome_key=admission_key,
             )
         call = ToolCall(name, args, call.call_id)
-
         agent.prompt.refresh()
-        repeat_key = self._repeat_key(agent, run_id, name, args)
-        repeat_reason = self._repeat_block_reason(self._outcomes_by_state.get(repeat_key, ()))
-        if repeat_reason:
-            return self._rejected(
-                call,
-                "repeated_identical_call",
-                repeat_reason,
-                "retry_after_change",
-                correction_action="replan",
-                outcome_key=repeat_key,
-            )
+        repeat_key = self._repeat_key(run_id, name, args)
+        repeated = self._reject_repeated_call(call, repeat_key)
+        if repeated is not None:
+            return repeated
         if tool["risky"] and not agent.tools.approve(name, args):
+            return self._rejected(call, "approval_denied", "approval denied")
+
+        try:
+            potential_scope, potential_paths = self._potential_effects(tool, args)
+            effects_before = self._effect_snapshot(agent, potential_paths)
+        except Exception as exc:  # noqa: BLE001 - fail before side effect
+            return self._rejected(
+                call, "effect_planning_failed", str(exc), "retry_after_change"
+            )
+        drift = self._tracked_workspace_drift(
+            agent,
+            effects_before,
+            potential_scope,
+        )
+        if drift:
+            paths = ", ".join(item["path"] for item in drift)
             return self._rejected(
                 call,
-                "approval_denied",
-                "approval denied",
-                outcome_key=repeat_key,
+                "workspace_drift",
+                f"workspace changed outside this Run after its last mutation: {paths}",
+                "user_action_required",
+                structured={"drift": list(drift)},
             )
-
-        potential_scope, potential_paths = self._potential_effects(
-            agent, name, args, workspace_mutating
-        )
-        effects_before = self._effect_snapshot(agent, potential_paths)
+        try:
+            preimages = self._preimage_artifacts(
+                agent, call, potential_paths, effects_before, potential_scope
+            )
+        except Exception as exc:  # noqa: BLE001 - fail before side effect
+            return self._rejected(
+                call, "effect_planning_failed", str(exc), "retry_after_change"
+            )
         self._record_tool_started(
             agent,
             call,
             risky=bool(tool["risky"]),
             effect_scope=potential_scope,
             potential_effects=[
-                {"path": path, "before_state": state}
+                {
+                    "path": path,
+                    "before_state": state,
+                    "before_artifact_id": preimages.get(path, ""),
+                }
                 for path, state in sorted(effects_before.items())
             ],
         )
-        verification_start_mutation_sequence = None
-        verification_started_changed_path_states = None
+
         observed_workspace_drift = False
         try:
-            if self._is_matching_verification(agent, call):
-                verification_start_mutation_sequence = (
-                    agent.run.evidence.last_workspace_mutation_sequence
-                )
-                verification_started_changed_path_states = capture_changed_path_states(
-                    agent.workspace.root,
-                    agent.run.evidence.changed_paths,
-                )
             execution = tool["run"](args)
             if not isinstance(execution, ToolRunnerResult):
                 raise TypeError("tool runner must return ToolRunnerResult")
             paths = list(execution.affected_paths)
-            effect_scope = execution.effect_scope
             failure = execution.failure
-            status = (
-                "success"
-                if failure is None
-                else ("partial_success" if paths else "error")
-            )
+            status = "success" if failure is None else ("partial_success" if paths else "error")
             side_effect = (
-                "partial"
-                if failure is not None and paths
-                else ("changed" if paths else "none")
+                "partial" if failure is not None and paths else ("changed" if paths else "none")
             )
             outcome = self._outcome(
-                call, status,
+                call,
+                status,
                 "completed",
-                side_effect, execution.content, failure=failure, affected_paths=paths,
-                effect_scope=effect_scope, structured=execution.structured,
+                side_effect,
+                execution.content,
+                failure=failure,
+                affected_paths=paths,
+                effect_scope=execution.effect_scope,
+                structured=self._attach_preimage_artifacts(
+                    execution.structured, preimages
+                ),
             )
-        except Exception as exc:  # noqa: BLE001 - tool boundary must capture arbitrary runner failures
+        except Exception as exc:  # noqa: BLE001 - tool boundary
             effects_after = self._effect_snapshot(agent, potential_paths)
             detected_paths = self._effect_diff(effects_before, effects_after)
             typed_error = exc if isinstance(exc, ToolFailureError) else None
@@ -476,44 +426,45 @@ class ToolExecutor:
                 and potential_scope in {"workspace", "mixed"}
             )
             paths = [] if typed_error else detected_paths
-            unknown = bool(
-                not typed_error and workspace_mutating and not potential_paths
-            )
+            unknown = bool(not typed_error and workspace_mutating and not potential_paths)
             uncertain = bool(paths or unknown)
+            transitions = self._path_transitions(
+                effects_before,
+                effects_after,
+                preimages,
+                paths,
+            )
             outcome = self._outcome(
-                call, "partial_success" if uncertain else "error", "failed",
+                call,
+                "partial_success" if uncertain else "error",
+                "failed",
                 "partial" if paths else ("unknown" if unknown else "none"),
                 f"error: tool {name} failed: {exc}",
-                failure=(typed_error.failure if typed_error else None) or FailureInfo(
-                    "tool_partial_success" if paths else ("tool_effect_unknown" if unknown else "tool_failed"),
+                failure=(typed_error.failure if typed_error else None)
+                or FailureInfo(
+                    "tool_partial_success"
+                    if paths
+                    else ("tool_effect_unknown" if unknown else "tool_failed"),
                     str(exc),
                     "no_retry" if uncertain else "retry_after_change",
                 ),
                 affected_paths=paths,
                 effect_scope=potential_scope,
-                structured=(typed_error.structured if typed_error else None),
+                structured=(
+                    typed_error.structured
+                    if typed_error
+                    else {"path_transitions": transitions}
+                ),
             )
 
-        workspace_effect = (
+        if (
             outcome.side_effect_state != "none"
             and outcome.effect_scope in {"workspace", "mixed"}
-        )
-        if workspace_effect or observed_workspace_drift:
-            revision_before_refresh = agent.workspace.revision
+        ) or observed_workspace_drift:
             agent.prompt.refresh(force=True)
-            if agent.workspace.revision == revision_before_refresh:
-                agent.workspace.mark_changed()
-        result_entry = self._record_tool_result(agent, outcome)
-        self._record_matching_verification(
-            agent,
-            call,
-            outcome,
-            result_entry,
-            verification_start_mutation_sequence,
-            verification_started_changed_path_states,
-        )
-        result_key = self._repeat_key(agent, run_id, name, args)
-        self._outcomes_by_state.setdefault(result_key, []).append(outcome)
+        self._record_tool_result(agent, outcome)
+        if repeat_key is not None and outcome.side_effect_state in {"partial", "unknown"}:
+            self._repeat_outcomes.setdefault(repeat_key, []).append(outcome)
         return outcome
 
     def _rejected(
@@ -523,40 +474,38 @@ class ToolExecutor:
         detail,
         recovery="no_retry",
         *,
-        correction_action=None,
         structured=None,
-        outcome_key=None,
+        record=True,
     ):
         outcome = self._outcome(
-            call, "rejected", "not_started", "none",
+            call,
+            "rejected",
+            "not_started",
+            "none",
             f"error: {detail} for {call.name}",
-            failure=FailureInfo(
-                code,
-                detail,
-                recovery,
-            ),
-            correction_action=correction_action,
+            failure=FailureInfo(code, detail, recovery),
             structured=structured,
         )
-        self._record_tool_result(self.agent, outcome)
-        if outcome_key is not None:
-            self._outcomes_by_state.setdefault(outcome_key, []).append(outcome)
+        if record:
+            self._record_tool_result(self.agent, outcome)
         return outcome
 
     def _outcome(
-        self, call, status, execution_state, side_effect_state,
-        content, *, failure=None, affected_paths=(), effect_scope="none",
-        structured=None, correction_action=None,
+        self,
+        call,
+        status,
+        execution_state,
+        side_effect_state,
+        content,
+        *,
+        failure=None,
+        affected_paths=(),
+        effect_scope="none",
+        structured=None,
     ):
-        run_id = (
-            self.agent.run.task_state.run_id
-            if self.agent.run.task_state
-            else "manual"
-        )
         safe_content = self.agent.redact_text(content)
         safe_structured = self._redact_structured(
-            self.agent,
-            dict(structured or {}),
+            self.agent, dict(structured or {})
         )
         if failure is not None:
             failure = FailureInfo(
@@ -567,28 +516,15 @@ class ToolExecutor:
         descriptor = {}
         if len(safe_content.encode("utf-8")) > _tool_preview_limit(call.name):
             descriptor = self.agent.dependencies.artifacts.write_tool_output(
-                run_id,
-                call.call_id,
-                safe_content,
+                _run_id(self.agent), call.call_id, safe_content
             )
-        content = model_tool_output(
-            safe_content,
-            call.name,
-            descriptor,
-        )
-        correction_action = (
-            self._correction_action(failure)
-            if correction_action is None
-            else str(correction_action)
-        )
         return ToolOutcome(
             tool_call_id=call.call_id,
             tool_name=call.name,
             status=status,
             execution_state=execution_state,
             side_effect_state=side_effect_state,
-            content=content,
-            correction_action=correction_action,
+            content=model_tool_output(safe_content, call.name, descriptor),
             structured=safe_structured,
             failure=failure,
             affected_paths=tuple(affected_paths),

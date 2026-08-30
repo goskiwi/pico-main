@@ -1,60 +1,57 @@
-"""Build model prompts from prefix, context, and selected project memory."""
+"""Build stable Responses instructions plus dynamic model input."""
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from .context_manager import ContextManager
 from .features.memory import WorkingState
-from .prompt_prefix import build_prompt_prefix
+from .prompt_instructions import build_prompt_instructions
 
 if TYPE_CHECKING:
     from .runtime import Pico
 
 
+@dataclass(frozen=True)
+class ModelPrompt:
+    instructions: str
+    input_text: str
+
+
 class PromptBuilder:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
-        self.prefix_state = self._build_prefix()
+        self.instructions_state = build_prompt_instructions(
+            enable_project_memory=runtime.dependencies.project_memory is not None
+        )
         self.context = ContextManager(runtime)
 
-    def _build_prefix(self):
-        runtime = self.runtime
-        return build_prompt_prefix(
-            workspace=runtime.workspace.context,
-            tools=runtime.tools.surface,
-        )
-
     @property
-    def prefix(self):
-        return self.prefix_state.text
+    def instructions(self):
+        return self.instructions_state.text
 
-    @prefix.setter
-    def prefix(self, value):
+    @instructions.setter
+    def instructions(self, value):
         text = str(value)
-        self.prefix_state = replace(
-            self.prefix_state,
+        self.instructions_state = replace(
+            self.instructions_state,
             text=text,
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
 
     def refresh(self, *, force=False):
-        previous_hash = self.prefix_state.content_hash
-        workspace_changed = self.runtime.workspace.refresh(force=force)
-        if not workspace_changed and not force:
-            return False
-        prefix_state = self._build_prefix()
-        prefix_changed = previous_hash != prefix_state.content_hash
-        if prefix_changed:
-            self.prefix_state = prefix_state
-        return prefix_changed
+        """Explicitly refresh Workspace metadata outside prompt construction."""
+        return self.runtime.workspace.refresh(force=force)
 
     def memory_text(self):
-        task_state = self.runtime.run.task_state
+        task_state = self.runtime.run.task
         working_text = (
-            task_state.working_state.render_panel()
+            "Task goal:\n- "
+            + task_state.contract.goal
+            + "\n\n"
+            + task_state.working.render_panel()
             if task_state is not None
             else WorkingState().render_panel()
         )
@@ -63,18 +60,34 @@ class PromptBuilder:
             f"{self.runtime.dependencies.project_memory.index_text()}"
         )
 
-    def build(
+    def prepare_compaction(
         self,
         user_message,
         *,
         provider_context_tokens=None,
         provider_overhead_tokens=0,
     ):
-        self.refresh()
-        prompt, metadata = self.context.build(
+        return self.context.prepare_compaction(
             user_message,
             provider_context_tokens=provider_context_tokens,
             provider_overhead_tokens=provider_overhead_tokens,
         )
-        metadata["prompt_cache_key"] = self.prefix_state.content_hash
-        return prompt, metadata
+
+    def build(
+        self,
+        user_message,
+        *,
+        provider_context_tokens=None,
+        provider_overhead_tokens=0,
+        compaction_metadata=None,
+        history_override=None,
+    ):
+        input_text, metadata = self.context.build(
+            user_message,
+            provider_context_tokens=provider_context_tokens,
+            provider_overhead_tokens=provider_overhead_tokens,
+            compaction_metadata=compaction_metadata,
+            history_override=history_override,
+        )
+        metadata["prompt_cache_key"] = self.instructions_state.content_hash
+        return ModelPrompt(self.instructions, input_text), metadata

@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
-from .features.memory import WorkingState
-from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState, apply_task_event
+from .delivery import FinalDiffDescriptor
+from .run_projection import RunProjection
+from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v12"
+RUN_LOG_SCHEMA_VERSION = "run-log-v14"
+COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -52,6 +54,11 @@ def _validate_text_payload(kind, payload):
         raise TypeError(f"{kind} content must be text")
 
 
+def _validate_user_payload(kind, payload):
+    _exact_payload(kind, payload, {"contract"})
+    TaskContract.from_dict(payload["contract"])
+
+
 def _validate_tool_call_payload(kind, payload):
     _exact_payload(kind, payload, {"name", "args", "call_id"})
     ToolCall(str(payload["name"]), payload["args"], str(payload["call_id"]))
@@ -78,7 +85,11 @@ def _validate_tool_started_payload(kind, payload):
     ):
         raise TypeError("tool_started has invalid field types")
     for effect in payload["potential_effects"]:
-        if not isinstance(effect, dict) or set(effect) != {"path", "before_state"}:
+        if not isinstance(effect, dict) or set(effect) != {
+            "path",
+            "before_state",
+            "before_artifact_id",
+        }:
             raise ValueError("tool_started has invalid potential effect")
 
 
@@ -86,7 +97,7 @@ def _validate_tool_result_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"tool_call_id", "tool_name", "workspace_revision", "outcome"},
+        {"tool_call_id", "tool_name", "outcome"},
         {"recovered_from_interruption"},
     )
     outcome = ToolOutcome.from_dict(payload["outcome"])
@@ -94,8 +105,6 @@ def _validate_tool_result_payload(kind, payload):
         raise ValueError("tool_result call id does not match outcome")
     if str(payload["tool_name"]) != outcome.tool_name:
         raise ValueError("tool_result tool name does not match outcome")
-    if not isinstance(payload["workspace_revision"], int):
-        raise TypeError("tool_result workspace_revision must be an integer")
     if "recovered_from_interruption" in payload and not isinstance(
         payload["recovered_from_interruption"], bool
     ):
@@ -103,21 +112,33 @@ def _validate_tool_result_payload(kind, payload):
 
 
 def _validate_final_payload(kind, payload):
-    _exact_payload(kind, payload, {"content", "stop_reason", "run_duration_ms"})
+    _exact_payload(
+        kind,
+        payload,
+        {"content", "stop_reason", "run_duration_ms", "final_diff"},
+    )
     if not str(payload["content"]).strip():
         raise ValueError("assistant_final requires content")
     if payload["stop_reason"] != STOP_REASON_FINAL_ANSWER_RETURNED:
         raise ValueError("assistant_final has invalid stop reason")
     if int(payload["run_duration_ms"]) < 0:
         raise ValueError("assistant_final duration cannot be negative")
+    final_diff = FinalDiffDescriptor.from_dict(payload["final_diff"])
+    if final_diff.unavailable_reason:
+        raise ValueError("assistant_final requires an available final Diff")
 
 
 def _validate_stopped_payload(kind, payload):
-    _exact_payload(kind, payload, {"content", "stop_reason", "run_duration_ms"})
+    _exact_payload(
+        kind,
+        payload,
+        {"content", "stop_reason", "run_duration_ms", "final_diff"},
+    )
     if not str(payload["stop_reason"]):
         raise ValueError("run_stopped requires stop_reason")
     if int(payload["run_duration_ms"]) < 0:
         raise ValueError("run_stopped duration cannot be negative")
+    FinalDiffDescriptor.from_dict(payload["final_diff"])
 
 
 def _validate_verification_payload(kind, payload):
@@ -126,7 +147,6 @@ def _validate_verification_payload(kind, payload):
         payload,
         {
             "status",
-            "freshness",
             "started_workspace_mutation_sequence",
             "finished_workspace_mutation_sequence",
             "started_changed_path_states",
@@ -139,8 +159,8 @@ def _validate_verification_payload(kind, payload):
             "source_tool_call_id",
         },
     )
-    if payload["freshness"] not in {"current", "stale"}:
-        raise ValueError("verification_result has invalid freshness")
+    if payload["status"] not in {"passed", "failed", "infrastructure_error"}:
+        raise ValueError("verification_result has invalid status")
     if not isinstance(payload["finished_workspace_mutation_sequence"], int):
         raise TypeError(
             "verification_result finished mutation sequence must be an integer"
@@ -166,7 +186,7 @@ def _validate_verification_payload(kind, payload):
 
 
 _PAYLOAD_VALIDATORS = {
-    "user_message": _validate_text_payload,
+    "user_message": _validate_user_payload,
     "model_instruction": _validate_text_payload,
     "assistant_tool_call": _validate_tool_call_payload,
     "tool_started": _validate_tool_started_payload,
@@ -248,25 +268,6 @@ def validate_run_events(events):
     return protocol
 
 
-def _clip(text, limit=320):
-    value = " ".join(str(text or "").split())
-    return value if len(value) <= limit else value[: limit - 2].rstrip() + " …"
-
-
-def _summary_args(args, limit=360):
-    """Keep operation identity without copying large mutation bodies."""
-    bounded = {}
-    for key, value in sorted(dict(args or {}).items()):
-        if key in {"content", "old_text", "new_text"}:
-            bounded[key] = f"<{len(str(value))} chars>"
-        else:
-            bounded[key] = value
-    return _clip(
-        json.dumps(bounded, ensure_ascii=False, sort_keys=True),
-        limit,
-    )
-
-
 @dataclass(frozen=True)
 class RunEvent:
     event_id: str
@@ -332,7 +333,9 @@ class RunEvent:
 
     @property
     def content(self):
-        if self.kind in {"user_message", "model_instruction", "assistant_final"}:
+        if self.kind == "user_message":
+            return str(dict(self.payload.get("contract", {})).get("goal", ""))
+        if self.kind in {"model_instruction", "assistant_final"}:
             return str(self.payload.get("content", ""))
         if self.kind == "tool_result":
             outcome = dict(self.payload.get("outcome", {}) or {})
@@ -390,100 +393,9 @@ class RunEvent:
         return tuple(str(item) for item in self.payload.get("covered_event_ids", []))
 
 
-@dataclass(frozen=True)
-class RunCursor:
-    sequence: int = 0
-    event_id: str = ""
-
-    def to_dict(self):
-        return {"sequence": self.sequence, "event_id": self.event_id}
-
-
-@dataclass
-class RunReplayState:
-    run_id: str = ""
-    task_id: str = ""
-    session_id: str = ""
-    working_state: WorkingState = field(default_factory=WorkingState)
-    status: str = "running"
-    stop_reason: str = ""
-    final_answer: str = ""
-    run_duration_ms: int = 0
-    model_request_count: int = 0
-    executed_tool_count: int = 0
-    kind_counts: dict[str, int] = field(default_factory=dict)
-    tool_counts: dict[str, int] = field(default_factory=dict)
-    outcome_counts: dict[str, int] = field(default_factory=dict)
-    verification_counts: dict[str, int] = field(default_factory=dict)
-    pending_operations: set[str] = field(default_factory=set)
-    last_cursor: RunCursor = field(default_factory=RunCursor)
-
-    def apply(self, entry):
-        kind = entry.kind
-        payload = dict(entry.payload)
-        apply_task_event(self, entry)
-        self.session_id = entry.session_id or self.session_id
-        self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
-        self.last_cursor = RunCursor(entry.sequence, entry.event_id)
-        if kind == "assistant_tool_call":
-            call_id = entry.call_id
-            if call_id:
-                self.pending_operations.add(call_id)
-        elif kind == "tool_result":
-            outcome = dict(payload.get("outcome", {}) or {})
-            call_id = str(payload.get("tool_call_id", "") or outcome.get("tool_call_id", ""))
-            if call_id:
-                self.pending_operations.discard(call_id)
-            tool_name = str(outcome.get("tool_name", payload.get("tool_name", "")))
-            status = str(outcome.get("status", "unknown"))
-            if tool_name and outcome.get("execution_state") != "not_started":
-                self.tool_counts[tool_name] = self.tool_counts.get(tool_name, 0) + 1
-            self.outcome_counts[status] = self.outcome_counts.get(status, 0) + 1
-        elif kind == "verification_result":
-            status = str(payload.get("status", "unknown"))
-            self.verification_counts[status] = self.verification_counts.get(status, 0) + 1
-        elif kind in {"assistant_final", "run_stopped"}:
-            self.run_duration_ms = int(payload.get("run_duration_ms", 0))
-        return self
-
-    @property
-    def terminal(self):
-        return self.status in {"completed", "stopped"}
-
-    def task_state(self):
-        return TaskState.from_dict(
-            {
-                "run_id": self.run_id,
-                "task_id": self.task_id,
-                "working_state": self.working_state.to_dict(),
-                "status": self.status,
-                "executed_tool_count": self.executed_tool_count,
-                "model_request_count": self.model_request_count,
-                "stop_reason": self.stop_reason,
-                "final_answer": self.final_answer,
-            }
-        ).to_dict()
-
-    def summary(self):
-        return {
-            **self.task_state(),
-            "session_id": self.session_id,
-            "run_duration_ms": self.run_duration_ms,
-            "kind_counts": dict(sorted(self.kind_counts.items())),
-            "tool_counts": dict(sorted(self.tool_counts.items())),
-            "outcome_counts": dict(sorted(self.outcome_counts.items())),
-            "verification_counts": dict(sorted(self.verification_counts.items())),
-            "pending_operations": sorted(self.pending_operations),
-            "run_cursor": self.last_cursor.to_dict(),
-        }
-
-
 def replay_events(events):
     validate_run_events(events)
-    projection = RunReplayState()
-    for entry in events:
-        projection.apply(entry)
-    return projection
+    return RunProjection.from_events(events)
 
 
 class RunLog:
@@ -529,8 +441,10 @@ class RunLog:
         self._protocol.apply(entry)
         return entry
 
-    def append_user(self, content):
-        return self.append("user_message", {"content": str(content)})
+    def append_user(self, contract):
+        if not isinstance(contract, TaskContract):
+            raise TypeError("user_message requires a TaskContract")
+        return self.append("user_message", {"contract": contract.to_dict()})
 
     def append_tool_call(self, call):
         return self.append(
@@ -561,13 +475,11 @@ class RunLog:
         self,
         outcome,
         *,
-        workspace_revision,
         recovered_from_interruption=False,
     ):
         payload = {
             "tool_call_id": outcome.tool_call_id,
             "tool_name": outcome.tool_name,
-            "workspace_revision": int(workspace_revision),
             "outcome": outcome.to_dict(),
         }
         if recovered_from_interruption:
@@ -581,25 +493,31 @@ class RunLog:
         self._require_no_pending()
         return self.append("model_instruction", {"content": str(content)})
 
-    def append_final(self, content, *, run_duration_ms=0):
+    def append_final(self, content, final_diff, *, run_duration_ms=0):
         self._require_no_pending()
+        if not isinstance(final_diff, FinalDiffDescriptor):
+            raise TypeError("assistant_final requires a FinalDiffDescriptor")
         return self.append(
             "assistant_final",
             {
                 "content": str(content),
                 "stop_reason": STOP_REASON_FINAL_ANSWER_RETURNED,
                 "run_duration_ms": int(run_duration_ms),
+                "final_diff": final_diff.to_dict(),
             },
         )
 
-    def append_stopped(self, content, stop_reason, *, run_duration_ms=0):
+    def append_stopped(self, content, stop_reason, final_diff, *, run_duration_ms=0):
         self._require_no_pending()
+        if not isinstance(final_diff, FinalDiffDescriptor):
+            raise TypeError("run_stopped requires a FinalDiffDescriptor")
         return self.append(
             "run_stopped",
             {
                 "content": str(content),
                 "stop_reason": str(stop_reason),
                 "run_duration_ms": int(run_duration_ms),
+                "final_diff": final_diff.to_dict(),
             },
         )
 
@@ -636,7 +554,6 @@ class RunLog:
                 execution_state="not_started",
                 side_effect_state="none",
                 content=detail,
-                correction_action="wait",
                 failure=FailureInfo(
                     "operation_not_started",
                     detail,
@@ -646,6 +563,7 @@ class RunLog:
         else:
             potential = list(started.payload.get("potential_effects", []))
             changed = []
+            transitions = []
             for effect in potential:
                 logical = str(effect.get("path", ""))
                 if not logical:
@@ -654,9 +572,18 @@ class RunLog:
                 if not path.is_absolute():
                     path = runtime.workspace.resolve_path(logical)
                 before = str(effect.get("before_state", ""))
+                before_artifact_id = str(effect.get("before_artifact_id", ""))
                 after = runtime.workspace.path_state(path)
                 if before != after:
                     changed.append(logical)
+                    transitions.append(
+                        {
+                            "path": logical,
+                            "before_state": before,
+                            "after_state": after,
+                            "before_artifact_id": before_artifact_id,
+                        }
+                    )
             effect_scope = str(started.payload.get("effect_scope", "none"))
             unknown = effect_scope in {"workspace", "mixed"} and not potential
             uncertain = bool(changed or unknown)
@@ -668,7 +595,6 @@ class RunLog:
                 execution_state="failed",
                 side_effect_state="partial" if changed else ("unknown" if unknown else "none"),
                 content=detail,
-                correction_action="stop_route" if uncertain else "wait",
                 failure=FailureInfo(
                     "operation_interrupted",
                     detail,
@@ -676,10 +602,10 @@ class RunLog:
                 ),
                 affected_paths=tuple(changed),
                 effect_scope=effect_scope if changed or unknown else "none",
+                structured={"path_transitions": transitions},
             )
         entry = self.append_tool_result(
             outcome,
-            workspace_revision=runtime.workspace.revision,
             recovered_from_interruption=True,
         )
         self.reconciled_outcomes.append((outcome, entry))
@@ -699,16 +625,21 @@ class RunLog:
         )
 
     def active_events(self):
-        context = self.context_events()
-        covered = {
-            item
-            for entry in context
-            if entry.kind == "compaction"
-            for item in entry.covered_event_ids
-        }
-        return tuple(entry for entry in context if entry.event_id not in covered)
+        active = []
+        for entry in self.context_events():
+            if entry.kind != "compaction":
+                active.append(entry)
+                continue
+            covered = entry.covered_event_ids
+            prefix = tuple(item.event_id for item in active[: len(covered)])
+            if not covered or prefix != covered:
+                raise ValueError(
+                    "compaction coverage must match the active logical prefix"
+                )
+            active = [entry, *active[len(covered) :]]
+        return tuple(active)
 
-    def compact(self, *, retain_tokens, token_counter, summary_builder=None):
+    def compact(self, *, retain_tokens, token_counter, summary_builder):
         active = list(self.active_events())
         units = []
         index = 0
@@ -741,12 +672,11 @@ class RunLog:
         compacted = tuple(item for unit in units[:cut] for item in unit)
         if not compacted:
             return None
-        summary = (
-            summary_builder(compacted)
-            if summary_builder is not None
-            else self._summary_text(compacted)
-        )
-        source = "\n".join(self._render_event(entry) for entry in compacted)
+        summary_events = tuple(self._without_projected_state(compacted))
+        if not summary_events:
+            return None
+        summary = summary_builder(summary_events)
+        source = "\n".join(self._render_event(entry) for entry in summary_events)
         if token_counter(summary) >= token_counter(source):
             return None
         event = self._commit_compaction(
@@ -754,7 +684,7 @@ class RunLog:
             [entry.event_id for entry in compacted],
         )
         return event, {
-            "mode": "runtime_summary",
+            "mode": "semantic_history",
             "covered_events": len(compacted),
             "retained_events": sum(len(unit) for unit in units[cut:]),
             "retained_tokens": retained_tokens,
@@ -780,42 +710,6 @@ class RunLog:
             },
         )
 
-    def _summary_text(self, events):
-        lines = ["Earlier run summary:"]
-        index = 0
-        while index < len(events):
-            entry = events[index]
-            if entry.kind == "model_instruction":
-                lines.append(f"- Instruction: {_clip(entry.content)}")
-                index += 1
-                continue
-            if entry.kind == "compaction":
-                lines.extend(
-                    line
-                    for line in entry.content.splitlines()
-                    if line.startswith("- ")
-                )
-                index += 1
-                continue
-            if entry.kind != "assistant_tool_call":
-                index += 1
-                continue
-            if index + 1 >= len(events):
-                raise RuntimeError("Run Log compaction received an incomplete tool batch")
-            result = events[index + 1]
-            if result.kind != "tool_result" or result.call_id != entry.call_id:
-                raise RuntimeError("Run Log compaction received a mismatched tool batch")
-            if not (
-                entry.name == "update_working_state"
-                and result.outcome_status == "success"
-            ):
-                lines.append(
-                    f"- Tool transaction: {entry.name} {_summary_args(entry.args)} "
-                    f"-> {result.outcome_status}; result: {_clip(result.content, 240)}"
-                )
-            index += 2
-        return "\n".join(lines)
-
     @staticmethod
     def _render_event(entry):
         if entry.kind == "assistant_tool_call":
@@ -833,11 +727,14 @@ class RunLog:
         return f"[{entry.kind}] {entry.content}"
 
     @staticmethod
-    def _without_projected_working_updates(events):
+    def _without_projected_state(events):
         selected = []
         index = 0
         while index < len(events):
             entry = events[index]
+            if entry.kind == "user_message":
+                index += 1
+                continue
             if (
                 entry.kind == "assistant_tool_call"
                 and entry.name == "update_working_state"
@@ -855,18 +752,9 @@ class RunLog:
             index += 1
         return selected
 
-    def render_projection(self, query, exclude_user_content=None):
-        del query
+    def render_projection(self):
         active = self.active_events()
-        selected = self._without_projected_working_updates(active)
-        if exclude_user_content is not None:
-            for index in range(len(selected) - 1, -1, -1):
-                entry = selected[index]
-                if entry.kind == "user_message" and entry.content == str(
-                    exclude_user_content
-                ):
-                    selected.pop(index)
-                    break
+        selected = self._without_projected_state(active)
         lines = ["Current run events:"]
         artifact_references = 0
         for entry in selected:
@@ -879,4 +767,122 @@ class RunLog:
             "selected_count": len(selected),
             "omitted_count": max(0, len(active) - len(selected)),
             "artifact_references": artifact_references,
+        }
+
+    def render_compacted_projection(self, *, retain_tokens, token_counter):
+        """Render complete summaries followed by a complete recent-event suffix."""
+
+        active = self.active_events()
+        selected = self._without_projected_state(active)
+        summaries = tuple(entry for entry in selected if entry.kind == "compaction")
+        if not summaries:
+            return None
+        recent = tuple(entry for entry in selected if entry.kind != "compaction")
+        units = []
+        index = 0
+        while index < len(recent):
+            entry = recent[index]
+            if entry.kind == "assistant_tool_call":
+                if index + 1 >= len(recent):
+                    raise RuntimeError("Run Log contains an incomplete tool transaction")
+                result = recent[index + 1]
+                if result.kind != "tool_result" or result.call_id != entry.call_id:
+                    raise RuntimeError("Run Log tool batch is not contiguous")
+                units.append((entry, result))
+                index += 2
+                continue
+            if entry.kind == "tool_result":
+                raise RuntimeError("Run Log contains an orphan tool result")
+            units.append((entry,))
+            index += 1
+
+        limit = max(0, int(retain_tokens))
+
+        def render(candidate):
+            retained_count = sum(len(unit) for unit in candidate)
+            lines = ["Current run events:"]
+            lines.extend(self._render_event(entry) for entry in summaries)
+            if retained_count < len(recent):
+                lines.append(COMPACTED_HISTORY_OMITTED)
+            for unit in candidate:
+                lines.extend(self._render_event(entry) for entry in unit)
+            return "\n".join(lines)
+
+        retained = []
+        minimum = render(retained)
+        if token_counter(minimum) > limit:
+            raise ValueError(
+                "committed compaction summary exceeds the History budget"
+            )
+        for unit in reversed(units):
+            candidate = [unit, *retained]
+            if token_counter(render(candidate)) > limit:
+                break
+            retained = candidate
+        text = render(retained)
+        flattened = tuple(entry for unit in retained for entry in unit)
+        return text, {
+            "active_count": len(active),
+            "selected_count": len(summaries) + len(flattened),
+            "omitted_count": max(
+                0,
+                len(active) - len(summaries) - len(flattened),
+            ),
+            "artifact_references": sum(
+                bool(entry.artifact_id) for entry in (*summaries, *flattened)
+            ),
+            "projection_mode": "compacted_complete_transactions",
+            "retained_tokens": token_counter(text),
+        }
+
+    def render_recent_projection(self, *, retain_tokens, token_counter):
+        """Render a bounded suffix without splitting a Tool transaction."""
+
+        active = self.active_events()
+        selected = self._without_projected_state(active)
+        units = []
+        index = 0
+        while index < len(selected):
+            entry = selected[index]
+            if entry.kind == "assistant_tool_call":
+                if index + 1 >= len(selected):
+                    break
+                result = selected[index + 1]
+                if result.kind != "tool_result" or result.call_id != entry.call_id:
+                    raise RuntimeError("Run Log tool batch is not contiguous")
+                units.append((entry, result))
+                index += 2
+                continue
+            if entry.kind == "tool_result":
+                raise RuntimeError("Run Log contains an orphan tool result")
+            units.append((entry,))
+            index += 1
+
+        limit = max(0, int(retain_tokens))
+        retained = []
+
+        def render(candidate):
+            retained_count = sum(len(unit) for unit in candidate)
+            omitted = max(0, len(selected) - retained_count)
+            lines = ["Current run events (bounded fallback):"]
+            lines.append(f"- {omitted} older events omitted")
+            for unit in candidate:
+                lines.extend(self._render_event(entry) for entry in unit)
+            return "\n".join(lines)
+
+        for unit in reversed(units):
+            candidate = [unit, *retained]
+            if token_counter(render(candidate)) > limit:
+                break
+            retained = candidate
+        text = render(retained)
+        flattened = tuple(entry for unit in retained for entry in unit)
+        return text, {
+            "active_count": len(active),
+            "selected_count": len(flattened),
+            "omitted_count": max(0, len(active) - len(flattened)),
+            "artifact_references": sum(
+                bool(entry.artifact_id) for entry in flattened
+            ),
+            "retained_tokens": token_counter(text),
         }
