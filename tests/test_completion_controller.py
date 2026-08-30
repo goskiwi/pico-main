@@ -103,8 +103,6 @@ def add_change(agent, path, before, after, sequence=1, status="success", side="c
         "tool_result",
         "now",
         {
-            "tool_call_id": outcome.tool_call_id,
-            "tool_name": outcome.tool_name,
             "outcome": outcome.to_dict(),
         },
     )

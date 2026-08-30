@@ -67,7 +67,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
     tool_entry = next(entry for entry in entries if entry.kind == "tool_result")
     outcome = tool_entry.payload["outcome"]
-    assert outcome["artifact"] == {}
+    assert outcome["artifact_id"] == ""
 
 
 def test_pico_ask_delegates_to_agent_loop(tmp_path):
@@ -574,7 +574,7 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     assert answer == "Stopped after reaching the tool execution limit without a final answer."
     assert agent.run.metrics.executed_tool_count == 1
     finished_tools = [
-        entry.payload["tool_name"]
+        entry.name
         for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
         if entry.kind == "tool_result"
         and entry.payload["outcome"]["execution_state"] != "not_started"

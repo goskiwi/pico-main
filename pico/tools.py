@@ -20,8 +20,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .artifacts import ARTIFACT_ID_PATTERN
-from .contracts import FailureInfo, ToolFailureError, ToolRunnerResult
+from .contracts import (
+    TOOL_ARTIFACT_ID_PATTERN,
+    FailureInfo,
+    ToolFailureError,
+    ToolRunnerResult,
+)
 from .features.memory import normalize_working_update
 from .project_memory import MEMORY_RECALL_MAX_CARDS
 from .sandbox import shell_argv
@@ -52,7 +56,7 @@ class ReadFileArgs(ToolArgs):
 
 
 class ReadArtifactArgs(ToolArgs):
-    artifact_id: str = Field(pattern=ARTIFACT_ID_PATTERN)
+    artifact_id: str = Field(pattern=TOOL_ARTIFACT_ID_PATTERN)
     offset: int = Field(default=0, ge=0)
     max_bytes: int = Field(default=8192, ge=1, le=8192)
 

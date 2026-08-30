@@ -57,7 +57,7 @@ class RunMetrics:
             self.model_request_count += 1
         elif kind == "tool_result":
             outcome = dict(payload.get("outcome", {}) or {})
-            tool = str(outcome.get("tool_name", payload.get("tool_name", "")))
+            tool = str(outcome.get("tool_name", ""))
             status = str(outcome.get("status", "unknown"))
             if tool and outcome.get("execution_state") != "not_started":
                 self.executed_tool_count += 1

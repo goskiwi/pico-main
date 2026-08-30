@@ -82,9 +82,9 @@ def test_tool_executor_returns_canonical_outcome_and_artifact(tmp_path):
         "failure",
         "affected_paths",
         "effect_scope",
-        "artifact",
+        "artifact_id",
     }
-    assert outcome.artifact == {}
+    assert outcome.artifact_id == ""
     assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
 
 
@@ -324,6 +324,17 @@ def test_tool_outcome_requires_consistent_effect_facts():
             side_effect_state="unknown",
             content="unknown",
             failure=failure,
+        )
+
+    with pytest.raises(ValueError, match="invalid tool artifact id"):
+        ToolOutcome(
+            tool_call_id="call_artifact",
+            tool_name="read_file",
+            status="success",
+            execution_state="completed",
+            side_effect_state="none",
+            content="read",
+            artifact_id="../escape",
         )
 
 

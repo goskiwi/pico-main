@@ -529,5 +529,5 @@ class ToolExecutor:
             failure=failure,
             affected_paths=tuple(affected_paths),
             effect_scope=effect_scope if side_effect_state != "none" else "none",
-            artifact=descriptor,
+            artifact_id=str(descriptor.get("artifact_id", "")),
         )

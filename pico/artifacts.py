@@ -5,11 +5,10 @@ import json
 import re
 from pathlib import Path
 
+from .contracts import TOOL_ARTIFACT_ID
 from .persistence import write_once_bytes
 
 ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
-ARTIFACT_ID_PATTERN = r"^tool_[a-f0-9]{16}_[a-f0-9]{10}$"
-ARTIFACT_ID = re.compile(ARTIFACT_ID_PATTERN)
 INTERNAL_ARTIFACT_ID = re.compile(
     r"^(?:preimage|diff)_[a-f0-9]{16}_[a-f0-9]{10}$"
 )
@@ -119,7 +118,7 @@ class ArtifactStore:
     def _artifact_path(root, artifact_id, suffix):
         root = Path(root).resolve()
         artifact_id = str(artifact_id)
-        if not ARTIFACT_ID.fullmatch(artifact_id):
+        if not TOOL_ARTIFACT_ID.fullmatch(artifact_id):
             raise ValueError("invalid artifact id")
         path = (root / f"{artifact_id}{suffix}").resolve()
         if path.parent != root:

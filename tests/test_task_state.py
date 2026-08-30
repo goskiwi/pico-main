@@ -70,8 +70,6 @@ def test_task_state_separates_contract_incremental_working_and_lifecycle():
             2,
             "tool_result",
             {
-                "tool_call_id": "state",
-                "tool_name": "update_working_state",
                 "outcome": outcome.to_dict(),
             },
         )
@@ -128,8 +126,6 @@ def test_live_projection_matches_replay_and_owns_metrics():
             5,
             "tool_result",
             {
-                "tool_call_id": "read",
-                "tool_name": "read_file",
                 "outcome": read.to_dict(),
             },
         ),

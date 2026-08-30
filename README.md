@@ -15,7 +15,7 @@ pico CLI
   -> build_agent() 构造 Pico、默认 Project Memory 与 RepoMap
   -> RuntimeRecovery 根据 Session.active_run_id 查找 Run Log
   -> 新 Run：RunLifecycle 先写 user_message + TaskContract，再写 Session 指针
-  -> 恢复 Run：校验 Run Log v14，使用 RunProjection 重放全部 Fact
+  -> 恢复 Run：校验 Run Log v15，使用 RunProjection 重放全部 Fact
   -> 若尾部存在未完成 Tool Call：RunLog.reconcile_interrupted() 追加确定性结果
   -> 写 run_started / run_resumed，重置 Provider action session
   -> AgentLoop

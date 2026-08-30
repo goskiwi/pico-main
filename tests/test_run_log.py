@@ -72,13 +72,15 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
         "run",
         "tool_result",
         {
-            "tool_call_id": "read",
-            "tool_name": "read_file",
             "outcome": read_outcome().to_dict(),
         },
     )
 
     summary = store.replay("run").summary()
+    result = store.read_events("run")[-1]
+    assert set(result.payload) == {"outcome"}
+    assert result.call_id == "read"
+    assert result.name == "read_file"
     assert summary["metrics"]["executed_tool_count"] == 1
     assert summary["metrics"]["tool_counts"] == {"read_file": 1}
     assert summary["pending_call_id"] is None
@@ -130,7 +132,7 @@ def test_run_log_repairs_only_incomplete_tail(tmp_path):
         store.read_events("tail")
 
 
-def test_v14_rejects_legacy_payload_shapes():
+def test_v15_rejects_legacy_payload_shapes():
     with pytest.raises(ValueError, match="invalid user_message payload"):
         RunEvent("e", 1, "run", "task", "session", "user_message", "now", {"content": "old"})
 
@@ -144,9 +146,47 @@ def test_v14_rejects_legacy_payload_shapes():
         "now",
         {"contract": TaskContract("inspect", **READ_TASK).to_dict()},
     ).to_dict()
-    value["schema_version"] = "run-log-v13"
+    value["schema_version"] = "run-log-v14"
     with pytest.raises(ValueError, match="invalid Run event"):
         RunEvent.from_dict(value)
+
+    with pytest.raises(ValueError, match="requires a call id"):
+        RunEvent(
+            "call",
+            2,
+            "run",
+            "task",
+            "session",
+            "assistant_tool_call",
+            "now",
+            {"name": "read_file", "args": {}, "call_id": ""},
+        )
+
+    with pytest.raises(ValueError, match="invalid tool_result payload"):
+        RunEvent(
+            "result",
+            2,
+            "run",
+            "task",
+            "session",
+            "tool_result",
+            "now",
+            {
+                "tool_call_id": "read",
+                "tool_name": "read_file",
+                "outcome": read_outcome().to_dict(),
+            },
+        )
+
+    with pytest.raises(ValueError, match="tool outcome requires a call id"):
+        ToolOutcome(
+            "",
+            "read_file",
+            "success",
+            "completed",
+            "none",
+            "read",
+        )
 
     malformed = TaskContract("inspect", **READ_TASK).to_dict()
     malformed["goal"] = 123

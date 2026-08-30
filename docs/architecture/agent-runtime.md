@@ -11,7 +11,7 @@ CLI build_agent
   -> Pico composition root
   -> RuntimeRecovery reads Session.active_run_id
   -> new: RunLifecycle appends user_message + TaskContract before the Session pointer
-  -> resume: RunStore validates Run Log v14 and RunProjection replays its Facts
+  -> resume: RunStore validates Run Log v15 and RunProjection replays its Facts
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> run_started / run_resumed
   -> Provider action session reset

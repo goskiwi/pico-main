@@ -11,7 +11,7 @@ from .delivery import FinalDiffDescriptor
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v14"
+RUN_LOG_SCHEMA_VERSION = "run-log-v15"
 COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
@@ -61,6 +61,8 @@ def _validate_user_payload(kind, payload):
 
 def _validate_tool_call_payload(kind, payload):
     _exact_payload(kind, payload, {"name", "args", "call_id"})
+    if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
+        raise ValueError("assistant_tool_call requires a call id")
     ToolCall(str(payload["name"]), payload["args"], str(payload["call_id"]))
 
 
@@ -97,14 +99,10 @@ def _validate_tool_result_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"tool_call_id", "tool_name", "outcome"},
+        {"outcome"},
         {"recovered_from_interruption"},
     )
-    outcome = ToolOutcome.from_dict(payload["outcome"])
-    if str(payload["tool_call_id"]) != outcome.tool_call_id:
-        raise ValueError("tool_result call id does not match outcome")
-    if str(payload["tool_name"]) != outcome.tool_name:
-        raise ValueError("tool_result tool name does not match outcome")
+    ToolOutcome.from_dict(payload["outcome"])
     if "recovered_from_interruption" in payload and not isinstance(
         payload["recovered_from_interruption"], bool
     ):
@@ -230,11 +228,11 @@ class _RunProtocol:
             if self.started_call_id:
                 raise ValueError("pending tool call already started")
         elif kind == "tool_result":
-            call_id = str(payload["tool_call_id"])
             outcome = ToolOutcome.from_dict(payload["outcome"])
+            call_id = outcome.tool_call_id
             if call_id != self.pending_call_id:
                 raise ValueError("tool_result must match the pending tool call")
-            if str(payload["tool_name"]) != self.pending_tool_name:
+            if outcome.tool_name != self.pending_tool_name:
                 raise ValueError("tool_result tool name does not match the pending call")
             if outcome.execution_state == "not_started" and self.started_call_id:
                 raise ValueError("started tool cannot finish as not_started")
@@ -349,8 +347,7 @@ class RunEvent:
         if self.kind == "assistant_tool_call":
             return str(self.payload.get("name", ""))
         if self.kind == "tool_result":
-            outcome = dict(self.payload.get("outcome", {}) or {})
-            return str(outcome.get("tool_name", self.payload.get("tool_name", "")))
+            return str(dict(self.payload.get("outcome", {}) or {}).get("tool_name", ""))
         return ""
 
     @property
@@ -361,11 +358,11 @@ class RunEvent:
     def call_id(self):
         if self.kind == "assistant_tool_call":
             return str(self.payload.get("call_id", ""))
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(
-            self.payload.get("tool_call_id", "")
-            or outcome.get("tool_call_id", "")
-        )
+        if self.kind == "tool_result":
+            return str(
+                dict(self.payload.get("outcome", {}) or {}).get("tool_call_id", "")
+            )
+        return str(self.payload.get("tool_call_id", ""))
 
     @property
     def outcome_status(self):
@@ -385,8 +382,7 @@ class RunEvent:
     @property
     def artifact_id(self):
         outcome = dict(self.payload.get("outcome", {}) or {})
-        artifact = dict(outcome.get("artifact", {}) or {})
-        return str(artifact.get("artifact_id", ""))
+        return str(outcome.get("artifact_id", ""))
 
     @property
     def covered_event_ids(self):
@@ -478,8 +474,6 @@ class RunLog:
         recovered_from_interruption=False,
     ):
         payload = {
-            "tool_call_id": outcome.tool_call_id,
-            "tool_name": outcome.tool_name,
             "outcome": outcome.to_dict(),
         }
         if recovered_from_interruption:

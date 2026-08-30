@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +13,8 @@ TOOL_STATUSES = frozenset({"success", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
 EFFECT_SCOPES = frozenset({"none", "workspace", "project_memory", "mixed"})
+TOOL_ARTIFACT_ID_PATTERN = r"^tool_[a-f0-9]{16}_[a-f0-9]{10}$"
+TOOL_ARTIFACT_ID = re.compile(TOOL_ARTIFACT_ID_PATTERN)
 RECOVERY_CONDITIONS = frozenset(
     {
         "retry_after_change",
@@ -176,9 +179,13 @@ class ToolOutcome:
     failure: FailureInfo | None = None
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
-    artifact: dict[str, Any] = field(default_factory=dict)
+    artifact_id: str = ""
 
     def __post_init__(self):
+        if not isinstance(self.tool_call_id, str) or not self.tool_call_id.strip():
+            raise ValueError("tool outcome requires a call id")
+        if not isinstance(self.tool_name, str) or not self.tool_name.strip():
+            raise ValueError("tool outcome requires a tool name")
         if self.status not in TOOL_STATUSES:
             raise ValueError(f"invalid tool status: {self.status}")
         if self.execution_state not in EXECUTION_STATES:
@@ -187,6 +194,10 @@ class ToolOutcome:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
         if self.effect_scope not in EFFECT_SCOPES:
             raise ValueError(f"invalid effect scope: {self.effect_scope}")
+        if not isinstance(self.artifact_id, str):
+            raise TypeError("tool artifact id must be text")
+        if self.artifact_id and not TOOL_ARTIFACT_ID.fullmatch(self.artifact_id):
+            raise ValueError("invalid tool artifact id")
         if not isinstance(self.structured, dict):
             raise TypeError("tool outcome structured result must be an object")
         if self.status == "success" and self.execution_state != "completed":
@@ -200,10 +211,6 @@ class ToolOutcome:
         _validate_effect_facts(
             self.side_effect_state, self.affected_paths, self.effect_scope
         )
-
-    @property
-    def artifact_id(self):
-        return str(self.artifact.get("artifact_id", ""))
 
     @property
     def correction_action(self):
@@ -221,7 +228,7 @@ class ToolOutcome:
             "failure": self.failure.to_dict() if self.failure else None,
             "affected_paths": list(self.affected_paths),
             "effect_scope": self.effect_scope,
-            "artifact": dict(self.artifact),
+            "artifact_id": self.artifact_id,
         }
 
     @classmethod
@@ -237,14 +244,14 @@ class ToolOutcome:
             "failure",
             "affected_paths",
             "effect_scope",
-            "artifact",
+            "artifact_id",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid ToolOutcome")
         if (
             not isinstance(value["structured"], dict)
             or not isinstance(value["affected_paths"], list)
-            or not isinstance(value["artifact"], dict)
+            or not isinstance(value["artifact_id"], str)
         ):
             raise TypeError("ToolOutcome collection fields have invalid types")
         failure = value["failure"]
@@ -259,7 +266,7 @@ class ToolOutcome:
             failure=FailureInfo.from_dict(failure) if failure is not None else None,
             affected_paths=tuple(str(item) for item in value["affected_paths"]),
             effect_scope=str(value["effect_scope"]),
-            artifact=dict(value["artifact"]),
+            artifact_id=value["artifact_id"],
         )
 
     def render_for_model(self):
@@ -278,8 +285,8 @@ class ToolOutcome:
             payload["affected_paths"] = list(self.affected_paths)
         if self.effect_scope != "none":
             payload["effect_scope"] = self.effect_scope
-        if self.artifact:
-            payload["artifact"] = dict(self.artifact)
+        if self.artifact_id:
+            payload["artifact_id"] = self.artifact_id
         return json.dumps(
             payload,
             ensure_ascii=False,

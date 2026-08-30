@@ -77,8 +77,6 @@ def tool_event(
     return event(
         "tool_result",
         {
-            "tool_call_id": call_id,
-            "tool_name": "edit_file",
             "outcome": outcome.to_dict(),
         },
         sequence,
@@ -119,8 +117,6 @@ def test_observation_count_only_counts_successful_observations():
             event(
                 "tool_result",
                 {
-                    "tool_call_id": "read",
-                    "tool_name": "read_file",
                     "outcome": success.to_dict(),
                 },
             )
@@ -195,8 +191,6 @@ def test_repaired_project_memory_partial_does_not_require_workspace_verification
             event(
                 "tool_result",
                 {
-                    "tool_call_id": partial.tool_call_id,
-                    "tool_name": partial.tool_name,
                     "outcome": partial.to_dict(),
                 },
                 1,
@@ -204,8 +198,6 @@ def test_repaired_project_memory_partial_does_not_require_workspace_verification
             event(
                 "tool_result",
                 {
-                    "tool_call_id": repair.tool_call_id,
-                    "tool_name": repair.tool_name,
                     "outcome": repair.to_dict(),
                 },
                 2,
