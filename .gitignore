@@ -61,6 +61,7 @@ output/
 
 # Local docs not intended for publication
 docs/*
+!docs/learning-path.md
 !docs/resume-project.md
 !docs/review-pack/
 !docs/review-pack/**

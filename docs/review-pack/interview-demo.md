@@ -1,6 +1,9 @@
 # Pico 面试讲解与演示
 
-## 30 秒介绍
+学习顺序以 [`../learning-path.md`](../learning-path.md) 为准。下面的标签区分 Core、默认
+上下文增强、Context Pressure、Orchestration Appendix 和 Applications，避免在开场平铺全部能力。
+
+## 30 秒介绍 `[Core]`
 
 Pico 不是聊天 UI，而是 Coding Model 外围的本地 Runtime。模型每轮只能提出一个
 `ModelAction`；Runtime 负责 Context、工具准入、副作用、持久化、崩溃恢复、验证和
@@ -15,7 +18,7 @@ User request
   -> RunProjection(Task / Evidence / Metrics / Pending)
 ```
 
-## 3 分钟主链路
+## 3 分钟主链路 `[Core]`
 
 ### 0:00～0:30：模型与 Runtime 的边界
 
@@ -68,7 +71,7 @@ Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 
 
 打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 按 TaskContract 检查 Observation、最终净 RunChangeSet 和明确要求的 Verification，再检查 partial/unknown 副作用与未应用 Child Patch。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
 
-## 5 分钟现场 Demo
+## 5 分钟现场 Demo `[Core + 默认上下文增强]`
 
 ### 1. 运行确定性演示
 
@@ -85,7 +88,7 @@ uv run python scripts/demo_runtime.py
 - `completion`：Runtime 终态；
 - `pending_call_id: null`：没有悬空工具事务。
 
-### 2. 运行机制评测
+### 2. 运行机制评测 `[默认上下文增强 + Context Pressure]`
 
 ```bash
 uv run python scripts/run_evaluations.py
@@ -107,34 +110,39 @@ uv run ruff check pico tests scripts
 
 ## 10 分钟深入讲解
 
-### 1. 单一事实源
+### 1. 单一事实源 `[Core]`
 
 `events.jsonl` 保存 User、Tool Call/Started/Result、Verification、Compaction 和终态。
 Session 指针、Workspace 内容、Project Memory Card 和 Artifact 各有独立且明确的所有权；
 没有第二份可变 `task_state.json` 或 `context.jsonl`。
 
-### 2. Context 治理
+### 2. Context 治理 `[Context Pressure]`
 
 固定 Runtime policy 进入 `instructions`；动态 Workspace、TaskContract、Memory Catalog、RepoMap、WorkingState、History 和 Current Request 进入 `input`。Prompt build 只读；Compaction 在 build 前准备，只总结历史 Progress/Critical Context，失败时使用近期完整事务的 bounded fallback。
 
-### 3. WorkingState 与 Project Memory
+### 3. WorkingState 与 Project Memory `[Core + 默认上下文增强]`
 
 TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；成功的增量 `update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；
 Catalog 常驻 Prompt，主模型按描述显式调用 `memory_recall`，Card 作为不可信历史数据
 返回，不能改变工具权限或代替 Workspace 当前事实。
 
-### 4. RepoMap
+### 4. RepoMap `[默认上下文增强]`
 
 RepoMap 使用 tree-sitter 提取 Python Symbol 和静态 Call/Import/Inheritance/Test Edges，
 再用 lexical personalization + PageRank 在 Token Budget 内输出任务相关签名。当前
 确定性评测验证任务命中、图关系和预算边界，不宣称通用模型收益。
 
-### 5. 多 Agent 附录
+### 5. 多 Agent 附录 `[Orchestration Appendix]`
 
 Parent 可以委派 Explore/Implement DAG。Explore Child 只读；Implement Child 在独立 Git
 Worktree 中执行并返回 Patch receipt。PatchIntegrator 在独立 Integration Worktree 按依赖
 应用、验证，并在 Parent HEAD 未变化时才写回。调度同步且进程内，不宣称分布式 Worker
 或跨进程 Child 调度恢复。
+
+## 应用层追问 `[Applications]`
+
+只有在 Core 和默认上下文增强讲清后，再用 `applications/triage` 说明 Pico 如何被薄应用层
+复用；Triage 不拥有第二套 Agent Loop、ToolRuntime、RunLog 或 Completion。
 
 ## 常见追问
 

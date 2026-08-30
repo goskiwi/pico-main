@@ -6,6 +6,14 @@ OpenAI-compatible Responses 原生 function calling 提出下一步动作；上�
 
 项目主动不做多 Provider、XML 工具协议、Skills、MCP、分布式 Worker 和旧状态兼容。
 
+## 从这里开始
+
+唯一权威学习导航见 [`docs/learning-path.md`](docs/learning-path.md)，并保留原始 Day 1～7 顺序。
+Day 1 从真实 CLI 请求进入；第一遍只学习 Core：Runtime、AgentLoop、ToolRuntime、RunLog、
+RunProjection 与 CompletionController。Project Memory 和 RepoMap 始终默认启用，但到 Day 5
+再深入；Semantic Compaction 属于 Context Pressure，Subagents 属于 Orchestration Appendix，
+Triage/Evals 属于 Applications。不要为了学习顺序关闭功能或新增开关。
+
 ## 当前三条执行路径
 
 ### 1. CLI 启动与恢复
@@ -28,12 +36,12 @@ AgentLoop 请求 Provider
   -> Responses 输出恰好一个 function_call
   -> 解析为 ModelAction.tool
   -> 先写 assistant_tool_call Fact
-  -> ToolRuntime：Registry / Surface / Schema / Policy / Approval
-  -> ToolRuntime 私有 tool-execution helpers：协议、重复调用、影响范围与 preimage
+  -> ToolRuntime：Registry / Surface / Schema / Policy / Approval、协议、重复调用、影响范围与 preimage
+  -> tool_execution.py 私有纯函数：Preview、脱敏、Drift/Diff/Transition 与结果分类
   -> 先 fsync tool_started Fact
   -> ToolContext 向当前 Tool Runner 提供 Workspace、Store、Sandbox 与 Run 身份
   -> Tool Runner 返回 ToolRunnerResult
-  -> ToolRuntime 私有 tool-execution helpers 归一化为 ToolOutcome
+  -> ToolRuntime 使用纯函数结果归一化为 ToolOutcome
   -> fsync tool_result Fact，并更新 RunProjection / RunEvidence
   -> 将有界 ToolOutcome 回写 Provider
 ```

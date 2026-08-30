@@ -27,11 +27,12 @@ AgentLoop
   -> OpenAICompatibleModelClient -> ModelAction.tool
   -> append assistant_tool_call Fact
   -> ToolRuntime validates Registry / Surface / Schema / Policy / Approval
-  -> private tool-execution helpers enforce protocol/repeat guards and capture effects/preimages
+  -> ToolRuntime enforces protocol/repeat guards and captures effects/preimages
+  -> private tool_execution helpers calculate preview/redaction/drift/diff/transitions/classification
   -> append + fsync tool_started Fact
   -> ToolContext supplies bounded Workspace / Store / Sandbox / Run capabilities
   -> concrete Tool Runner -> ToolRunnerResult
-  -> private tool-execution helpers -> ToolOutcome
+  -> ToolRuntime uses those pure values to construct ToolOutcome
   -> append + fsync tool_result Fact
   -> RunProjection applies Fact and RunEvidence derives observations/effects
   -> bounded ToolOutcome returned to the Provider session

@@ -1,0 +1,177 @@
+# Pico 七天学习路径
+
+这是 Pico 的唯一权威学习导航。架构事实以
+[`agent-runtime.md`](architecture/agent-runtime.md) 和
+[`state-ownership.md`](architecture/state-ownership.md) 为准；本文只决定第一次应该按什么
+顺序阅读，不改变任何 Runtime 默认行为。
+
+Project Memory 与 RepoMap 从 `Pico` 初始化开始就默认启用。第一遍遇到它们时，先把它们
+当成 Prompt 中两份有界上下文；到 Day 5 再阅读内部实现。Semantic Compaction、Subagents
+和 Triage 也都不是理解一次普通单 Agent 请求的前置条件。
+
+## 六个核心 Ownership 文件
+
+先记住下面六个文件分别拥有什么。其他文件会出现在真实调用链中，但只是协议、数据或
+实现接缝，不另起一套核心 Ownership。
+
+| 文件 | 核心 Ownership |
+|---|---|
+| [`pico/runtime.py`](../pico/runtime.py) | `Pico` 组合根、九个顶层组件以及 `ask()` 入口 |
+| [`pico/agent_loop.py`](../pico/agent_loop.py) | 模型轮、工具轮、Provider 续接和停止条件的控制流 |
+| [`pico/tool_runtime.py`](../pico/tool_runtime.py) | 模型可见工具的唯一公开执行边界，以及 Call/Started/Result 因果顺序 |
+| [`pico/run_log.py`](../pico/run_log.py) | Run Fact 的严格协议、追加、Compaction 与中断对账 |
+| [`pico/run_projection.py`](../pico/run_projection.py) | 从 Fact 重建 Task、Evidence、Metrics、单 Pending Call 和终态 receipt |
+| [`pico/completion_controller.py`](../pico/completion_controller.py) | 是否允许模型最终提交的 Runtime 决策 |
+
+阅读 Trace 时还会经过 `cli.py`、`run_lifecycle.py`、Prompt/Provider、`ToolContext`、具体
+Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实接缝，不冒充第七个
+核心状态源。
+
+## 从一个真实 CLI 请求开始
+
+下面的参数都由当前 CLI 提供。它表示“必须产生修改，并且必须通过显式验证”这一种任务：
+
+```bash
+uv run pico \
+  --task-kind modify \
+  --require-verification \
+  --verify-command "python -m pytest -q" \
+  --cwd /path/to/repo \
+  "Fix calculator.add so the existing addition test passes"
+```
+
+真实 Provider 与 `run_shell` 分别需要模型配置和 Docker。只想看确定性本地演示时，运行：
+
+```bash
+uv run python scripts/day7_runtime_capstone.py
+```
+
+Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作为完整 Capstone 使用。
+
+## 一次请求的逐步调用 Trace
+
+第一遍只回答每一步的“输入、动作、输出”，不要同时展开所有辅助模块。
+
+| 步骤 | 当前调用 | 第一遍要看懂的内容 |
+|---:|---|---|
+| 1 | `pico/cli.py: main -> build_agent -> _ask_kwargs` | CLI 参数如何变成 `PicoConfig` 和明确的任务要求 |
+| 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 Memory、RepoMap、ToolRuntime、Recovery、Prompt，并进入 AgentLoop |
+| 3 | `pico/run_lifecycle.py: initialize -> _restore_or_create_run` | 新 Run 先写 `user_message.contract`；恢复 Run 保持同一 TaskContract |
+| 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
+| 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`，动态上下文进 `input`，Schema 进 `tools`；Memory/RepoMap 暂按不透明输入处理 |
+| 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |
+| 7 | `AgentLoop._handle_tool_action` | Tool 执行前先持久化 `assistant_tool_call` Fact |
+| 8 | `ToolRuntime.execute` | 准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result` |
+| 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换 |
+| 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
+| 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，并写入 `final_diff` 与 `assistant_final` |
+
+恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读：
+
+```text
+RuntimeRecovery
+  -> RunStore.load_run
+  -> replay_events
+  -> RunProjection.apply_event
+  -> RunLog.reconcile_interrupted
+  -> run_resumed
+```
+
+`load_run` 从同一次持久化读取返回 Events 与 Projection；`RunStore.replay` 是只返回
+Projection 的委托。Live 路径只调用 `apply_event`。
+
+## 五层知识结构
+
+| 层级 | 内容 | 第一次是否必学 |
+|---|---|---|
+| Core | 上述 CLI Trace、TaskContract、增量 WorkingState、单 Pending、工具安全、恢复、Completion 与 Final Diff | 是 |
+| 默认上下文增强 | RepoMap 自动仓库导航；Memory Catalog 常驻 Prompt、Card 正文显式 Recall | 功能始终启用；内部实现第二遍再学 |
+| Context Pressure | Token Budget、Provider Session Rotation、Semantic Compaction、失败后的事务级 Fallback | 仅超长任务需要 |
+| Orchestration Appendix | Explore/Implement DAG、Child Pico、Git Worktree、PatchIntegrator | 单 Agent Core 完成后选学 |
+| Applications | Triage Workflow、Report、真实 Fixture 与 Evals | 最后学习 |
+
+Semantic Compaction 不是每轮执行：必须已有 Run Log、当前没有 Pending Call，并且本地估算与
+Provider 报告的 Context Token 较大者超过
+`total_budget - max(max_new_tokens, compaction_reserve_tokens)`，才进入准备分支；失败时只使用
+完整 Tool 事务组成的 bounded fallback。
+
+Subagents 在 CLI 中默认提供，因为 `build_agent()` 会安装 Child Model Client Factory；直接使用
+`Pico(...)` API 时只有显式传入该 Factory 才启用。无论是否启用，普通单 Agent Core 都不依赖
+Subagent 实现。
+
+## 保留原始七天顺序
+
+### Day 1：从 CLI 到 AgentLoop
+
+- 从上面的真实 CLI 命令进入 `cli.py`，沿步骤 1～4 阅读。
+- 运行 `scripts/day1_runtime_walkthrough.py` 查看九个顶层组件；这个脚本是程序化组合实验，
+  不替代前一步真实 CLI 的参数解析与 `build_agent()` 阅读。
+- Memory 与 RepoMap 此时只需要知道“默认存在”，不要打开其实现。
+
+完成标准：能用 30 秒讲清用户请求如何进入 `AgentLoop`。
+
+### Day 2：State、Fact 与 Projection
+
+- 阅读 TaskContract、六字段 add/remove WorkingState、RunLog v15 和 RunProjection。
+- 运行 `scripts/day2_state_walkthrough.py`，比较 Live 与 `RunStore.replay`。
+- 再阅读恢复侧支中的 `load_run`、单 Pending Call 和 interrupted reconciliation。
+
+完成标准：能解释 Fact 与 Projection 的区别，以及为什么不保存第二份 Task 快照。
+
+### Day 3：Prompt 与 Provider
+
+- 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
+- 运行 `scripts/day3_prompt_provider_walkthrough.py`。
+- 只确认 Prompt 中存在 Memory Catalog 与 RepoMap，不在今天学习 Card 或图算法。
+
+完成标准：能画出一次 Function Call 及其 Output 的 Provider 会话。
+
+### Day 4：ToolRuntime 与一次安全 Edit
+
+- 阅读步骤 7～10：ToolRuntime、私有 tool-execution helpers、ToolContext、文件 Runner 和 Mutation Service。
+- 运行 `scripts/day4_tool_boundary_walkthrough.py`。
+- 用一个 `timeout=30 -> timeout=60` 例子解释 Revision Conflict、Preimage 与原子提交。
+
+完成标准：能说明模型为什么不能直接写文件。
+
+### Day 5：Context、Memory 与 Compaction（分两段）
+
+运行同一个 `scripts/day5_context_memory_walkthrough.py`，但分两次学习：
+
+1. **默认上下文增强**：先看 RepoMap 结果、Memory Catalog 和显式 `memory_recall`；确认两者
+   默认启用，但完整 Card 不会自动塞进 Prompt。
+2. **Context Pressure**：再看 Context Budget、`prepare_compaction`、Semantic Summary 和
+   bounded transaction fallback。
+
+完成标准：能区分“默认上下文输入”和“只有压力下才发生的压缩路径”。
+
+### Day 6：Completion、Recovery 与 Subagents 附录
+
+- 先学习 `scripts/day6_completion_recovery_subagents_walkthrough.py` 中的
+  `completion_experiment` 和 `recovery_experiment`。
+- 理解净变化、Verification Freshness、Partial/Unknown 与“不盲目重放”。
+- 最后的 `subagent_dag_experiment` 属于 **Orchestration Appendix**；Core 第一遍可以跳过，
+  完成单 Agent 路径后再回来。
+
+完成标准：能解释为什么模型说“完成”不等于 Runtime 接受完成。
+
+### Day 7：Capstone 与面试表达
+
+- 运行 `scripts/day7_runtime_capstone.py`，把前六天串成一条完整请求。
+- 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和
+  10 分钟三种表达。
+- `scripts/demo_runtime.py` 是 Memory Recall 增强 Demo，不作为第一条 Core Demo。
+- 最后再进入 **Applications**：`applications/triage/workflow.py`、`report.py` 与相关 Evals。
+
+完成标准：不用枚举所有类，也能先讲清 Core；面试官追问时再进入 Enhancement、Pressure、
+Appendix 或 Application。
+
+## 第一遍可以跳过什么
+
+- `repo_map.py` 的 Tree-sitter 图构建与 PageRank 细节；
+- `project_memory.py` 的 Frontmatter、Catalog 重建和 Card 生命周期；
+- `compaction_summary.py` 的 Summary Schema；
+- `pico/subagents/` 的 DAG、Worktree 和 Patch 集成；
+- `applications/`、`evals/` 与真实 OSS Fixture。
+
+跳过这些实现不等于关闭功能。它们仍按当前 Runtime 默认与条件路径正常工作。
