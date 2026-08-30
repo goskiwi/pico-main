@@ -136,7 +136,7 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 - 隔离执行：`run_shell` 在临时 Docker 容器内通过 POSIX Shell 执行，支持 `&&`、管道、重定向、环境变量与 `cd`；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。
 - 崩溃恢复：Session 只保存 `active_run_id`。副作用前先 fsync `tool_started` 及精确潜在影响路径/before revision；结果完成后 fsync `tool_result`。恢复时若二者不配对，只检查声明路径并生成 interrupted error/partial，绝不盲目重放。最后一条未完成 JSONL 尾巴可截断，中间损坏直接报错。
 - 恢复配置：模型、预算、超时、Verifier、工具表面和权限策略均使用续跑时的当前配置，不冻结为 Resume identity。
-- 完成证据：TaskContract 明确 read-only/modify、是否必须产生净修改、是否必须验证。只读任务需要成功 Observation；要求修改的任务需要非空最终 RunChangeSet；要求验证的任务需要当前状态上的通过结果。没有通用 Python AST 隐式 Gate，也不会自动猜验证命令。未解决 partial/unknown 状态禁止成功结束。
+- 完成证据：`CompletionController` 是唯一完成决策者，依次检查 Subagent、TaskContract、未修复 unknown/partial、Workspace drift、当前 Verification，以及验证后仍未解决的 Effect。未修复的不确定副作用不会触发无意义的 verifier；修复后的 Workspace partial 必须验证当前代码，修复后的 Project Memory partial 不运行 Workspace verifier。`RunEvidence` 只提供 repair/effect/verification 事实查询。没有通用 Python AST 隐式 Gate，也不会自动猜验证命令。
 
 ## 多 Agent 协作
 

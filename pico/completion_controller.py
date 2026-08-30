@@ -30,31 +30,49 @@ class CompletionController:
         blocker = (
             self._static_blocker()
             or self._task_requirement_blocker()
+            or self._unrepaired_effect_blocker()
             or self._workspace_drift_blocker()
         )
         if blocker:
             status, instruction = blocker
             return CompletionResult(status=status, instruction=instruction)
 
-        mutation_sequence, path_states, guidance = self._ensure_verification()
+        verification, guidance = self._ensure_verification()
         if guidance:
             return CompletionResult(
                 status="verification_failed",
                 instruction=guidance,
             )
-        evidence_check = self.runtime.run.evidence.assess_completion(
-            mutation_sequence,
-            path_states,
+        blocker = self._effect_blocker(
+            self.runtime.run.evidence.unresolved_effects(verification)
         )
-        if not evidence_check.allowed:
-            return CompletionResult(
-                status=evidence_check.status,
-                instruction=(
-                    f"Runtime completion gate: {evidence_check.reason}. "
-                    "Inspect or repair before returning a final answer."
-                ),
-            )
+        if blocker:
+            status, instruction = blocker
+            return CompletionResult(status=status, instruction=instruction)
         return CompletionResult(final_answer=final)
+
+    def _unrepaired_effect_blocker(self):
+        return self._effect_blocker(
+            self.runtime.run.evidence.unrepaired_uncertain_effects()
+        )
+
+    @staticmethod
+    def _effect_blocker(effects):
+        effects = tuple(effects)
+        if not effects:
+            return None
+        paths = sorted(
+            {
+                path
+                for effect in effects
+                for path in effect.get("affected_paths", ())
+            }
+        )
+        detail = ", ".join(paths) or "unknown workspace state"
+        return "partial", (
+            "Runtime completion gate: unresolved partial side effects: "
+            f"{detail}. Inspect or repair before returning a final answer."
+        )
 
     def _workspace_drift_blocker(self):
         drift = self.runtime.run.evidence.change_set.workspace_drift(
@@ -113,9 +131,9 @@ class CompletionController:
             runtime.run.evidence.repaired_partials_requiring_verification()
         )
         if not (required or partial_repair_requires_verification):
-            return None, None, ""
+            return None, ""
         if not runtime.config.verification_command:
-            return None, None, (
+            return None, (
                 "Runtime verification is required, but no verification command "
                 "is configured."
             )
@@ -150,14 +168,14 @@ class CompletionController:
                 + str(current.get("output") or "verification unavailable")
             )
         if current is None:
-            return sequence, states, (
+            return None, (
                 "Runtime workspace changed during verification; run verification "
                 "again before submit_final."
             )
         if current.get("status") != "passed":
-            return sequence, states, (
+            return None, (
                 "Runtime verification failed; inspect and repair before "
                 "submit_final.\n"
                 + str(current.get("output") or "verification unavailable")
             )
-        return sequence, states, ""
+        return current, ""

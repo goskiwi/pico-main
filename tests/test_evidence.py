@@ -165,9 +165,14 @@ def test_partial_requires_repair_and_current_passing_verification():
             tool_event(2, call_id="repair", before="partial", after="fixed"),
         ]
     )
-    assert not evidence.assess_completion().allowed
+    assert evidence.unrepaired_uncertain_effects() == []
+    assert evidence.unresolved_effects()
     evidence.verifications.append(verification(2, "fixed"))
-    assert evidence.assess_completion(2, {"src/app.py": "fixed"}).allowed
+    current = evidence.latest_verification_for_state(
+        2,
+        {"src/app.py": "fixed"},
+    )
+    assert evidence.unresolved_effects(current) == []
 
 
 def test_repaired_project_memory_partial_does_not_require_workspace_verification():
@@ -213,8 +218,8 @@ def test_repaired_project_memory_partial_does_not_require_workspace_verification
     )
 
     assert evidence.repaired_partials_requiring_verification() == []
+    assert evidence.unrepaired_uncertain_effects() == []
     assert evidence.unresolved_effects() == []
-    assert evidence.assess_completion().allowed
 
 
 def test_unknown_effect_is_never_cleared_by_verification():
@@ -229,7 +234,9 @@ def test_unknown_effect_is_never_cleared_by_verification():
         ]
     )
     evidence.verifications.append(verification(1))
-    assert not evidence.assess_completion(
+    current = evidence.latest_verification_for_state(
         1,
         {"src/app.py": "sha256:b"},
-    ).allowed
+    )
+    assert evidence.unrepaired_uncertain_effects() == evidence.effects
+    assert evidence.unresolved_effects(current) == evidence.effects

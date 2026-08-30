@@ -321,6 +321,17 @@ class RunEvidence:
             and self._repair_after(index, effect) is not None
         ]
 
+    def unrepaired_uncertain_effects(self):
+        return [
+            effect
+            for index, effect in enumerate(self.effects)
+            if effect["side_effect_state"] in {"partial", "unknown"}
+            and (
+                effect["side_effect_state"] == "unknown"
+                or self._repair_after(index, effect) is None
+            )
+        ]
+
     def unresolved_effects(self, current_verification=None):
         unresolved = []
         for index, effect in enumerate(self.effects):
@@ -343,38 +354,6 @@ class RunEvidence:
                 unresolved.append(effect)
         return unresolved
 
-    def assess_completion(
-        self,
-        expected_workspace_mutation_sequence=None,
-        current_changed_path_states=None,
-    ):
-        current = None
-        if (
-            expected_workspace_mutation_sequence is not None
-            and current_changed_path_states is not None
-        ):
-            current = self.latest_verification_for_state(
-                expected_workspace_mutation_sequence,
-                current_changed_path_states,
-            )
-        passed = current if current and current.get("status") == "passed" else None
-        remaining = self.unresolved_effects(passed)
-        if not remaining:
-            return EvidenceCompletionCheck(True, "completed")
-        paths = sorted(
-            {
-                path
-                for effect in remaining
-                for path in effect.get("affected_paths", ())
-            }
-        )
-        return EvidenceCompletionCheck(
-            False,
-            "partial",
-            "unresolved partial side effects: "
-            + (", ".join(paths) or "unknown workspace state"),
-        )
-
     def to_dict(self):
         return {
             "successful_observation_count": self.successful_observation_count,
@@ -392,10 +371,3 @@ class RunEvidence:
             "change_set": self.change_set.to_dict(),
             "verifications": [dict(item) for item in self.verifications],
         }
-
-
-@dataclass(frozen=True)
-class EvidenceCompletionCheck:
-    allowed: bool
-    status: str
-    reason: str = ""

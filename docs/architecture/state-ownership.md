@@ -6,8 +6,9 @@ Terminology in this document is strict:
 
 - A **Fact** is an accepted Run Event persisted in `events.jsonl`.
 - A **Projection** is rebuildable state reduced from Facts; it is never an additional source of truth.
-- **Evidence** is the `RunEvidence` projection derived from Tool Result and Verification Facts.
-- **Completion** is the decision made by `CompletionController`; terminal ownership begins only
+- **Evidence** is the `RunEvidence` projection derived from Tool Result and Verification Facts; it
+  exposes factual repair, effect and verification relationships but no completion decision.
+- **Completion** is the ordered policy decision made only by `CompletionController`; terminal ownership begins only
   when `RunLifecycle` appends `assistant_final` or `run_stopped`.
 - **Tool runtime** is the `ToolRuntime` public boundary backed by private tool-execution helpers,
   `ToolContext` and concrete Tool Runners. It owns no second durable Tool state.
