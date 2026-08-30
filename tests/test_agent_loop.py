@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -12,6 +14,7 @@ from pico.agent_loop import AgentLoop
 from pico.contracts import ToolOutcome
 from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
+from pico.providers import ProviderContextOverflow
 from pico.sandbox import SandboxResult
 
 READ_TASK = {
@@ -454,7 +457,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         def complete_action(self, *args, **kwargs):
             self.request_count += 1
             if self.request_count == 3:
-                raise RuntimeError("maximum context length exceeded")
+                raise ProviderContextOverflow("redacted context overflow")
             return super().complete_action(*args, **kwargs)
 
         def complete(self, prompt, max_new_tokens, **kwargs):
@@ -495,6 +498,64 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         "context_overflow_retry"
     ]
     assert client.request_count == 4
+
+
+def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
+    class OverflowClient(FakeModelClient):
+        request_count = 0
+
+        def complete_action(self, *args, **kwargs):
+            self.request_count += 1
+            raise ProviderContextOverflow("redacted context overflow")
+
+    client = OverflowClient([])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    with pytest.raises(ProviderContextOverflow):
+        agent.ask("Inspect the workspace", **READ_TASK)
+
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
+    assert [entry.payload["reason"] for entry in resets] == [
+        "context_overflow_retry"
+    ]
+    assert client.request_count == 2
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "maximum context length exceeded",
+        "too many tokens per minute",
+    ],
+)
+def test_untyped_runtime_error_is_not_recovered(tmp_path, message):
+    class OrdinaryFailureClient(FakeModelClient):
+        request_count = 0
+
+        def complete_action(self, *args, **kwargs):
+            self.request_count += 1
+            raise RuntimeError(message)
+
+    client = OrdinaryFailureClient([])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(approval_policy="auto"),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        agent.ask("Inspect the workspace", **READ_TASK)
+
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    assert not any(entry.kind == "provider_session_reset" for entry in entries)
+    assert client.request_count == 1
 
 
 def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):

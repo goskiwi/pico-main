@@ -13,6 +13,137 @@ OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
 
 
+class ProviderContextOverflow(RuntimeError):
+    """The provider rejected an input that exceeded its context window."""
+
+
+_CONTEXT_OVERFLOW_CODES = {
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "context_overflow",
+    "input_too_long",
+    "max_context_length_exceeded",
+    "maximum_context_length_exceeded",
+    "prompt_too_long",
+    "token_limit_exceeded",
+}
+_NON_CONTEXT_ERROR_CODES = {
+    "authentication_error",
+    "authorization_error",
+    "billing_hard_limit_reached",
+    "insufficient_quota",
+    "invalid_api_key",
+    "permission_denied",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "too_many_requests",
+}
+_GENERIC_PROVIDER_ERROR_IDENTIFIERS = {
+    "bad_request",
+    "bad_request_error",
+    "error",
+    "invalid_request",
+    "invalid_request_error",
+    "request_error",
+}
+_CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
+    "context window exceeded",
+    "exceeded the context window",
+    "exceeds the context window",
+    "input is too long",
+    "max context length",
+    "maximum context length",
+    "prompt is too long",
+)
+_CONTEXT_OVERFLOW_MESSAGE = (
+    "OpenAI-compatible error: provider context window exceeded"
+)
+_HTTP_CONTEXT_MESSAGE_STATUSES = {400, 413, 414, 422}
+
+
+def _normalized_error_code(value):
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _message_indicates_context_overflow(value):
+    text = str(value).lower()
+    return any(marker in text for marker in _CONTEXT_OVERFLOW_MESSAGE_MARKERS)
+
+
+def _error_payload_indicates_context_overflow(
+    value,
+    *,
+    allow_message_fallback=True,
+):
+    if not isinstance(value, dict):
+        return allow_message_fallback and _message_indicates_context_overflow(value)
+    identifiers = [
+        _normalized_error_code(value[key])
+        for key in ("code", "reason", "type")
+        if value.get(key) not in (None, "")
+    ]
+    if any(identifier in _CONTEXT_OVERFLOW_CODES for identifier in identifiers):
+        return True
+    if any(identifier in _NON_CONTEXT_ERROR_CODES for identifier in identifiers):
+        return False
+    if any(
+        not identifier.isdigit()
+        and identifier not in _GENERIC_PROVIDER_ERROR_IDENTIFIERS
+        for identifier in identifiers
+    ):
+        return False
+    if not allow_message_fallback:
+        return False
+    return any(
+        _message_indicates_context_overflow(value.get(key))
+        for key in ("message", "detail")
+        if value.get(key) is not None
+    )
+
+
+def _is_sse_response(body_text, content_type):
+    media_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    return media_type == "text/event-stream" or body_text.lstrip().startswith("data:")
+
+
+def _body_indicates_context_overflow(
+    body,
+    content_type="",
+    *,
+    allow_message_fallback=True,
+):
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    body = str(body or "")
+    if _is_sse_response(body, content_type):
+        payload = _extract_openai_response_from_sse(body)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return _error_payload_indicates_context_overflow(
+            error,
+            allow_message_fallback=allow_message_fallback,
+        )
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return allow_message_fallback and _message_indicates_context_overflow(body)
+    if isinstance(payload, dict):
+        payload = payload.get("error", payload)
+    return _error_payload_indicates_context_overflow(
+        payload,
+        allow_message_fallback=allow_message_fallback,
+    )
+
+
+def _response_error_payload(response_data):
+    if response_data.get("type") == "error":
+        return True, response_data
+    if response_data.get("status") == "failed":
+        return True, response_data.get("error")
+    if "error" in response_data and response_data.get("error") is not None:
+        return True, response_data.get("error")
+    return False, None
+
+
 class FakeModelClient:
     conversation_mode = "responses-manual-replay-v1"
 
@@ -69,20 +200,34 @@ def _normalize_versioned_base_url(base_url):
     return base
 
 
+def _decode_sse_data(data_lines):
+    payload = "\n".join(data_lines).strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
 def _iter_sse_events(body_text):
+    data_lines = []
     for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
+        if not line.strip():
+            event = _decode_sse_data(data_lines)
+            data_lines = []
+            if event is not None:
+                yield event
             continue
-        payload = line[len("data:") :].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            yield event
+        if line == "data":
+            data_lines.append("")
+        elif line.startswith("data:"):
+            value = line[len("data:") :]
+            data_lines.append(value.removeprefix(" "))
+    event = _decode_sse_data(data_lines)
+    if event is not None:
+        yield event
 
 
 def _extract_openai_response_from_sse(body_text):
@@ -91,12 +236,25 @@ def _extract_openai_response_from_sse(body_text):
         response = event.get("response")
         if isinstance(response, dict):
             last_response = response
+        if event.get("error"):
+            return {"error": event["error"]}
+        if event.get("type") == "error":
+            return {
+                "error": {
+                    key: event[key]
+                    for key in ("code", "reason", "message", "detail", "param")
+                    if key in event
+                }
+                or True
+            }
         if event.get("type") in {
             "response.completed",
             "response.failed",
             "response.incomplete",
         } and isinstance(response, dict):
-            return response
+            terminal = dict(response)
+            terminal["status"] = event["type"].removeprefix("response.")
+            return terminal
     return last_response
 
 
@@ -316,40 +474,72 @@ class OpenAICompatibleModelClient:
                     f"Model: {self.model}"
                 )
             effective_timeout = min(float(self.timeout), remaining)
+            http_failure = None
+            transport_failure = False
             try:
                 with urllib.request.urlopen(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
                     response_headers = getattr(response, "headers", {}) or {}
                     return body_text, response_headers.get("Content-Type", "")
             except urllib.error.HTTPError as exc:
-                transient = exc.code in {408, 429} or exc.code >= 500
-                if transient and attempt < attempts - 1 and retry_delay(attempt):
-                    continue
-                raise RuntimeError(
-                    f"OpenAI-compatible request failed with HTTP {exc.code}.\n"
-                    f"Backend host: {self.backend_hostname}\n"
-                    f"Model: {self.model}"
-                ) from exc
+                status = int(exc.code)
+                try:
+                    error_body = exc.read()
+                except (
+                    urllib.error.URLError,
+                    IncompleteRead,
+                    RemoteDisconnected,
+                    TimeoutError,
+                    OSError,
+                    ValueError,
+                ):
+                    error_body = b""
+                error_headers = getattr(exc, "headers", {}) or {}
+                error_content_type = error_headers.get("Content-Type", "")
+                http_failure = (
+                    status,
+                    _body_indicates_context_overflow(
+                        error_body,
+                        error_content_type,
+                        allow_message_fallback=(
+                            status in _HTTP_CONTEXT_MESSAGE_STATUSES
+                        ),
+                    ),
+                    status in {408, 429} or status >= 500,
+                )
             except (
                 urllib.error.URLError,
                 IncompleteRead,
                 RemoteDisconnected,
                 TimeoutError,
-            ) as exc:
+            ):
+                transport_failure = True
+
+            if http_failure is not None:
+                status, context_overflow, transient = http_failure
+                if context_overflow:
+                    raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
+                if transient and attempt < attempts - 1 and retry_delay(attempt):
+                    continue
+                raise RuntimeError(
+                    f"OpenAI-compatible request failed with HTTP {status}.\n"
+                    f"Backend host: {self.backend_hostname}\n"
+                    f"Model: {self.model}"
+                )
+            if transport_failure:
                 if attempt < attempts - 1 and retry_delay(attempt):
                     continue
                 raise RuntimeError(
                     "Could not reach the OpenAI-compatible backend.\n"
                     f"Backend host: {self.backend_hostname}\n"
                     f"Model: {self.model}"
-                ) from exc
+                )
         raise RuntimeError("OpenAI-compatible request exhausted retries")
 
     @staticmethod
     def _decode_response(body_text, content_type):
-        if content_type.startswith("text/event-stream") or body_text.lstrip().startswith(
-            "data:"
-        ):
+        parse_failed = False
+        if _is_sse_response(body_text, content_type):
             response_data = _extract_openai_response_from_sse(body_text)
             if response_data is None:
                 raise RuntimeError(
@@ -358,16 +548,22 @@ class OpenAICompatibleModelClient:
         else:
             try:
                 response_data = json.loads(body_text)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    "OpenAI-compatible error: backend returned non-JSON "
-                    "content that could not be parsed"
-                ) from exc
+            except json.JSONDecodeError:
+                response_data = None
+                parse_failed = True
+        if parse_failed:
+            raise RuntimeError(
+                "OpenAI-compatible error: backend returned non-JSON "
+                "content that could not be parsed"
+            )
         if not isinstance(response_data, dict):
             raise RuntimeError(  # noqa: TRY004 - provider protocol failure
                 "OpenAI-compatible error: backend returned a non-object JSON response"
             )
-        if response_data.get("error"):
+        has_error, error = _response_error_payload(response_data)
+        if has_error and _error_payload_indicates_context_overflow(error):
+            raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
+        if has_error:
             raise RuntimeError("OpenAI-compatible error: backend returned an error")
         output = response_data.get("output")
         if not isinstance(output, list) or any(

@@ -1,5 +1,6 @@
 import io
 import json
+import traceback
 import urllib.error
 from http.client import IncompleteRead
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pico import ModelAction
+from pico.providers import ProviderContextOverflow
 from pico.providers.clients import OpenAICompatibleModelClient, _action_from_response
 
 TOOLS = [
@@ -45,6 +47,26 @@ def client():
     return OpenAICompatibleModelClient(
         "gpt-test", "https://example.test", "secret", None, 3
     )
+
+
+def assert_exception_graph_redacted(error, *secrets):
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    rendered = "".join(traceback.format_exception(error))
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for secret in secrets:
+            assert secret not in str(current)
+            assert secret not in rendered
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
 
 
 def final_response(answer="done", *, usage=None):
@@ -155,7 +177,7 @@ def test_non_transient_http_status_is_not_retried_or_echoed():
     error = urllib.error.HTTPError(
         "https://example.test/v1/responses",
         400,
-        "bad",
+        "provider secret reason",
         {},
         io.BytesIO(b"provider echoed secret"),
     )
@@ -165,8 +187,189 @@ def test_non_transient_http_status_is_not_retried_or_echoed():
     ):
         client().complete_action("prompt", 32, action_tools=TOOLS)
     assert request.call_count == 1
-    assert "provider echoed secret" not in str(raised.value)
-    assert "secret" not in str(raised.value)
+    assert_exception_graph_redacted(
+        raised.value,
+        "provider echoed secret",
+        "provider secret reason",
+        "secret",
+    )
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        {"type": "invalid_request_error"},
+        {"code": 400},
+        {"code": "bad_request"},
+    ],
+)
+def test_http_context_overflow_is_typed_without_echoing_provider_body(identifier):
+    error = urllib.error.HTTPError(
+        "https://example.test/v1/responses",
+        400,
+        "provider secret reason",
+        {"Content-Type": "application/json"},
+        io.BytesIO(
+            json.dumps(
+                {
+                    "error": {
+                        **identifier,
+                        "message": (
+                            "The maximum context length was exceeded; "
+                            "provider secret context detail"
+                        ),
+                    }
+                }
+            ).encode()
+        ),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=error) as request,
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert request.call_count == 1
+    assert_exception_graph_redacted(
+        raised.value,
+        "provider secret context detail",
+        "provider secret reason",
+        "secret",
+    )
+
+
+def test_http_rate_limit_with_token_wording_retries_and_is_not_overflow():
+    def rate_limit_error():
+        return urllib.error.HTTPError(
+            "https://example.test/v1/responses",
+            429,
+            "rate limited",
+            {"Content-Type": "application/json"},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "rate_limit_exceeded",
+                            "message": "Too many tokens per minute; provider secret",
+                        }
+                    }
+                ).encode()
+            ),
+        )
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=[rate_limit_error() for _ in range(3)],
+        ) as request,
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="HTTP 429") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert request.call_count == 3
+    assert not isinstance(raised.value, ProviderContextOverflow)
+    assert "provider secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_transient_http_context_wording_without_context_code_still_retries(status):
+    def transient_error():
+        return urllib.error.HTTPError(
+            "https://example.test/v1/responses",
+            status,
+            "provider secret reason",
+            {"Content-Type": "application/json"},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": (
+                                "The maximum context length was exceeded; "
+                                "provider secret"
+                            ),
+                        }
+                    }
+                ).encode()
+            ),
+        )
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=[transient_error() for _ in range(3)],
+        ) as request,
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match=f"HTTP {status}") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert request.call_count == 3
+    assert not isinstance(raised.value, ProviderContextOverflow)
+    assert_exception_graph_redacted(raised.value, "provider secret", "secret")
+
+
+def test_transient_http_structured_context_code_is_typed_without_retry():
+    error = urllib.error.HTTPError(
+        "https://example.test/v1/responses",
+        500,
+        "provider secret reason",
+        {"Content-Type": "application/json"},
+        io.BytesIO(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "provider secret",
+                    }
+                }
+            ).encode()
+        ),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=error) as request,
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert request.call_count == 1
+    assert_exception_graph_redacted(raised.value, "provider secret", "secret")
+
+
+def test_incomplete_http_error_body_is_discarded_and_redacted():
+    class IncompleteBody:
+        @staticmethod
+        def read():
+            raise IncompleteRead(b"provider secret partial body", 100)
+
+        @staticmethod
+        def close():
+            return None
+
+    error = urllib.error.HTTPError(
+        "https://example.test/v1/responses",
+        400,
+        "provider secret reason",
+        {"Content-Type": "application/json"},
+        IncompleteBody(),
+    )
+
+    with (
+        patch("urllib.request.urlopen", side_effect=error),
+        pytest.raises(RuntimeError, match="HTTP 400") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert not isinstance(raised.value, ProviderContextOverflow)
+    assert_exception_graph_redacted(
+        raised.value,
+        "provider secret partial body",
+        "provider secret reason",
+        "secret",
+    )
 
 
 def test_timeout_is_retried_then_normalized_without_leaking_api_key():
@@ -179,6 +382,25 @@ def test_timeout_is_retried_then_normalized_without_leaking_api_key():
     assert request.call_count == 3
     assert "Could not reach" in str(raised.value)
     assert "secret" not in str(raised.value)
+
+
+def test_network_error_traceback_does_not_leak_provider_reason_or_api_key():
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("provider secret network reason"),
+        ) as request,
+        patch("time.sleep"),
+        pytest.raises(RuntimeError, match="Could not reach") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert request.call_count == 3
+    assert_exception_graph_redacted(
+        raised.value,
+        "provider secret network reason",
+        "secret",
+    )
 
 
 def test_retries_share_one_request_deadline():
@@ -231,6 +453,23 @@ def test_invalid_json_response_shape_has_normalized_provider_error(body):
         client().complete_action("prompt", 32, action_tools=TOOLS)
 
 
+def test_non_json_provider_body_is_absent_from_exception_graph():
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response("provider secret non-json body"),
+        ),
+        pytest.raises(RuntimeError, match="non-JSON") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert_exception_graph_redacted(
+        raised.value,
+        "provider secret non-json body",
+        "secret",
+    )
+
+
 def test_malformed_response_output_has_normalized_provider_error():
     with (
         patch(
@@ -259,6 +498,182 @@ def test_sse_provider_error_is_not_treated_as_model_output():
         client().complete_action("prompt", 32, action_tools=TOOLS)
 
     assert "provider secret detail" not in str(raised.value)
+
+
+def test_json_context_overflow_error_is_typed_and_redacted():
+    response = Response(
+        json.dumps(
+            {
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": (
+                        "This model's maximum context length is 8192 tokens. "
+                        "provider secret detail"
+                    ),
+                }
+            }
+        )
+    )
+
+    with (
+        patch("urllib.request.urlopen", return_value=response),
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert "provider secret detail" not in str(raised.value)
+    assert "secret" not in str(raised.value)
+
+
+def test_top_level_json_error_uses_its_own_context_payload():
+    response = Response(
+        json.dumps(
+            {
+                "type": "error",
+                "code": "context_length_exceeded",
+                "message": "provider secret detail",
+            }
+        )
+    )
+
+    with (
+        patch("urllib.request.urlopen", return_value=response),
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert_exception_graph_redacted(raised.value, "provider secret detail", "secret")
+
+
+@pytest.mark.parametrize("error", [None, {}, "", False])
+def test_failed_response_status_is_error_even_with_falsey_error(error):
+    response = Response(json.dumps({"status": "failed", "error": error, "output": []}))
+
+    with (
+        patch("urllib.request.urlopen", return_value=response),
+        pytest.raises(RuntimeError, match="backend returned an error") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert not isinstance(raised.value, ProviderContextOverflow)
+
+
+def test_sse_context_overflow_error_is_typed_and_redacted():
+    event = {
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    "The maximum context length was exceeded; "
+                    "provider secret detail"
+                ),
+            }
+        },
+    }
+    body = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "text/event-stream"),
+        ),
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert "provider secret detail" not in str(raised.value)
+    assert "secret" not in str(raised.value)
+
+
+def test_failed_sse_envelope_cannot_smuggle_a_valid_function_call():
+    event = {
+        "type": "response.failed",
+        "response": {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "submit_final",
+                    "call_id": "call_false_success",
+                    "arguments": {"answer": "must not be accepted"},
+                }
+            ]
+        },
+    }
+    body = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "text/event-stream"),
+        ),
+        pytest.raises(RuntimeError, match="backend returned an error"),
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+
+def test_top_level_sse_context_message_is_typed():
+    event = {
+        "type": "error",
+        "message": "The maximum context length was exceeded; provider secret",
+    }
+    body = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n"
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "text/event-stream"),
+        ),
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert "provider secret" not in str(raised.value)
+
+
+def test_sse_parser_merges_data_lines_and_normalizes_content_type():
+    body = (
+        'data: {"type":"response.failed",\n'
+        'data: "response":{"error":{"code":"context_length_exceeded",\n'
+        'data: "message":"provider secret detail"}}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            return_value=Response(body, "Text/Event-Stream; Charset=UTF-8"),
+        ),
+        pytest.raises(ProviderContextOverflow) as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert_exception_graph_redacted(raised.value, "provider secret detail", "secret")
+
+
+def test_ordinary_provider_error_is_not_context_overflow():
+    response = Response(
+        json.dumps(
+            {
+                "error": {
+                    "code": "invalid_api_key",
+                    "message": (
+                        "The maximum context length was exceeded; "
+                        "provider secret authentication detail"
+                    ),
+                }
+            }
+        )
+    )
+
+    with (
+        patch("urllib.request.urlopen", return_value=response),
+        pytest.raises(RuntimeError, match="backend returned an error") as raised,
+    ):
+        client().complete_action("prompt", 32, action_tools=TOOLS)
+
+    assert not isinstance(raised.value, ProviderContextOverflow)
+    assert "provider secret authentication detail" not in str(raised.value)
 
 
 def test_sse_text_without_response_object_is_rejected():

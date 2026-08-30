@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .completion_controller import CompletionController
+from .providers import ProviderContextOverflow
 from .run_lifecycle import RunLifecycle, reload_current_run
 
 if TYPE_CHECKING:
@@ -48,8 +49,8 @@ class AgentLoop:
 
                 try:
                     turn = self._next_model_turn(loop_state)
-                except RuntimeError as exc:
-                    if self._recover_context_overflow(loop_state, exc):
+                except ProviderContextOverflow:
+                    if self._recover_context_overflow(loop_state):
                         continue
                     raise
                 loop_state.execution_stop = self.lifecycle.execution_stop()
@@ -262,27 +263,8 @@ class AgentLoop:
             return
         agent.model_client.record_action_result(turn.action, provider_result)
 
-    @staticmethod
-    def _is_context_overflow_error(exc):
-        text = str(exc).lower()
-        return any(
-            marker in text
-            for marker in (
-                "context window",
-                "maximum context length",
-                "max context length",
-                "prompt is too long",
-                "input is too long",
-                "too many tokens",
-                "token limit exceeded",
-            )
-        )
-
-    def _recover_context_overflow(self, loop_state, exc):
-        if (
-            loop_state.overflow_recovery_attempted
-            or not self._is_context_overflow_error(exc)
-        ):
+    def _recover_context_overflow(self, loop_state):
+        if loop_state.overflow_recovery_attempted:
             return False
         loop_state.overflow_recovery_attempted = True
         loop_state.prompt_snapshot = None
