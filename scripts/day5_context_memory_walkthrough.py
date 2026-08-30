@@ -14,6 +14,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.context_manager import ContextManager
+from pico.execution import ExecutionContext
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
@@ -111,6 +112,7 @@ def main():
         agent.run.run_log = run_log
         first = run_log.append_user(contract)
         agent.run.projection = RunProjection().apply_event(first)
+        agent.run.execution_context = ExecutionContext.root(max_seconds=30)
         for index in range(6):
             append_historical_read(agent, index)
 

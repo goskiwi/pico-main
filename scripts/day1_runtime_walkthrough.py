@@ -1,4 +1,4 @@
-"""Day 1: inspect Pico's nine top-level components before and after ask()."""
+"""Day 1: inspect Pico's eight top-level components before and after ask()."""
 
 import json
 import tempfile
@@ -15,7 +15,7 @@ from pico import (
 
 
 def component_snapshot(agent):
-    """Return a small, beginner-friendly view of Pico's nine components."""
+    """Return a small, beginner-friendly view of Pico's eight components."""
     task = agent.run.task
     run_log = agent.run.run_log
     return {
@@ -42,6 +42,8 @@ def component_snapshot(agent):
             "has_task_state": task is not None,
             "has_run_log": run_log is not None,
             "status": task.lifecycle.status if task is not None else None,
+            "resumable": agent.run.resumable,
+            "reload_required": agent.run.reload_required,
             "model_requests": agent.run.metrics.model_request_count,
             "executed_tools": agent.run.metrics.executed_tool_count,
         },
@@ -57,8 +59,7 @@ def component_snapshot(agent):
             "type": type(agent.tools).__name__,
             "visible_tools": sorted(agent.tools.surface),
         },
-        "8_recovery": dict(agent.recovery.state),
-        "9_prompt": {
+        "8_prompt": {
             "type": type(agent.prompt).__name__,
             "instruction_characters": len(agent.prompt.instructions),
         },

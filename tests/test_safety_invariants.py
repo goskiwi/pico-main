@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.contracts import ToolCall
+from pico.execution import ExecutionContext
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.sandbox import (
@@ -51,6 +52,7 @@ def run_active(agent, call):
         )
         agent.run.projection = RunProjection().apply_event(first)
         agent.run.run_log = run_log
+        agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     agent.apply_run_event(run_log.append_tool_call(call))
     return agent.tools.execute(call)
 

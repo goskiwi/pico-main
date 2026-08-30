@@ -16,7 +16,7 @@ Terminology in this document is strict:
 | Scope | Source of truth | Derived state |
 |---|---|---|
 | Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Call and final Diff receipt |
-| Session | `active_run_id` | RuntimeRecovery state |
+| Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived and `reload_required` is only a process-local cache-validity bit |
 | Task contract | First `user_message.contract` | Goal, task kind, write scope and completion requirements |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
 | Project | Markdown Memory Cards | Bounded `MEMORY.md` catalog plus explicit `memory_recall` Tool results |
@@ -27,7 +27,7 @@ Terminology in this document is strict:
 
 | Path | Durable writes | Rebuildable/current state |
 |---|---|---|
-| CLI / resume | First `user_message.contract`, then Session `active_run_id`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | RuntimeRecovery selection and one RunProjection replay |
+| CLI / resume | First `user_message.contract`, then Session `active_run_id`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
 | Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolRuntime admission/orchestration, private tool-execution helpers, ToolContext-bound Tool Runner result, Projection and Evidence updates |
 | Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
 

@@ -9,6 +9,7 @@ from pico import (
     WorkspaceContext,
 )
 from pico.contracts import ToolCall
+from pico.execution import ExecutionContext
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
@@ -63,6 +64,7 @@ def test_read_only_surface_and_direct_execution_both_reject_mutators(tmp_path):
     )
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = run_log
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     executed = []
     agent.tools.registry["write_file"]["run"] = lambda _args: executed.append(True)
 

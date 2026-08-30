@@ -21,13 +21,15 @@ Triage/Evals 属于 Applications。不要为了学习顺序关闭功能或新增
 ```text
 pico CLI
   -> build_agent() 构造 Pico、默认 Project Memory 与 RepoMap
-  -> RuntimeRecovery 根据 Session.active_run_id 查找 Run Log
+  -> Pico.__init__ 通过 load_resumable_run 读取 Session.active_run_id；无指针时查找孤立的未完成 Run
   -> 新 Run：RunLifecycle 先写 user_message + TaskContract，再写 Session 指针
   -> 恢复 Run：RunStore.load_run 单次读取并校验 Run Log v15、终态 Artifact，重放全部 Fact
   -> 若尾部存在未完成 Tool Call：RunLog.reconcile_interrupted() 追加确定性结果
   -> 写 run_started / run_resumed，重置 Provider action session
   -> AgentLoop
 ```
+
+同一 `Pico` 请求若因未处理异常退出，会先用 durable Run Log 替换可能存在提交歧义的内存快照；若该读取暂时失败，`ActiveRunState.reload_required` 保持为真，下一次 `ask()` 必须先重试读取，不能直接沿用旧 Projection。首次 Session 指针写失败时，恢复请求也会在写任何 `run_resumed` Fact 或调用 Provider 前修复指针。
 
 ### 2. 普通工具轮
 
@@ -80,7 +82,7 @@ ModelAction.final
 
 ## Runtime 对象边界
 
-`Pico` 只保留九个顶层组件，不再把配置、当前 Run、Workspace 缓存和工具状态
+`Pico` 只保留八个顶层组件，不再把配置、当前 Run、Workspace 缓存和工具状态
 平铺成几十个属性：
 
 ```text
@@ -92,7 +94,6 @@ Pico
   run            当前或最近一次 Run 的可变状态
   dependencies   Store、Sandbox、RepoMap 和 Subagents
   tools          工具 Registry、模型 Surface、准入与执行
-  recovery       active_run_id 与 Run Log tail 恢复
   prompt         稳定 instructions、动态 ContextManager 和相关记忆选择
 ```
 
@@ -138,7 +139,7 @@ Provider 续接；`RunLifecycle` 负责创建/恢复 Run 和 Run Log 终态；
 - Workspace 新鲜度：文件工具返回真实 Unified Diff 和 before/after path transitions。每个路径只在本 Run 第一次修改前保存完整 preimage；`RunChangeSet` 计算最终净变化，因此 `A -> B -> A` 不算完成所需的修改。外部漂移会阻止成功提交；用户取消或重置仍可受控停止，并以 `unavailable_reason=workspace_drift` 明确说明此时无法生成可信 Final Diff。Verifier 只保存命令结果及其 mutation/path states，current/stale 在查询时派生。
 - RepoMap：基于 tree-sitter 构建 Python symbol/reference graph，以 lexical + personalized PageRank 在 Token 预算内返回任务相关签名。
 - 分层状态：`TaskContract` 保存目标、任务类型、写入范围与完成要求，模型不能修改；WorkingState 继续使用原有 add/remove 增量协议，只保存约束、已确认决定和下一步。Project Memory 与 RepoMap 保持默认开启。Memory Catalog 在初始化、store、forget 或显式 refresh 时重建，Prompt build 不写磁盘。
-- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；Manual 模式只允许观察工具，mutation 必须属于 Active Run。`FailureInfo.recovery` 是唯一持久化纠错事实，模型可见 correction action 由它派生。Repeat guard 只阻止相同 `partial/unknown` 副作用的盲目重放。`write_file` 只创建 absent 文件，`edit_file` 只修改 existing 文件并携带 `read_file` Revision；提交点再次复验 Revision 后原子替换。
+- 安全工具：路径锚定 Workspace，通用文件工具不能访问 `.git/` 或 `.pico/`；Manual 模式只允许观察工具，mutation 必须属于 Active Run。父级 `delegate_tasks` 的 Implement scope 与 `apply_task_patches` 的计划路径同样必须落在 TaskContract/当前 Config 的有效写入交集内，并在 Approval 与集成前拒绝越界。`FailureInfo.recovery` 是唯一持久化纠错事实，模型可见 correction action 由它派生。Repeat cache 是进程内避免连续盲目重放相同 `partial/unknown` 调用的辅助；持久安全仍由 create-only、Revision、原子 Memory/Workspace 写入和 Patch 状态负责。`write_file` 只创建 absent 文件，`edit_file` 只修改 existing 文件并携带 `read_file` Revision；提交点再次复验 Revision 后原子替换。
 - 最小 Shell 环境：未配置时使用默认白名单；显式空白名单保持为空，仅由 Shell 边界补充运行必需的 `PWD`/`PATH`。
 - 大输出：模型直接获得一次 12 KiB 预览（shell 为尾部 16 KiB）；完整、脱敏输出写入不可变 artifact，截断结果可通过当前 run 限定的 `read_artifact` 按 8 KiB 字节页继续读取。
 - 隔离执行：`run_shell` 在临时 Docker 容器内通过 POSIX Shell 执行，支持 `&&`、管道、重定向、环境变量与 `cd`；inspect/verify Profile 均禁网、只读 rootfs 与 Workspace，并施加 cap-drop、进程/CPU/内存/输出限制和整轮 deadline。

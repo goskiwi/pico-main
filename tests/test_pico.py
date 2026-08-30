@@ -1,4 +1,5 @@
 import json
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -288,6 +289,63 @@ def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path)
     assert old_projection.stop_reason == "user_reset"
 
 
+def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool(
+                "write_file",
+                {"path": "late.txt", "content": "tracked side effect\n"},
+            ),
+            ModelAction.final("must not be reached"),
+        ],
+    )
+    original_runner = agent.tools.registry["write_file"]["run"]
+
+    def blocked_runner(args):
+        started.set()
+        if not release.wait(timeout=3):
+            raise TimeoutError("test runner was not released")
+        return original_runner(args)
+
+    agent.tools.registry["write_file"]["run"] = blocked_runner
+    result = {}
+
+    def ask_in_thread():
+        try:
+            result["answer"] = agent.ask("Create late.txt", **NO_CHANGE_TASK)
+        except BaseException as exc:  # noqa: BLE001 - thread assertion handoff
+            result["error"] = exc
+
+    thread = threading.Thread(target=ask_in_thread)
+    thread.start()
+    assert started.wait(timeout=3)
+    run_id = agent.run.projection.run_id
+
+    agent.reset()
+    assert agent.run.execution_context.token.reason == "user_reset"
+    release.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert "error" not in result
+    assert result["answer"].endswith("user_reset.")
+    assert (tmp_path / "late.txt").read_text(encoding="utf-8") == (
+        "tracked side effect\n"
+    )
+    events = agent.dependencies.run_store.read_events(run_id)
+    assert events[-2].kind == "tool_result"
+    assert events[-2].affected_paths == ("late.txt",)
+    assert events[-1].kind == "run_stopped"
+    replayed = agent.dependencies.run_store.replay(run_id)
+    assert replayed.evidence.changed_paths == ["late.txt"]
+    assert replayed.stop_reason == "user_reset"
+    assert agent.session.data["active_run_id"] == ""
+    assert agent.run.task is None
+
+
 def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monkeypatch):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
@@ -307,6 +365,42 @@ def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monke
         agent.dependencies.run_store.replay(agent.run.projection.run_id).task.to_dict()
         == agent.run.task.to_dict()
     )
+
+
+def test_reset_reloads_a_durably_committed_ambiguous_terminal_event(
+    tmp_path,
+    monkeypatch,
+):
+    agent = build_agent(tmp_path, [])
+    with pytest.raises(RuntimeError, match="ran out of outputs"):
+        agent.ask("old task", **NO_CHANGE_TASK)
+    run_id = agent.run.projection.run_id
+    store = agent.dependencies.run_store
+    original_append = store.append_event
+    failed = False
+
+    def commit_then_raise(*args, **kwargs):
+        nonlocal failed
+        event = original_append(*args, **kwargs)
+        kind = str(args[3]) if len(args) > 3 else str(kwargs.get("kind", ""))
+        if kind == "run_stopped" and not failed:
+            failed = True
+            raise OSError("ambiguous reset append")
+        return event
+
+    monkeypatch.setattr(store, "append_event", commit_then_raise)
+
+    with pytest.raises(OSError, match="ambiguous reset append"):
+        agent.reset()
+
+    replayed = store.replay(run_id)
+    assert agent.run.projection.summary() == replayed.summary()
+    assert agent.run.projection.terminal is True
+    assert agent.run.reload_required is False
+    assert agent.session.data["active_run_id"] == ""
+
+    agent.reset()
+    assert agent.run.task is None
 
 
 def test_terminal_run_closes_execution_when_session_pointer_save_fails(

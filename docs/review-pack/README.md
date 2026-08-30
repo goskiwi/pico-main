@@ -5,13 +5,13 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.contracts`: provider-neutral Runtime contracts after native Responses parsing.
 - `pico.run_log` / `pico.context_manager`: single-source causal state, compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
-- `pico.features.memory` / `pico.project_memory`: RunLog-projected goal, constraints, decisions and next steps plus Markdown long-term facts recalled through explicit, audited Tool transactions.
+- `pico.features.memory` / `pico.project_memory`: RunLog-projected WorkingState constraints, decisions and next steps plus cross-Run Markdown cards recalled through explicit, audited Tool transactions. Goal belongs to TaskContract.
 - `pico.tool_runtime` / `pico.mutations` / `pico.sandbox`: staged admission, atomic edits and Docker execution.
-- `pico.runtime_recovery` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts.
+- `pico.run_lifecycle` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts without a second recovery-state object.
 - `pico.evidence` / `pico.verification` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and a separate receipt-bound Patch integrator.
 - `evals`: repository-local deterministic Runtime regressions and mechanism evaluations; it is excluded from the installable `pico` package.
-- `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool, Recovery and Prompt ownership;
+- `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool and Prompt ownership;
   `pico.runtime.Pico` is the small composition root.
 - `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,
   durable Run lifecycle and completion authority have separate owners.

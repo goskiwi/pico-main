@@ -13,11 +13,10 @@ from .mutations import WorkspaceMutationService
 from .project_memory import ProjectMemoryStore
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_log import RunLog
+from .run_lifecycle import load_resumable_run, reload_current_run
 from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
-from .runtime_recovery import RESUME_NONE, RESUME_READY, RuntimeRecovery
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .sandbox import DockerSandbox, DockerSandboxConfig
@@ -93,10 +92,9 @@ class Pico:
             )
 
         self.tools = ToolRuntime(self)
-        self.recovery = RuntimeRecovery(self)
         self.prompt = PromptBuilder(self)
         self.session.save()
-        self.recovery.evaluate()
+        load_resumable_run(self)
 
     def redact_text(self, text):
         return securitylib.redact_text(
@@ -172,45 +170,30 @@ class Pico:
         )
 
     def reset(self):
+        if self.run.reload_required:
+            reload_current_run(self)
+        execution = self.run.execution_context
+        if execution is not None:
+            execution.request_stop("user_reset")
+            return
         run_log = self.run.run_log
-        projection = self.run.projection
-        recovery_state = dict(self.recovery.state)
-        if run_log is None and recovery_state.get("status") == RESUME_READY:
-            events = tuple(recovery_state.get("events", ()))
-            if events:
-                first = events[0]
-                run_log = RunLog(
-                    first.run_id,
-                    first.task_id,
-                    first.session_id,
-                    self.dependencies.run_store,
-                    events,
+        try:
+            if run_log is not None and not self.run.projection.terminal:
+                for _outcome, event in run_log.reconcile_interrupted(self):
+                    self.apply_run_event(event)
+                self.apply_run_event(
+                    run_log.append_stopped(
+                        "Session reset by user.",
+                        "user_reset",
+                        build_stopped_final_diff_descriptor(self),
+                    )
                 )
-                projection = recovery_state.get("projection") or (
-                    self.dependencies.run_store.replay(first.run_id)
-                )
-        if run_log is not None and not projection.terminal:
-            self.run.run_log = run_log
-            self.run.projection = projection
-            for _outcome, event in run_log.reconcile_interrupted(self):
-                self.apply_run_event(event)
-            self.apply_run_event(
-                run_log.append_stopped(
-                    "Session reset by user.",
-                    "user_reset",
-                    build_stopped_final_diff_descriptor(self),
-                )
-            )
-        if self.run.execution_context is not None:
-            self.run.execution_context.request_stop("user_reset")
+        except BaseException:
+            self.run.reload_required = True
+            reload_current_run(self)
+            raise
         self.session.reset()
         self.run = ActiveRunState()
-        self.recovery.state = {
-            "status": RESUME_NONE,
-            "active_run_id": "",
-            "projection": None,
-            "events": (),
-        }
         self.model_client.reset_action_session()
 
     def cancel_current_run(self, reason="user_cancelled"):

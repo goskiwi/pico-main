@@ -14,12 +14,18 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.contracts import ToolCall
+from pico.execution import ExecutionContext
 from pico.mutations import content_revision
+from pico.run_log import RunLog
+from pico.run_projection import RunProjection
 from pico.run_store import RunStore
 from pico.sandbox import DockerSandbox, SandboxResult
 from pico.subagents import SubtaskSpec
+from pico.subagents.contracts import SubtaskRecord
 from pico.subagents.tools import DelegateTasksArgs
 from pico.subagents.worktree import GitWorktree, GitWorktreeError
+from pico.task_state import TaskContract
 from pico.tools import function_schema
 
 READ_TASK = {
@@ -86,6 +92,7 @@ def build_parent(
     sandbox_factory=None,
     parent_outputs=(),
     verification_command="python -m pytest -q",
+    allowed_write_paths=None,
 ):
     sandbox_factory = sandbox_factory or (lambda child_root: PassingSandbox(child_root))
     return Pico(
@@ -95,6 +102,7 @@ def build_parent(
         config=PicoConfig(
             approval_policy="auto",
             verification_command=verification_command,
+            allowed_write_paths=allowed_write_paths,
         ),
         sandbox_factory=sandbox_factory,
         subagent_model_client_factory=child_factory,
@@ -220,6 +228,104 @@ def test_delegate_tool_schema_is_strict_at_nested_task_level():
             prompt="inspect",
             max_tool_executions=13,
         )
+
+
+def test_parent_effective_scope_blocks_delegate_and_apply_before_side_effects(
+    tmp_path,
+    monkeypatch,
+):
+    root = repository(tmp_path)
+    parent = build_parent(
+        root,
+        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
+        allowed_write_paths=(),
+    )
+    run_log = RunLog(
+        "run_parent_scope",
+        "task_parent_scope",
+        parent.session.data["id"],
+        parent.dependencies.run_store,
+    )
+    first = run_log.append_user(
+        TaskContract(
+            goal="Exercise narrowed parent scope",
+            task_kind="modify",
+            requires_workspace_change=False,
+            requires_verification=False,
+            allowed_write_paths=("feature.py",),
+        )
+    )
+    parent.run.projection = RunProjection().apply_event(first)
+    parent.run.run_log = run_log
+    parent.run.execution_context = ExecutionContext.root(max_seconds=30)
+
+    delegate_calls = []
+    monkeypatch.setattr(
+        parent.dependencies.subagents,
+        "delegate",
+        lambda specs: delegate_calls.append(specs),
+    )
+    delegate = ToolCall(
+        "delegate_tasks",
+        {
+            "tasks": [
+                {
+                    "task_id": "implement-feature",
+                    "kind": "implement",
+                    "prompt": "create feature.py",
+                    "depends_on": [],
+                    "allowed_write_paths": ["feature.py"],
+                    "max_tool_executions": 4,
+                }
+            ]
+        },
+        "call_delegate_scope",
+    )
+    parent.apply_run_event(run_log.append_tool_call(delegate))
+    delegated = parent.tools.execute(delegate)
+
+    record = SubtaskRecord(
+        spec=SubtaskSpec(
+            task_id="implement-feature",
+            kind="implement",
+            prompt="create feature.py",
+            allowed_write_paths=("feature.py",),
+        ),
+        status="completed",
+        changed_paths=("feature.py",),
+    )
+    parent.dependencies.subagents._records(parent.run.projection.run_id)[
+        record.spec.task_id
+    ] = record
+    approval_calls = []
+    integration_calls = []
+    monkeypatch.setattr(
+        parent.tools,
+        "approve",
+        lambda name, args: approval_calls.append((name, args)) or True,
+    )
+    monkeypatch.setattr(
+        parent.dependencies.subagents.integration,
+        "apply",
+        lambda task_ids: integration_calls.append(task_ids),
+    )
+    apply_call = ToolCall(
+        "apply_task_patches",
+        {"task_ids": ["implement-feature"]},
+        "call_apply_scope",
+    )
+    parent.apply_run_event(run_log.append_tool_call(apply_call))
+    applied = parent.tools.execute(apply_call)
+
+    assert delegated.status == "rejected"
+    assert delegated.failure.code == "invalid_arguments"
+    assert applied.status == "rejected"
+    assert applied.failure.code == "invalid_arguments"
+    assert delegate_calls == []
+    assert approval_calls == []
+    assert integration_calls == []
+    assert not (root / "feature.py").exists()
+    assert all(event.kind != "tool_started" for event in run_log.events)
 
 
 def test_one_delegation_cannot_mix_explore_and_implement_tasks(tmp_path):

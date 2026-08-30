@@ -6,6 +6,7 @@ import pytest
 import pico.mutations as mutation_module
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.contracts import ToolCall, ToolRunnerResult
+from pico.execution import ExecutionContext
 from pico.mutations import WorkspaceMutationService, file_revision
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
@@ -53,6 +54,7 @@ def start_run(agent):
     )
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = run_log
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return run_log
 
 

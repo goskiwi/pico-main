@@ -51,6 +51,7 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
     )
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = run_log
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return run_log
 
 
@@ -817,6 +818,7 @@ def test_controlled_stop_survives_external_workspace_drift(tmp_path, stop_mode):
     agent.session.set_active_run("run_tool_test")
 
     if stop_mode == "reset":
+        agent.run.execution_context = None
         agent.reset()
     else:
         agent.run.execution_context = ExecutionContext.root(max_seconds=30)

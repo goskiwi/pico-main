@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .completion_controller import CompletionController
-from .run_lifecycle import RunLifecycle
+from .run_lifecycle import RunLifecycle, reload_current_run
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -40,28 +40,41 @@ class AgentLoop:
             requires_workspace_change=requires_workspace_change,
             requires_verification=requires_verification,
         )
-        while True:
-            loop_state.execution_stop = self.lifecycle.execution_stop()
-            if loop_state.execution_stop:
-                break
+        try:
+            while True:
+                loop_state.execution_stop = self.lifecycle.execution_stop()
+                if loop_state.execution_stop:
+                    break
 
-            try:
-                turn = self._next_model_turn(loop_state)
-            except RuntimeError as exc:
-                if self._recover_context_overflow(loop_state, exc):
-                    continue
-                raise
-            if turn.action.kind == "tool":
-                loop_state.execution_stop = self._handle_tool_action(loop_state, turn)
-            elif turn.action.kind == "invalid":
-                loop_state.execution_stop = self._handle_invalid_output(loop_state, turn)
-            else:
-                final = self._handle_final_action(loop_state, turn)
-                if final is not None:
-                    return self.lifecycle.finish_success(loop_state, final)
-            if loop_state.execution_stop:
-                break
-        return self.lifecycle.finish_stopped(loop_state)
+                try:
+                    turn = self._next_model_turn(loop_state)
+                except RuntimeError as exc:
+                    if self._recover_context_overflow(loop_state, exc):
+                        continue
+                    raise
+                loop_state.execution_stop = self.lifecycle.execution_stop()
+                if loop_state.execution_stop:
+                    break
+                if turn.action.kind == "tool":
+                    loop_state.execution_stop = self._handle_tool_action(
+                        loop_state, turn
+                    )
+                elif turn.action.kind == "invalid":
+                    loop_state.execution_stop = self._handle_invalid_output(
+                        loop_state, turn
+                    )
+                else:
+                    final = self._handle_final_action(loop_state, turn)
+                    if final is not None:
+                        return self.lifecycle.finish_success(loop_state, final)
+                if loop_state.execution_stop:
+                    break
+            return self.lifecycle.finish_stopped(loop_state)
+        except BaseException:
+            self.agent.run.reload_required = True
+            self.agent.run.execution_context = None
+            reload_current_run(self.agent)
+            raise
 
     def _next_model_turn(self, loop_state):
         agent = self.agent

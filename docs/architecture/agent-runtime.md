@@ -9,7 +9,7 @@ Pico uses `events.jsonl` as the durable source for each Run's process Facts. One
 ```text
 CLI build_agent
   -> Pico composition root
-  -> RuntimeRecovery reads Session.active_run_id
+  -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
   -> new: RunLifecycle appends user_message + TaskContract before the Session pointer
   -> resume: RunStore.load_run reads once, validates Run Log v15 / terminal Artifact,
      and returns that Event snapshot with its Projection
@@ -58,6 +58,8 @@ controlled stop
   -> workspace drift is reported as unavailable_reason, never as a trustworthy Diff
 ```
 
+An active `reset()` first requests `user_reset` on the existing ExecutionContext and returns without replacing Run state. The running AgentLoop records the current Tool Result, observes cancellation, appends `run_stopped`, clears the Session pointer, and only then clears ActiveRunState. A dormant reset performs the same reconciliation and terminal settlement synchronously.
+
 ## Terminology
 
 - **Fact**: an accepted durable Run Event in `events.jsonl`. Tool Call, `tool_started`, Tool
@@ -79,7 +81,7 @@ controlled stop
 | State | Durable owner | Projection/cache |
 |---|---|---|
 | Current Run facts | `runs/<run_id>/events.jsonl` | One RunProjection containing identity, Task, Evidence, Metrics, Pending and final Diff receipt |
-| Active Run pointer | Session `active_run_id` | RuntimeRecovery state |
+| Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
 | Task contract | First `user_message.contract` | Goal, task kind, write scope and completion requirements |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
 | Project memory catalog | Generated `MEMORY.md` | Bounded resident section |
@@ -135,7 +137,7 @@ ToolOutcome keeps three explicit state dimensions for direct inspection:
 - `execution_state`: whether the Tool Runner was not started, returned normally, or failed/interrupted;
 - `side_effect_state`: whether effects are absent, changed, partial, or unknown.
 
-Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. Repeat admission only blocks a matching call after `partial/unknown` side effects. Manual mode only permits observation tools; mutations require an active Run and exact persisted Pending Call.
+Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. The repeat cache is only a process-local aid against immediately replaying a matching `partial/unknown` call; durable mutation safety remains owned by create-only writes, revisions, atomic stores and Patch state. Manual mode only permits observation tools; mutations require an active Run and exact persisted Pending Call. The effective parent write scope is the intersection of the persisted TaskContract and current Runtime policy: Implement delegation declarations and planned Patch integration paths are both checked against it before Approval or execution.
 
 ## Context and compaction
 
@@ -143,7 +145,7 @@ Stable Runtime policy is sent through Responses `instructions`; dynamic Workspac
 
 ## Resume
 
-Session stores only `active_run_id`. On startup Pico opens that Run Log, repairs an incomplete final line, reduces events through the same RunProjection used live, reconciles an unfinished Tool, rebuilds Context, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements. A terminal Run Log clears `active_run_id`.
+Session stores only `active_run_id`. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, rebuilds Context, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced; a transient reload failure leaves the process-local `reload_required` cache-validity bit set so the next request retries before using Task state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
 
 ## Completion
 

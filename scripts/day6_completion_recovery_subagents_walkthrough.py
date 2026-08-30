@@ -14,6 +14,7 @@ from pico import (
 )
 from pico.completion_controller import CompletionController
 from pico.evidence import verification_is_current
+from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
@@ -66,6 +67,7 @@ def activate(
     agent.run.run_log = run_log
     first = run_log.append_user(contract)
     agent.run.projection = RunProjection().apply_event(first)
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return agent.run.task, run_log
 
 
@@ -205,19 +207,13 @@ def recovery_experiment(root):
         session=loaded_session,
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    projection = resumed.recovery.state["projection"]
-    restored = RunLog.restore(
-        original.run.projection.run_id,
-        resumed.dependencies.run_store,
-    )
-    resumed.run.projection = projection
-    resumed.run.run_log = restored
+    assert resumed.run.resumable is True
+    restored = resumed.run.run_log
     reconciled = restored.reconcile_interrupted(resumed)
     for _outcome, event in reconciled:
         resumed.apply_run_event(event)
     outcome, event = reconciled[-1]
 
-    assert resumed.recovery.state["status"] == "resumable"
     assert outcome.status == "partial_success"
     assert outcome.side_effect_state == "partial"
     assert outcome.affected_paths == ("interrupted.txt",)
@@ -227,7 +223,7 @@ def recovery_experiment(root):
     )
 
     return {
-        "recovery_status": resumed.recovery.state["status"],
+        "recovery_status": "resumable" if resumed.run.resumable else "active",
         "outcome": outcome.to_dict(),
         "recovered_from_interruption": event.payload[
             "recovered_from_interruption"

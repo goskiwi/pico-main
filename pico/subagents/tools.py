@@ -26,7 +26,7 @@ def _delegate(manager, args):
 
 
 def _apply_paths(manager, task_ids):
-    records = manager._records(manager._parent_run_id())
+    records = manager._records_by_run.get(manager._parent_run_id(), {})
     order = implementation_order(records, tuple(task_ids))
     return tuple(
         sorted(

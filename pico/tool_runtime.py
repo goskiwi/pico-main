@@ -96,16 +96,44 @@ class ToolRuntime:
                 "read-only task may delegate explore tasks only",
                 "no_retry",
             )
-        allowed_paths = intersect_write_scopes(
-            getattr(contract, "allowed_write_paths", None),
-            runtime.config.allowed_write_paths,
-        )
+        allowed_paths = self._effective_write_scope()
         if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
-            if relative not in set(allowed_paths):
-                raise ValueError(f"write path outside allowed scope: {relative}")
+            self._require_write_scope((relative,), allowed_paths)
+        if name == "delegate_tasks" and allowed_paths is not None:
+            declared_paths = tuple(
+                path
+                for task_spec in validated["tasks"]
+                if task_spec["kind"] == "implement"
+                for path in task_spec["allowed_write_paths"]
+            )
+            self._require_write_scope(declared_paths, allowed_paths)
+        if name == "apply_task_patches" and allowed_paths is not None:
+            _scope, planned_paths = self._potential_effects(tool, validated)
+            self._require_write_scope(
+                (logical for logical, _path in planned_paths),
+                allowed_paths,
+            )
         return validated
+
+    def _effective_write_scope(self):
+        task = self.runtime.run.task
+        contract = getattr(task, "contract", None)
+        return intersect_write_scopes(
+            getattr(contract, "allowed_write_paths", None),
+            self.runtime.config.allowed_write_paths,
+        )
+
+    @staticmethod
+    def _require_write_scope(paths, allowed_paths):
+        if allowed_paths is None:
+            return
+        outside = sorted(set(paths) - set(allowed_paths))
+        if outside:
+            raise ValueError(
+                "write path outside allowed scope: " + ", ".join(outside)
+            )
 
     def model_action_tools(self):
         task = self.runtime.run.task
@@ -166,16 +194,10 @@ class ToolRuntime:
 
     @staticmethod
     def _run_boundary_reason(agent, call_id):
+        if agent.run.reload_required or agent.run.resumable:
+            return "a resumable Run must be resumed or reset before manual tools"
         task = agent.run.task
         if task is None:
-            recovery_state = getattr(getattr(agent, "recovery", None), "state", None)
-            recovery_status = (
-                recovery_state.get("status", "")
-                if isinstance(recovery_state, dict)
-                else getattr(recovery_state, "status", "")
-            )
-            if recovery_status == "resumable":
-                return "a resumable Run must be resumed or reset before manual tools"
             return ""
         run_log = agent.run.run_log
         if run_log is None:
@@ -313,6 +335,26 @@ class ToolRuntime:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
+    def _validate_call(self, call):
+        try:
+            args = self.validate(call.name, call.args)
+        except ToolFailureError as exc:
+            return None, self._rejected(
+                call,
+                exc.failure.code,
+                exc.failure.detail,
+                exc.failure.recovery,
+                structured=exc.structured,
+            )
+        except Exception as exc:  # noqa: BLE001 - validator boundary
+            return None, self._rejected(
+                call,
+                "invalid_arguments",
+                str(exc),
+                "retry_after_change",
+            )
+        return ToolCall(call.name, args, call.call_id), None
+
     def execute(self, call_or_name, args=None):
         call = (
             call_or_name
@@ -334,24 +376,10 @@ class ToolRuntime:
         if repeated is not None:
             return repeated
 
-        try:
-            args = self.validate(name, args)
-        except ToolFailureError as exc:
-            return self._rejected(
-                call,
-                exc.failure.code,
-                exc.failure.detail,
-                exc.failure.recovery,
-                structured=exc.structured,
-            )
-        except Exception as exc:  # noqa: BLE001 - validator boundary
-            return self._rejected(
-                call,
-                "invalid_arguments",
-                str(exc),
-                "retry_after_change",
-            )
-        call = ToolCall(name, args, call.call_id)
+        call, validation_rejection = self._validate_call(call)
+        if validation_rejection is not None:
+            return validation_rejection
+        args = call.args
         agent.prompt.refresh()
         normalized_repeat_key = repeat_key(run_id, name, args)
         repeated = self._reject_repeated_call(call, normalized_repeat_key)

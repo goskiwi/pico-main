@@ -16,7 +16,7 @@ Project Memory 与 RepoMap 从 `Pico` 初始化开始就默认启用。第一遍
 
 | 文件 | 核心 Ownership |
 |---|---|
-| [`pico/runtime.py`](../pico/runtime.py) | `Pico` 组合根、九个顶层组件以及 `ask()` 入口 |
+| [`pico/runtime.py`](../pico/runtime.py) | `Pico` 组合根、八个顶层组件以及 `ask()` 入口 |
 | [`pico/agent_loop.py`](../pico/agent_loop.py) | 模型轮、工具轮、Provider 续接和停止条件的控制流 |
 | [`pico/tool_runtime.py`](../pico/tool_runtime.py) | 模型可见工具的唯一公开执行边界，以及 Call/Started/Result 因果顺序 |
 | [`pico/run_log.py`](../pico/run_log.py) | Run Fact 的严格协议、追加、Compaction 与中断对账 |
@@ -55,8 +55,8 @@ Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作
 | 步骤 | 当前调用 | 第一遍要看懂的内容 |
 |---:|---|---|
 | 1 | `pico/cli.py: main -> build_agent -> _ask_kwargs` | CLI 参数如何变成 `PicoConfig` 和明确的任务要求 |
-| 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 Memory、RepoMap、ToolRuntime、Recovery、Prompt，并进入 AgentLoop |
-| 3 | `pico/run_lifecycle.py: initialize -> _restore_or_create_run` | 新 Run 先写 `user_message.contract`；恢复 Run 保持同一 TaskContract |
+| 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 Memory、RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
+| 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先写 `user_message.contract`；恢复 Run 保持同一 TaskContract |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
 | 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`，动态上下文进 `input`，Schema 进 `tools`；Memory/RepoMap 暂按不透明输入处理 |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |
@@ -69,7 +69,7 @@ Day 7 脚本还演示了默认启用的 Memory，因此应在完成 Day 5 后作
 恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读：
 
 ```text
-RuntimeRecovery
+load_resumable_run
   -> RunStore.load_run
   -> replay_events
   -> RunProjection.apply_event
@@ -104,7 +104,7 @@ Subagent 实现。
 ### Day 1：从 CLI 到 AgentLoop
 
 - 从上面的真实 CLI 命令进入 `cli.py`，沿步骤 1～4 阅读。
-- 运行 `scripts/day1_runtime_walkthrough.py` 查看九个顶层组件；这个脚本是程序化组合实验，
+- 运行 `scripts/day1_runtime_walkthrough.py` 查看八个顶层组件；这个脚本是程序化组合实验，
   不替代前一步真实 CLI 的参数解析与 `build_agent()` 阅读。
 - Memory 与 RepoMap 此时只需要知道“默认存在”，不要打开其实现。
 

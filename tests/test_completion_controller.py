@@ -5,6 +5,7 @@ import pytest
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
+from pico.execution import ExecutionContext
 from pico.mutations import content_revision, file_revision
 from pico.run_log import RunEvent, RunLog
 from pico.run_projection import RunProjection
@@ -49,6 +50,7 @@ def active_agent(tmp_path, requirements, verification_command=""):
     first = log.append_user(contract)
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = log
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return agent
 
 

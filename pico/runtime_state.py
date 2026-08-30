@@ -14,6 +14,7 @@ class ActiveRunState:
     projection: RunProjection = field(default_factory=RunProjection)
     execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
+    reload_required: bool = False
 
     @property
     def task(self):
@@ -26,3 +27,14 @@ class ActiveRunState:
     @property
     def metrics(self):
         return self.projection.metrics
+
+    @property
+    def resumable(self):
+        """Whether this unfinished Run is dormant and safe to resume."""
+
+        return bool(
+            self.task is not None
+            and self.run_log is not None
+            and not self.projection.terminal
+            and self.execution_context is None
+        )

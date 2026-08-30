@@ -13,7 +13,7 @@ from .delivery import (
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
 from .run_projection import RunProjection
-from .runtime_recovery import RESUME_NONE, RESUME_READY
+from .runtime_state import ActiveRunState
 from .task_state import TaskContract
 
 if TYPE_CHECKING:
@@ -33,6 +33,106 @@ class AgentLoopState:
     execution_stop: str = ""
 
 
+def _state_from_snapshot(runtime: Pico, run_id, events, projection):
+    session_id = str(runtime.session.data["id"])
+    if not events:
+        raise ValueError("active Run Log is missing or empty")
+    if projection.run_id != run_id or projection.session_id != session_id:
+        raise ValueError("active Run does not belong to this Session")
+    first = events[0]
+    run_log = RunLog(
+        first.run_id,
+        first.task_id,
+        first.session_id,
+        runtime.dependencies.run_store,
+        events,
+    )
+    return ActiveRunState(projection=projection, run_log=run_log)
+
+
+def load_resumable_run(runtime: Pico):
+    """Install the one validated unfinished Run named by this Session.
+
+    A non-empty Session pointer is authoritative and therefore fails closed if
+    its Run Log is absent, corrupt, or belongs to another Session.  Without a
+    pointer, the Run Store may discover the latest orphaned unfinished Run.
+    """
+
+    session_id = str(runtime.session.data["id"])
+    if runtime.session.data.get("workspace_root") != str(runtime.workspace.root):
+        raise ValueError("session workspace does not match runtime workspace")
+
+    pointed_run_id = str(runtime.session.data.get("active_run_id", ""))
+    if pointed_run_id:
+        run_id = pointed_run_id
+        events, projection = runtime.dependencies.run_store.load_run(run_id)
+    else:
+        run_id, events, projection = runtime.dependencies.run_store.find_active_run(
+            session_id
+        )
+    if (
+        not run_id
+        and runtime.run.reload_required
+        and runtime.run.run_log is not None
+    ):
+        candidate_run_id = runtime.run.run_log.run_id
+        events, projection = runtime.dependencies.run_store.load_run(
+            candidate_run_id
+        )
+        if events:
+            run_id = candidate_run_id
+        else:
+            runtime.run = ActiveRunState()
+    if not run_id:
+        return runtime.run
+
+    state = _state_from_snapshot(runtime, run_id, events, projection)
+    if projection.terminal:
+        if pointed_run_id:
+            runtime.session.set_active_run("")
+        runtime.run = ActiveRunState()
+        return runtime.run
+
+    runtime.run = state
+    if not pointed_run_id:
+        runtime.session.set_active_run(run_id)
+    return runtime.run
+
+
+def reload_current_run(runtime: Pico):
+    """Replace possibly ambiguous in-memory state with its durable snapshot."""
+
+    run_id = str(runtime.run.projection.run_id)
+    if not run_id:
+        return load_resumable_run(runtime)
+    events, projection = runtime.dependencies.run_store.load_run(run_id)
+    runtime.run = _state_from_snapshot(runtime, run_id, events, projection)
+    pointed_run_id = str(runtime.session.data.get("active_run_id", ""))
+    expected_pointer = "" if projection.terminal else run_id
+    if pointed_run_id != expected_pointer:
+        runtime.session.set_active_run(expected_pointer)
+    return runtime.run
+
+
+def _reload_if_snapshot_is_stale(runtime: Pico):
+    run = runtime.run
+    run_id = str(run.projection.run_id)
+    if run.reload_required:
+        return reload_current_run(runtime)
+    if not run_id or run.run_log is None or not run.run_log.events:
+        return run
+    last_event = run.run_log.events[-1]
+    projection_cursor = run.projection.last_cursor
+    durable_cursor = runtime.dependencies.run_store.cursor(run_id)
+    if (
+        projection_cursor.sequence != last_event.sequence
+        or projection_cursor.event_id != last_event.event_id
+        or projection_cursor != durable_cursor
+    ):
+        return reload_current_run(runtime)
+    return run
+
+
 class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
@@ -47,39 +147,44 @@ class RunLifecycle:
     ):
         runtime = self.runtime
         run_started_at = time.monotonic()
-        runtime.recovery.evaluate()
-        projection, run_log, resumed = self._restore_or_create_run(
+        resumed = self._resume_or_create_run(
             user_message,
             task_kind=task_kind,
             requires_workspace_change=requires_workspace_change,
             requires_verification=requires_verification,
         )
-        runtime.run.projection = projection
-        runtime.run.run_log = run_log
+        run_log = runtime.run.run_log
+        if run_log is None:
+            raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
+        try:
+            reconciled = run_log.reconcile_interrupted(runtime)
+            for _outcome, entry in reconciled:
+                runtime.apply_run_event(entry)
+            if resumed:
+                runtime.apply_run_event(
+                    run_log.append_model_instruction(f"Resume request: {user_message}")
+                )
 
-        reconciled = run_log.reconcile_interrupted(runtime)
-        for _outcome, entry in reconciled:
-            runtime.apply_run_event(entry)
-        if resumed:
-            runtime.apply_run_event(
-                run_log.append_model_instruction(f"Resume request: {user_message}")
+            runtime.emit_event(
+                "run_resumed" if resumed else "run_started",
+                {
+                    "task_id": runtime.run.projection.task_id,
+                    "workspace_root": str(runtime.workspace.root),
+                },
             )
-
-        runtime.emit_event(
-            "run_resumed" if resumed else "run_started",
-            {
-                "task_id": runtime.run.projection.task_id,
-                "workspace_root": str(runtime.workspace.root),
-            },
-        )
-        runtime.model_client.reset_action_session()
+            runtime.model_client.reset_action_session()
+        except BaseException:
+            runtime.run.reload_required = True
+            runtime.run.execution_context = None
+            reload_current_run(runtime)
+            raise
         return AgentLoopState(
             user_message=user_message,
             run_started_at=run_started_at,
         )
 
-    def _restore_or_create_run(
+    def _resume_or_create_run(
         self,
         user_message,
         *,
@@ -88,54 +193,39 @@ class RunLifecycle:
         requires_verification,
     ):
         runtime = self.runtime
-        if runtime.recovery.state.get("status") == RESUME_READY:
-            projection = runtime.recovery.state["projection"]
-            events = runtime.recovery.state.pop("events")
-            if not events:
-                raise RuntimeError("resumable Run events are unavailable")
-            first = events[0]
-            run_log = RunLog(
-                first.run_id,
-                first.task_id,
-                first.session_id,
-                runtime.dependencies.run_store,
-                events,
-            )
-            if projection.task is None:
-                raise RuntimeError("resumable Run task projection is unavailable")
-            contract = projection.task.contract
-            requested = (
-                str(task_kind),
-                bool(requires_workspace_change),
-                bool(requires_verification),
-            )
-            persisted = (
-                contract.task_kind,
-                contract.requires_workspace_change,
-                contract.requires_verification,
+        _reload_if_snapshot_is_stale(runtime)
+        if runtime.run.resumable:
+            persisted = runtime.run.task.contract
+            requested = TaskContract(
+                goal=persisted.goal,
+                task_kind=task_kind,
+                requires_workspace_change=requires_workspace_change,
+                requires_verification=requires_verification,
+                allowed_write_paths=persisted.allowed_write_paths,
             )
             if requested != persisted:
                 raise ValueError(
                     "resume task requirements do not match the persisted Run"
                 )
-            runtime.recovery.state = {
-                "status": RESUME_NONE,
-                "active_run_id": "",
-                "projection": None,
-                "events": (),
-            }
-            return projection, run_log, True
+            if (
+                runtime.session.data.get("active_run_id")
+                != runtime.run.projection.run_id
+            ):
+                runtime.session.set_active_run(runtime.run.projection.run_id)
+            return True
+
+        if runtime.run.task is not None and not runtime.run.projection.terminal:
+            raise RuntimeError("unfinished Run is not dormant and cannot be resumed")
+        if runtime.run.run_log is not None and runtime.run.task is None:
+            raise RuntimeError("Run state contains a Run Log without a TaskContract")
 
         run_id = runtime.new_run_id()
         task_id = runtime.new_task_id()
-        contract = TaskContract(
-            goal=user_message,
+        contract = self._task_contract(
+            user_message,
             task_kind=task_kind,
             requires_workspace_change=requires_workspace_change,
             requires_verification=requires_verification,
-            allowed_write_paths=(
-                None if task_kind == "read_only" else runtime.config.allowed_write_paths
-            ),
         )
         run_log = RunLog(
             run_id,
@@ -143,10 +233,36 @@ class RunLifecycle:
             runtime.session.data["id"],
             runtime.dependencies.run_store,
         )
-        first = run_log.append_user(contract)
-        projection = RunProjection().apply_event(first)
+        try:
+            first = run_log.append_user(contract)
+            projection = RunProjection().apply_event(first)
+        except BaseException:
+            runtime.run = ActiveRunState(run_log=run_log, reload_required=True)
+            load_resumable_run(runtime)
+            raise
+        runtime.run = ActiveRunState(projection=projection, run_log=run_log)
         runtime.session.set_active_run(run_id)
-        return projection, run_log, False
+        return False
+
+    def _task_contract(
+        self,
+        goal,
+        *,
+        task_kind,
+        requires_workspace_change,
+        requires_verification,
+    ):
+        return TaskContract(
+            goal=goal,
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=requires_verification,
+            allowed_write_paths=(
+                None
+                if task_kind == "read_only"
+                else self.runtime.config.allowed_write_paths
+            ),
+        )
 
     def _root_execution(self):
         runtime = self.runtime
@@ -202,10 +318,14 @@ class RunLifecycle:
                 ),
             )
         )
+        runtime = self.runtime
         try:
-            self.runtime.session.set_active_run("")
+            runtime.session.set_active_run("")
         finally:
-            self.runtime.run.execution_context = None
+            runtime.run.execution_context = None
+        if stop_reason == "user_reset":
+            runtime.run = ActiveRunState()
+            runtime.model_client.reset_action_session()
         return final
 
     @staticmethod
