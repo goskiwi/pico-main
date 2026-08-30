@@ -1,21 +1,80 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, the single Pending Call and final Diff receipt for live execution and replay. Workspace, Project Memory, RepoMap and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, the single Pending Call and final Diff receipt for live execution and replay. Workspace, Project Memory, RepoMap and Artifact stores remain authoritative for their current content.
+
+## Current execution paths
+
+### CLI startup and resume
 
 ```text
-User request
-  -> Run Log user_message + TaskContract
-  -> bounded Context projection + RepoMap + Memory
-  -> Responses ModelAction
-  -> admission / approval
-  -> assistant_tool_call
-  -> fsynced tool_started with potential effects
-  -> ToolRunnerResult / ToolOutcome
-  -> fsynced tool_result
-  -> RunProjection(Task + Evidence + Metrics + Pending)
-  -> verification_result
-  -> assistant_final or run_stopped + final_diff receipt
+CLI build_agent
+  -> Pico composition root
+  -> RuntimeRecovery reads Session.active_run_id
+  -> new: RunLifecycle appends user_message + TaskContract before the Session pointer
+  -> resume: RunStore validates Run Log v14 and RunProjection replays its Facts
+  -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
+  -> run_started / run_resumed
+  -> Provider action session reset
+  -> AgentLoop
 ```
+
+### Normal Tool turn
+
+```text
+AgentLoop
+  -> PromptBuilder / ContextManager
+  -> OpenAICompatibleModelClient -> ModelAction.tool
+  -> append assistant_tool_call Fact
+  -> ToolManager validates Registry / Surface / Schema / Policy / Approval
+  -> ToolExecutor captures potential effects and first preimages
+  -> append + fsync tool_started Fact
+  -> concrete Tool Runner -> ToolRunnerResult
+  -> ToolExecutor -> ToolOutcome
+  -> append + fsync tool_result Fact
+  -> RunProjection applies Fact and RunEvidence derives observations/effects
+  -> bounded ToolOutcome returned to the Provider session
+```
+
+There is currently no standalone Tool-runtime object. **Tool runtime** names the responsibility
+implemented by the real `ToolManager -> ToolExecutor -> Tool Runner` chain.
+
+### Final submission
+
+```text
+ModelAction.final
+  -> CompletionController assesses TaskContract + Subagents + Evidence + Verifier
+  -> blocked: model_instruction + completion_blocked, then continue Provider
+  -> allowed: RunLifecycle builds the net final Diff receipt
+  -> append assistant_final Fact
+  -> RunProjection becomes terminal
+  -> clear Session.active_run_id and ExecutionContext
+
+controlled stop
+  -> RunLifecycle appends run_stopped + final_diff receipt
+  -> workspace drift is reported as unavailable_reason, never as a trustworthy Diff
+```
+
+## Terminology
+
+- **Fact**: an accepted durable Run Event in `events.jsonl`. Tool Call, `tool_started`, Tool
+  Result, Verification, Compaction and terminal events are Facts. Workspace files, Memory Cards
+  and Artifact contents remain facts of their own stores, not duplicated Run Facts.
+- **Projection**: the rebuildable in-memory `RunProjection` produced by reducing Facts. It is not
+  a second persistence format.
+- **Evidence**: `RunEvidence`, derived from Tool Result and Verification Facts. It contains
+  observations, side effects, final net changes and verification records.
+- **Completion**: the `CompletionController` decision about whether final submission is allowed.
+  A Run is terminal only after `RunLifecycle` appends the corresponding terminal Fact.
+- **Tool runtime**: the current cross-module execution responsibility described above, not a
+  class or persisted object.
+
+## Refactor direction
+
+The durable contracts above are the boundary to preserve. A later refactor may consolidate
+Tool-turn orchestration that is currently split across AgentLoop, ToolManager and ToolExecutor,
+and may simplify the handoff between CompletionController and RunLifecycle. That consolidation
+has not happened yet: current code and diagrams intentionally name only the classes and return
+types that exist in this repository.
 
 ## State ownership
 

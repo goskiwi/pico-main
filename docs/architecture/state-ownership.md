@@ -2,6 +2,16 @@
 
 Pico has one durable source for each Run's process facts. Content state remains owned by Workspace, Project Memory, and Artifact storage.
 
+Terminology in this document is strict:
+
+- A **Fact** is an accepted Run Event persisted in `events.jsonl`.
+- A **Projection** is rebuildable state reduced from Facts; it is never an additional source of truth.
+- **Evidence** is the `RunEvidence` projection derived from Tool Result and Verification Facts.
+- **Completion** is the decision made by `CompletionController`; terminal ownership begins only
+  when `RunLifecycle` appends `assistant_final` or `run_stopped`.
+- **Tool runtime** describes the current `ToolManager -> ToolExecutor -> Tool Runner`
+  responsibility chain. No standalone object owns a second Tool state.
+
 | Scope | Source of truth | Derived state |
 |---|---|---|
 | Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Call and final Diff receipt |
@@ -11,6 +21,14 @@ Pico has one durable source for each Run's process facts. Content state remains 
 | Project | Markdown Memory Cards | Bounded `MEMORY.md` catalog plus explicit `memory_recall` Tool results |
 | Large output | Artifact content + descriptor | Run Log reference |
 | Subagents | Child Run Logs and Patch files | In-process DAG and applied flags |
+
+## Ownership across the three current paths
+
+| Path | Durable writes | Rebuildable/current state |
+|---|---|---|
+| CLI / resume | First `user_message.contract`, then Session `active_run_id`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | RuntimeRecovery selection and one RunProjection replay |
+| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolManager admission, ToolExecutor orchestration, Tool Runner result, Projection and Evidence updates |
+| Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
 
 Invariants:
 
@@ -24,3 +42,7 @@ Invariants:
 - Tool protocol events form one strict `assistant_tool_call -> tool_started? -> tool_result` transaction.
 - Subagent scheduling and Patch application are synchronous and process-local; cross-process Child recovery is outside scope.
 - Old persistence formats are rejected; no compatibility or migration branch exists.
+
+Future refactoring may reduce handoffs inside the current Tool chain and final-settlement path,
+but it must not introduce another durable Tool status, Evidence file or terminal summary. Until
+that work exists, ownership remains with the concrete classes and stores listed above.
