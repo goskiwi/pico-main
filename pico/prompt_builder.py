@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from .context_manager import ContextManager
+from .context_manager import _ContextAssembler
 from .prompt_instructions import build_prompt_instructions
 from .working_state import WorkingState
 
@@ -24,7 +24,7 @@ class PromptBuilder:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
         self.instructions_state = build_prompt_instructions()
-        self.context = ContextManager(runtime)
+        self._context = _ContextAssembler(runtime)
 
     @property
     def instructions(self):
@@ -42,6 +42,9 @@ class PromptBuilder:
     def refresh(self, *, force=False):
         """Explicitly refresh Workspace metadata outside prompt construction."""
         return self.runtime.workspace.refresh(force=force)
+
+    def count_tokens(self, text):
+        return self._context.tokenizer.count(text)
 
     def working_state_text(self):
         task_state = self.runtime.run.task
@@ -62,7 +65,7 @@ class PromptBuilder:
         provider_overhead_tokens=0,
         action_tools=None,
     ):
-        return self.context.prepare_compaction(
+        return self._context.prepare_compaction(
             user_message,
             provider_context_tokens=provider_context_tokens,
             provider_overhead_tokens=provider_overhead_tokens,
@@ -79,7 +82,7 @@ class PromptBuilder:
         history_override=None,
         action_tools=None,
     ):
-        input_text, metadata = self.context.build(
+        input_text, metadata = self._context.build(
             user_message,
             provider_context_tokens=provider_context_tokens,
             provider_overhead_tokens=provider_overhead_tokens,

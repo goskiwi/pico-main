@@ -412,7 +412,7 @@ class DeterministicSummarizer:
 def semantic_compaction_experiment(root):
     agent, run_log = build_pressure_fixture(root, "run_day5_semantic")
     summarizer = DeterministicSummarizer()
-    agent.prompt.context.semantic_summarizer = summarizer
+    agent.prompt._context.semantic_summarizer = summarizer
     original_physical = tuple(run_log.events)
     original_ids = [event.event_id for event in original_physical]
     original_history_view_count = len(run_log.active_events())

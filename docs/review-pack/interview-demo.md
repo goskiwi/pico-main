@@ -57,7 +57,7 @@ assistant_tool_call
 Approval、preimage 以及执行事务的 `tool_started/tool_result`。纯值计算下沉到私有
 `tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
 
-`write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。
+`write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。失败反馈不靠增加 Patch 工具：未找到时返回相近当前代码和建议读取范围，多处匹配时返回行号，Revision 冲突时返回新 Revision 和可直接调用的 `read_file` 参数。
 
 ### 1:45～2:30：恢复与状态投影
 
@@ -106,7 +106,8 @@ Session 指针、Workspace 内容和 Artifact 各有独立且明确的所有权�
 
 固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
 只包含 Runtime task policy、非空的有界不可信 Context 和 Task Request；仅 Resume 且请求改变时
-才追加 latest request。空 RepoMap/WorkingState/History 不渲染，普通 Function Call 续接
+才追加 latest request。RepoMap 用 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径排序；
+History 位于当前 WorkingState 之前，避免旧摘要覆盖当前状态。空 RepoMap/WorkingState/History 不渲染，普通 Function Call 续接
 只追加 Call/Output。原生 Function Schema 只在 `tools`；支持 `allowed_tools` 的 Provider 在
 普通阶段获得稳定完整 Schema 和动态允许名称，final-only 边界则物理缩成 `submit_final` 并
 重建 Provider Session。Runtime 的 Token 预算按实际 wire tools 计算。稳定
@@ -143,8 +144,11 @@ Worktree；Implement 必须声明允许写路径并始终在独立 Git Worktree 
 
 ## 应用层追问 `[Applications]`
 
-只有在 Core 和默认上下文增强讲清后，再用 `applications/triage` 说明 Pico 如何被薄应用层
-复用；Triage 不拥有第二套 Agent Loop、ToolRuntime、RunLog 或 Completion。
+只有在 Core 和默认上下文增强讲清后，再用 `applications/coding.py` 和
+`applications/triage` 说明 Pico 如何被薄应用层复用；它们都不拥有第二套 Agent Loop、
+ToolRuntime、RunLog 或 Completion。CodingWorkflow 只在成功终态后从 replay 取得净变化路径，
+跳过运行前已经脏的同路径，并用显式 pathspec 创建一个不包含用户其他 staged 内容的 Commit；
+它不 reset、不 push，也不让 Git Commit 参与 Core 的恢复和完成判断。
 
 ## 常见追问
 

@@ -126,7 +126,7 @@ def build_prompt_fixture(root):
     allowed_names = set(allowed_tool_names)
     expected_tool_tokens = client.estimate_action_tool_tokens(
         action_tools,
-        bootstrap.prompt.context.tokenizer.count,
+        bootstrap.prompt.count_tokens,
     )
 
     assert metadata["section_order"] == [

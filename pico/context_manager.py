@@ -19,13 +19,20 @@ DEFAULT_SECTION_CAPS = {
 }
 FIXED_SECTION_ALLOCATION_ORDER = (
     "workspace",
-    "working_state",
     "repository_conventions",
     "repo_map",
+    "working_state",
 )
-UNTRUSTED_SECTION_ORDER = (
+CONTEXT_ALLOCATION_ORDER = (
     *FIXED_SECTION_ALLOCATION_ORDER,
     "history",
+)
+CONTEXT_WIRE_ORDER = (
+    "workspace",
+    "repository_conventions",
+    "repo_map",
+    "history",
+    "working_state",
 )
 SECTION_ORDER = (
     "runtime_policy",
@@ -59,8 +66,8 @@ class Tokenizer:
         return self.encoding.decode(tokens[: limit - 2]).rstrip() + " …"
 
 
-class ContextManager:
-    """Build dynamic Responses input; compaction preparation is explicit."""
+class _ContextAssembler:
+    """Internal dynamic-input assembly used only by PromptBuilder."""
 
     def __init__(
         self,
@@ -187,7 +194,7 @@ class ContextManager:
                     self._untrusted_envelope(
                         {
                             key: raw[key]
-                            for key in UNTRUSTED_SECTION_ORDER
+                            for key in CONTEXT_WIRE_ORDER
                             if raw[key]
                         }
                     )
@@ -222,7 +229,9 @@ class ContextManager:
                 ),
             ],
             "sections": sections,
-            "included_context_sections": list(rendered_context),
+            "included_context_sections": [
+                key for key in CONTEXT_WIRE_ORDER if key in rendered_context
+            ],
             "budget_allocation": allocation,
             "history_projection": dict(self._last_history_metadata),
             "run_log_generation": int(
@@ -438,7 +447,7 @@ class ContextManager:
         budgets = {}
         clipped = []
 
-        for section in UNTRUSTED_SECTION_ORDER:
+        for section in CONTEXT_ALLOCATION_ORDER:
             text = raw[section]
             if not text:
                 continue
@@ -574,7 +583,7 @@ class ContextManager:
 
     def _untrusted_envelope(self, context):
         lines = ['<untrusted_context trust="untrusted_data">']
-        for section in UNTRUSTED_SECTION_ORDER:
+        for section in CONTEXT_WIRE_ORDER:
             value = str(context.get(section, "")).strip()
             if not value:
                 continue
@@ -682,8 +691,30 @@ class ContextManager:
         return "\n".join(lines)
 
     def _repo_map_text(self, query):
+        task = self.agent.run.task
+        evidence = self.agent.run.evidence
+        parts = []
+        if task is not None and task.contract.goal:
+            parts.append("Task goal:\n" + task.contract.goal)
+        query = str(query).strip()
+        if query:
+            parts.append("Current request:\n" + query)
+        working_state = self._working_state_text()
+        if working_state:
+            parts.append("Current working state:\n" + working_state)
+        active_paths = {
+            str(item.get("path", "")).strip()
+            for item in evidence.observations
+            if item.get("status") == "success" and item.get("path")
+        }
+        active_paths.update(evidence.touched_paths)
+        if active_paths:
+            parts.append(
+                "Active paths:\n"
+                + "\n".join(f"- {path}" for path in sorted(active_paths))
+            )
         result = self.agent.dependencies.repo_map.render(
-            query,
+            "\n\n".join(parts),
             budget_tokens=self.section_caps["repo_map"],
             max_results=24,
             token_counter=self.tokenizer.count,

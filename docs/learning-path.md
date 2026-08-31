@@ -75,11 +75,11 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
 | 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先用隔离结构化分类生成 TaskContract；恢复 Run 复用原 Contract，并在 Provider 前持久化 `user_guidance` |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
-| 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；最小 Runtime policy、按需上下文和任务请求进首轮 `input`；原生 Schema 进 `tools`，支持时用 `allowed_tools` 动态限名 |
+| 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；PromptBuilder 内部按需组装最小 Runtime policy、仓库定位、当前状态、历史和任务请求；原生 Schema 进 `tools`，支持时用 `allowed_tools` 动态限名 |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |
 | 7 | `AgentLoop._handle_tool_action` | Tool 执行前先持久化 `assistant_tool_call` Fact |
 | 8 | `ToolRuntime.execute` | 按 call ID 取回持久化 ToolCall，完成准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result` |
-| 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换 |
+| 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换；失败用相近代码、匹配行号和建议读取参数驱动重读修正 |
 | 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
 
@@ -112,7 +112,7 @@ Projection 的委托。Live 路径只调用 `apply_event`。
 | 默认上下文增强 | 非空 RepoMap 自动提供有界仓库导航 | 功能始终启用；空投影不发送；内部实现第二遍再学 |
 | Context Pressure | Token Budget、Provider Session Rotation、Semantic Compaction、失败后的事务级 Fallback | 仅超长任务需要 |
 | Orchestration Appendix | 单个 Explore/Implement Child、Git Worktree、显式 `integrate_child` | 单 Agent Core 完成后选学 |
-| Applications | Triage Workflow、Report、真实 Fixture 与 Evals | 最后学习 |
+| Applications | Coding Workflow 的终态 Git Commit、Triage Workflow、Report、真实 Fixture 与 Evals | 最后学习 |
 
 Semantic Compaction 不是每轮执行：必须已有 Run Log、当前没有 Pending Call，并且本地估算与
 Provider 报告的 Context Token 较大者超过
@@ -219,7 +219,7 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
   一致性。
 - 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和
   10 分钟三种表达。
-- 最后再进入 **Applications**：`applications/triage/workflow.py`、`report.py` 与相关 Evals。
+- 最后再进入 **Applications**：先看 `applications/coding.py` 如何在终态后只提交本 Run 的干净路径，再看 `applications/triage/workflow.py`、`report.py` 与相关 Evals。
 
 完成标准：不用枚举所有类，也能先讲清 Core；面试官追问时再进入 Enhancement、Pressure、
 Appendix 或 Application。

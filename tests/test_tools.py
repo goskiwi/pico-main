@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -160,7 +161,7 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         agent,
         ToolCall(
             "edit_file",
-            {"path": "README.md", "old_text": "missing", "new_text": "beta", "expected_revision": revision},
+            {"path": "README.md", "old_text": "alpah", "new_text": "beta", "expected_revision": revision},
             "call_not_found",
         ),
     )
@@ -197,13 +198,39 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         "path": "README.md",
         "actual_revision": revision,
         "match_count": 0,
+        "closest_match": {
+            "start_line": 1,
+            "end_line": 1,
+            "similarity": 0.8,
+            "content": "alpha",
+        },
         "recommended_next_tool": "read_file",
+        "recommended_tool_args": {
+            "path": "README.md",
+            "start_line": 1,
+            "end_line": 2,
+        },
     }
     assert (ambiguous.failure.code, ambiguous.failure.recovery) == (
         "ambiguous_text_match",
         "retry_after_change",
     )
-    assert ambiguous.structured["match_count"] == 2
+    assert ambiguous.structured == {
+        "path": "README.md",
+        "actual_revision": revision,
+        "match_count": 2,
+        "match_locations": [
+            {"start_line": 1, "end_line": 1},
+            {"start_line": 2, "end_line": 2},
+        ],
+        "match_locations_truncated": False,
+        "recommended_next_tool": "read_file",
+        "recommended_tool_args": {
+            "path": "README.md",
+            "start_line": 1,
+            "end_line": 2,
+        },
+    }
     assert (conflict.failure.code, conflict.failure.recovery) == (
         "revision_conflict",
         "retry_after_change",
@@ -213,7 +240,17 @@ def test_file_failures_have_typed_recovery_conditions(tmp_path):
         "expected_revision": revision,
         "actual_revision": file_revision(target),
         "recommended_next_tool": "read_file",
+        "recommended_tool_args": {
+            "path": "README.md",
+            "start_line": 1,
+            "end_line": 200,
+        },
     }
+    rendered = json.loads(not_found.render_for_model())
+    assert rendered["structured"]["closest_match"]["content"] == "alpha"
+    assert rendered["structured"]["recommended_tool_args"]["path"] == (
+        "README.md"
+    )
 
     (tmp_path / "missing.py").write_text("created\n", encoding="utf-8")
     after_change = run_active(

@@ -105,8 +105,8 @@ def run_variant(args, variant, api_key, base_url, run_group):
         command_runner=CommandRunner(workspace),
     )
     if variant == "fallback":
-        agent.prompt.context.semantic_summarizer = None
-    summarizer = agent.prompt.context.semantic_summarizer
+        agent.prompt._context.semantic_summarizer = None
+    summarizer = agent.prompt._context.semantic_summarizer
     started = time.monotonic()
     outcome = agent._ask_with_intent(
         ab_prompt(),

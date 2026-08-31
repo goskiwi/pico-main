@@ -6,7 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from pico.context_manager import ContextManager, Tokenizer
+from pico.context_manager import Tokenizer, _ContextAssembler
 from pico.contracts import ToolCall, ToolOutcome
 from pico.providers.clients import FakeModelClient
 from pico.repo_map import RepoMap
@@ -82,7 +82,7 @@ def run_context_governance_evaluation(
                     )
                 )
 
-            manager = ContextManager(
+            manager = _ContextAssembler(
                 agent,
                 total_budget=1200,
                 section_caps={

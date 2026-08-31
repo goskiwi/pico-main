@@ -3,7 +3,7 @@
 Pico is a compact, single-protocol local multi-agent coding Runtime.
 
 - `pico.contracts`: provider-neutral Runtime contracts after native Responses parsing.
-- `pico.run_log` / `pico.context_manager`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
+- `pico.run_log` / `pico.prompt_builder`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
 - `pico.working_state`: RunLog-projected constraints, decisions and next steps. Goal belongs to TaskContract.
 - `pico.tool_runtime` / `pico.mutations`: staged admission and revision-bound atomic edits; the model has no general-purpose shell Tool.
@@ -11,6 +11,7 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.command_runner` / `pico.verification`: trusted host execution for the one user-fixed Verification command, not a sandbox.
 - `pico.evidence` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: one synchronous Child delegation at a time, read-only explore, Worktree-isolated implement, and explicit receipt-bound integration.
+- `applications.coding`: opt-in post-Completion Git commit restricted to clean Run-changed paths.
 - `evals`: repository-local deterministic Runtime regressions and mechanism evaluations; it is excluded from the installable `pico` package.
 - `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool and Prompt ownership;
   `pico.runtime.Pico` is the small composition root.

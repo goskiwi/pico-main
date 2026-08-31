@@ -170,6 +170,11 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         "expected_revision": initial_revision,
         "actual_revision": external_revision,
         "recommended_next_tool": "read_file",
+        "recommended_tool_args": {
+            "path": "subject.txt",
+            "start_line": 1,
+            "end_line": 200,
+        },
     }
     assert outcomes["call_read_current"]["structured"]["revision"] == (
         external_revision
@@ -367,8 +372,8 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
             compaction_keep_recent_tokens=6000,
         ),
     )
-    original_count = agent.prompt.context.tokenizer.count
-    agent.prompt.context.tokenizer.count = lambda text: (
+    original_count = agent.prompt._context.tokenizer.count
+    agent.prompt._context.tokenizer.count = lambda text: (
         200 if "alpha" in str(text) else original_count(text)
     )
 
@@ -434,8 +439,8 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
             compaction_keep_recent_tokens=6000,
         ),
     )
-    original_count = agent.prompt.context.tokenizer.count
-    agent.prompt.context.tokenizer.count = lambda text: (
+    original_count = agent.prompt._context.tokenizer.count
+    agent.prompt._context.tokenizer.count = lambda text: (
         200 if "alpha" in str(text) else original_count(text)
     )
 
@@ -476,8 +481,8 @@ def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
             compaction_keep_recent_tokens=6000,
         ),
     )
-    original_count = agent.prompt.context.tokenizer.count
-    agent.prompt.context.tokenizer.count = lambda text: (
+    original_count = agent.prompt._context.tokenizer.count
+    agent.prompt._context.tokenizer.count = lambda text: (
         300 if "Runtime instruction:" in str(text) else original_count(text)
     )
 

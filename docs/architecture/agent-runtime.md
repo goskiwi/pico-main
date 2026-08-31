@@ -25,7 +25,7 @@ CLI build_agent
 
 ```text
 AgentLoop
-  -> PromptBuilder / ContextManager
+  -> PromptBuilder
   -> OpenAICompatibleModelClient -> ModelAction.tool
   -> append assistant_tool_call Fact
   -> ToolRuntime resolves the canonical pending ToolCall from that durable Fact
@@ -114,7 +114,7 @@ assistant_final / run_stopped
 
 The Run Log is single-writer and fsynced after every accepted event. It has no hash chain: a hash stored beside mutable local data is not a trusted tamper boundary. Contiguous sequence and IDs plus strict User, Tool Call/Started/Result, and terminal payloads reject causal corruption; telemetry payloads remain extensible. A final incomplete JSONL tail is a crash artifact and is truncated; malformed complete events fail closed.
 
-Replaceable snapshots and Workspace mutations use same-directory temporary files plus atomic replace. `write_file` only creates an absent file; `edit_file` only changes an existing file and stages/fsyncs the complete payload before revalidating its expected revision at the `os.replace` commit point. A mismatch preserves external content and returns structured expected/actual revision facts for a model-driven re-read and repair.
+Replaceable snapshots and Workspace mutations use same-directory temporary files plus atomic replace. `write_file` only creates an absent file; `edit_file` only changes an existing file and stages/fsyncs the complete payload before revalidating its expected revision at the `os.replace` commit point. A stale Revision preserves external content and returns expected/actual revisions plus ready-to-call `read_file` arguments. Missing text returns a bounded closest current excerpt when one is useful; ambiguous text returns bounded exact line ranges. These are facts on the existing ToolOutcome, not additional Tools or recovery state.
 
 ## Tool recovery
 
@@ -148,9 +148,12 @@ Responses `instructions`. The first request of a Provider action session sends a
 `input` with two always-present parts, Runtime task policy and the original task request. It adds an
 untrusted-context envelope only when at least one bounded projection is non-empty, and adds a
 differing latest request only on Resume. The envelope can include minimal Workspace facts and
-document names, WorkingState,
-`AGENTS.md` repository conventions, RepoMap and History. Empty RepoMap, WorkingState and History
-sections are not rendered; project-document bodies are not preloaded.
+document names, `AGENTS.md` repository conventions, RepoMap, History and WorkingState. RepoMap is
+ranked from the immutable goal, latest request, current WorkingState and paths already observed or
+changed by the Run. History is rendered before WorkingState so an older summary cannot displace the
+current constraints, decisions and next steps; the original task and latest request remain last.
+Empty RepoMap, WorkingState and History sections are not rendered; project-document bodies are not
+preloaded.
 Normal Tool continuation appends the native `function_call` and `function_call_output` to the same
 manual Responses replay instead of rebuilding or resending the dynamic suffix.
 
@@ -223,6 +226,18 @@ Session stores only `active_run_id`. On startup `load_resumable_run` opens that 
 ## Completion
 
 `CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; the persisted TaskContract; unrepaired `unknown/partial` effects; external Workspace drift; required/current verification; and effects that remain unresolved after verification. This ordering prevents meaningless verifier runs for unrepaired uncertainty, while a repaired Workspace partial must receive a passing verifier for the current mutation/path state. `RunEvidence` only answers factual relationship queries such as repair and unresolved-effect lookup; it does not return a completion decision.
+
+## Coding application Git delivery
+
+`applications.coding.CodingWorkflow` is an opt-in delivery application, not part of Pico Core. It
+runs the normal AgentLoop through terminal Completion, replays the durable Run to obtain net changed
+paths, and only then creates one Git commit restricted to those paths. It never commits a path that
+was already dirty when the application started, never includes unrelated staged changes, and never
+resets or pushes. It rechecks the existing RunChangeSet immediately before delivery. The commit
+bypasses Git hooks because Runtime owns any configured Verification and a hook must not mutate the
+settled Final Diff. A stopped Run, an empty net change, a dirty-path overlap, or a Git failure
+returns an explicit skipped/failed delivery result
+while preserving the Workspace.
 
 ## Child delegation and integration
 

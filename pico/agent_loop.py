@@ -286,7 +286,7 @@ class AgentLoop:
             and turn.provider_total_tokens > 0
             else input_tokens + output_tokens
         )
-        result_tokens = self.agent.prompt.context.tokenizer.count(provider_result)
+        result_tokens = self.agent.prompt.count_tokens(provider_result)
         return base_tokens + result_tokens
 
     def _should_rotate_provider(self, turn, provider_result):
@@ -306,7 +306,7 @@ class AgentLoop:
                 if isinstance(turn.provider_output_tokens, int)
                 else 0
             )
-            result_tokens = agent.prompt.context.tokenizer.count(provider_result)
+            result_tokens = agent.prompt.count_tokens(provider_result)
             context_tokens = self._context_tokens_after_result(turn, provider_result)
             estimated_next_total = context_tokens + agent.config.max_new_tokens
             agent.model_client.reset_action_session()
