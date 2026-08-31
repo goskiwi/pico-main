@@ -299,13 +299,11 @@ class SubagentRunner:
         child_error = None
         child_outcome = None
         try:
-            child_outcome = child.ask(
+            child_outcome = child._ask_with_intent(
                 prompt,
-                task_kind=(
+                intent=(
                     "read_only" if record.spec.role == "explore" else "modify"
                 ),
-                requires_workspace_change=record.spec.role == "implement",
-                requires_verification=record.spec.role == "implement",
             )
         except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
             child_error = exc

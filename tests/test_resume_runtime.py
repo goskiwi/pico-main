@@ -18,19 +18,13 @@ from pico.runtime_state import ActiveRunState
 from pico.task_state import TaskContract
 
 READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "intent": "read_only",
 }
 NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "intent": "modify_optional",
 }
 MODIFY_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": True,
-    "requires_verification": False,
+    "intent": "modify",
 }
 
 
@@ -48,7 +42,9 @@ def build_interrupted_run(tmp_path, config=None):
     )
     contract = TaskContract(
         "Inspect",
-        **NO_CHANGE_TASK,
+        task_kind="modify",
+        requires_workspace_change=False,
+        requires_verification=False,
         allowed_write_paths=effective_config.allowed_write_paths,
     )
     log = RunLog(
@@ -100,7 +96,7 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     assert resumed.run.run_log.events == snapshots[0][0]
     assert resumed.run.projection.last_cursor.event_id == snapshots[0][0][-1].event_id
     assert resumed.run.resumable is True
-    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.projection.run_id == projection.run_id
     assert resumed.run.task.contract.goal == "Inspect"
     assert resumed.run.projection.pending_call_id is None
@@ -125,7 +121,7 @@ def test_resume_guidance_survives_another_process_failure(tmp_path):
     first_resume = resumed_agent(agent, store, [])
 
     with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
-        first_resume.ask(
+        first_resume._ask_with_intent(
             "Continue, but never touch config.py",
             **NO_CHANGE_TASK,
         )
@@ -135,7 +131,7 @@ def test_resume_guidance_survives_another_process_failure(tmp_path):
         store,
         [ModelAction.final("Recovered.")],
     )
-    assert second_resume.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert second_resume._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     prompt = second_resume.model_client.prompts[0]
     assert "never touch config.py" in prompt
     assert [
@@ -161,47 +157,27 @@ def test_incremental_working_state_restores_from_tool_events(tmp_path):
     assert agent.tools.execute(call).status == "success"
 
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.task.contract.goal == projection.task.contract.goal
     assert resumed.run.task.working.constraints == ("Keep schema",)
     assert resumed.run.task.working.decisions == ("Fix refresh",)
     assert resumed.run.task.working.next_steps == ("Add test",)
 
 
-def test_resume_rejects_requirement_change_without_consuming_recovery(tmp_path):
-    agent, store, _projection, _log = build_interrupted_run(tmp_path)
+def test_resume_reuses_persisted_contract_without_reclassification(tmp_path):
+    agent, store, projection, _log = build_interrupted_run(tmp_path)
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    run_id = resumed.run.projection.run_id
-    before_summary = resumed.run.projection.summary()
-    before_events = tuple(event.to_dict() for event in resumed.run.run_log.events)
 
-    with pytest.raises(ValueError, match="do not match"):
-        resumed.ask("Continue", **READ_TASK)
+    class ExplodingClassifier:
+        @staticmethod
+        def classify(_message):
+            raise AssertionError("resume must not classify the task again")
 
-    assert resumed.run.resumable is True
-    assert resumed.run.projection.summary() == before_summary
-    assert tuple(event.to_dict() for event in resumed.run.run_log.events) == before_events
+    resumed.dependencies.task_classifier = ExplodingClassifier()
+    outcome = resumed.ask("Continue")
 
-    with pytest.raises(TypeError, match="must be a boolean"):
-        resumed.ask(
-            "Continue",
-            task_kind="modify",
-            requires_workspace_change=0,
-            requires_verification=False,
-        )
-
-    assert resumed.run.projection.summary() == before_summary
-    assert tuple(event.to_dict() for event in resumed.run.run_log.events) == before_events
-
-    resumed.reset()
-    terminal = resumed.dependencies.run_store.replay(run_id)
-    found_run_id, _events, _projection = resumed.dependencies.run_store.find_active_run(
-        resumed.session.data["id"]
-    )
-    assert terminal.terminal is True
-    assert terminal.stop_reason == "user_reset"
-    assert resumed.session.data["active_run_id"] == ""
-    assert found_run_id == ""
+    assert outcome.answer == "Recovered."
+    assert resumed.run.task.contract == projection.task.contract
 
 
 def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_path):
@@ -236,7 +212,7 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
         config=narrower_config,
     )
 
-    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert resumed.run.task.contract.allowed_write_paths == ("README.md",)
     tool_result = next(
         event for event in resumed.run.run_log.events if event.kind == "tool_result"
@@ -266,7 +242,7 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent.session, "set_active_run", fail_pointer)
     with pytest.raises(OSError, match="pointer failed"):
-        agent.ask("Persist", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Persist", **NO_CHANGE_TASK)
     monkeypatch.setattr(agent.session, "set_active_run", original)
     agent.model_client.outputs.append(ModelAction.final("Recovered."))
     original_complete = agent.model_client.complete_action
@@ -280,7 +256,7 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
         "complete_action",
         complete_with_durable_pointer,
     )
-    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert agent.run.projection.run_id == captured
 
 
@@ -299,12 +275,12 @@ def test_pointer_repair_failure_does_not_consume_dormant_run(tmp_path, monkeypat
         lambda _run_id: (_ for _ in ()).throw(OSError("pointer failed")),
     )
     with pytest.raises(OSError, match="pointer failed"):
-        agent.ask("Persist", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Persist", **NO_CHANGE_TASK)
     before = tuple(event.to_dict() for event in agent.run.run_log.events)
     agent.model_client.outputs.append(ModelAction.final("must not run"))
 
     with pytest.raises(OSError, match="pointer failed"):
-        agent.ask("Continue", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Continue", **NO_CHANGE_TASK)
 
     assert agent.run.resumable is True
     assert tuple(event.to_dict() for event in agent.run.run_log.events) == before
@@ -341,7 +317,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
         commit_then_raise,
     )
     with pytest.raises(OSError, match="ambiguous append"):
-        agent.ask("Inspect", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
 
     run_id = agent.run.projection.run_id
     assert run_id
@@ -351,7 +327,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
         range(1, len(agent.run.run_log.events) + 1)
     )
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     replayed = agent.dependencies.run_store.replay(run_id)
     assert agent.run.projection.summary() == replayed.summary()
 
@@ -392,13 +368,13 @@ def test_ambiguous_append_retries_reload_after_transient_load_failure(
     monkeypatch.setattr(store, "load_run", fail_first_reload)
 
     with pytest.raises(OSError, match="reload unavailable"):
-        agent.ask("Inspect", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
 
     run_id = agent.run.projection.run_id
     assert agent.run.reload_required is True
     assert agent.run.resumable is True
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     replayed = original_load(run_id)[1]
     assert agent.run.reload_required is False
     assert agent.run.projection.summary() == replayed.summary()
@@ -440,7 +416,7 @@ def test_unloaded_first_event_blocks_all_manual_tools_until_reset(
     monkeypatch.setattr(store, "load_run", fail_first_load)
 
     with pytest.raises(OSError, match="load unavailable"):
-        agent.ask("Inspect", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
 
     assert agent.run.task is None
     assert agent.run.reload_required is True
@@ -487,7 +463,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
 
     monkeypatch.setattr(store, "append_event", fail_before_commit)
     with pytest.raises(OSError, match="precommit failure"):
-        agent.ask("Inspect", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
 
     assert agent.run.task is None
     assert agent.run.run_log is None
@@ -496,7 +472,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
     agent.reset()
 
     agent.model_client.outputs.append(ModelAction.final("Retried."))
-    assert agent.ask("Inspect", **NO_CHANGE_TASK).answer == "Retried."
+    assert agent._ask_with_intent("Inspect", **NO_CHANGE_TASK).answer == "Retried."
 
 
 def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path):
@@ -508,13 +484,13 @@ def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path
     )
 
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("Inspect", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
 
     run_id = agent.run.projection.run_id
     assert agent.run.resumable is True
     agent.model_client.outputs.append(ModelAction.final("Recovered."))
 
-    assert agent.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     assert agent.run.projection.run_id == run_id
 
 
@@ -537,7 +513,7 @@ def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("Finish", **NO_CHANGE_TASK).answer == "Done."
+    assert agent._ask_with_intent("Finish", **NO_CHANGE_TASK).answer == "Done."
     terminal_run_id = agent.run.projection.run_id
     agent.session.set_active_run(terminal_run_id)
 
@@ -555,7 +531,7 @@ def test_terminal_candidate_clears_temporary_reload_state(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("Finish", **NO_CHANGE_TASK).answer == "Done."
+    assert agent._ask_with_intent("Finish", **NO_CHANGE_TASK).answer == "Done."
     terminal_log = agent.run.run_log
     agent.run = ActiveRunState(run_log=terminal_log, reload_required=True)
 
@@ -593,10 +569,10 @@ def test_terminal_run_starts_a_new_run(tmp_path):
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(approval_policy="auto", verification_command=""),
     )
-    assert agent.ask("First", **NO_CHANGE_TASK).answer == "First."
+    assert agent._ask_with_intent("First", **NO_CHANGE_TASK).answer == "First."
     first_run = agent.run.projection.run_id
     resumed = resumed_agent(agent, agent.session.store, [ModelAction.final("Second.")])
-    assert resumed.ask("Second", **NO_CHANGE_TASK).answer == "Second."
+    assert resumed._ask_with_intent("Second", **NO_CHANGE_TASK).answer == "Second."
     assert resumed.run.projection.run_id != first_run
 
 
@@ -605,7 +581,7 @@ def test_persisted_call_without_start_is_not_replayed(tmp_path):
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
     log.append_tool_call(call)
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     result = next(
         event
         for event in resumed.run.run_log.events
@@ -628,7 +604,7 @@ def test_started_unchanged_path_recovers_as_no_effect_error(tmp_path):
         ],
     )
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
     result = next(event for event in resumed.run.run_log.events if event.call_id == "write" and event.kind == "tool_result")
     assert result.outcome_status == "error"
     assert result.side_effect_state == "none"

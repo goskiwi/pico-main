@@ -12,7 +12,7 @@
 
 Session 只保存 `active_run_id`。恢复输入先作为 `user_guidance` Fact 持久化。Active Run 只按 call ID 取回 Run Log 中的原始 ToolCall；副作用前 fsync `tool_started`，记录精确潜在影响路径及 before revision；完成后 fsync `tool_result`。恢复时分析 Run Log tail，对未完成工具按路径 revision 生成 not-started、error、partial 或 unknown 结果，绝不盲目重放非幂等副作用。
 
-首个 User Event 保存 Runtime-owned TaskContract。Goal、任务类型、写入范围和完成要求不能被 WorkingState 修改；恢复请求必须保持相同要求。WorkingState 继续使用原有 add/remove 增量协议。
+首个 User Event 保存 Runtime-owned TaskContract。新 Run 由隔离的结构化 IntentClassifier 从自然语言派生 Contract；用户不填写协议字段。Goal、任务类型、写入范围和完成要求不能被 WorkingState 修改；恢复直接复用原 Contract，不重新分类。WorkingState 继续使用原有 add/remove 增量协议。
 
 ## 长上下文治理
 

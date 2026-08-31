@@ -241,11 +241,9 @@ def main(argv=None):
         ),
         command_runner=CommandRunner(workspace),
     )
-    outcome = agent.ask(
+    outcome = agent._ask_with_intent(
         build_prompt(),
-        task_kind="modify",
-        requires_workspace_change=True,
-        requires_verification=True,
+        intent="modify",
     )
     run_id = outcome.run_id
     events = agent.dependencies.run_store.read_events(run_id)

@@ -628,9 +628,7 @@ def test_new_runner_recovers_unintegrated_child_and_later_integration(tmp_path):
 
     RunLifecycle(resumed).initialize(
         "Continue",
-        task_kind="modify",
-        requires_workspace_change=True,
-        requires_verification=False,
+        task_intent="modify",
     )
     outcome = run_active(
         resumed,

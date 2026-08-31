@@ -234,9 +234,7 @@ def recovery_experiment(root):
     )
     RunLifecycle(original).initialize(
         "Create interrupted.txt",
-        task_kind="modify",
-        requires_workspace_change=True,
-        requires_verification=False,
+        task_intent="modify",
     )
     run_log = original.run.run_log
     assert run_log is not None
@@ -315,11 +313,9 @@ def recovery_experiment(root):
         "pending_call_id": resumed.run.projection.pending_call_id,
     }
 
-    run_outcome = resumed.ask(
+    run_outcome = resumed._ask_with_intent(
         "Continue after the crash",
-        task_kind="modify",
-        requires_workspace_change=True,
-        requires_verification=False,
+        intent="modify",
     )
     events = resumed.dependencies.run_store.read_events(run_outcome.run_id)
     recovered_results = [
@@ -415,11 +411,9 @@ def active_reset_experiment(root):
 
     def ask_in_thread():
         try:
-            result["outcome"] = agent.ask(
+            result["outcome"] = agent._ask_with_intent(
                 "Create late.txt",
-                task_kind="modify",
-                requires_workspace_change=True,
-                requires_verification=False,
+                intent="modify",
             )
         except BaseException as exc:  # noqa: BLE001 - thread handoff
             result["error"] = exc

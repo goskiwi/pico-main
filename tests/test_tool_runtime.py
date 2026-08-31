@@ -174,11 +174,9 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
                 secret_env_names=frozenset({"CUSTOM_SECRET_NAME"}),
             ),
         )
-        assert agent.ask(
+        assert agent._ask_with_intent(
             "Read secret.txt",
-            task_kind="read_only",
-            requires_workspace_change=False,
-            requires_verification=False,
+            intent="read_only",
         ).answer == "Done."
         provider_result = client.recorded_action_results[0][1]
         event = next(

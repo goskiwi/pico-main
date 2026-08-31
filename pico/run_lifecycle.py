@@ -14,6 +14,7 @@ from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineEx
 from .run_log import RunLog
 from .run_projection import RunOutcome, RunProjection
 from .runtime_state import ActiveRunState
+from .task_classifier import normalize_task_intent
 from .task_state import TaskContract
 
 if TYPE_CHECKING:
@@ -141,17 +142,13 @@ class RunLifecycle:
         self,
         user_message,
         *,
-        task_kind,
-        requires_workspace_change,
-        requires_verification,
+        task_intent=None,
     ):
         runtime = self.runtime
         run_started_at = time.monotonic()
         resumed = self._resume_or_create_run(
             user_message,
-            task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=requires_verification,
+            task_intent=task_intent,
         )
         run_log = runtime.run.run_log
         if run_log is None:
@@ -188,25 +185,11 @@ class RunLifecycle:
         self,
         user_message,
         *,
-        task_kind,
-        requires_workspace_change,
-        requires_verification,
+        task_intent=None,
     ):
         runtime = self.runtime
         _reload_if_snapshot_is_stale(runtime)
         if runtime.run.resumable:
-            persisted = runtime.run.task.contract
-            requested = TaskContract(
-                goal=persisted.goal,
-                task_kind=task_kind,
-                requires_workspace_change=requires_workspace_change,
-                requires_verification=requires_verification,
-                allowed_write_paths=persisted.allowed_write_paths,
-            )
-            if requested != persisted:
-                raise ValueError(
-                    "resume task requirements do not match the persisted Run"
-                )
             if (
                 runtime.session.data.get("active_run_id")
                 != runtime.run.projection.run_id
@@ -221,11 +204,14 @@ class RunLifecycle:
 
         run_id = runtime.new_run_id()
         task_id = runtime.new_task_id()
+        intent = (
+            runtime.dependencies.task_classifier.classify(user_message)
+            if task_intent is None
+            else normalize_task_intent(task_intent)
+        )
         contract = self._task_contract(
             user_message,
-            task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=requires_verification,
+            intent=intent,
         )
         run_log = RunLog(
             run_id,
@@ -248,15 +234,18 @@ class RunLifecycle:
         self,
         goal,
         *,
-        task_kind,
-        requires_workspace_change,
-        requires_verification,
+        intent,
     ):
+        intent = normalize_task_intent(intent)
+        task_kind = "read_only" if intent == "read_only" else "modify"
         return TaskContract(
             goal=goal,
             task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=requires_verification,
+            requires_workspace_change=intent == "modify",
+            requires_verification=(
+                task_kind == "modify"
+                and bool(self.runtime.config.verification_command)
+            ),
             allowed_write_paths=(
                 None
                 if task_kind == "read_only"

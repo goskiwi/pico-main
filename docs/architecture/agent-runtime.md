@@ -10,9 +10,11 @@ Pico uses `events.jsonl` as the durable source for each Run's process Facts. One
 CLI build_agent
   -> Pico composition root
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
-  -> new: RunLifecycle appends user_message + TaskContract before the Session pointer
+  -> new: isolated TaskIntentClassifier returns read_only / modify / modify_optional
+  -> new: RunLifecycle derives and appends the TaskContract before the Session pointer
   -> resume: RunStore.load_run reads once, validates Run Log v15 / terminal Artifact,
      and returns that Event snapshot with its Projection
+  -> resume: persisted TaskContract is reused without another classification call
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> resumed input is appended as user_guidance before run_resumed; new Runs append run_started
   -> Provider action session reset

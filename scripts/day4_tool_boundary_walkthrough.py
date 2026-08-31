@@ -131,11 +131,9 @@ def main():
                 verification_command="",
             ),
         )
-        run_outcome = repaired.ask(
+        run_outcome = repaired._ask_with_intent(
             "Replace alpha without losing concurrent edits",
-            task_kind="modify",
-            requires_workspace_change=True,
-            requires_verification=False,
+            intent="modify",
         )
         repair_outcomes = outcomes(repaired)
 
@@ -164,11 +162,9 @@ def main():
                 verification_command="",
             ),
         )
-        denied_run_outcome = denied.ask(
+        denied_run_outcome = denied._ask_with_intent(
             "Attempt to create created.txt only if policy permits it; otherwise report the denial.",
-            task_kind="modify",
-            requires_workspace_change=False,
-            requires_verification=False,
+            intent="modify_optional",
         )
         denied_outcomes = outcomes(denied)
         denied_started = [

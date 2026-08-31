@@ -20,6 +20,7 @@ from .runtime_dependencies import RuntimeDependencies
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .session_store import SessionStore
+from .task_classifier import TaskIntentClassifier, normalize_task_intent
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
 from .workspace_tracker import WorkspaceTracker
@@ -41,6 +42,7 @@ class Pico:
         run_store=None,
         command_runner=None,
         command_runner_factory=None,
+        task_classifier=None,
         subagent_model_client_factory=None,
         parent_cancellation_token=None,
     ):
@@ -72,6 +74,9 @@ class Pico:
             command_runner=effective_command_runner,
             command_runner_factory=command_runner_factory,
             repo_map=RepoMap(self.workspace.root),
+            task_classifier=(
+                task_classifier or TaskIntentClassifier(self.model_client)
+            ),
             parent_cancellation_token=parent_cancellation_token,
         )
         if subagent_model_client_factory is not None:
@@ -120,21 +125,18 @@ class Pico:
     def run_verification(self, started_workspace_mutation_sequence):
         return run_verification(self, started_workspace_mutation_sequence)
 
-    def ask(
-        self,
-        user_message,
-        *,
-        task_kind,
-        requires_workspace_change,
-        requires_verification,
-    ) -> RunOutcome:
+    def ask(self, user_message) -> RunOutcome:
+        from .agent_loop import AgentLoop
+
+        return AgentLoop(self).run(user_message)
+
+    def _ask_with_intent(self, user_message, *, intent) -> RunOutcome:
+        """Internal deterministic entry for Child runtimes, applications, and tests."""
         from .agent_loop import AgentLoop
 
         return AgentLoop(self).run(
             user_message,
-            task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=requires_verification,
+            task_intent=normalize_task_intent(intent),
         )
 
     @staticmethod

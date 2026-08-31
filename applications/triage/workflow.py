@@ -76,11 +76,9 @@ class TriageWorkflow:
             command_runner_factory=self.command_runner_factory,
             subagent_model_client_factory=self.subagent_model_client_factory,
         )
-        outcome = agent.ask(
+        outcome = agent._ask_with_intent(
             build_triage_prompt(case),
-            task_kind="modify",
-            requires_workspace_change=True,
-            requires_verification=True,
+            intent="modify",
         )
         events = agent.dependencies.run_store.read_events(
             outcome.run_id

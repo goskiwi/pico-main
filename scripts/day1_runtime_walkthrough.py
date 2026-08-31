@@ -42,8 +42,6 @@ def main():
             encoding="utf-8",
         )
         argv = [
-            "--task-kind",
-            "read_only",
             "--approval",
             "auto",
             "--cwd",
@@ -51,7 +49,6 @@ def main():
             "请读取 README.md，然后告诉我是否读取成功。",
         ]
         args = pico_cli.build_arg_parser().parse_args(argv)
-        ask_kwargs = pico_cli._ask_kwargs(args)
         user_message = " ".join(args.prompt).strip()
 
         fake_model = FakeModelClient(
@@ -64,22 +61,25 @@ def main():
                 ModelAction.final("README 已读取，文件工具工作正常。"),
             ]
         )
+        fake_model.new_isolated_client = lambda: FakeModelClient(
+            [
+                ModelAction.tool(
+                    "classify_task_intent",
+                    {"intent": "read_only"},
+                    call_id="call_classify",
+                )
+            ]
+        )
         with patch("pico.cli._build_model_client", return_value=fake_model):
             agent = pico_cli.build_agent(args)
 
         assert agent.model_client is fake_model
-        assert ask_kwargs == {
-            "task_kind": "read_only",
-            "requires_workspace_change": False,
-            "requires_verification": False,
-        }
-
         print_section(
-            "1. CLI 输入如何变成任务要求",
+            "1. CLI 只接收自然语言任务",
             {
                 "argv": argv,
                 "prompt": user_message,
-                "ask_kwargs": ask_kwargs,
+                "user_declared_contract_fields": False,
                 "provider_note": (
                     "FakeModelClient 只替代网络 Provider；CLI 解析、build_agent "
                     "和 Runtime 都使用真实代码"
@@ -97,11 +97,12 @@ def main():
             },
         )
 
-        outcome = agent.ask(user_message, **ask_kwargs)
+        outcome = agent.ask(user_message)
         assert isinstance(outcome, RunOutcome)
         assert outcome.status == "completed"
         assert outcome.answer == "README 已读取，文件工具工作正常。"
         assert agent.session.data["active_run_id"] == ""
+        assert agent.run.task.contract.task_kind == "read_only"
 
         events = agent.run.run_log.events
         event_rows = [

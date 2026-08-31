@@ -30,7 +30,7 @@ execution evidence from RunEvidence; the composed view is neither durable state 
 
 ## 30-second interview framing
 
-Pico is not an LLM chat wrapper. It is the control plane around a coding model: it selects bounded repository context, admits and audits tool calls, records side effects as evidence, resumes interrupted work without blindly replaying mutations, and blocks completion until Runtime-owned checks agree with the current workspace.
+Pico is not an LLM chat wrapper. It is the control plane around a coding model: it first classifies the natural-language request into an internal TaskContract, selects bounded repository context, admits and audits tool calls, records side effects as evidence, resumes interrupted work without blindly replaying mutations, and blocks completion until Runtime-owned checks agree with the current workspace.
 
 The Runtime is for trusted local repositories. A user-configured fixed Verification command runs
 locally with the current user's permissions; it is not protected by the structured file-Tool path

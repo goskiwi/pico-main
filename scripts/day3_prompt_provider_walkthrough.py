@@ -24,17 +24,6 @@ from pico import (
 from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
 
-READ_ONLY_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-
 
 class Response:
     """The tiny subset of an HTTP response used by the provider adapter."""
@@ -122,7 +111,9 @@ def build_prompt_fixture(root):
             max_new_tokens=96,
         ),
     )
-    RunLifecycle(bootstrap).initialize("Read README.md", **READ_ONLY_TASK)
+    RunLifecycle(bootstrap).initialize(
+        "Read README.md", task_intent="read_only"
+    )
     action_tools = tuple(bootstrap.tools.action_schemas)
     allowed_tool_names = tuple(
         tool["name"] for tool in bootstrap.tools.model_action_tools()
@@ -533,9 +524,9 @@ def experiment_context_overflow(root):
         "success-sessions",
     )
     with patch("urllib.request.urlopen", overflow_once):
-        outcome = success_agent.ask(
+        outcome = success_agent._ask_with_intent(
             "Return a short provider recovery confirmation",
-            **NO_CHANGE_TASK,
+            intent="modify_optional",
         )
 
     success_resets = reset_events(success_agent)
@@ -582,9 +573,9 @@ def experiment_context_overflow(root):
     caught = None
     with patch("urllib.request.urlopen", always_overflow):
         try:
-            failure_agent.ask(
+            failure_agent._ask_with_intent(
                 "Return a short provider recovery confirmation",
-                **NO_CHANGE_TASK,
+                intent="modify_optional",
             )
         except ProviderContextOverflow as exc:
             caught = exc

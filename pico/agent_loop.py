@@ -44,15 +44,11 @@ class AgentLoop:
         self,
         user_message,
         *,
-        task_kind,
-        requires_workspace_change,
-        requires_verification,
+        task_intent=None,
     ) -> RunOutcome:
         loop_state = self.lifecycle.initialize(
             user_message,
-            task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=requires_verification,
+            task_intent=task_intent,
         )
         try:
             while True:

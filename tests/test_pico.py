@@ -22,17 +22,14 @@ from pico.providers.clients import OpenAICompatibleModelClient, _action_from_res
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
+from pico.task_classifier import StaticTaskIntentClassifier
 from pico.task_state import TaskContract
 
 READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "intent": "read_only",
 }
 NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "intent": "modify_optional",
 }
 
 
@@ -52,7 +49,7 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
         ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 2}),
         ModelAction.final("Read successfully."),
     ])
-    outcome = agent.ask("Read hello", **READ_TASK)
+    outcome = agent._ask_with_intent("Read hello", **READ_TASK)
     assert outcome.answer == "Read successfully."
     assert [entry.kind for entry in agent.run.run_log.context_events()] == [
         "user_message", "assistant_tool_call", "tool_result", "assistant_final"
@@ -75,7 +72,7 @@ def test_native_tool_loop_records_context_and_working_goal(tmp_path):
 def test_run_outcome_is_frozen_and_keeps_detached_metrics_snapshot(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("Done.")])
 
-    outcome = agent.ask("Finish", **NO_CHANGE_TASK)
+    outcome = agent._ask_with_intent("Finish", **NO_CHANGE_TASK)
     projection = agent.run.projection
     snapshot = outcome.to_dict()
 
@@ -101,7 +98,7 @@ def test_cli_prints_only_run_outcome_answer(monkeypatch, capsys):
     monkeypatch.setattr(cli, "build_agent", lambda _args: agent)
     monkeypatch.setattr(cli, "build_welcome", lambda *_args, **_kwargs: "welcome")
 
-    assert cli.main(["--task-kind", "read_only", "inspect"]) == 0
+    assert cli.main(["inspect"]) == 0
 
     assert capsys.readouterr().out == "welcome\n\nplain answer\n"
 
@@ -123,7 +120,14 @@ def test_emit_event_requires_one_consistent_active_run(tmp_path):
         agent.session.data["id"],
         agent.dependencies.run_store,
     )
-    first = active_log.append_user(TaskContract(goal="Inspect", **READ_TASK))
+    first = active_log.append_user(
+        TaskContract(
+            goal="Inspect",
+            task_kind="read_only",
+            requires_workspace_change=False,
+            requires_verification=False,
+        )
+    )
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = RunLog(
         "run_other",
@@ -151,7 +155,7 @@ def test_working_state_tool_is_durable_and_replayable(tmp_path):
         ],
     )
 
-    assert agent.ask("Fix the login timeout", **NO_CHANGE_TASK).answer == "Working state recorded."
+    assert agent._ask_with_intent("Fix the login timeout", **NO_CHANGE_TASK).answer == "Working state recorded."
     state = agent.run.task.working
     assert agent.run.task.contract.goal == "Fix the login timeout"
     assert state.constraints == ("Keep Python 3.10 compatibility",)
@@ -176,7 +180,7 @@ def test_rejected_working_state_update_does_not_change_projection(tmp_path):
         ],
     )
 
-    assert agent.ask("Inspect the API", **NO_CHANGE_TASK).answer == "Rejected update left state unchanged."
+    assert agent._ask_with_intent("Inspect the API", **NO_CHANGE_TASK).answer == "Rejected update left state unchanged."
     assert agent.run.task.working.constraints == ()
     results = [
         event
@@ -189,14 +193,31 @@ def test_rejected_working_state_update_does_not_change_projection(tmp_path):
 def test_fake_client_refuses_legacy_text_protocol(tmp_path):
     agent = build_agent(tmp_path, ["legacy text"])
     with pytest.raises(TypeError, match="ModelAction"):
-        agent.ask("do it", **NO_CHANGE_TASK)
+        agent._ask_with_intent("do it", **NO_CHANGE_TASK)
 
 
-def test_ask_requires_explicit_task_requirements(tmp_path):
+def test_public_ask_classifies_internal_contract_without_user_fields(tmp_path):
+    agent = build_agent(tmp_path, [ModelAction.final("classified")])
+    agent.dependencies.task_classifier = StaticTaskIntentClassifier("modify_optional")
+
+    outcome = agent.ask("Review and change only if needed")
+
+    assert outcome.answer == "classified"
+    assert agent.run.task.contract.task_kind == "modify"
+    assert agent.run.task.contract.requires_workspace_change is False
+    assert agent.run.task.contract.requires_verification is False
+
+
+def test_public_ask_rejects_old_contract_parameters(tmp_path):
     agent = build_agent(tmp_path, [ModelAction.final("unused")])
 
     with pytest.raises(TypeError, match="task_kind"):
-        agent.ask("legacy untyped task")
+        agent.ask(
+            "Fix it",
+            task_kind="modify",
+            requires_workspace_change=True,
+            requires_verification=False,
+        )
 
 
 def test_response_action_parser_requires_one_allowed_function():
@@ -271,7 +292,9 @@ def test_openai_sse_completed_function_call_is_parsed():
 
 def test_revision_conflict_is_a_tool_error(tmp_path):
     agent = build_agent(tmp_path, [])
-    RunLifecycle(agent).initialize("Edit hello", **NO_CHANGE_TASK)
+    RunLifecycle(agent).initialize(
+        "Edit hello", task_intent="modify_optional"
+    )
     read_call = ToolCall("read_file", {"path": "hello.txt"}, "read")
     agent.apply_run_event(agent.run.run_log.append_tool_call(read_call))
     read = agent.tools.execute(read_call)
@@ -318,13 +341,13 @@ def test_prefix_refresh_preserves_explicit_workspace_root_and_invocation_cwd(tmp
 def test_reset_terminalizes_interrupted_run_before_starting_a_new_task(tmp_path):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("old task", **NO_CHANGE_TASK)
+        agent._ask_with_intent("old task", **NO_CHANGE_TASK)
     old_run_id = agent.run.projection.run_id
 
     agent.reset()
     agent.model_client.outputs.append(ModelAction.final("new answer"))
 
-    assert agent.ask("new task", **NO_CHANGE_TASK).answer == "new answer"
+    assert agent._ask_with_intent("new task", **NO_CHANGE_TASK).answer == "new answer"
     assert agent.run.projection.run_id != old_run_id
     assert agent.run.task.contract.goal == "new task"
     old_projection = agent.dependencies.run_store.replay(old_run_id)
@@ -358,7 +381,7 @@ def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
 
     def ask_in_thread():
         try:
-            result["outcome"] = agent.ask("Create late.txt", **NO_CHANGE_TASK)
+            result["outcome"] = agent._ask_with_intent("Create late.txt", **NO_CHANGE_TASK)
         except BaseException as exc:  # noqa: BLE001 - thread assertion handoff
             result["error"] = exc
 
@@ -399,7 +422,7 @@ def test_active_reset_waits_for_tool_result_before_terminal_cleanup(tmp_path):
 def test_reset_applies_terminal_event_before_session_persistence(tmp_path, monkeypatch):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("old task", **NO_CHANGE_TASK)
+        agent._ask_with_intent("old task", **NO_CHANGE_TASK)
 
     def fail_session_reset():
         raise OSError("session persistence failed")
@@ -423,7 +446,7 @@ def test_reset_reloads_a_durably_committed_ambiguous_terminal_event(
 ):
     agent = build_agent(tmp_path, [])
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent.ask("old task", **NO_CHANGE_TASK)
+        agent._ask_with_intent("old task", **NO_CHANGE_TASK)
     run_id = agent.run.projection.run_id
     store = agent.dependencies.run_store
     original_append = store.append_event
@@ -467,7 +490,7 @@ def test_terminal_run_closes_execution_when_session_pointer_save_fails(
     monkeypatch.setattr(agent.session, "set_active_run", fail_terminal_pointer)
 
     with pytest.raises(OSError, match="terminal pointer failed"):
-        agent.ask("Finish", **NO_CHANGE_TASK)
+        agent._ask_with_intent("Finish", **NO_CHANGE_TASK)
 
     assert agent.run.task.lifecycle.status == "completed"
     assert agent.run.execution_context is None

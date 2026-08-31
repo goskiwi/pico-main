@@ -117,11 +117,9 @@ def main():
             command_runner=command_runner,
         )
 
-        outcome = agent.ask(
+        outcome = agent._ask_with_intent(
             "Fix calculator.add so the existing addition test passes",
-            task_kind="modify",
-            requires_workspace_change=True,
-            requires_verification=True,
+            intent="modify",
         )
         run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)

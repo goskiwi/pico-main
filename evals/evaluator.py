@@ -143,11 +143,9 @@ class BenchmarkEvaluator:
                 verification_command="",
             ),
         )
-        outcome = agent.ask(
+        outcome = agent._ask_with_intent(
             task["prompt"],
-            task_kind="modify",
-            requires_workspace_change=True,
-            requires_verification=False,
+            intent="modify",
         )
         argv = shlex.split(task["verifier"])
         verified = subprocess.run(

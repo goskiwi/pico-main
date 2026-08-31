@@ -13,13 +13,14 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 
 先运行 `scripts/day7_runtime_capstone.py`，然后只读一个 owner、一个 caller 和一个结果：
 
-1. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支。
-2. `AgentLoop._handle_tool_action()` → `ToolRuntime.execute()`：Call 由 Loop 接受并持久化，
+1. `TaskIntentClassifier.classify()`：自然语言只生成内部 Intent，不授予工具权限；Resume 跳过分类。
+2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支。
+3. `AgentLoop._handle_tool_action()` → `ToolRuntime.execute()`：Call 由 Loop 接受并持久化，
    Started/Result 由 ToolRuntime 持久化。
-3. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
+4. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
    单 Pending 与 Crash recovery；第一遍在 `compact()` 前停止，不读 History projection。
-4. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
-5. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
+5. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
+6. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
    Verification 的顺序理解 Runtime 完成权。
 
 到这里已经能完成面试主线。只有被追问 Child delegation 时才运行 Day 6；RepoMap、Provider
@@ -49,8 +50,6 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 ```bash
 uv run pico \
-  --task-kind modify \
-  --require-verification \
   --verify-command "python -m pytest -q" \
   --cwd /path/to/repo \
   "Fix calculator.add so the existing addition test passes"
@@ -72,9 +71,9 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 
 | 步骤 | 当前调用 | 第一遍要看懂的内容 |
 |---:|---|---|
-| 1 | `pico/cli.py: main -> build_agent -> _ask_kwargs` | CLI 参数如何变成 `PicoConfig` 和明确的任务要求 |
+| 1 | `pico/cli.py: main -> build_agent` | CLI 只提交自然语言与 Runtime 配置，不要求用户填写 TaskContract |
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
-| 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先写 `user_message.contract`；恢复 Run 保持同一 TaskContract，并在 Provider 前持久化 `user_guidance` |
+| 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先用隔离结构化分类生成 TaskContract；恢复 Run 复用原 Contract，并在 Provider 前持久化 `user_guidance` |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
 | 5 | `PromptBuilder -> ContextManager -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；最小 Runtime policy、按需上下文和任务请求进首轮 `input`；原生 Schema 进 `tools`，支持时用 `allowed_tools` 动态限名 |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |

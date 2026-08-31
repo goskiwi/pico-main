@@ -24,12 +24,6 @@ from pico import (
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RUN_LOG_SCHEMA_VERSION, replay_events
 
-READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-
 
 def print_section(title, value):
     print(f"\n=== {title} ===")
@@ -86,9 +80,9 @@ def fact_projection_experiment(root):
         ]
     )
     agent = build_agent(root, model)
-    outcome = agent.ask(
+    outcome = agent._ask_with_intent(
         "Inspect README without changing the workspace",
-        **READ_TASK,
+        intent="read_only",
     )
     run_id = outcome.run_id
     store = agent.dependencies.run_store
@@ -255,7 +249,7 @@ def interrupted_read_experiment(root):
     original = build_agent(root, FakeModelClient([]))
     RunLifecycle(original).initialize(
         "Read README.md after restart",
-        **READ_TASK,
+        task_intent="read_only",
     )
     run_id = original.run.projection.run_id
     call = ToolCall(
@@ -302,7 +296,9 @@ def interrupted_read_experiment(root):
         "pending_call_id": call.call_id,
     }
 
-    outcome = resumed.ask("Continue the same Run", **READ_TASK)
+    outcome = resumed._ask_with_intent(
+        "Continue the same Run", intent="read_only"
+    )
     assert isinstance(outcome, RunOutcome)
     assert outcome.run_id == run_id
     assert outcome.status == "completed"

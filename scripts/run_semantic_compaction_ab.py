@@ -108,11 +108,9 @@ def run_variant(args, variant, api_key, base_url, run_group):
         agent.prompt.context.semantic_summarizer = None
     summarizer = agent.prompt.context.semantic_summarizer
     started = time.monotonic()
-    outcome = agent.ask(
+    outcome = agent._ask_with_intent(
         ab_prompt(),
-        task_kind="modify",
-        requires_workspace_change=True,
-        requires_verification=True,
+        intent="modify",
     )
     wall_duration_ms = int((time.monotonic() - started) * 1000)
     events = agent.dependencies.run_store.read_events(outcome.run_id)

@@ -13,6 +13,7 @@ from .execution import CancellationToken
 from .mutations import WorkspaceMutationService
 from .repo_map import RepoMap
 from .run_store import RunStore
+from .task_classifier import TaskClassifier
 
 if TYPE_CHECKING:
     from .subagents import SubagentRunner
@@ -26,5 +27,6 @@ class RuntimeDependencies:
     command_runner: CommandRunner
     command_runner_factory: Callable[[Path], CommandRunner]
     repo_map: RepoMap
+    task_classifier: TaskClassifier
     subagents: SubagentRunner | None = None
     parent_cancellation_token: CancellationToken | None = None

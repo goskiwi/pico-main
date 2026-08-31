@@ -12,6 +12,7 @@ RunProjection，重建 TaskContract、增量 WorkingState、Evidence、Metrics �
 
 ```text
 User request
+  -> hidden TaskIntentClassifier -> TaskContract
   -> ModelAction(tool / invalid / final)
   -> Tool transaction or Completion Gate
   -> RunLog

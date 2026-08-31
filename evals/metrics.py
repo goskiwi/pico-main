@@ -50,9 +50,7 @@ def run_context_governance_evaluation(
             )
             RunLifecycle(agent).initialize(
                 request,
-                task_kind="read_only",
-                requires_workspace_change=False,
-                requires_verification=False,
+                task_intent="read_only",
             )
             run_log = agent.run.run_log
             chunk = "old noise " * max(1, size // 8)

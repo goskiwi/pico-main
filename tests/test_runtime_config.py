@@ -7,7 +7,7 @@ from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 
 def test_runtime_context_defaults_match_cli():
     config = PicoConfig.build()
-    args = build_arg_parser().parse_args(["--task-kind", "read_only"])
+    args = build_arg_parser().parse_args([])
 
     assert config.max_new_tokens == args.max_new_tokens == 1024
     assert (
@@ -26,8 +26,6 @@ def test_runtime_context_defaults_match_cli():
 def test_cli_accepts_custom_max_new_tokens():
     args = build_arg_parser().parse_args(
         [
-            "--task-kind",
-            "read_only",
             "--max-new-tokens",
             "2048",
             "--compaction-reserve-tokens",
@@ -42,11 +40,14 @@ def test_cli_accepts_custom_max_new_tokens():
     assert args.compaction_keep_recent_tokens == 16000
 
 
+def test_cli_rejects_old_task_contract_flags():
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--task-kind", "modify", "Fix it"])
+
+
 def test_approval_policy_uses_explicit_deny_name():
     config = PicoConfig.build(approval_policy="deny")
-    args = build_arg_parser().parse_args(
-        ["--task-kind", "read_only", "--approval", "deny"]
-    )
+    args = build_arg_parser().parse_args(["--approval", "deny"])
 
     assert config.approval_policy == args.approval == "deny"
     with pytest.raises(ValueError, match="approval_policy must be ask, auto, or deny"):

@@ -209,22 +209,6 @@ def build_arg_parser():
         ),
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
-    parser.add_argument(
-        "--task-kind",
-        choices=("read_only", "modify"),
-        required=True,
-        help="Runtime-owned task kind used by the Completion Gate.",
-    )
-    parser.add_argument(
-        "--allow-no-change",
-        action="store_true",
-        help="Allow a modify task to finish without a workspace mutation.",
-    )
-    parser.add_argument(
-        "--require-verification",
-        action="store_true",
-        help="Require a current passed verification before completion.",
-    )
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
     parser.add_argument(
         "--model",
@@ -312,16 +296,6 @@ def build_arg_parser():
     return parser
 
 
-def _ask_kwargs(args):
-    return {
-        "task_kind": args.task_kind,
-        "requires_workspace_change": (
-            args.task_kind == "modify" and not args.allow_no_change
-        ),
-        "requires_verification": bool(args.require_verification),
-    }
-
-
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv[:1] == ["run"]:
@@ -342,7 +316,7 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt, **_ask_kwargs(args)).answer)
+                print(agent.ask(prompt).answer)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -377,6 +351,6 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input, **_ask_kwargs(args)).answer)
+            print(agent.ask(user_input).answer)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

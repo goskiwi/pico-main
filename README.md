@@ -17,8 +17,6 @@ Pico 面向用户已经信任的本地仓库。模型没有通用 `run_shell`；
 uv sync
 
 uv run pico \
-  --task-kind modify \
-  --require-verification \
   --verify-command "python -m pytest -q" \
   --cwd /path/to/trusted/repo \
   "Fix calculator.add so the existing test passes"
@@ -32,13 +30,15 @@ PICO_OPENAI_API_BASE="https://www.right.codes/codex/v1"
 PICO_OPENAI_MODEL="gpt-5.4"
 ```
 
-Pico 不根据仓库内容猜任务类型、写入要求或验证命令；调用方必须显式提供这些要求。
-`ask()` 返回结构化 `RunOutcome`，持久事实仍以 `RunStore.replay(run_id)` 为准。
+用户只提交自然语言目标。新 Run 创建前，Runtime 使用隔离的结构化分类调用生成
+`read_only / modify / modify_optional` Intent，并据此持久化 TaskContract；分类不授予工具权限。
+Resume 直接复用原 Contract，不重新分类。`ask()` 返回结构化 `RunOutcome`，持久事实仍以
+`RunStore.replay(run_id)` 为准。
 
 ## 核心运行链
 
 ```text
-User request + TaskContract
+User request -> hidden TaskIntentClassifier -> TaskContract
   -> AgentLoop: ModelAction(tool / invalid / final)
   -> ToolRuntime: admission -> tool_started -> Runner -> tool_result
   -> RunLog: append-only, sequenced, fsynced Facts
