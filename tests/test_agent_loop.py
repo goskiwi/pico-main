@@ -264,6 +264,51 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
     assert sum(entry.kind == "completion_blocked" for entry in events) == 3
 
 
+def test_verifier_created_file_prevents_successful_completion(tmp_path):
+    class MutatingVerificationRunner:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            (tmp_path / "verifier-extra.txt").write_text(
+                "unexpected\n",
+                encoding="utf-8",
+            )
+            return CommandResult(returncode=0, stdout="tests passed")
+
+    agent = Pico(
+        FakeModelClient(
+            [
+                ModelAction.tool(
+                    "write_file",
+                    {"path": "subject.txt", "content": "changed\n"},
+                ),
+                ModelAction.final("done"),
+            ]
+        ),
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico" / "sessions"),
+        config=PicoConfig(
+            approval_policy="auto",
+            verification_command="verify",
+        ),
+        command_runner=MutatingVerificationRunner(),
+    )
+
+    with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
+        agent.ask("Create subject.txt", **VERIFIED_MODIFY_TASK)
+
+    events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    verification = next(
+        event for event in events if event.kind == "verification_result"
+    )
+    assert verification.payload["status"] == "failed"
+    assert "verifier-extra.txt" in verification.payload["output"]
+    assert any(event.kind == "completion_blocked" for event in events)
+    assert not any(event.kind == "assistant_final" for event in events)
+    assert agent.run.projection.terminal is False
+    assert agent.run.projection.final_diff is None
+    assert (tmp_path / "verifier-extra.txt").is_file()
+
+
 def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(

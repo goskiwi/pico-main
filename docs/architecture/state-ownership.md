@@ -44,5 +44,5 @@ Invariants:
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
 - Tool protocol events form one strict `assistant_tool_call -> tool_started? -> tool_result` transaction.
-- Child delegation and integration are synchronous and process-local; there is no DAG/background scheduler, and cross-process Child recovery is outside scope.
+- Child delegation and integration are synchronous; there is no DAG/background scheduler. Completed Implement receipts and integration state replay from the Parent Run Log, but running Child execution is not resumed across processes.
 - Old persistence formats are rejected; no compatibility or migration branch exists.

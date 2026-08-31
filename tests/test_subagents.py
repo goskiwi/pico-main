@@ -13,11 +13,12 @@ from pico import (
 )
 from pico.command_runner import CommandResult
 from pico.completion_controller import CompletionController
-from pico.contracts import ToolCall
+from pico.contracts import ToolCall, ToolOutcome
 from pico.execution import ExecutionContext
+from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
-from pico.subagents import ChildSpec
+from pico.subagents import ChildSpec, SubagentRunner
 from pico.subagents.tools import DelegateArgs, IntegrateChildArgs
 from pico.task_state import TaskContract
 from pico.tools import function_schema
@@ -171,6 +172,19 @@ def run_active(parent, call):
     return parent.tools.execute(call)
 
 
+def reopen_parent(parent, child_factory, *, outputs=()):
+    parent.session.set_active_run(parent.run.projection.run_id)
+    return Pico(
+        FakeModelClient(list(outputs)),
+        WorkspaceContext.build(parent.workspace.root),
+        parent.session.store,
+        session=parent.session.store.load(parent.session.data["id"]),
+        config=parent.config,
+        command_runner_factory=parent.dependencies.command_runner_factory,
+        subagent_model_client_factory=child_factory,
+    )
+
+
 def explore_client(answer="Findings: README.md contains demo."):
     return FakeModelClient(
         [
@@ -293,8 +307,11 @@ def test_implement_requires_verifier_and_clean_git(tmp_path):
             "implement", "Create feature.py", ("feature.py",)
         )
 
-    (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
-    dirty, _ = build_parent(root, child_factory)
+    dirty_parent = tmp_path / "dirty"
+    dirty_parent.mkdir()
+    dirty_root = repository(dirty_parent)
+    (dirty_root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    dirty, _ = build_parent(dirty_root, child_factory)
     receipt = delegate_implementation(dirty)
 
     assert receipt["status"] == "failed"
@@ -442,7 +459,7 @@ def test_verifier_cannot_add_a_path_outside_the_child_receipt(tmp_path):
     )
     receipt = delegate_implementation(parent)
 
-    with pytest.raises(ValueError, match="outside the Child receipt"):
+    with pytest.raises(RuntimeError, match="changed additional workspace state"):
         parent.dependencies.subagents.integrate_child(receipt["child_id"])
 
     record = parent.dependencies.subagents._record(
@@ -470,7 +487,7 @@ def test_verifier_cannot_modify_the_immutable_child_patch(tmp_path):
     )
     receipt = delegate_implementation(parent)
 
-    with pytest.raises(ValueError, match="immutable Child patch"):
+    with pytest.raises(RuntimeError, match="changed Runtime-tracked file contents"):
         parent.dependencies.subagents.integrate_child(receipt["child_id"])
 
     record = parent.dependencies.subagents._record(
@@ -489,7 +506,20 @@ def test_successful_integration_records_parent_workspace_evidence(tmp_path):
         allowed_write_paths=("feature.py",),
         requires_workspace_change=True,
     )
-    receipt = delegate_implementation(parent)
+    delegated = run_active(
+        parent,
+        ToolCall(
+            "delegate",
+            {
+                "role": "implement",
+                "task": "Create feature.py",
+                "allowed_write_paths": ["feature.py"],
+            },
+            "call_delegate_before_resume",
+        ),
+    )
+    assert delegated.status == "success"
+    receipt = delegated.structured
     outcome = run_active(
         parent,
         ToolCall(
@@ -554,3 +584,113 @@ def test_failed_child_is_a_structured_delegate_error(tmp_path):
     assert outcome.structured["status"] == "failed"
     assert outcome.structured["error"]
     assert outcome.structured["integrated"] is False
+
+
+def test_new_runner_recovers_unintegrated_child_and_later_integration(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        requires_workspace_change=True,
+    )
+    delegated = run_active(
+        parent,
+        ToolCall(
+            "delegate",
+            {
+                "role": "implement",
+                "task": "Create feature.py",
+                "allowed_write_paths": ["feature.py"],
+            },
+            "call_delegate_before_resume",
+        ),
+    )
+    assert delegated.status == "success"
+    receipt = delegated.structured
+
+    resumed = reopen_parent(parent, lambda _spec: implement_client())
+    runner = resumed.dependencies.subagents
+    issue = runner.completion_issue()
+    recovered = runner._record(resumed.run.projection.run_id, receipt["child_id"])
+
+    assert receipt["child_id"] in issue
+    assert recovered.status == "completed"
+    assert recovered.integrated is False
+    assert recovered.spec.task == "Create feature.py"
+    assert recovered.spec.allowed_write_paths == ("feature.py",)
+    assert recovered.patch_path == str(
+        resumed.dependencies.run_store.run_dir(resumed.run.projection.run_id)
+        / "subagents"
+        / receipt["child_id"]
+        / "patch.diff"
+    )
+
+    RunLifecycle(resumed).initialize(
+        "Continue",
+        task_kind="modify",
+        requires_workspace_change=True,
+        requires_verification=False,
+    )
+    outcome = run_active(
+        resumed,
+        ToolCall(
+            "integrate_child",
+            {"child_id": receipt["child_id"]},
+            "call_integrate_after_resume",
+        ),
+    )
+    assert outcome.status == "success"
+    assert (root / "feature.py").read_text() == "feature\n"
+    resumed.run.execution_context = None
+
+    reopened = reopen_parent(resumed, lambda _spec: implement_client())
+    restored = reopened.dependencies.subagents._record(
+        reopened.run.projection.run_id,
+        receipt["child_id"],
+    )
+    assert restored.integrated is True
+    assert reopened.dependencies.subagents.completion_issue() == ""
+
+
+def test_malformed_persisted_delegate_receipt_fails_closed(tmp_path):
+    parent, _ = build_parent(
+        repository(tmp_path),
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+    )
+    call = ToolCall(
+        "delegate",
+        {
+            "role": "implement",
+            "task": "Create feature.py",
+            "allowed_write_paths": ["feature.py"],
+        },
+        "call_malformed_receipt",
+    )
+    parent.apply_run_event(parent.run.run_log.append_tool_call(call))
+    parent.apply_run_event(
+        parent.run.run_log.append_tool_started(
+            call,
+            risky=False,
+            effect_scope="none",
+            potential_effects=[],
+        )
+    )
+    parent.apply_run_event(
+        parent.run.run_log.append_tool_result(
+            ToolOutcome(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                status="success",
+                execution_state="completed",
+                side_effect_state="none",
+                content="malformed",
+                structured={"child_id": "child_012345abcdef"},
+            )
+        )
+    )
+
+    fresh_runner = SubagentRunner(parent, lambda _spec: implement_client())
+    with pytest.raises(ValueError, match="invalid persisted delegate receipt"):
+        fresh_runner.completion_issue()

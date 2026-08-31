@@ -52,9 +52,9 @@ assistant_tool_call
 ```
 
 强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界；调用方不能用相同 call ID 替换
-持久化 name/args。参数校验、Approval、preimage 和
-Fact 写入仍由它保持因果顺序，纯值计算下沉到私有 `tool_execution.py`，具体 Runner 只获得
-`ToolContext` 中的受限能力。
+持久化 name/args。AgentLoop 接受并持久化 `assistant_tool_call`，ToolRuntime 负责参数校验、
+Approval、preimage 以及执行事务的 `tool_started/tool_result`。纯值计算下沉到私有
+`tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
 
 `write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。
 
@@ -71,11 +71,12 @@ Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 
 
 ### 2:30～3:00：完成权
 
-打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 按 TaskContract 检查 Observation、最终净 RunChangeSet 和明确要求的 Verification，再检查 partial/unknown 副作用与尚未集成的 Implement Child。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
+打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 依次检查尚未集成的
+Implement Child、TaskContract、未修复 partial/unknown、副作用后的 Workspace drift、当前
+Verification，以及验证后仍未解决的 Effect。这个顺序避免在副作用仍不确定时运行无意义的
+verifier。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
 
-## 5 分钟现场 Demo `[Core + 默认上下文增强]`
-
-### 1. 运行纯 Core Capstone
+## 5 分钟现场 Demo `[Core]`
 
 ```bash
 uv run python scripts/day7_runtime_capstone.py
@@ -89,24 +90,8 @@ uv run python scripts/day7_runtime_capstone.py
 - `tool_transactions`：每个调用都有 Call/Started/Result；
 - `outcome_matches_replay`：返回值与 durable Replay 的终态一致。
 
-### 2. 运行机制评测 `[默认上下文增强 + Context Pressure]`
-
-```bash
-uv run python scripts/run_evaluations.py
-```
-
-说明这些是确定性 Runtime 评测，不是模型能力分数：
-
-- Native Harness 真实运行 Pico、工具和外部 verifier；
-- Context v5 真实触发 ContextManager/RunLog Compaction；
-- RepoMap v1 验证 tree-sitter 图、任务命中和 Token Budget。
-
-### 3. 可选回归证明
-
-```bash
-uv run pytest -q
-uv run ruff check pico tests scripts
-```
+现场不运行完整 Evals 或 pytest；把通过结果作为预先准备的证据。只有面试官追问 Crash
+Recovery、Completion 顺序或 Child integration 时，再运行 Day 6 的对应实验。
 
 ## 10 分钟深入讲解
 
@@ -203,8 +188,9 @@ Patch receipt；`integrate_child` 再在临时 Worktree 复验 base、应用 Pat
 
 ### 这是生产系统吗？
 
-不是。它是本地、单用户、单 Responses 协议的 Runtime。多租户、远程 Worker、后台
-Mailbox、跨进程 Child 调度恢复和通用 MCP/Skills 都明确不在范围内。
+不是。它是本地、单用户、单 Responses 协议的 Runtime。已完成 Implement receipt 可以恢复并
+继续显式集成，但运行中的 Child 不会跨进程恢复。多租户、远程 Worker、后台 Mailbox 和通用
+MCP/Skills 都明确不在范围内。
 
 ## 证据边界
 

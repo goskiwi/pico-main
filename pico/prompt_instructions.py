@@ -45,8 +45,9 @@ def build_prompt_instructions():
         (
             "Completion",
             (
-                "Return a final answer only after the task and Runtime completion requirements are satisfied.",
-                "After changes, run relevant verification and inspect the resulting diff before finishing.",
+                "When the requested work is ready, call submit_final with a concise evidence-backed answer.",
+                "After submit_final, the Runtime runs the user-fixed verification command when required and constructs the Final Diff.",
+                "Do not run the fixed verifier or generate or inspect the Final Diff yourself; if the Runtime rejects completion, follow its instruction and submit again.",
                 "Keep the final answer concise, concrete, and supported by observed evidence.",
             ),
         ),

@@ -9,6 +9,22 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 仓库导航，到 Day 5 再阅读内部实现。Semantic Compaction、Subagents 和 Triage 也都不是
 理解一次普通单 Agent 请求的前置条件。
 
+## 15 分钟核心路径
+
+先运行 `scripts/day7_runtime_capstone.py`，然后只读一个 owner、一个 caller 和一个结果：
+
+1. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支。
+2. `AgentLoop._handle_tool_action()` → `ToolRuntime.execute()`：Call 由 Loop 接受并持久化，
+   Started/Result 由 ToolRuntime 持久化。
+3. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
+   单 Pending 与 Crash recovery；第一遍在 `compact()` 前停止，不读 History projection。
+4. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
+5. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
+   Verification 的顺序理解 Runtime 完成权。
+
+到这里已经能完成面试主线。只有被追问 Child delegation 时才运行 Day 6；RepoMap、Provider
+cache、Semantic Compaction、Triage 和完整 Evals 都留到后续章节。
+
 ## 六个核心 Ownership 文件
 
 先记住下面六个文件分别拥有什么。其他文件会出现在真实调用链中，但只是协议、数据或
@@ -182,7 +198,7 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
 
 完成标准：能区分“默认上下文输入”和“只有压力下才发生的压缩路径”。
 
-### Day 6：Completion、Recovery 与 Subagents 附录
+### Day 6：Completion、Recovery 与 Child 附录（仅追问）
 
 - 先运行 `completion_experiment`：Evidence 只展示净变化和当前 Verification，是否允许完成只
   由 CompletionController 决定。

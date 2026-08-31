@@ -5,9 +5,10 @@ from __future__ import annotations
 import atexit
 import uuid
 
+from ..contracts import ToolOutcome
 from ..run_store import RunStore
 from ..session_store import SessionStore
-from ..workspace import WorkspaceContext
+from ..workspace import WorkspaceContext, normalize_relative_file
 from .contracts import ChildRecord, ChildSpec
 from .integration import PatchIntegrator
 from .worktree import GitWorktree, require_clean_repository
@@ -56,6 +57,7 @@ class SubagentRunner:
         self.parent = parent
         self.model_client_factory = model_client_factory
         self._records_by_run: dict[str, dict[str, ChildRecord]] = {}
+        self._recovered_runs: set[str] = set()
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
         self.integration = PatchIntegrator(self)
         atexit.register(self.cleanup)
@@ -69,7 +71,93 @@ class SubagentRunner:
         return self.parent.dependencies.run_store.run_dir(run_id) / "subagents"
 
     def _records(self, run_id):
-        return self._records_by_run.setdefault(run_id, {})
+        records = self._records_by_run.setdefault(run_id, {})
+        if run_id not in self._recovered_runs:
+            self._recover_records(run_id, records)
+            self._recovered_runs.add(run_id)
+        return records
+
+    def _recover_delegate(self, run_id, call, outcome, records):
+        spec = ChildSpec.model_validate(call.args)
+        if spec.role != "implement":
+            return
+        receipt = outcome.structured
+        try:
+            child_id = receipt["child_id"]
+            role = receipt["role"]
+            status = receipt["status"]
+            child_run_id = receipt["child_run_id"]
+            base_sha = receipt["base_sha"]
+            raw_paths = receipt["changed_paths"]
+            patch_sha256 = receipt["patch_sha256"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("invalid persisted delegate receipt") from exc
+        if not all(
+            isinstance(value, str) and value
+            for value in (child_id, child_run_id, base_sha, patch_sha256)
+        ):
+            raise ValueError("invalid persisted delegate receipt")
+        if role != "implement" or status != "completed":
+            raise ValueError("invalid persisted delegate receipt")
+        if child_id in records or not isinstance(raw_paths, list):
+            raise ValueError("invalid persisted delegate receipt")
+        changed_paths = tuple(normalize_relative_file(path) for path in raw_paths)
+        if not changed_paths or not set(changed_paths) <= set(
+            spec.allowed_write_paths
+        ):
+            raise ValueError("persisted Child paths exceed the delegate call scope")
+        subagent_root = self._run_root(run_id).resolve()
+        patch_path = (subagent_root / child_id / "patch.diff").resolve()
+        try:
+            patch_path.relative_to(subagent_root)
+        except ValueError as exc:
+            raise ValueError("persisted Child patch path escapes its Run") from exc
+        records[child_id] = ChildRecord(
+            child_id=child_id,
+            spec=spec,
+            status="completed",
+            child_run_id=child_run_id,
+            base_sha=base_sha,
+            changed_paths=changed_paths,
+            patch_path=str(patch_path),
+            patch_sha256=patch_sha256,
+        )
+
+    def _recover_integration(self, call, outcome, records):
+        try:
+            child_id = call.args["child_id"]
+            receipt_child_id = outcome.structured["child_id"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("invalid persisted integration receipt") from exc
+        if (
+            set(call.args) != {"child_id"}
+            or not isinstance(child_id, str)
+            or receipt_child_id != child_id
+        ):
+            raise ValueError("invalid persisted integration receipt")
+        record = records.get(child_id)
+        if record is None:
+            raise ValueError("persisted integration references an unknown Child")
+        record.integrated = True
+
+    def _recover_records(self, run_id, records):
+        calls = {}
+        for event in self.parent.dependencies.run_store.read_events(run_id):
+            if event.kind == "assistant_tool_call":
+                calls[event.call_id] = event
+                continue
+            if event.kind != "tool_result":
+                continue
+            call = calls.get(event.call_id)
+            if call is None or call.name not in {"delegate", "integrate_child"}:
+                continue
+            outcome = ToolOutcome.from_dict(event.payload["outcome"])
+            if outcome.status != "success":
+                continue
+            if call.name == "delegate":
+                self._recover_delegate(run_id, call, outcome, records)
+            else:
+                self._recover_integration(call, outcome, records)
 
     def _new_child_id(self, run_id):
         records = self._records(run_id)

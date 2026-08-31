@@ -240,6 +240,10 @@ Verification there, and only then writes the verified result into the Parent Wor
 change, path-scope mismatch, Patch failure, or failed Verification rejects integration without
 claiming success.
 
+Completed implementation receipts and their integration state are projected from the Parent Run
+Log, so a restarted Parent can continue `integrate_child`. A Child that was still running at process
+exit is not resumed or automatically dispatched again.
+
 Read-only tasks need a successful Observation; modify tasks that require change need a non-empty final RunChangeSet. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but its receipt explicitly records `unavailable_reason=workspace_drift` instead of claiming a trustworthy Diff. Verification freshness is derived from its mutation sequence and path states rather than stored as a mutable label. There is no implicit language-specific AST gate.
 
 ### Local verification trust boundary

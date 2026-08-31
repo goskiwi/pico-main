@@ -1,3 +1,5 @@
+import subprocess
+
 from evals.pytest_output import parse_pytest_output
 from pico.command_runner import CommandResult
 from pico.evidence import verification_is_current
@@ -162,7 +164,8 @@ def test_runtime_verification_records_changed_path_drift(
         changed_paths=("subject.txt",),
     )
 
-    assert result["status"] == "passed"
+    assert result["status"] == "failed"
+    assert "changed Runtime-tracked file contents: subject.txt" in result["output"]
     assert "freshness" not in result
     assert result["started_changed_path_states"] == {"subject.txt": before}
     assert result["finished_changed_path_states"] == {
@@ -173,3 +176,42 @@ def test_runtime_verification_records_changed_path_drift(
         7,
         {"subject.txt": file_revision(target)},
     )
+
+
+def test_runtime_verification_rejects_extra_git_workspace_changes(tmp_path):
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tracked.txt"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    class Runner:
+        @staticmethod
+        def run(*_args, **_kwargs):
+            (tmp_path / "verifier-extra.txt").write_text(
+                "unexpected\n",
+                encoding="utf-8",
+            )
+            return CommandResult(returncode=0, stdout="tests passed")
+
+    result = verify_workspace(
+        root=tmp_path,
+        command="verify",
+        command_runner=Runner(),
+        timeout_seconds=60,
+        redact_text=str,
+        mutation_sequence_provider=lambda: 0,
+        started_workspace_mutation_sequence=0,
+        changed_paths=(),
+    )
+
+    assert result["status"] == "failed"
+    assert "changed additional workspace state" in result["output"]
+    assert "verifier-extra.txt" in result["output"]
+    assert (tmp_path / "verifier-extra.txt").is_file()
