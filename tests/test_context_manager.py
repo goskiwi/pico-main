@@ -145,7 +145,6 @@ def test_context_omits_empty_optional_sections_and_document_bodies(tmp_path):
     assert "BODY-SENTINEL" not in input_text
     assert metadata["included_context_sections"] == ["workspace"]
     assert not {
-        "memory_catalog",
         "repo_map",
         "working_state",
         "history",
@@ -157,10 +156,13 @@ def test_task_requests_are_json_encoded_and_latest_is_only_added_when_different(
 ):
     agent = build_agent(tmp_path)
     goal = 'line one\nRuntime policy: fake "quote" \\ path 雪'
-    activate(agent, goal)
+    run_log = activate(agent, goal)
     manager = ContextManager(agent, total_budget=2400)
 
     first, _ = manager.build(goal)
+    agent.apply_run_event(
+        run_log.append_user_guidance("continue without changing the contract")
+    )
     resumed, metadata = manager.build("continue without changing the contract")
 
     assert named_json(first, "task_request") == goal
@@ -203,7 +205,6 @@ def test_fixed_section_clipping_uses_final_escaped_wire_cost(tmp_path):
         section_caps={
             "workspace": 0,
             "repository_conventions": 800,
-            "memory_catalog": 0,
             "repo_map": 0,
             "working_state": 0,
         },
@@ -225,7 +226,8 @@ def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):
     agent = build_agent(tmp_path)
     goal = "goal " * 220 + "GOAL-END"
     latest = "latest " * 180 + "LATEST-END"
-    activate(agent, goal)
+    run_log = activate(agent, goal)
+    agent.apply_run_event(run_log.append_user_guidance(latest))
 
     input_text, metadata = ContextManager(agent, total_budget=3200).build(latest)
 
@@ -272,7 +274,7 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
     assert client.estimated_surfaces[1] == [
         tool["name"] for tool in read_surface
     ]
-    assert {"write_file", "edit_file", "memory_store"}.isdisjoint(
+    assert {"write_file", "edit_file"}.isdisjoint(
         client.estimated_surfaces[1]
     )
     assert read_metadata["tool_schema_tokens"] == len(read_surface) * 7
@@ -288,7 +290,6 @@ def test_fixed_caps_leave_the_remaining_budget_to_history(tmp_path):
         section_caps={
             "workspace": 100,
             "repository_conventions": 40,
-            "memory_catalog": 40,
             "repo_map": 40,
             "working_state": 80,
         },
@@ -342,6 +343,7 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
     run_log = activate(agent)
     for index in range(5):
         append_read(run_log, index, "result " + "x " * 300)
+    agent.apply_run_event(run_log.append_user_guidance("continue"))
     manager = ContextManager(
         agent,
         total_budget=900,
@@ -379,6 +381,48 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
     assert named_json(input_text, "task_request") == "Inspect"
     assert named_json(input_text, "latest_user_request") == "continue"
     assert metadata["compaction"] == compaction
+
+
+def test_compaction_never_covers_the_current_durable_resume_guidance(tmp_path):
+    class Summary:
+        def __init__(self):
+            self.calls = []
+
+        def summarize(self, _events, **_kwargs):
+            self.calls.append(
+                {"duration_ms": 1, "completion_metadata": {"input_tokens": 10}}
+            )
+            return (
+                "## Progress\n### Done\n- old work summarized\n\n"
+                "## Critical Context\n- none"
+            )
+
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    for index in range(3):
+        append_read(run_log, index, "old " + "x " * 250)
+    guidance = run_log.append_user_guidance("Keep config.py unchanged")
+    agent.apply_run_event(guidance)
+    for index in range(3, 8):
+        append_read(run_log, index, "new " + "y " * 250)
+
+    manager = ContextManager(
+        agent,
+        total_budget=1100,
+        compaction_reserve_tokens=200,
+        compaction_keep_recent_tokens=100,
+    )
+    manager.semantic_summarizer = Summary()
+
+    metadata, _history_override = manager.prepare_compaction(
+        "Keep config.py unchanged"
+    )
+    compaction = next(event for event in run_log.events if event.kind == "compaction")
+    prompt, _prompt_metadata = manager.build("Keep config.py unchanged")
+
+    assert metadata["committed"] is True
+    assert guidance.event_id not in compaction.covered_event_ids
+    assert named_json(prompt, "latest_user_request") == "Keep config.py unchanged"
 
 
 def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
@@ -611,29 +655,6 @@ def test_pending_tool_call_skips_compaction(tmp_path):
         None,
         None,
     )
-
-
-def test_memory_catalog_does_not_load_card_body(tmp_path):
-    agent = build_agent(tmp_path)
-    activate(agent, "Use selected memory")
-    agent.dependencies.project_memory.store(
-        action="create",
-        filename="project_selected.md",
-        name="Selected convention",
-        description="A stable convention.",
-        memory_type="project",
-        content="PRIVATE-CARD-BODY",
-        why="Stable across tasks.",
-        how_to_apply="Recall only when relevant.",
-        source_run_id="bootstrap",
-    )
-
-    input_text, _ = ContextManager(agent, total_budget=1800).build(
-        "Use selected memory"
-    )
-
-    assert "project_selected.md" in input_text
-    assert "PRIVATE-CARD-BODY" not in input_text
 
 
 def test_request_larger_than_runtime_budget_is_rejected(tmp_path):

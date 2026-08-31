@@ -11,18 +11,11 @@ These deterministic artifacts measure Runtime mechanisms, not model intelligence
 ## Context governance
 
 - Within-budget rate: 100.0%
-- Current-request preservation: 100.0%
+- Task-request preservation: 100.0%
 - Compaction commit rate: 100.0%
 - Tool-transaction integrity: 100.0%
 - Original-event preservation: 100.0%
-- WorkingState preservation: 100.0%
-
-## Project memory
-
-- Catalog generated: True
-- Explicit Store transaction: True
-- Explicit Recall transaction: True
-- Untrusted-data boundary: True
+- TaskContract preservation: 100.0%
 
 ## RepoMap
 

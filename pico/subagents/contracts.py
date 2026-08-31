@@ -1,4 +1,4 @@
-"""Strict contracts for one parent-owned subtask graph."""
+"""Strict contracts for one synchronous Pico child."""
 
 from __future__ import annotations
 
@@ -14,28 +14,15 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SubtaskSpec(StrictModel):
-    task_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
-    kind: Literal["explore", "implement"]
-    prompt: str = Field(min_length=1, max_length=6000)
-    depends_on: tuple[str, ...] = ()
+class ChildSpec(StrictModel):
+    role: Literal["explore", "implement"]
+    task: str = Field(min_length=1, max_length=6000)
     allowed_write_paths: tuple[str, ...] = ()
-    max_tool_executions: int = Field(default=12, ge=1, le=12)
 
-    @field_validator("prompt")
+    @field_validator("task")
     @classmethod
-    def normalize_prompt(cls, value):
+    def normalize_task(cls, value):
         return str(value).strip()
-
-    @field_validator("depends_on")
-    @classmethod
-    def validate_dependencies(cls, value):
-        normalized = tuple(str(item).strip() for item in value)
-        if any(not item for item in normalized) or len(set(normalized)) != len(
-            normalized
-        ):
-            raise ValueError("depends_on must contain unique non-empty task ids")
-        return normalized
 
     @field_validator("allowed_write_paths")
     @classmethod
@@ -46,26 +33,23 @@ class SubtaskSpec(StrictModel):
         return normalized
 
     @model_validator(mode="after")
-    def validate_kind_contract(self):
-        if self.task_id in self.depends_on:
-            raise ValueError("subtask cannot depend on itself")
-        if self.kind == "explore" and self.allowed_write_paths:
-            raise ValueError("explore subtasks cannot declare write paths")
-        if self.kind == "implement" and not self.allowed_write_paths:
-            raise ValueError("implement subtasks require allowed_write_paths")
+    def validate_role_contract(self):
+        if self.role == "explore" and self.allowed_write_paths:
+            raise ValueError("explore children cannot declare write paths")
+        if self.role == "implement" and not self.allowed_write_paths:
+            raise ValueError("implement children require allowed_write_paths")
         return self
 
 
 @dataclass
-class SubtaskRecord:
-    spec: SubtaskSpec
-    status: Literal["pending", "running", "completed", "failed", "blocked"] = (
-        "pending"
-    )
+class ChildRecord:
+    child_id: str
+    spec: ChildSpec
+    status: Literal["running", "completed", "failed"] = "running"
     child_run_id: str = ""
     base_sha: str = ""
     changed_paths: tuple[str, ...] = ()
     patch_path: str = ""
     patch_sha256: str = ""
     error: str = ""
-    applied: bool = False
+    integrated: bool = False

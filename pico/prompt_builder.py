@@ -7,8 +7,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from .context_manager import ContextManager
-from .features.memory import WorkingState
 from .prompt_instructions import build_prompt_instructions
+from .working_state import WorkingState
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -43,19 +43,15 @@ class PromptBuilder:
         """Explicitly refresh Workspace metadata outside prompt construction."""
         return self.runtime.workspace.refresh(force=force)
 
-    def memory_text(self):
+    def working_state_text(self):
         task_state = self.runtime.run.task
-        working_text = (
+        return (
             "Task goal:\n- "
             + task_state.contract.goal
             + "\n\n"
             + task_state.working.render_panel()
             if task_state is not None
             else WorkingState().render_panel()
-        )
-        return (
-            f"{working_text}\n\n"
-            f"{self.runtime.dependencies.project_memory.index_text()}"
         )
 
     def prepare_compaction(

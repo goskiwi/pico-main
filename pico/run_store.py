@@ -78,28 +78,13 @@ class RunStore:
                 raise ValueError(
                     f"Run Log line {number} is not valid JSON"
                 ) from exc
-            entry = RunEvent.from_dict(value)
-            expected = len(events) + 1
-            if entry.run_id != run_id:
-                raise ValueError("Run event belongs to another run")
-            if entry.sequence != expected:
-                raise ValueError("Run Log sequence is not contiguous")
-            if entry.event_id != f"{run_id}:event:{expected:06d}":
-                raise ValueError("Run event id does not match its sequence")
-            if events:
-                first = events[0]
-                if (
-                    entry.task_id != first.task_id
-                    or entry.session_id != first.session_id
-                ):
-                    raise ValueError("Run Log identity changed within one run")
-            events.append(entry)
+            events.append(RunEvent.from_dict(value))
+        validate_run_events(events, expected_run_id=run_id)
         self._cursors[run_id] = (
             RunCursor(events[-1].sequence, events[-1].event_id)
             if events
             else RunCursor()
         )
-        validate_run_events(events)
         return events
 
     def cursor(self, run_id):

@@ -1,7 +1,4 @@
-import json
-import os
 import subprocess
-import threading
 from pathlib import Path
 
 import pytest
@@ -14,34 +11,28 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.command_runner import CommandResult
+from pico.completion_controller import CompletionController
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
-from pico.mutations import content_revision
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
-from pico.run_store import RunStore
-from pico.sandbox import DockerSandbox, SandboxResult
-from pico.subagents import SubtaskSpec
-from pico.subagents.contracts import SubtaskRecord
-from pico.subagents.tools import DelegateTasksArgs
-from pico.subagents.worktree import GitWorktree, GitWorktreeError
+from pico.subagents import ChildSpec
+from pico.subagents.tools import DelegateArgs, IntegrateChildArgs
 from pico.task_state import TaskContract
 from pico.tools import function_schema
 
-READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-VERIFIED_MODIFY_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": True,
-    "requires_verification": True,
-}
-NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+CHILD_RECEIPT_FIELDS = {
+    "child_id",
+    "role",
+    "status",
+    "child_run_id",
+    "result",
+    "base_sha",
+    "changed_paths",
+    "patch_sha256",
+    "error",
+    "integrated",
 }
 
 
@@ -54,1074 +45,512 @@ def git(root, *args):
         check=False,
     )
     if result.returncode:
-        raise AssertionError(result.stderr)
+        raise AssertionError(result.stderr or result.stdout)
     return result.stdout.strip()
 
 
-def repository(tmp_path, *, ignore_pico=True):
+def repository(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    git(root, "init")
+    git(root, "init", "--quiet")
     git(root, "config", "user.email", "pico@example.test")
     git(root, "config", "user.name", "Pico Test")
     (root / "README.md").write_text("demo\n", encoding="utf-8")
-    tracked = ["README.md"]
-    if ignore_pico:
-        (root / ".gitignore").write_text(".pico/\n", encoding="utf-8")
-        tracked.append(".gitignore")
-    git(root, "add", *tracked)
-    git(root, "commit", "-m", "base")
+    (root / ".gitignore").write_text(".pico/\n", encoding="utf-8")
+    git(root, "add", "README.md", ".gitignore")
+    git(root, "commit", "--quiet", "-m", "base")
     return root
 
 
-class PassingSandbox:
-    def __init__(self, root, *, side_effect=None):
+class RecordingCommandRunner:
+    def __init__(self, root, *, fail=False):
         self.root = Path(root)
-        self.side_effect = side_effect
+        self.fail = fail
+        self.calls = []
 
-    def run(self, *_args, **_kwargs):
-        if self.side_effect is not None:
-            self.side_effect(self.root)
-        return SandboxResult(returncode=0, stdout="2 passed\n")
+    def run(self, argv, **kwargs):
+        self.calls.append((tuple(argv), dict(kwargs)))
+        if self.fail:
+            return CommandResult(returncode=1, stderr="verification failed\n")
+        return CommandResult(returncode=0, stdout="1 passed\n")
+
+
+class RunnerFactory:
+    def __init__(self, *, fail_integration=False):
+        self.fail_integration = fail_integration
+        self.runners = []
+
+    def __call__(self, root):
+        root = Path(root)
+        runner = RecordingCommandRunner(
+            root,
+            fail=self.fail_integration and root.name.startswith("integration-"),
+        )
+        self.runners.append(runner)
+        return runner
+
+
+class MutatingRunnerFactory:
+    def __init__(self, mutation):
+        self.mutation = mutation
+
+    def __call__(self, root):
+        root = Path(root)
+        mutation = self.mutation
+
+        class MutatingRunner(RecordingCommandRunner):
+            def run(self, argv, **kwargs):
+                if self.root.name.startswith("integration-"):
+                    mutation(self.root)
+                return super().run(argv, **kwargs)
+
+        return MutatingRunner(root)
+
+
+def activate_parent(
+    parent,
+    *,
+    task_kind="modify",
+    requires_workspace_change=False,
+    allowed_write_paths=None,
+):
+    run_log = RunLog(
+        "run_parent",
+        "task_parent",
+        parent.session.data["id"],
+        parent.dependencies.run_store,
+    )
+    first = run_log.append_user(
+        TaskContract(
+            goal="Parent task",
+            task_kind=task_kind,
+            requires_workspace_change=requires_workspace_change,
+            requires_verification=False,
+            allowed_write_paths=allowed_write_paths,
+        )
+    )
+    parent.run.projection = RunProjection().apply_event(first)
+    parent.run.run_log = run_log
+    parent.run.execution_context = ExecutionContext.root(max_seconds=60)
 
 
 def build_parent(
     root,
     child_factory,
     *,
-    sandbox_factory=None,
-    parent_outputs=(),
-    verification_command="python -m pytest -q",
+    verification_command="verify",
     allowed_write_paths=None,
+    requires_workspace_change=False,
+    task_kind="modify",
+    runner_factory=None,
 ):
-    sandbox_factory = sandbox_factory or (lambda child_root: PassingSandbox(child_root))
-    return Pico(
-        model_client=FakeModelClient(list(parent_outputs)),
-        workspace=WorkspaceContext.build(root),
-        session_store=SessionStore(root / ".pico" / "sessions"),
+    runner_factory = runner_factory or RunnerFactory()
+    parent = Pico(
+        FakeModelClient([]),
+        WorkspaceContext.build(root),
+        SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
             approval_policy="auto",
             verification_command=verification_command,
             allowed_write_paths=allowed_write_paths,
         ),
-        sandbox_factory=sandbox_factory,
+        command_runner_factory=runner_factory,
         subagent_model_client_factory=child_factory,
     )
-
-
-def explore_outputs(final_answer):
-    return [
-        ModelAction.tool(
-            "read_file",
-            {"path": "README.md", "start_line": 1, "end_line": 20},
-        ),
-        ModelAction.final(final_answer),
-    ]
-
-
-class BarrierClient(FakeModelClient):
-    def __init__(self, barrier, label):
-        super().__init__(
-            [
-                ModelAction.tool(
-                    "read_file",
-                    {"path": "README.md", "start_line": 1, "end_line": 20},
-                ),
-                ModelAction.final(label),
-            ]
-        )
-        self.barrier = barrier
-
-    def complete_action(self, *args, **kwargs):
-        self.barrier.wait(timeout=3)
-        return super().complete_action(*args, **kwargs)
-
-
-def test_worktree_create_failure_removes_temporary_container(tmp_path, monkeypatch):
-    container = tmp_path / "failed-worktree"
-
-    def make_container(*_args, **_kwargs):
-        container.mkdir()
-        return str(container)
-
-    def fail_git(*_args, **_kwargs):
-        raise GitWorktreeError("planned create failure")
-
-    monkeypatch.setattr(
-        "pico.subagents.worktree.tempfile.mkdtemp",
-        make_container,
+    activate_parent(
+        parent,
+        task_kind=task_kind,
+        requires_workspace_change=requires_workspace_change,
+        allowed_write_paths=allowed_write_paths,
     )
-    monkeypatch.setattr("pico.subagents.worktree._git", fail_git)
-    handle = GitWorktree(tmp_path, "base", "child")
-
-    with pytest.raises(GitWorktreeError, match="planned create failure"):
-        handle.create()
-
-    assert not container.exists()
-    assert handle.container_root is None
-    assert handle.path is None
+    return parent, runner_factory
 
 
-def test_parent_tool_runs_parallel_children_with_isolated_runtime_state(tmp_path):
-    root = repository(tmp_path)
-    barrier = threading.Barrier(2)
+def run_active(parent, call):
+    parent.apply_run_event(parent.run.run_log.append_tool_call(call))
+    return parent.tools.execute(call)
+
+
+def explore_client(answer="Findings: README.md contains demo."):
+    return FakeModelClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "README.md", "start_line": 1, "end_line": 20},
+            ),
+            ModelAction.final(answer),
+        ]
+    )
+
+
+def implement_client(path="feature.py"):
+    return FakeModelClient(
+        [
+            ModelAction.tool(
+                "write_file",
+                {"path": path, "content": "feature\n"},
+            ),
+            ModelAction.final(f"implemented {path}"),
+        ]
+    )
+
+
+def delegate_implementation(parent, path="feature.py"):
+    return parent.dependencies.subagents.delegate(
+        "implement",
+        f"Create {path}",
+        (path,),
+    )
+
+
+def test_child_contract_and_tool_schema_are_single_child_actions(tmp_path):
+    parent, _ = build_parent(repository(tmp_path), lambda _spec: explore_client())
+    delegate_schema = function_schema(DelegateArgs)
+    integrate_schema = function_schema(IntegrateChildArgs)
+
+    assert set(delegate_schema["properties"]) == {
+        "role",
+        "task",
+        "allowed_write_paths",
+    }
+    assert delegate_schema["properties"]["role"]["enum"] == [
+        "explore",
+        "implement",
+    ]
+    assert set(integrate_schema["properties"]) == {"child_id"}
+    assert {"delegate", "integrate_child"} <= {
+        tool["name"] for tool in parent.tools.action_schemas
+    }
+    with pytest.raises(ValueError, match="cannot declare write paths"):
+        ChildSpec(
+            role="explore",
+            task="Inspect",
+            allowed_write_paths=("README.md",),
+        )
+    with pytest.raises(ValueError, match="require allowed_write_paths"):
+        ChildSpec(role="implement", task="Change")
+
+
+def test_explore_creates_distinct_read_only_non_recursive_children(tmp_path):
     clients = []
 
     def child_factory(spec):
-        client = BarrierClient(barrier, f"result-{spec.task_id}")
+        assert spec.role == "explore"
+        client = explore_client(f"handoff {len(clients) + 1}")
         clients.append(client)
         return client
 
-    tasks = [
-        {
-            "task_id": "explore-auth",
-            "kind": "explore",
-            "prompt": "inspect auth",
-            "depends_on": [],
-            "allowed_write_paths": [],
-            "max_tool_executions": 4,
-        },
-        {
-            "task_id": "explore-cache",
-            "kind": "explore",
-            "prompt": "inspect cache",
-            "depends_on": [],
-            "allowed_write_paths": [],
-            "max_tool_executions": 4,
-        },
-    ]
-    parent = build_parent(
-        root,
+    parent, _ = build_parent(
+        repository(tmp_path),
         child_factory,
-        parent_outputs=[
-            ModelAction.tool("delegate_tasks", {"tasks": tasks}, call_id="delegate"),
-            ModelAction.final("Parent synthesized both results."),
-        ],
+        task_kind="read_only",
     )
-
-    outcome = parent.ask("Inspect auth and cache in parallel", **READ_TASK)
-
-    assert outcome.answer == "Parent synthesized both results."
-    tool_result = parent.model_client.recorded_action_results[0][1]
-    payload = json.loads(tool_result)
-    receipts = payload["structured"]["tasks"]
-    assert {item["status"] for item in receipts} == {"completed"}
-    assert len({item["child_run_id"] for item in receipts}) == 2
-    assert all("delegate_tasks" not in client.action_tool_surfaces[0] for client in clients)
-    assert all("exact repository paths, line ranges" in client.prompts[0] for client in clients)
-    assert "delegate_tasks" in parent.model_client.action_tool_surfaces[0]
-
-
-def test_delegate_tool_schema_is_strict_at_nested_task_level():
-    schema = function_schema(DelegateTasksArgs)
-    task_schema = schema["$defs"]["SubtaskSpec"]
-
-    assert set(schema["required"]) == set(schema["properties"])
-    assert set(task_schema["required"]) == set(task_schema["properties"])
-    assert task_schema["additionalProperties"] is False
-    assert task_schema["properties"]["max_tool_executions"]["maximum"] == 12
-
-    with pytest.raises(ValueError, match="less than or equal to 12"):
-        SubtaskSpec(
-            task_id="explore-too-long",
-            kind="explore",
-            prompt="inspect",
-            max_tool_executions=13,
-        )
-
-
-def test_parent_effective_scope_blocks_delegate_and_apply_before_side_effects(
-    tmp_path,
-    monkeypatch,
-):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-        allowed_write_paths=(),
-    )
-    run_log = RunLog(
-        "run_parent_scope",
-        "task_parent_scope",
-        parent.session.data["id"],
-        parent.dependencies.run_store,
-    )
-    first = run_log.append_user(
-        TaskContract(
-            goal="Exercise narrowed parent scope",
-            task_kind="modify",
-            requires_workspace_change=False,
-            requires_verification=False,
-            allowed_write_paths=("feature.py",),
-        )
-    )
-    parent.run.projection = RunProjection().apply_event(first)
-    parent.run.run_log = run_log
-    parent.run.execution_context = ExecutionContext.root(max_seconds=30)
-
-    delegate_calls = []
-    monkeypatch.setattr(
-        parent.dependencies.subagents,
-        "delegate",
-        lambda specs: delegate_calls.append(specs),
-    )
-    delegate = ToolCall(
-        "delegate_tasks",
-        {
-            "tasks": [
+    outcomes = [
+        run_active(
+            parent,
+            ToolCall(
+                "delegate",
                 {
-                    "task_id": "implement-feature",
-                    "kind": "implement",
-                    "prompt": "create feature.py",
-                    "depends_on": [],
-                    "allowed_write_paths": ["feature.py"],
-                    "max_tool_executions": 4,
-                }
-            ]
-        },
-        "call_delegate_scope",
-    )
-    parent.apply_run_event(run_log.append_tool_call(delegate))
-    delegated = parent.tools.execute(delegate)
+                    "role": "explore",
+                    "task": f"Inspect README pass {index}",
+                    "allowed_write_paths": [],
+                },
+                f"call_explore_{index}",
+            ),
+        )
+        for index in (1, 2)
+    ]
+    receipts = [outcome.structured for outcome in outcomes]
 
-    record = SubtaskRecord(
-        spec=SubtaskSpec(
-            task_id="implement-feature",
-            kind="implement",
-            prompt="create feature.py",
-            allowed_write_paths=("feature.py",),
-        ),
-        status="completed",
-        changed_paths=("feature.py",),
-    )
-    parent.dependencies.subagents._records(parent.run.projection.run_id)[
-        record.spec.task_id
-    ] = record
-    approval_calls = []
-    integration_calls = []
-    monkeypatch.setattr(
-        parent.tools,
-        "approve",
-        lambda name, args: approval_calls.append((name, args)) or True,
-    )
-    monkeypatch.setattr(
-        parent.dependencies.subagents.integration,
-        "apply",
-        lambda task_ids: integration_calls.append(task_ids),
-    )
-    apply_call = ToolCall(
-        "apply_task_patches",
-        {"task_ids": ["implement-feature"]},
-        "call_apply_scope",
-    )
-    parent.apply_run_event(run_log.append_tool_call(apply_call))
-    applied = parent.tools.execute(apply_call)
+    assert all(outcome.status == "success" for outcome in outcomes)
+    assert all(set(receipt) == CHILD_RECEIPT_FIELDS for receipt in receipts)
+    assert all(receipt["status"] == "completed" for receipt in receipts)
+    assert receipts[0]["child_id"] != receipts[1]["child_id"]
+    assert receipts[0]["child_run_id"] != receipts[1]["child_run_id"]
 
-    assert delegated.status == "rejected"
-    assert delegated.failure.code == "invalid_arguments"
-    assert applied.status == "rejected"
-    assert applied.failure.code == "invalid_arguments"
-    assert delegate_calls == []
-    assert approval_calls == []
-    assert integration_calls == []
-    assert not (root / "feature.py").exists()
-    assert all(event.kind != "tool_started" for event in run_log.events)
-
-
-def test_one_delegation_cannot_mix_explore_and_implement_tasks(tmp_path):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-    )
-
-    with pytest.raises(ValueError, match="only explore tasks or only implement tasks"):
-        parent.dependencies.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="explore-first",
-                    kind="explore",
-                    prompt="inspect",
-                ),
-                SubtaskSpec(
-                    task_id="implement-after",
-                    kind="implement",
-                    prompt="implement",
-                    depends_on=("explore-first",),
-                    allowed_write_paths=("feature.py",),
-                ),
-            )
+    manager = parent.dependencies.subagents
+    for receipt, client in zip(receipts, clients):
+        record = manager._record(parent.run.projection.run_id, receipt["child_id"])
+        projection = manager._child_projection(parent.run.projection.run_id, record)
+        child_tools = set(client.action_tool_surfaces[0])
+        assert projection.task.contract.task_kind == "read_only"
+        assert {"delegate", "integrate_child", "write_file", "edit_file"}.isdisjoint(
+            child_tools
         )
 
 
-def test_explore_handoff_feeds_separate_implement_delegation(tmp_path):
+def test_implement_requires_verifier_and_clean_git(tmp_path):
     root = repository(tmp_path)
-    clients = {}
+    calls = []
 
-    def child_factory(spec):
-        if spec.kind == "explore":
-            client = FakeModelClient(explore_outputs("change feature.py line 1"))
-        else:
-            client = FakeModelClient(
-                [
-                    ModelAction.tool(
-                        "write_file",
-                        {
-                            "path": "feature.py",
-                            "content": "implemented\n",
-                        },
-                    ),
-                    ModelAction.final("implemented handoff"),
-                ]
-            )
-        clients[spec.task_id] = client
-        return client
+    def child_factory(_spec):
+        calls.append(True)
+        return implement_client()
 
-    parent = build_parent(root, child_factory)
-    explore = SubtaskSpec(
-        task_id="explore-feature",
-        kind="explore",
-        prompt="inspect feature",
-    )
-    implement = SubtaskSpec(
-        task_id="implement-feature",
-        kind="implement",
-        prompt="implement the synthesized specification",
-        depends_on=("explore-feature",),
+    no_verifier, _ = build_parent(root, child_factory, verification_command="")
+    with pytest.raises(ValueError, match="require a verification command"):
+        no_verifier.dependencies.subagents.delegate(
+            "implement", "Create feature.py", ("feature.py",)
+        )
+
+    (root / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    dirty, _ = build_parent(root, child_factory)
+    receipt = delegate_implementation(dirty)
+
+    assert receipt["status"] == "failed"
+    assert "clean working tree" in receipt["error"]
+    assert receipt["changed_paths"] == []
+    assert receipt["patch_sha256"] == ""
+    assert calls == []
+
+
+def test_implement_returns_patch_without_touching_parent(tmp_path):
+    root = repository(tmp_path)
+    parent, runners = build_parent(
+        root,
+        lambda spec: implement_client(spec.allowed_write_paths[0]),
         allowed_write_paths=("feature.py",),
     )
-
-    first = parent.dependencies.subagents.delegate((explore,))
-    second = parent.dependencies.subagents.delegate((implement,))
-
-    assert first["tasks"][0]["status"] == "completed"
-    assert second["tasks"][0]["status"] == "completed"
-    assert "change feature.py line 1" in clients["implement-feature"].prompts[0]
-    assert "make the first mutation after at most three" in clients[
-        "implement-feature"
-    ].prompts[0]
-    implement_tools = clients["implement-feature"].action_tool_surfaces[0]
-    assert "search" not in implement_tools
-    assert "list_files" not in implement_tools
-
-
-def test_dag_orders_dependencies_and_blocks_failed_branch_only(tmp_path):
-    root = repository(tmp_path)
-    started = []
-
-    class RecordingClient(FakeModelClient):
-        def __init__(self, task_id, fail=False):
-            super().__init__(explore_outputs(f"done-{task_id}"))
-            self.task_id = task_id
-            self.fail = fail
-
-        def complete_action(self, *args, **kwargs):
-            started.append(self.task_id)
-            if self.fail:
-                raise RuntimeError("planned child failure")
-            return super().complete_action(*args, **kwargs)
-
-    parent = build_parent(
-        root,
-        lambda spec: RecordingClient(spec.task_id, spec.task_id == "explore-bad"),
-    )
-    result = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="explore-bad",
-                kind="explore",
-                prompt="fail",
-            ),
-            SubtaskSpec(
-                task_id="explore-good",
-                kind="explore",
-                prompt="succeed",
-            ),
-            SubtaskSpec(
-                task_id="explore-dependent",
-                kind="explore",
-                prompt="blocked",
-                depends_on=("explore-bad",),
-            ),
-            SubtaskSpec(
-                task_id="explore-after-good",
-                kind="explore",
-                prompt="run later",
-                depends_on=("explore-good",),
-            ),
-        )
-    )
-    by_id = {item["task_id"]: item for item in result["tasks"]}
-
-    assert by_id["explore-bad"]["status"] == "failed"
-    assert by_id["explore-dependent"]["status"] == "blocked"
-    assert by_id["explore-good"]["status"] == "completed"
-    assert by_id["explore-after-good"]["status"] == "completed"
-    assert started.index("explore-after-good") > started.index("explore-good")
-    assert "explore-dependent" not in started
-
-
-def test_dag_rejects_cycles_unknown_dependencies_and_unordered_write_overlap(
-    tmp_path,
-):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-    )
-
-    with pytest.raises(ValueError, match="cycle"):
-        parent.dependencies.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="explore-a",
-                    kind="explore",
-                    prompt="a",
-                    depends_on=("explore-b",),
-                ),
-                SubtaskSpec(
-                    task_id="explore-b",
-                    kind="explore",
-                    prompt="b",
-                    depends_on=("explore-a",),
-                ),
-            )
-        )
-
-    with pytest.raises(ValueError, match="unknown dependencies"):
-        parent.dependencies.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="explore-c",
-                    kind="explore",
-                    prompt="c",
-                    depends_on=("missing",),
-                ),
-            )
-        )
-
-    with pytest.raises(ValueError, match="overlapping write paths"):
-        parent.dependencies.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="implement-a",
-                    kind="implement",
-                    prompt="a",
-                    allowed_write_paths=("shared.py",),
-                ),
-                SubtaskSpec(
-                    task_id="implement-b",
-                    kind="implement",
-                    prompt="b",
-                    allowed_write_paths=("shared.py",),
-                ),
-            )
-        )
-
-
-def test_implement_delegation_requires_verification_command(tmp_path):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-        verification_command="",
-    )
-
-    with pytest.raises(ValueError, match="require a verification command"):
-        parent.dependencies.subagents.delegate(
-            (
-                SubtaskSpec(
-                    task_id="implement-without-verifier",
-                    kind="implement",
-                    prompt="create feature.py",
-                    allowed_write_paths=("feature.py",),
-                ),
-            )
-        )
-
-    assert parent.dependencies.subagents._records("manual") == {}
-    assert parent.dependencies.subagents._worktrees == {}
-
-
-def test_implementation_worktrees_are_isolated_then_verified_and_applied(tmp_path):
-    root = repository(tmp_path)
-    clients = []
-
-    def child_factory(spec):
-        target = spec.allowed_write_paths[0]
-        client = FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": target,
-                        "content": f"{spec.task_id}\n",
-                    },
-                ),
-                ModelAction.final(f"implemented {target}"),
-            ]
-        )
-        clients.append(client)
-        return client
-
-    parent = build_parent(root, child_factory)
-    result = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-auth",
-                kind="implement",
-                prompt="implement auth",
-                allowed_write_paths=("auth.py",),
-            ),
-            SubtaskSpec(
-                task_id="implement-cache",
-                kind="implement",
-                prompt="implement cache",
-                allowed_write_paths=("cache.py",),
-            ),
-        )
-    )
-
-    assert {item["status"] for item in result["tasks"]} == {"completed"}
-    records = parent.dependencies.subagents._records("manual")
-    assert {record.base_sha for record in records.values()} == {
-        git(root, "rev-parse", "HEAD")
-    }
-    assert not (root / "auth.py").exists()
-    assert not (root / "cache.py").exists()
-    worktrees = [
-        parent.dependencies.subagents._worktrees[("manual", task_id)].path
-        for task_id in ("implement-auth", "implement-cache")
+    receipt = delegate_implementation(parent)
+    manager = parent.dependencies.subagents
+    record = manager._record(parent.run.projection.run_id, receipt["child_id"])
+    worktree = manager._worktrees[
+        (parent.run.projection.run_id, receipt["child_id"])
     ]
-    assert worktrees[0] != worktrees[1]
-    assert (worktrees[0] / "auth.py").exists()
-    assert not (worktrees[0] / "cache.py").exists()
-    assert (worktrees[1] / "cache.py").exists()
-    assert not (worktrees[1] / "auth.py").exists()
-    assert all("Do not run git commands" in client.prompts[0] for client in clients)
-    child_requests = [
-        json.loads(client.prompts[0].rsplit("task_request:\n", 1)[1])
-        for client in clients
-    ]
-    assert all(
-        "Configured verification command:\npython -m pytest -q" in request
-        for request in child_requests
+
+    assert set(receipt) == CHILD_RECEIPT_FIELDS
+    assert receipt["status"] == "completed"
+    assert receipt["changed_paths"] == ["feature.py"]
+    assert receipt["patch_sha256"] and receipt["integrated"] is False
+    assert not (root / "feature.py").exists()
+    assert Path(record.patch_path).is_file()
+    assert worktree.path != root
+    assert (worktree.path / "feature.py").read_text() == "feature\n"
+    assert any(runner.calls for runner in runners.runners if runner.root == worktree.path)
+
+
+def test_parent_scope_rejects_implement_before_child_runs(tmp_path):
+    calls = []
+    parent, _ = build_parent(
+        repository(tmp_path),
+        lambda _spec: calls.append(True) or implement_client(),
+        allowed_write_paths=("safe.py",),
     )
-
-    applied = parent.dependencies.subagents.integration.apply(
-        ("implement-auth", "implement-cache")
-    )
-
-    assert applied["status"] == "applied"
-    assert applied["verification"]["exit_code"] == 0
-    assert applied["verification"]["status"] == "passed"
-    assert applied["verification"]["finished_workspace_mutation_sequence"] == 0
-    assert (root / "auth.py").read_text() == "implement-auth\n"
-    assert (root / "cache.py").read_text() == "implement-cache\n"
-
-
-def test_parallel_implementation_patches_must_be_applied_together(tmp_path):
-    root = repository(tmp_path)
-
-    def child_factory(spec):
-        target = spec.allowed_write_paths[0]
-        return FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": target,
-                        "content": f"{spec.task_id}\n",
-                    },
-                ),
-                ModelAction.final("implemented"),
-            ]
-    )
-
-    parent = build_parent(root, child_factory)
-    parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-a",
-                kind="implement",
-                prompt="create a.py",
-                allowed_write_paths=("a.py",),
-            ),
-            SubtaskSpec(
-                task_id="implement-b",
-                kind="implement",
-                prompt="create b.py",
-                allowed_write_paths=("b.py",),
-            ),
-        )
-    )
-
-    with pytest.raises(ValueError, match="apply all completed patches together"):
-        parent.dependencies.subagents.integration.apply(("implement-a",))
-
-    assert not (root / "a.py").exists()
-    assert not (root / "b.py").exists()
-
-    result = parent.dependencies.subagents.integration.apply(
-        ("implement-a", "implement-b")
-    )
-
-    assert result["status"] == "applied"
-    assert (root / "a.py").is_file()
-    assert (root / "b.py").is_file()
-
-
-def test_write_scope_is_enforced_before_execution(tmp_path):
-    root = repository(tmp_path)
-
-    def child_factory(_spec):
-        return FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "forbidden.py",
-                        "content": "bad\n",
-                    },
-                ),
-                ModelAction.final("done"),
-            ]
-        )
-
-    parent = build_parent(root, child_factory)
-    result = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-safe",
-                kind="implement",
-                prompt="write only safe.py",
-                allowed_write_paths=("safe.py",),
-            ),
-        )
-    )
-    receipt = result["tasks"][0]
-    record = parent.dependencies.subagents._records("manual")["implement-safe"]
-
-    assert receipt["status"] == "failed"
-    assert not Path(record.patch_path or root / "missing").exists()
-    assert ("manual", "implement-safe") not in parent.dependencies.subagents._worktrees
-    run_store = RunStore(
-        parent.dependencies.run_store.run_dir("manual")
-        / "subagents"
-        / record.spec.task_id
-        / "runs"
-    )
-    entries = run_store.read_events(record.child_run_id)
-    rejection = next(
-        entry
-        for entry in entries
-        if entry.kind == "tool_result"
-        and entry.payload["outcome"]["status"] == "rejected"
-    )
-    assert rejection.payload["outcome"]["failure"]["detail"].startswith(
-        "write path outside allowed scope"
-    )
-
-
-def test_post_execution_diff_detects_an_out_of_scope_side_effect(tmp_path):
-    root = repository(tmp_path)
-
-    def sandbox_factory(child_root):
-        child_root = Path(child_root)
-
-        def side_effect(workspace):
-            if workspace != root:
-                (workspace / "forbidden.py").write_text("escaped\n", encoding="utf-8")
-
-        return PassingSandbox(child_root, side_effect=side_effect)
-
-    def child_factory(_spec):
-        return FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "safe.py",
-                        "content": "safe\n",
-                    },
-                ),
-                ModelAction.final("done"),
-            ]
-        )
-
-    parent = build_parent(root, child_factory, sandbox_factory=sandbox_factory)
-    receipt = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-escape",
-                kind="implement",
-                prompt="write safe.py",
-                allowed_write_paths=("safe.py",),
-            ),
-        )
-    )["tasks"][0]
-
-    assert receipt["status"] == "failed"
-    assert receipt["changed_paths"] == ["forbidden.py", "safe.py"]
-    assert "write scope violation after execution" in receipt["error"]
-    assert ("manual", "implement-escape") not in parent.dependencies.subagents._worktrees
-
-
-def test_completed_task_id_is_reused_without_another_model_call(tmp_path):
-    root = repository(tmp_path)
-    calls = 0
-
-    def child_factory(_spec):
-        nonlocal calls
-        calls += 1
-        return FakeModelClient(explore_outputs("done"))
-
-    parent = build_parent(root, child_factory)
-    spec = SubtaskSpec(
-        task_id="explore-reuse",
-        kind="explore",
-        prompt="inspect once",
-    )
-
-    parent.dependencies.subagents.delegate((spec,))
-    second = parent.dependencies.subagents.delegate((spec,))
-
-    assert calls == 1
-    assert second["tasks"][0]["reused"] is True
-    record = parent.dependencies.subagents._records("manual")["explore-reuse"]
-    assert record.status == "completed"
-    assert not hasattr(record, "result")
-    assert not hasattr(record, "worktree")
-
-
-def test_ordered_implement_dependency_receives_prior_patch_and_integrates(tmp_path):
-    root = repository(tmp_path)
-
-    def child_factory(spec):
-        if spec.task_id == "implement-base":
-            return FakeModelClient(
-                [
-                    ModelAction.tool(
-                        "write_file",
-                        {
-                            "path": "shared.py",
-                            "content": "first\n",
-                        },
-                    ),
-                    ModelAction.final("created shared.py"),
-                ]
-            )
-        return FakeModelClient(
-            [
-                ModelAction.tool(
-                    "edit_file",
-                    {
-                        "path": "shared.py",
-                        "old_text": "first\n",
-                        "new_text": "second\n",
-                        "expected_revision": content_revision(b"first\n"),
-                    },
-                ),
-                ModelAction.final("updated shared.py"),
-            ]
-        )
-
-    parent = build_parent(root, child_factory)
-    result = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-base",
-                kind="implement",
-                prompt="create shared.py",
-                allowed_write_paths=("shared.py",),
-            ),
-            SubtaskSpec(
-                task_id="implement-followup",
-                kind="implement",
-                prompt="update shared.py",
-                depends_on=("implement-base",),
-                allowed_write_paths=("shared.py",),
-            ),
-        )
-    )
-
-    assert [item["status"] for item in result["tasks"]] == [
-        "completed",
-        "completed",
-    ]
-    followup = parent.dependencies.subagents._worktrees[
-        ("manual", "implement-followup")
-    ].path
-    assert Path(followup, "shared.py").read_text() == "second\n"
-
-    applied = parent.dependencies.subagents.integration.apply(("implement-followup",))
-
-    assert applied["task_ids"] == ["implement-base", "implement-followup"]
-    assert (root / "shared.py").read_text() == "second\n"
-
-
-def test_failed_integrated_verification_does_not_modify_parent(tmp_path):
-    root = repository(tmp_path)
-
-    class SelectiveSandbox(PassingSandbox):
-        def run(self, *_args, **_kwargs):
-            if self.root.name == "integration":
-                return SandboxResult(returncode=1, stderr="verification failed\n")
-            return SandboxResult(returncode=0, stdout="1 passed\n")
-
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "feature.py",
-                        "content": "feature\n",
-                    },
-                ),
-                ModelAction.final("implemented"),
-            ]
+    outcome = run_active(
+        parent,
+        ToolCall(
+            "delegate",
+            {
+                "role": "implement",
+                "task": "Create forbidden.py",
+                "allowed_write_paths": ["forbidden.py"],
+            },
+            "call_scope_rejected",
         ),
-        sandbox_factory=lambda child_root: SelectiveSandbox(child_root),
     )
-    parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-feature",
-                kind="implement",
-                prompt="implement feature",
-                allowed_write_paths=("feature.py",),
-            ),
-        )
+
+    assert outcome.status == "rejected"
+    assert "outside allowed scope" in outcome.failure.detail
+    assert calls == []
+
+
+def test_integrate_child_requires_explicit_approval(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
     )
+    receipt = delegate_implementation(parent)
+    parent.config = PicoConfig.build(parent.config, approval_policy="deny")
+    outcome = run_active(
+        parent,
+        ToolCall(
+            "integrate_child",
+            {"child_id": receipt["child_id"]},
+            "call_denied_integration",
+        ),
+    )
+    record = parent.dependencies.subagents._record(
+        parent.run.projection.run_id, receipt["child_id"]
+    )
+
+    assert parent.tools.registry["integrate_child"]["risky"] is True
+    assert outcome.status == "rejected"
+    assert outcome.failure.code == "approval_denied"
+    assert record.integrated is False
+    assert not (root / "feature.py").exists()
+
+
+def test_integrate_child_rejects_parent_base_drift(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+    )
+    receipt = delegate_implementation(parent)
+    (root / "drift.txt").write_text("new base\n")
+    git(root, "add", "drift.txt")
+    git(root, "commit", "--quiet", "-m", "advance parent")
+
+    with pytest.raises(ValueError, match="parent base changed"):
+        parent.dependencies.subagents.integrate_child(receipt["child_id"])
+
+    record = parent.dependencies.subagents._record(
+        parent.run.projection.run_id, receipt["child_id"]
+    )
+    assert record.integrated is False
+    assert not (root / "feature.py").exists()
+
+
+def test_failed_integration_verification_does_not_modify_parent(tmp_path):
+    root = repository(tmp_path)
+    runners = RunnerFactory(fail_integration=True)
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        runner_factory=runners,
+    )
+    receipt = delegate_implementation(parent)
 
     with pytest.raises(RuntimeError, match="verification failed"):
-        parent.dependencies.subagents.integration.apply(("implement-feature",))
+        parent.dependencies.subagents.integrate_child(receipt["child_id"])
 
+    record = parent.dependencies.subagents._record(
+        parent.run.projection.run_id, receipt["child_id"]
+    )
+    assert record.integrated is False
     assert not (root / "feature.py").exists()
+    assert any(runner.fail and runner.calls for runner in runners.runners)
 
 
-def test_dirty_parent_integration_error_names_the_integration_boundary(tmp_path):
+def test_verifier_cannot_add_a_path_outside_the_child_receipt(tmp_path):
     root = repository(tmp_path)
-    parent = build_parent(
+    runners = MutatingRunnerFactory(
+        lambda workspace: (workspace / "verifier-extra.txt").write_text(
+            "unexpected\n",
+            encoding="utf-8",
+        )
+    )
+    parent, _ = build_parent(
         root,
-        lambda _spec: FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "feature.py",
-                        "content": "feature\n",
-                    },
-                ),
-                ModelAction.final("implemented"),
-            ]
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        runner_factory=runners,
+    )
+    receipt = delegate_implementation(parent)
+
+    with pytest.raises(ValueError, match="outside the Child receipt"):
+        parent.dependencies.subagents.integrate_child(receipt["child_id"])
+
+    record = parent.dependencies.subagents._record(
+        parent.run.projection.run_id, receipt["child_id"]
+    )
+    assert record.integrated is False
+    assert not (root / "feature.py").exists()
+    assert not (root / "verifier-extra.txt").exists()
+    assert git(root, "status", "--porcelain") == ""
+
+
+def test_verifier_cannot_modify_the_immutable_child_patch(tmp_path):
+    root = repository(tmp_path)
+    runners = MutatingRunnerFactory(
+        lambda workspace: (workspace / "feature.py").write_text(
+            "tampered by verifier\n",
+            encoding="utf-8",
+        )
+    )
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        runner_factory=runners,
+    )
+    receipt = delegate_implementation(parent)
+
+    with pytest.raises(ValueError, match="immutable Child patch"):
+        parent.dependencies.subagents.integrate_child(receipt["child_id"])
+
+    record = parent.dependencies.subagents._record(
+        parent.run.projection.run_id, receipt["child_id"]
+    )
+    assert record.integrated is False
+    assert not (root / "feature.py").exists()
+    assert git(root, "status", "--porcelain") == ""
+
+
+def test_successful_integration_records_parent_workspace_evidence(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(
+        root,
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        requires_workspace_change=True,
+    )
+    receipt = delegate_implementation(parent)
+    outcome = run_active(
+        parent,
+        ToolCall(
+            "integrate_child",
+            {"child_id": receipt["child_id"]},
+            "call_integrate",
         ),
     )
-    parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-dirty-parent",
-                kind="implement",
-                prompt="create feature.py",
-                allowed_write_paths=("feature.py",),
-            ),
-        )
-    )
-    (root / "README.md").write_text("user changed parent\n", encoding="utf-8")
 
-    with pytest.raises(
-        ValueError,
-        match="parent workspace changed after implementation delegation",
-    ):
-        parent.dependencies.subagents.integration.apply(("implement-dirty-parent",))
-
-    assert not (root / "feature.py").exists()
-
-
-def test_parent_agent_delegates_and_applies_when_pico_state_is_untracked(tmp_path):
-    root = repository(tmp_path, ignore_pico=False)
-    task = {
-        "task_id": "implement-parent-flow",
-        "kind": "implement",
-        "prompt": "create feature.py",
-        "depends_on": [],
-        "allowed_write_paths": ["feature.py"],
-        "max_tool_executions": 4,
-    }
-    child_clients = []
-
-    def child_factory(_spec):
-        client = FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "feature.py",
-                        "content": "value = 1\n",
-                    },
-                ),
-                ModelAction.final("implemented feature.py"),
-            ]
-        )
-        child_clients.append(client)
-        return client
-
-    parent = build_parent(
-        root,
-        child_factory,
-        parent_outputs=[
-            ModelAction.tool(
-                "delegate_tasks", {"tasks": [task]}, call_id="delegate-impl"
-            ),
-            ModelAction.final("premature success"),
-            ModelAction.tool(
-                "apply_task_patches",
-                {"task_ids": ["implement-parent-flow"]},
-                call_id="apply-impl",
-            ),
-            ModelAction.final("implemented and verified"),
-        ],
-    )
-
-    outcome = parent.ask("Implement feature.py using a child", **VERIFIED_MODIFY_TASK)
-
-    assert outcome.answer == "implemented and verified"
-    assert (root / "feature.py").read_text() == "value = 1\n"
+    assert outcome.status == "success"
+    assert outcome.side_effect_state == "changed"
+    assert outcome.affected_paths == ("feature.py",)
+    assert outcome.structured["status"] == "integrated"
     assert parent.run.evidence.changed_paths == ["feature.py"]
-    assert parent.run.evidence.verifications[-1]["status"] == "passed"
-    assert "delegate_tasks" not in child_clients[0].action_tool_surfaces[0]
-    blocked = [
-        entry
-        for entry in parent.dependencies.run_store.read_events(
-            parent.run.projection.run_id
-        )
-        if entry.kind == "completion_blocked"
-        and entry.payload["status"] == "subtasks_incomplete"
-    ]
-    assert len(blocked) == 1
+    assert (root / "feature.py").read_text() == "feature\n"
+    assert CompletionController(parent).assess("done").allowed
 
 
-@pytest.mark.parametrize("dirty_kind", ["tracked", "untracked"])
-def test_failed_clean_check_does_not_leave_phantom_subtasks(tmp_path, dirty_kind):
+def test_completion_blocks_unintegrated_implementation(tmp_path):
     root = repository(tmp_path)
-    if dirty_kind == "tracked":
-        (root / "README.md").write_text("dirty\n", encoding="utf-8")
-    else:
-        (root / "user-note.txt").write_text("dirty\n", encoding="utf-8")
-    task = {
-        "task_id": "implement-dirty",
-        "kind": "implement",
-        "prompt": "create feature.py",
-        "depends_on": [],
-        "allowed_write_paths": ["feature.py"],
-        "max_tool_executions": 4,
-    }
-    parent = build_parent(
+    parent, _ = build_parent(
         root,
-        lambda _spec: FakeModelClient([ModelAction.final("unused")]),
-        parent_outputs=[
-            ModelAction.tool(
-                "delegate_tasks", {"tasks": [task]}, call_id="delegate-dirty"
-            ),
-            ModelAction.final("delegation was rejected"),
-        ],
-        verification_command="",
+        lambda _spec: implement_client(),
+        allowed_write_paths=("feature.py",),
+        requires_workspace_change=True,
     )
+    receipt = delegate_implementation(parent)
+    assessment = CompletionController(parent).assess("done")
 
-    outcome = parent.ask("Delegate despite a dirty workspace", **NO_CHANGE_TASK)
-
-    assert outcome.answer == "delegation was rejected"
-    assert parent.dependencies.subagents.completion_issue() == ""
-    run_id = parent.run.projection.run_id
-    assert not (parent.dependencies.run_store.run_dir(run_id) / "subtasks.json").exists()
-    blocked = [
-        entry
-        for entry in parent.dependencies.run_store.read_events(run_id)
-        if entry.kind == "completion_blocked"
-    ]
-    assert blocked == []
+    assert assessment.status == "subtasks_incomplete"
+    assert receipt["child_id"] in assessment.instruction
+    assert not (root / "feature.py").exists()
 
 
-def test_tampered_child_patch_is_rejected_before_integration(tmp_path):
-    root = repository(tmp_path)
-    parent = build_parent(
-        root,
+def test_failed_child_is_a_structured_delegate_error(tmp_path):
+    parent, _ = build_parent(
+        repository(tmp_path),
         lambda _spec: FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "safe.py",
-                        "content": "safe\n",
-                    },
-                ),
-                ModelAction.final("implemented"),
-            ]
+            [ModelAction.invalid("invalid child action") for _ in range(8)]
+        ),
+        task_kind="read_only",
+    )
+    outcome = run_active(
+        parent,
+        ToolCall(
+            "delegate",
+            {
+                "role": "explore",
+                "task": "Fail in a controlled way",
+                "allowed_write_paths": [],
+            },
+            "call_failed_child",
         ),
     )
-    parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-tamper",
-                kind="implement",
-                prompt="create safe.py",
-                allowed_write_paths=("safe.py",),
-            ),
-        )
-    )
-    record = parent.dependencies.subagents._records("manual")["implement-tamper"]
-    Path(record.patch_path).write_bytes(b"tampered")
 
-    with pytest.raises(ValueError, match="patch digest is invalid"):
-        parent.dependencies.subagents.integration.apply(("implement-tamper",))
-
-    assert not (root / "safe.py").exists()
-
-
-@pytest.mark.docker
-@pytest.mark.skipif(
-    os.environ.get("PICO_RUN_DOCKER_TESTS") != "1",
-    reason="set PICO_RUN_DOCKER_TESTS=1",
-)
-def test_real_docker_verifies_child_and_integrated_worktrees(tmp_path):
-    root = repository(tmp_path)
-    (root / "verify.py").write_text(
-        "from pathlib import Path\n"
-        "assert Path('feature.py').read_text() == 'ok\\n'\n",
-        encoding="utf-8",
-    )
-    git(root, "add", "verify.py")
-    git(root, "commit", "-m", "add verifier")
-    parent = build_parent(
-        root,
-        lambda _spec: FakeModelClient(
-            [
-                ModelAction.tool(
-                    "write_file",
-                    {
-                        "path": "feature.py",
-                        "content": "ok\n",
-                    },
-                ),
-                ModelAction.final("implemented"),
-            ]
-        ),
-        sandbox_factory=lambda child_root: DockerSandbox(child_root),
-        verification_command="python verify.py",
-    )
-    receipt = parent.dependencies.subagents.delegate(
-        (
-            SubtaskSpec(
-                task_id="implement-docker",
-                kind="implement",
-                prompt="create feature.py",
-                allowed_write_paths=("feature.py",),
-            ),
-        )
-    )["tasks"][0]
-
-    assert receipt["status"] == "completed"
-    parent.dependencies.subagents.integration.apply(("implement-docker",))
-    assert (root / "feature.py").read_text() == "ok\n"
+    assert outcome.status == "error"
+    assert outcome.execution_state == "completed"
+    assert outcome.side_effect_state == "none"
+    assert outcome.failure.code == "child_failed"
+    assert set(outcome.structured) == CHILD_RECEIPT_FIELDS
+    assert outcome.structured["child_id"].startswith("child_")
+    assert outcome.structured["status"] == "failed"
+    assert outcome.structured["error"]
+    assert outcome.structured["integrated"] is False

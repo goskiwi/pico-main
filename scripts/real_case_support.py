@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
+from pico.command_runner import CommandRunner, shell_argv
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN_CHANGE_GLOBS = (
@@ -46,16 +46,13 @@ def matches(path, patterns):
     )
 
 
-def run_verifier(root, task, sandbox_image):
+def run_verifier(root, task):
     source = (ROOT / task["verifier_file"]).resolve()
     target = (Path(root) / ".pico_hidden_verifier" / "test_hidden.py").resolve()
     target.relative_to(Path(root).resolve())
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
-    result = DockerSandbox(
-        root,
-        DockerSandboxConfig(image=sandbox_image),
-    ).run(
+    result = CommandRunner(root).run(
         shell_argv(task["verifier_command"]), cwd=root, timeout=90, env={}
     )
     return {

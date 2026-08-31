@@ -57,12 +57,3 @@ def redact_value(value, key=None, env=None, secret_env_names=None):
     if isinstance(value, str):
         return redact_text(value, env=env, secret_env_names=secret_env_names)
     return value
-
-
-def shell_env(env=None, allowlist=()):
-    env = os.environ if env is None else env
-    return {
-        name: env[name]
-        for name in allowlist
-        if name in env
-    }

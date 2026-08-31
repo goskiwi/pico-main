@@ -148,8 +148,8 @@ def build_prompt_fixture(root):
     assert prompt.input_text.count("Read README.md") == 1
     assert '"task_kind": "read_only"' in prompt.input_text
     assert metadata["tool_schema_tokens"] == expected_tool_tokens
-    assert {"write_file", "edit_file", "memory_store"}.issubset(declared_names)
-    assert {"write_file", "edit_file", "memory_store"}.isdisjoint(allowed_names)
+    assert {"write_file", "edit_file"}.issubset(declared_names)
+    assert {"write_file", "edit_file"}.isdisjoint(allowed_names)
     return prompt, metadata, action_tools, allowed_tool_names
 
 
@@ -310,7 +310,6 @@ def experiment_channels_and_pending(
                 "declared_but_disallowed_by_read_only_contract": [
                     "write_file",
                     "edit_file",
-                    "memory_store",
                 ],
                 "wire_schema_stable_across_continuation": (
                     first_payload["tools"] == continued_payload["tools"]

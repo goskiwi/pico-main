@@ -22,9 +22,9 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.command_runner import CommandRunner, shell_argv
 from pico.config import load_project_env, provider_env
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
-from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.real_case_support import git_metadata, require_clean_runtime
 
 EVIDENCE_COUNT = 12
@@ -111,7 +111,7 @@ file exactly once in order, modify only {TARGET_PATH}, and preserve the public A
 Record a next step to read all evidence before editing.
 
 Then read every file below with one read_file call per file, using start_line=1 and end_line=200.
-Do not use Search, List, project memory, or delegation:
+Do not use Search, List, or delegation:
 {files}
 
 After all evidence is read, call update_working_state again to record the evidence-backed
@@ -120,11 +120,10 @@ the smallest exact patch, and call submit_final. The Runtime owns verification.
 """
 
 
-def run_command(workspace, image, command):
-    result = DockerSandbox(
-        workspace,
-        DockerSandboxConfig(image=image),
-    ).run(shell_argv(command), cwd=workspace, timeout=120, env={})
+def run_command(workspace, command):
+    result = CommandRunner(workspace).run(
+        shell_argv(command), cwd=workspace, timeout=120, env={}
+    )
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
         "infrastructure_error": result.infrastructure_error,
@@ -184,7 +183,6 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--run-timeout-seconds", type=int, default=900)
-    parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -212,9 +210,9 @@ def main(argv=None):
         "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
     )
     workspace = prepare_workspace(args.workspace)
-    initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
+    initial = run_command(workspace, VISIBLE_COMMAND)
     if initial["infrastructure_error"]:
-        raise RuntimeError("controlled baseline sandbox could not start")
+        raise RuntimeError("controlled baseline command could not start")
     if initial["ok"]:
         raise RuntimeError("controlled baseline must fail before the Agent runs")
 
@@ -239,13 +237,9 @@ def main(argv=None):
             provider_context_limit_tokens=CONTROLLED_CONTEXT_LIMIT,
             compaction_reserve_tokens=8192,
             compaction_keep_recent_tokens=8000,
-            sandbox_image=args.sandbox_image,
             verification_command=VISIBLE_COMMAND,
         ),
-        sandbox=DockerSandbox(
-            workspace,
-            DockerSandboxConfig(image=args.sandbox_image),
-        ),
+        command_runner=CommandRunner(workspace),
     )
     outcome = agent.ask(
         build_prompt(),
@@ -256,8 +250,8 @@ def main(argv=None):
     run_id = outcome.run_id
     events = agent.dependencies.run_store.read_events(run_id)
     analysis = analyze_run(events, agent.run.task)
-    visible = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
-    hidden = run_command(workspace, args.sandbox_image, HIDDEN_COMMAND)
+    visible = run_command(workspace, VISIBLE_COMMAND)
+    hidden = run_command(workspace, HIDDEN_COMMAND)
     patch_text = _git(workspace, "diff", "--binary", "--unified=1", "HEAD")
     changed_paths = _git(workspace, "diff", "--name-only", "HEAD").splitlines()
 

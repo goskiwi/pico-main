@@ -161,6 +161,10 @@ class RunLifecycle:
             reconciled = run_log.reconcile_interrupted(runtime)
             for _outcome, entry in reconciled:
                 runtime.apply_run_event(entry)
+            if resumed:
+                runtime.apply_run_event(
+                    run_log.append_user_guidance(user_message)
+                )
 
             runtime.emit_event(
                 "run_resumed" if resumed else "run_started",

@@ -16,6 +16,7 @@ COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
+        "user_guidance",
         "assistant_tool_call",
         "tool_result",
         "model_instruction",
@@ -185,6 +186,7 @@ def _validate_verification_payload(kind, payload):
 
 _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
+    "user_guidance": _validate_text_payload,
     "model_instruction": _validate_text_payload,
     "assistant_tool_call": _validate_tool_call_payload,
     "tool_started": _validate_tool_started_payload,
@@ -259,7 +261,29 @@ class _RunProtocol:
             self.terminal = True
 
 
-def validate_run_events(events):
+def _validate_event_identity(events, *, expected_run_id=None):
+    if not events:
+        return
+    first = events[0]
+    run_id = first.run_id
+    if expected_run_id is not None and run_id != str(expected_run_id):
+        raise ValueError("Run event belongs to another run")
+    for expected_sequence, entry in enumerate(events, start=1):
+        if entry.sequence != expected_sequence:
+            raise ValueError("Run Log sequence is not contiguous")
+        if entry.event_id != f"{run_id}:event:{expected_sequence:06d}":
+            raise ValueError("Run event id does not match its sequence")
+        if (
+            entry.run_id != run_id
+            or entry.task_id != first.task_id
+            or entry.session_id != first.session_id
+        ):
+            raise ValueError("Run event identity changed within one run")
+
+
+def validate_run_events(events, *, expected_run_id=None):
+    events = tuple(events)
+    _validate_event_identity(events, expected_run_id=expected_run_id)
     protocol = _RunProtocol()
     for entry in events:
         protocol.apply(entry)
@@ -333,7 +357,7 @@ class RunEvent:
     def content(self):
         if self.kind == "user_message":
             return str(dict(self.payload.get("contract", {})).get("goal", ""))
-        if self.kind in {"model_instruction", "assistant_final"}:
+        if self.kind in {"user_guidance", "model_instruction", "assistant_final"}:
             return str(self.payload.get("content", ""))
         if self.kind == "tool_result":
             outcome = dict(self.payload.get("outcome", {}) or {})
@@ -390,6 +414,7 @@ class RunEvent:
 
 
 def replay_events(events):
+    events = tuple(events)
     validate_run_events(events)
     projection = RunProjection()
     for event in events:
@@ -444,6 +469,13 @@ class RunLog:
         if not isinstance(contract, TaskContract):
             raise TypeError("user_message requires a TaskContract")
         return self.append("user_message", {"contract": contract.to_dict()})
+
+    def append_user_guidance(self, content):
+        content = str(content).strip()
+        if not content:
+            raise ValueError("user guidance must not be blank")
+        self._require_no_pending()
+        return self.append("user_guidance", {"content": content})
 
     def append_tool_call(self, call):
         return self.append(
@@ -521,6 +553,34 @@ class RunLog:
     def pending_call_id(self):
         return self._protocol.pending_call_id
 
+    def pending_tool_call(self):
+        pending = self.pending_call_id()
+        if not pending:
+            return None
+        entry = next(
+            (
+                candidate
+                for candidate in reversed(self._events)
+                if candidate.kind == "assistant_tool_call"
+                and candidate.call_id == pending
+            ),
+            None,
+        )
+        if entry is None:
+            raise RuntimeError("pending ToolCall fact is unavailable")
+        return ToolCall(entry.name, entry.args, entry.call_id)
+
+    def latest_user_guidance(self):
+        entry = next(
+            (
+                candidate
+                for candidate in reversed(self.active_events())
+                if candidate.kind == "user_guidance"
+            ),
+            None,
+        )
+        return entry.content if entry is not None else ""
+
     def _require_no_pending(self):
         if self.pending_call_id():
             raise RuntimeError("pending tool call must receive a result first")
@@ -582,7 +642,7 @@ class RunLog:
                         }
                     )
             effect_scope = str(started.payload.get("effect_scope", "none"))
-            unknown = effect_scope in {"workspace", "mixed"} and not potential
+            unknown = effect_scope == "workspace" and not potential
             uncertain = bool(changed or unknown)
             detail = "tool execution was interrupted before a durable result"
             outcome = ToolOutcome(
@@ -638,6 +698,7 @@ class RunLog:
 
     def compact(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
+        latest_guidance_id = self._latest_user_guidance_id(active)
         units = []
         index = 0
         while index < len(active):
@@ -660,7 +721,10 @@ class RunLog:
             events = tuple(
                 event for unit in candidate_units for event in unit
             )
-            visible = self._without_projected_state(events)
+            visible = self._without_projected_state(
+                events,
+                projected_guidance_id=latest_guidance_id,
+            )
             lines = ["Current run events:"]
             if summary:
                 lines.append(f"[compaction] {summary}")
@@ -680,15 +744,31 @@ class RunLog:
             if retained and candidate_tokens > limit:
                 break
             retained = candidate
+        cut = max(0, len(units) - len(retained))
+        guidance_unit_index = next(
+            (
+                index
+                for index, unit in enumerate(units)
+                if any(event.event_id == latest_guidance_id for event in unit)
+            ),
+            None,
+        )
+        if guidance_unit_index is not None and cut > guidance_unit_index:
+            cut = guidance_unit_index
+            retained = units[cut:]
         retained_tokens = max(
             1,
             int(history_token_counter(render(retained))),
         )
-        cut = max(0, len(units) - len(retained))
         compacted = tuple(item for unit in units[:cut] for item in unit)
         if not compacted:
             return None
-        summary_events = tuple(self._without_projected_state(compacted))
+        summary_events = tuple(
+            self._without_projected_state(
+                compacted,
+                projected_guidance_id=latest_guidance_id,
+            )
+        )
         if not summary_events:
             return None
         summary = summary_builder(summary_events)
@@ -744,12 +824,26 @@ class RunLog:
         return f"[{entry.kind}] {entry.content}"
 
     @staticmethod
-    def _without_projected_state(events):
+    def _latest_user_guidance_id(events):
+        return next(
+            (
+                entry.event_id
+                for entry in reversed(tuple(events))
+                if entry.kind == "user_guidance"
+            ),
+            "",
+        )
+
+    @staticmethod
+    def _without_projected_state(events, *, projected_guidance_id=""):
         selected = []
         index = 0
         while index < len(events):
             entry = events[index]
             if entry.kind == "user_message":
+                index += 1
+                continue
+            if entry.kind == "user_guidance" and entry.event_id == projected_guidance_id:
                 index += 1
                 continue
             if (
@@ -771,7 +865,10 @@ class RunLog:
 
     def render_projection(self):
         active = self.active_events()
-        selected = self._without_projected_state(active)
+        selected = self._without_projected_state(
+            active,
+            projected_guidance_id=self._latest_user_guidance_id(active),
+        )
         lines = ["Current run events:"]
         artifact_references = 0
         for entry in selected:
@@ -790,7 +887,10 @@ class RunLog:
         """Render complete summaries followed by a complete recent-event suffix."""
 
         active = self.active_events()
-        selected = self._without_projected_state(active)
+        selected = self._without_projected_state(
+            active,
+            projected_guidance_id=self._latest_user_guidance_id(active),
+        )
         summaries = tuple(entry for entry in selected if entry.kind == "compaction")
         if not summaries:
             return None
@@ -856,7 +956,10 @@ class RunLog:
         """Render a bounded suffix without splitting a Tool transaction."""
 
         active = self.active_events()
-        selected = self._without_projected_state(active)
+        selected = self._without_projected_state(
+            active,
+            projected_guidance_id=self._latest_user_guidance_id(active),
+        )
         units = []
         index = 0
         while index < len(selected):

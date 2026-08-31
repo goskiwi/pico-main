@@ -27,7 +27,6 @@ def test_native_function_schemas_are_strict(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     for definition in build_action_tools(build_tool_registry(context)):
@@ -69,7 +68,6 @@ def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=lambda: {"PWD": str(tmp_path)},
     )
 
     result = tool_read_file(context, {"path": "sample.txt", "start_line": 1, "end_line": 1})
@@ -93,7 +91,6 @@ def test_list_files_reports_when_the_result_is_truncated(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     result = tool_list_files(context, {"path": "."})
@@ -110,7 +107,6 @@ def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     with (
@@ -124,7 +120,7 @@ def test_read_file_rejects_files_over_the_host_read_limit(tmp_path):
         )
 
 
-def test_old_read_and_shell_parameter_names_are_rejected(tmp_path):
+def test_old_read_parameter_names_are_rejected(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = Pico(
         FakeModelClient([]),
@@ -137,15 +133,8 @@ def test_old_read_and_shell_parameter_names_are_rejected(tmp_path):
         "read_file",
         {"path": "README.md", "start": 1, "end": 1},
     )
-    old_shell = agent.tools.execute(
-        "run_shell",
-        {"command": "true", "timeout": 20},
-    )
-
     assert old_read.status == "rejected"
     assert old_read.failure.code == "invalid_arguments"
-    assert old_shell.status == "rejected"
-    assert old_shell.failure.code == "invalid_arguments"
 
 
 def test_file_failures_have_typed_recovery_conditions(tmp_path):
@@ -242,18 +231,15 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: Path(tmp_path / raw_path),
-        shell_env_provider=lambda: {"PWD": str(tmp_path)},
     )
 
     tools = build_tool_registry(context)
 
     assert "read_file" in tools
     assert set(tools) == {
-        "list_files", "read_file", "read_artifact", "search", "run_shell",
-        "write_file", "edit_file", "update_working_state", "memory_recall",
-        "memory_store", "memory_forget",
+        "list_files", "read_file", "read_artifact", "search",
+        "write_file", "edit_file", "update_working_state",
     }
-    assert "&&" in tools["run_shell"]["description"]
     assert "as small as possible" in tools["edit_file"]["description"]
 
 
@@ -264,7 +250,6 @@ def test_search_returns_workspace_relative_paths(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     result = tool_search(context, {"pattern": "needle", "path": "src"})
@@ -280,7 +265,6 @@ def test_fallback_search_skips_symlinks_that_leave_workspace(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     with patch("pico.tools.shutil.which", return_value=None):
@@ -298,7 +282,6 @@ def test_fallback_search_has_a_global_match_limit(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     with patch("pico.tools.shutil.which", return_value=None):
@@ -316,7 +299,6 @@ def test_fallback_search_uses_regex_and_classifies_invalid_patterns(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path.resolve(),
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
     )
 
     with patch("pico.tools.shutil.which", return_value=None):
@@ -400,7 +382,6 @@ def test_patch_is_revision_bound_and_atomic(tmp_path):
     context = ToolContext(
         workspace_root=tmp_path,
         path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
-        shell_env_provider=dict,
         mutation_service=WorkspaceMutationService(tmp_path),
     )
     revision = file_revision(path)

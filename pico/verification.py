@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .sandbox import shell_argv
+from .command_runner import shell_argv
 from .workspace import normalize_relative_file
 from .workspace_tracker import WorkspaceTracker
 
@@ -23,7 +23,7 @@ def verify_workspace(
     *,
     root,
     command,
-    sandbox,
+    command_runner,
     timeout_seconds,
     redact_text,
     mutation_sequence_provider,
@@ -49,7 +49,7 @@ def verify_workspace(
         "output": "",
     }
     try:
-        result = sandbox.run(
+        result = command_runner.run(
             shell_argv(command),
             cwd=root,
             timeout=int(timeout_seconds),
@@ -86,7 +86,7 @@ def run_verification(agent, started_workspace_mutation_sequence):
     return verify_workspace(
         root=agent.workspace.root,
         command=agent.config.verification_command,
-        sandbox=agent.dependencies.sandbox,
+        command_runner=agent.dependencies.command_runner,
         timeout_seconds=agent.config.run_timeout_seconds,
         redact_text=agent.redact_text,
         mutation_sequence_provider=lambda: (

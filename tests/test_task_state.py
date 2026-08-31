@@ -4,9 +4,9 @@ import pytest
 
 from pico.contracts import ToolOutcome
 from pico.delivery import FinalDiffDescriptor
-from pico.features.memory import WorkingState
 from pico.run_log import RunEvent, replay_events
 from pico.task_state import TaskContract, TaskLifecycle, TaskState
+from pico.working_state import WorkingState
 
 READ_TASK = {
     "task_kind": "read_only",

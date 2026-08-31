@@ -106,13 +106,10 @@ def test_cli_prints_only_run_outcome_answer(monkeypatch, capsys):
     assert capsys.readouterr().out == "welcome\n\nplain answer\n"
 
 
-def test_memory_and_repo_map_remain_enabled_by_default(tmp_path):
+def test_repo_map_remains_enabled_by_default(tmp_path):
     agent = build_agent(tmp_path, [])
-    tool_names = {tool["name"] for tool in agent.tools.action_schemas}
 
-    assert agent.dependencies.project_memory is not None
     assert agent.dependencies.repo_map is not None
-    assert {"memory_recall", "memory_store", "memory_forget"} <= tool_names
 
 
 def test_emit_event_requires_one_consistent_active_run(tmp_path):

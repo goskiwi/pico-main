@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -14,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from applications.triage import TriageCase, TriageWorkflow
 from pico import ModelAction, PicoConfig
-from pico.sandbox import SandboxResult
 
 from .metrics import summarize_triage_rows
 
@@ -34,37 +31,6 @@ class EvalCase(BaseModel):
     new_text: str
     expected_root_file: str
     tool_budget: int = Field(default=4, ge=1)
-
-
-class HostEvaluationSandbox:
-    """Execute fixed evaluator commands without weakening Pico production policy."""
-
-    def run(self, argv, *, cwd, timeout, env=None, execution_context=None):
-        if execution_context is not None:
-            timeout = execution_context.bounded_timeout(timeout)
-        try:
-            result = subprocess.run(
-                list(argv),
-                cwd=cwd,
-                env={**os.environ, **dict(env or {})},
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-            return SandboxResult(
-                returncode=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return SandboxResult(
-                returncode=None,
-                stdout=str(exc.stdout or ""),
-                stderr=str(exc.stderr or ""),
-                timed_out=True,
-                stop_reason="deadline_exceeded",
-            )
 
 
 class ScriptedTriageModel:
@@ -91,17 +57,11 @@ class ScriptedTriageModel:
         self.step += 1
         if self.step == 1:
             return ModelAction.tool(
-                "run_shell",
-                {"command": self.case.failing_command, "timeout_seconds": 20},
-                call_id="call_reproduce",
-            )
-        if self.step == 2:
-            return ModelAction.tool(
                 "read_file",
                 {"path": self.case.target_path, "start_line": 1, "end_line": 200},
                 call_id="call_source",
             )
-        if self.step == 3:
+        if self.step == 2:
             transcript = "\n".join(result for _kind, result in self.recorded_action_results)
             revisions = re.findall(r"revision: (sha256:[a-f0-9]{64})", transcript)
             if not revisions:
@@ -123,13 +83,6 @@ class ScriptedTriageModel:
                 "files": [self.case.expected_root_file],
             },
             "evidence": [
-                {
-                    "kind": "test_result",
-                    "claim": "The configured CI command reproduced the failure.",
-                    "tool_call_id": "call_reproduce",
-                    "path": "",
-                    "line": None,
-                },
                 {
                     "kind": "source",
                     "claim": "The target file contained the stale value.",
@@ -174,7 +127,6 @@ def run_triage_evaluation(
                     approval_policy="auto",
                     max_tool_executions=case.tool_budget,
                 ),
-                sandbox=HostEvaluationSandbox(),
             ).run(triage_case)
             target = repository / case.target_path
             rows.append(

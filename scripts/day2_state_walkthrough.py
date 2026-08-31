@@ -319,13 +319,16 @@ def interrupted_read_experiment(root):
         for event in events
     )
     result_position = events.index(recovered_result)
+    guidance_position = next(
+        index for index, event in enumerate(events) if event.kind == "user_guidance"
+    )
     resumed_position = next(
         index for index, event in enumerate(events) if event.kind == "run_resumed"
     )
     assert recovered_result.payload["recovered_from_interruption"] is True
     assert recovered_result.payload["outcome"]["side_effect_state"] == "none"
     assert started_count == 1
-    assert result_position < resumed_position
+    assert result_position < guidance_position < resumed_position
     assert projection.pending_call_id is None
 
     print_section(
@@ -346,7 +349,9 @@ def interrupted_read_experiment(root):
                 "tool_started_count": started_count,
                 "runner_was_blindly_replayed": False,
                 "model_later_requested_a_new_call": "call_explicit_retry_read",
-                "event_order": "recovered tool_result -> run_resumed",
+                "event_order": (
+                    "recovered tool_result -> user_guidance -> run_resumed"
+                ),
             },
             "run_outcome": outcome.to_dict(),
         },

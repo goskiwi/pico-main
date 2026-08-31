@@ -1,6 +1,6 @@
 # Runtime State Ownership
 
-Pico has one durable source for each Run's process facts. Content state remains owned by Workspace, Project Memory, and Artifact storage.
+Pico has one durable source for each Run's process facts. Content state remains owned by Workspace and Artifact storage.
 
 Terminology in this document is strict:
 
@@ -18,17 +18,17 @@ Terminology in this document is strict:
 | Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Call and final Diff receipt |
 | Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived and `reload_required` is only a process-local cache-validity bit |
 | Task contract | First `user_message.contract` | Goal, task kind, write scope and completion requirements |
+| Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
-| Project | Markdown Memory Cards | Bounded `MEMORY.md` catalog plus explicit `memory_recall` Tool results |
 | Large output | Artifact content + descriptor | Run Log reference |
-| Subagents | Child Run Logs and Patch files | In-process DAG and applied flags |
+| Child delegation | Child Run Logs and Patch files | One receipt per Child plus explicit integration state |
 
 ## Ownership across the three current paths
 
 | Path | Durable writes | Rebuildable/current state |
 |---|---|---|
-| CLI / resume | First `user_message.contract`, then Session `active_run_id`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
-| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolRuntime admission/orchestration, private tool-execution helpers, ToolContext-bound Tool Runner result, Projection and Evidence updates |
+| CLI / resume | First `user_message.contract`, then Session `active_run_id`; each resumed input as `user_guidance`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
+| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolRuntime resolves the pending durable call before admission/execution; private helpers, ToolContext, Projection and Evidence remain derived |
 | Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
 
 Invariants:
@@ -44,5 +44,5 @@ Invariants:
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
 - Tool protocol events form one strict `assistant_tool_call -> tool_started? -> tool_result` transaction.
-- Subagent scheduling and Patch application are synchronous and process-local; cross-process Child recovery is outside scope.
+- Child delegation and integration are synchronous and process-local; there is no DAG/background scheduler, and cross-process Child recovery is outside scope.
 - Old persistence formats are rejected; no compatibility or migration branch exists.

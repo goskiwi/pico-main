@@ -9,22 +9,14 @@ from pathlib import Path
 class ToolContext:
     workspace_root: Path
     path_resolver: Callable[[str], Path]
-    shell_env_provider: Callable[[], dict]
-    project_memory: object | None = None
     artifact_store: object | None = None
     run_id_provider: Callable[[], str] | None = None
     tool_call_id_provider: Callable[[], str] | None = None
     working_state_provider: Callable[[], object | None] | None = None
-    token_counter_provider: Callable[[str], int] | None = None
     mutation_service: object | None = None
-    sandbox: object | None = None
-    execution_context_provider: Callable[[], object] | None = None
 
     def path(self, raw_path):
         return self.path_resolver(str(raw_path))
-
-    def shell_env(self):
-        return self.shell_env_provider()
 
     def run_id(self):
         return self.run_id_provider() if self.run_id_provider else ""
@@ -34,11 +26,3 @@ class ToolContext:
 
     def working_state(self):
         return self.working_state_provider() if self.working_state_provider else None
-
-    def count_tokens(self, text):
-        if self.token_counter_provider is None:
-            raise RuntimeError("tool token counter is unavailable")
-        return int(self.token_counter_provider(str(text)))
-
-    def execution_context(self):
-        return self.execution_context_provider() if self.execution_context_provider else None

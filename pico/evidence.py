@@ -13,12 +13,10 @@ OBSERVATION_TOOLS = frozenset(
         "read_file",
         "read_artifact",
         "search",
-        "run_shell",
-        "memory_recall",
-        "delegate_tasks",
+        "delegate",
     }
 )
-WORKSPACE_SCOPES = frozenset({"workspace", "mixed"})
+WORKSPACE_SCOPES = frozenset({"workspace"})
 
 
 class WorkspaceDriftError(RuntimeError):
@@ -307,7 +305,7 @@ class RunEvidence:
                 for later in self.effects[index + 1 :]
                 if later["status"] == "success"
                 and later["side_effect_state"] == "changed"
-                and later["effect_scope"] in {effect["effect_scope"], "mixed"}
+                and later["effect_scope"] == "workspace"
                 and affected.issubset(set(later["affected_paths"]))
             ),
             None,
@@ -341,8 +339,6 @@ class RunEvidence:
                 unresolved.append(effect)
                 continue
             repair = self._repair_after(index, effect)
-            if repair is not None and effect["effect_scope"] not in WORKSPACE_SCOPES:
-                continue
             repaired_and_verified = bool(
                 repair is not None
                 and current_verification is not None

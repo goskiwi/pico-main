@@ -37,7 +37,7 @@ def test_allowed_tools_filter_prompt_and_execution(tmp_path):
         "read_file",
         "submit_final",
     ]
-    outcome = agent.tools.execute("run_shell", {"command": "echo hi", "timeout_seconds": 20})
+    outcome = agent.tools.execute("list_files", {"path": "."})
     assert outcome.status == "rejected"
     assert outcome.failure.code == "tool_not_allowed"
 
@@ -95,7 +95,6 @@ def test_read_only_surface_and_direct_execution_both_reject_mutators(tmp_path):
     assert "submit_final" in visible
     assert "write_file" not in visible
     assert "edit_file" not in visible
-    assert "memory_store" not in visible
     assert outcome.status == "rejected"
     assert outcome.execution_state == "not_started"
     assert outcome.failure.code == "read_only_task"

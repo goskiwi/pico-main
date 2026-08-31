@@ -13,7 +13,6 @@ from evals.evaluator import run_harness_regression
 from evals.gates import evaluation_failures
 from evals.metrics import (
     run_context_governance_evaluation,
-    run_project_memory_evaluation,
     run_repo_map_evaluation,
     write_runtime_report,
 )
@@ -23,7 +22,6 @@ def main():
     results = {
         "harness": run_harness_regression(),
         "context": run_context_governance_evaluation(),
-        "project_memory": run_project_memory_evaluation(),
         "repo_map": run_repo_map_evaluation(),
     }
     write_runtime_report()

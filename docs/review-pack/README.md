@@ -5,11 +5,12 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.contracts`: provider-neutral Runtime contracts after native Responses parsing.
 - `pico.run_log` / `pico.context_manager`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
-- `pico.features.memory` / `pico.project_memory`: RunLog-projected WorkingState constraints, decisions and next steps plus cross-Run Markdown cards recalled through explicit, audited Tool transactions. Goal belongs to TaskContract.
-- `pico.tool_runtime` / `pico.mutations` / `pico.sandbox`: staged admission, atomic edits and Docker execution.
+- `pico.working_state`: RunLog-projected constraints, decisions and next steps. Goal belongs to TaskContract.
+- `pico.tool_runtime` / `pico.mutations`: staged admission and revision-bound atomic edits; the model has no general-purpose shell Tool.
 - `pico.run_lifecycle` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts without a second recovery-state object.
-- `pico.evidence` / `pico.verification` / `pico.completion_controller`: evidence-bound completion.
-- `pico.subagents`: bounded DAG scheduling, isolated Child Runtime state, Git Worktrees and a separate receipt-bound Patch integrator.
+- `pico.command_runner` / `pico.verification`: trusted host execution for the one user-fixed Verification command, not a sandbox.
+- `pico.evidence` / `pico.completion_controller`: evidence-bound completion.
+- `pico.subagents`: one synchronous Child delegation at a time, read-only explore, Worktree-isolated implement, and explicit receipt-bound integration.
 - `evals`: repository-local deterministic Runtime regressions and mechanism evaluations; it is excluded from the installable `pico` package.
 - `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool and Prompt ownership;
   `pico.runtime.Pico` is the small composition root.
@@ -29,7 +30,11 @@ execution evidence from RunEvidence; the composed view is neither durable state 
 
 ## 30-second interview framing
 
-Pico is not an LLM chat wrapper. It is the control plane around a coding model: it selects bounded repository context, admits and isolates tool calls, records side effects as evidence, resumes interrupted work without blindly replaying mutations, and blocks completion until Runtime-owned checks agree with the current workspace.
+Pico is not an LLM chat wrapper. It is the control plane around a coding model: it selects bounded repository context, admits and audits tool calls, records side effects as evidence, resumes interrupted work without blindly replaying mutations, and blocks completion until Runtime-owned checks agree with the current workspace.
+
+The Runtime is for trusted local repositories. A user-configured fixed Verification command runs
+locally with the current user's permissions; it is not protected by the structured file-Tool path
+boundary. Unknown code requires an external CI runner, VM, or container.
 
 The three core deep dives are:
 
@@ -37,7 +42,7 @@ The three core deep dives are:
 2. Revision-bound atomic mutations plus interrupted-operation reconciliation.
 3. Single-source Run Log, workspace-bound verification, and the Completion Gate.
 
-Multi-Agent DAG scheduling and isolated Patch integration are an optional fourth deep dive,
+Single-Child delegation and explicit Patch integration are an optional fourth deep dive,
 after the single-Agent Runtime is understood.
 
 See [Agent Runtime](../architecture/agent-runtime.md) for invariants, [resume wording](../resume-project.md) for claims aligned with the code, and [the interview demo](interview-demo.md) for a short evidence-first walkthrough.

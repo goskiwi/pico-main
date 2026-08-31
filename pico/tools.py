@@ -11,12 +11,11 @@ import selectors
 import shutil
 import stat
 import subprocess
-import textwrap
 import time
 from collections import deque
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,9 +25,7 @@ from .contracts import (
     ToolFailureError,
     ToolRunnerResult,
 )
-from .features.memory import normalize_working_update
-from .project_memory import MEMORY_RECALL_MAX_CARDS
-from .sandbox import shell_argv
+from .working_state import normalize_working_update
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -38,7 +35,6 @@ SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
-MEMORY_RECALL_MAX_TOKENS = 2400
 
 
 class ToolArgs(BaseModel):
@@ -64,11 +60,6 @@ class ReadArtifactArgs(ToolArgs):
 class SearchArgs(ToolArgs):
     pattern: str = Field(min_length=1)
     path: str = "."
-
-
-class RunShellArgs(ToolArgs):
-    command: str = Field(min_length=1)
-    timeout_seconds: int = Field(default=20, ge=1, le=120)
 
 
 class WriteFileArgs(ToolArgs):
@@ -99,29 +90,6 @@ class UpdateWorkingStateArgs(ToolArgs):
     remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
 
 
-class MemoryStoreArgs(ToolArgs):
-    action: Literal["create", "update"]
-    filename: str = Field(pattern=r"^(?:user|feedback|project|reference)_[a-z0-9][a-z0-9_-]{0,55}\.md$")
-    name: str = Field(min_length=1, max_length=80)
-    description: str = Field(min_length=1, max_length=240)
-    memory_type: Literal["user", "feedback", "project", "reference"]
-    content: str = Field(min_length=1, max_length=1000)
-    why: str = Field(default="", max_length=500)
-    how_to_apply: str = Field(default="", max_length=500)
-    expires_at: str = ""
-
-
-class MemoryForgetArgs(ToolArgs):
-    filename: str = Field(pattern=r"^(?:user|feedback|project|reference)_[a-z0-9][a-z0-9_-]{0,55}\.md$")
-
-
-class MemoryRecallArgs(ToolArgs):
-    filenames: tuple[str, ...] = Field(
-        min_length=1,
-        max_length=MEMORY_RECALL_MAX_CARDS,
-    )
-
-
 BASE_TOOL_SPECS = {
     "list_files": {
         "args_schema": ListFilesArgs,
@@ -148,16 +116,6 @@ BASE_TOOL_SPECS = {
         "risky": False,
         "manual_observation": True,
         "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "run_shell": {
-        "args_schema": RunShellArgs,
-        "risky": True,
-        "manual_observation": True,
-        "description": (
-            "Run a POSIX shell command inside the Docker sandbox at the repo root. "
-            "Shell operators such as &&, pipes, redirects, environment assignments, "
-            "and cd are supported."
-        ),
     },
     "write_file": {
         "args_schema": WriteFileArgs,
@@ -189,32 +147,6 @@ BASE_TOOL_SPECS = {
             "and next steps. The Runtime owns the immutable goal. Do not store current file "
             "contents, transient command output, guesses, or cross-task project knowledge here."
         ),
-    },
-    "memory_recall": {
-        "args_schema": MemoryRecallArgs,
-        "risky": False,
-        "manual_observation": True,
-        "description": (
-            "Recall one to five complete Project Memory cards by exact filename from the "
-            "visible Catalog. Use only for relevant user preferences, prior feedback, stable "
-            "project conventions, or reference procedures. Current workspace facts must be "
-            "checked with workspace tools."
-        ),
-    },
-    "memory_store": {
-        "args_schema": MemoryStoreArgs,
-        "risky": True,
-        "state_mutating": True,
-        "description": (
-            "Create or update one explicit Markdown project-memory card. Runtime adds source "
-            "Run and Tool Call provenance; do not put provenance claims in memory content."
-        ),
-    },
-    "memory_forget": {
-        "args_schema": MemoryForgetArgs,
-        "risky": True,
-        "state_mutating": True,
-        "description": "Delete one explicit Markdown project-memory card.",
     },
 }
 
@@ -328,12 +260,6 @@ def _validate_search(context, args):
     return args
 
 
-def _validate_run_shell(_context, args):
-    if not str(args.get("command", "")).strip():
-        raise ValueError("command must not be empty")
-    return args
-
-
 def _require_mutation_service(context):
     if context.mutation_service is None:
         raise ValueError("workspace mutation service is unavailable")
@@ -368,19 +294,6 @@ def _validate_edit_file(context, args):
     return args
 
 
-def _validate_project_memory(context, args):
-    if context.project_memory is None:
-        raise ValueError("project memory is unavailable")
-    return args
-
-
-def _validate_memory_recall(context, args):
-    _validate_project_memory(context, args)
-    filenames = tuple(str(item).strip() for item in args["filenames"])
-    context.project_memory.recall_cards(filenames)
-    return {"filenames": filenames}
-
-
 def _validate_working_state(context, args):
     state = context.working_state()
     if state is None or not context.tool_call_id():
@@ -395,13 +308,9 @@ _TOOL_VALIDATORS = {
     "read_file": _validate_read_file,
     "read_artifact": _validate_read_artifact,
     "search": _validate_search,
-    "run_shell": _validate_run_shell,
     "write_file": _validate_write_file,
     "edit_file": _validate_edit_file,
     "update_working_state": _validate_working_state,
-    "memory_recall": _validate_memory_recall,
-    "memory_store": _validate_project_memory,
-    "memory_forget": _validate_project_memory,
 }
 
 
@@ -711,96 +620,6 @@ def tool_search(context, args):
     return _fallback_search(context, path, pattern)
 
 
-def tool_run_shell(context, args):
-    command = str(args.get("command", "")).strip()
-    timeout_seconds = int(args.get("timeout_seconds", 20))
-    if context.sandbox is None:
-        raise RuntimeError("Docker sandbox is unavailable")
-    result = context.sandbox.run(
-        shell_argv(command),
-        cwd=context.workspace_root,
-        timeout=timeout_seconds,
-        env=context.shell_env(),
-        execution_context=context.execution_context(),
-    )
-    if result.infrastructure_error:
-        failure = FailureInfo(
-            "sandbox_infrastructure_error",
-            result.stderr.strip() or "Docker could not start the sandbox",
-            "user_action_required",
-        )
-    elif result.cancelled:
-        failure = FailureInfo(
-            "command_cancelled",
-            result.stop_reason or "command cancelled",
-            "no_retry",
-        )
-    elif result.timed_out:
-        failure = FailureInfo(
-            "command_timeout",
-            result.stop_reason or "command timed out",
-            "retry_after_change",
-        )
-    elif result.output_limited:
-        failure = FailureInfo(
-            "command_output_limit",
-            result.stop_reason or "command exceeded the output limit",
-            "retry_after_change",
-        )
-    elif result.killed:
-        failure = FailureInfo(
-            "command_killed",
-            result.stop_reason or "command was killed",
-            "retry_after_change",
-        )
-    elif result.returncode is None:
-        failure = FailureInfo(
-            "command_result_missing",
-            result.stop_reason or "command did not report an exit code",
-            "retry_after_wait",
-        )
-    elif result.returncode == 127:
-        failure = FailureInfo(
-            "command_not_found",
-            result.stderr.strip() or "shell could not find the command",
-            "retry_after_change",
-        )
-    elif result.returncode != 0:
-        failure = FailureInfo(
-            "command_failed",
-            f"command exited with {result.returncode}",
-            "retry_after_change",
-        )
-    else:
-        failure = None
-    return ToolRunnerResult(
-        textwrap.dedent(
-            f"""\
-            exit_code: {result.returncode if result.returncode is not None else -1}
-            sandbox: docker (network=none, read_only_rootfs=true, read_only_workspace=true)
-            stop_reason: {result.stop_reason or "none"}
-            cleanup_state: {result.cleanup_state}
-            output_limited: {result.output_limited}
-            stdout:
-            {result.stdout.strip() or "(empty)"}
-            stderr:
-            {result.stderr.strip() or "(empty)"}
-            """
-        ).strip(),
-        structured={
-            "exit_code": result.returncode,
-            "timed_out": result.timed_out,
-            "cancelled": result.cancelled,
-            "killed": result.killed,
-            "output_limited": result.output_limited,
-            "stop_reason": result.stop_reason,
-            "cleanup_state": result.cleanup_state,
-            "sandbox": "docker",
-        },
-        failure=failure,
-    )
-
-
 def tool_write_file(context, args):
     path = context.path(args["path"])
     content = str(args["content"])
@@ -868,99 +687,8 @@ def tool_edit_file(context, args):
     )
 
 
-def _memory_effect_paths(context, filename):
-    paths = (
-        context.project_memory.cards_root / filename,
-        context.project_memory.index_path,
-    )
-    logical = []
-    for path in paths:
-        try:
-            logical.append(path.relative_to(context.workspace_root).as_posix())
-        except ValueError:
-            logical.append(path.as_posix())
-    return tuple(logical)
-
-
-def tool_memory_store(context, args):
-    card, action = context.project_memory.store(
-        action=args["action"],
-        filename=args["filename"],
-        name=args["name"],
-        description=args["description"],
-        memory_type=args["memory_type"],
-        content=args["content"],
-        why=args.get("why", ""),
-        how_to_apply=args.get("how_to_apply", ""),
-        source_run_id=context.run_id(),
-        source_tool_call_id=context.tool_call_id(),
-        expires_at=args.get("expires_at", ""),
-    )
-    if action == "unchanged":
-        return ToolRunnerResult(
-            f"{action} project memory {card.filename}; no data changed. "
-            "Do not repeat memory_store; submit the final answer if the task is complete.",
-            structured={
-                "filename": card.filename,
-                "action": action,
-                "changed": False,
-            },
-        )
-    paths = _memory_effect_paths(context, card.filename)
-    return ToolRunnerResult(
-        content=(
-            f"{action} project memory {card.filename}; commit complete. "
-            "Do not repeat memory_store for the same fact."
-        ),
-        structured={
-            "filename": card.filename,
-            "action": action,
-            "changed": True,
-        },
-        affected_paths=paths,
-        effect_scope="project_memory",
-    )
-
-
 def tool_update_working_state(_context, _args):
     return ToolRunnerResult("working state update accepted")
-
-
-def tool_memory_recall(context, args):
-    cards = context.project_memory.recall_cards(args["filenames"])
-    rendered, included = context.project_memory.render_recalled_with_budget(
-        cards,
-        max_tokens=MEMORY_RECALL_MAX_TOKENS,
-        token_counter=context.count_tokens,
-    )
-    included_names = tuple(card.filename for card in included)
-    omitted_names = tuple(card.filename for card in cards if card not in included)
-    lines = ["recalled project memory: " + ", ".join(included_names)]
-    if omitted_names:
-        lines.append(
-            "omitted by recall budget: " + ", ".join(omitted_names)
-        )
-    lines.extend(["", rendered])
-    return ToolRunnerResult(
-        "\n".join(lines),
-        structured={
-            "included_filenames": list(included_names),
-            "omitted_filenames": list(omitted_names),
-        },
-    )
-
-
-def tool_memory_forget(context, args):
-    card = context.project_memory.forget(args["filename"])
-    if card is None:
-        raise ValueError("memory file does not exist")
-    paths = _memory_effect_paths(context, card.filename)
-    return ToolRunnerResult(
-        content=f"forgot project memory {card.filename}",
-        structured={"filename": card.filename, "changed": True},
-        affected_paths=paths,
-        effect_scope="project_memory",
-    )
 
 
 _TOOL_RUNNERS = {
@@ -968,13 +696,9 @@ _TOOL_RUNNERS = {
     "read_file": tool_read_file,
     "read_artifact": tool_read_artifact,
     "search": tool_search,
-    "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "edit_file": tool_edit_file,
     "update_working_state": tool_update_working_state,
-    "memory_recall": tool_memory_recall,
-    "memory_store": tool_memory_store,
-    "memory_forget": tool_memory_forget,
 }
 
 
@@ -984,24 +708,7 @@ def _workspace_file_effects(context, args):
     return "workspace", ((logical, path),)
 
 
-def _project_memory_effects(context, args):
-    paths = (
-        context.project_memory.cards_root / args["filename"],
-        context.project_memory.index_path,
-    )
-    effects = []
-    for path in paths:
-        try:
-            logical = path.relative_to(context.workspace_root).as_posix()
-        except ValueError:
-            logical = path.as_posix()
-        effects.append((logical, path))
-    return "project_memory", tuple(effects)
-
-
 _TOOL_EFFECT_PLANNERS = {
     "write_file": _workspace_file_effects,
     "edit_file": _workspace_file_effects,
-    "memory_store": _project_memory_effects,
-    "memory_forget": _project_memory_effects,
 }

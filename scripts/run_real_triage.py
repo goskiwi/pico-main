@@ -18,10 +18,10 @@ if str(ROOT) not in sys.path:
 
 from applications.triage import TriageCase, TriageWorkflow
 from pico import OpenAICompatibleModelClient, PicoConfig
+from pico.command_runner import CommandRunner, shell_argv
 from pico.config import load_project_env, provider_env
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.run_store import RunStore
-from pico.sandbox import DockerSandbox, DockerSandboxConfig, shell_argv
 from scripts.materialize_real_oss import load_manifest as load_real_manifest
 from scripts.official_test_support import apply_patch, expected_failure
 from scripts.official_test_support import load_manifest as load_official_manifest
@@ -77,11 +77,10 @@ def visible_command(official_task):
     return f"PYTHONPATH=src python -m pytest -q --tb=short -p no:cacheprovider {nodes}"
 
 
-def run_visible_test(workspace, image, command):
-    result = DockerSandbox(
-        workspace,
-        DockerSandboxConfig(image=image),
-    ).run(shell_argv(command), cwd=workspace, timeout=120, env={})
+def run_visible_test(workspace, command):
+    result = CommandRunner(workspace).run(
+        shell_argv(command), cwd=workspace, timeout=120, env={}
+    )
     return {
         "ok": result.returncode == 0 and not result.stop_reason,
         "exit_code": result.returncode,
@@ -178,8 +177,6 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--run-timeout-seconds", type=int, default=900)
-    parser.add_argument("--sandbox-image", default="pico/official-public-tests:latest")
-    parser.add_argument("--hidden-image", default="pico/real-oss-suite:latest")
     parser.add_argument("--max-tool-executions", type=int, default=40)
     parser.add_argument(
         "--workspace",
@@ -235,7 +232,7 @@ def main(argv=None):
     command = visible_command(official_task)
     baseline_sha = prepare_triage_workspace(args.workspace, real_task, official_task)
     before = file_snapshot(args.workspace)
-    initial = run_visible_test(args.workspace, args.sandbox_image, command)
+    initial = run_visible_test(args.workspace, command)
     if not expected_failure(initial):
         raise RuntimeError(
             f"{args.task} visible CI test did not fail discriminatively before Triage"
@@ -250,17 +247,15 @@ def main(argv=None):
             args.timeout,
         )
 
-    sandbox_config = DockerSandboxConfig(image=args.sandbox_image)
     report = TriageWorkflow(
         model_client(),
         config=PicoConfig(
             approval_policy="auto",
             max_tool_executions=args.max_tool_executions,
             run_timeout_seconds=args.run_timeout_seconds,
-            sandbox_image=args.sandbox_image,
         ),
         subagent_model_client_factory=lambda _spec: model_client(),
-        sandbox_factory=lambda root: DockerSandbox(root, sandbox_config),
+        command_runner_factory=lambda root: CommandRunner(root),
     ).run(
         TriageCase(
             incident_id=args.task.replace("_", "-") + "-ci",
@@ -280,8 +275,8 @@ def main(argv=None):
             ),
         )
     )
-    visible_after = run_visible_test(args.workspace, args.sandbox_image, command)
-    hidden = run_verifier(args.workspace, real_task, args.hidden_image)
+    visible_after = run_visible_test(args.workspace, command)
+    hidden = run_verifier(args.workspace, real_task)
     after = file_snapshot(args.workspace)
     changed = changed_paths(before, after)
     patch_text = _git(args.workspace, "diff", "--binary", "--unified=1", "HEAD")

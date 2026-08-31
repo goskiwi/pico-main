@@ -1,6 +1,7 @@
-"""Day 6: exercise completion policy, recovery, reset, and subagent scope."""
+"""Day 6: exercise completion, recovery, reset, and explicit Child integration."""
 
 import json
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -14,24 +15,18 @@ from pico import (
     ToolCall,
     WorkspaceContext,
 )
+from pico.command_runner import CommandResult
 from pico.completion_controller import CompletionController
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
-from pico.sandbox import SandboxResult
-from pico.subagents.contracts import SubtaskRecord, SubtaskSpec
-from pico.subagents.dag import (
-    implementation_order,
-    ready_task_ids,
-    validate_graph,
-)
 from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
 
 
-class SequenceSandbox:
+class SequenceCommandRunner:
     def __init__(self, results):
         self.results = list(results)
         self.calls = []
@@ -95,11 +90,11 @@ def apply_edit(agent, call_id, old_text, new_text):
 def completion_experiment(root):
     target = root / "subject.py"
     target.write_text("def value():\n    return 1\n", encoding="utf-8")
-    sandbox = SequenceSandbox(
+    command_runner = SequenceCommandRunner(
         [
-            SandboxResult(returncode=0, stdout="1 passed\n"),
-            SandboxResult(returncode=1, stdout="1 failed\n"),
-            SandboxResult(returncode=0, stdout="1 passed\n"),
+            CommandResult(returncode=0, stdout="1 passed\n"),
+            CommandResult(returncode=1, stdout="1 failed\n"),
+            CommandResult(returncode=0, stdout="1 passed\n"),
         ]
     )
     agent = Pico(
@@ -110,7 +105,7 @@ def completion_experiment(root):
             approval_policy="auto",
             verification_command="verify",
         ),
-        sandbox=sandbox,
+        command_runner=command_runner,
     )
     activate(
         agent,
@@ -184,7 +179,7 @@ def completion_experiment(root):
     assert failed_assessment.allowed is False
     assert failed_assessment.status == "verification_failed"
     assert passed_assessment.allowed is True
-    assert len(sandbox.calls) == 3
+    assert len(command_runner.calls) == 3
 
     return {
         "evidence_facts": {
@@ -221,7 +216,7 @@ def completion_experiment(root):
                 "status": passed_assessment.status or "allowed",
             },
         },
-        "verification_runs": len(sandbox.calls),
+        "verification_runs": len(command_runner.calls),
         "first_change": {
             "mutation_sequence": first_cursor,
         },
@@ -276,8 +271,8 @@ def recovery_experiment(root):
     loaded_session = store.load(original.session.data["id"])
     target = root / "interrupted.txt"
     repair_revision = file_revision(target)
-    sandbox = SequenceSandbox(
-        [SandboxResult(returncode=0, stdout="1 passed\n")]
+    command_runner = SequenceCommandRunner(
+        [CommandResult(returncode=0, stdout="1 passed\n")]
     )
     resumed = Pico(
         model_client=FakeModelClient(
@@ -311,7 +306,7 @@ def recovery_experiment(root):
             approval_policy="auto",
             verification_command="verify",
         ),
-        sandbox=sandbox,
+        command_runner=command_runner,
     )
     assert resumed.run.resumable is True
     startup_state = {
@@ -357,7 +352,7 @@ def recovery_experiment(root):
     assert len(recovered_results) == len(resumed_events) == 1
     assert len(started_run_events) == 1
     assert run_outcome.status == "completed"
-    assert len(sandbox.calls) == 1
+    assert len(command_runner.calls) == 1
     assert target.read_text(encoding="utf-8") == "side effect confirmed\n"
     assert resumed.run.evidence.unresolved_effects(
         resumed.run.evidence.verifications[-1]
@@ -380,7 +375,7 @@ def recovery_experiment(root):
         },
         "repair_and_verification": {
             "file_content": target.read_text(encoding="utf-8"),
-            "verification_count": len(sandbox.calls),
+            "verification_count": len(command_runner.calls),
             "unresolved_effects": resumed.run.evidence.unresolved_effects(
                 resumed.run.evidence.verifications[-1]
             ),
@@ -469,71 +464,76 @@ def active_reset_experiment(root):
     }
 
 
-def subagent_dag_experiment(root):
-    specs = (
-        SubtaskSpec(
-            task_id="explore_api",
-            kind="explore",
-            prompt="Inspect the public API",
-        ),
-        SubtaskSpec(
-            task_id="explore_tests",
-            kind="explore",
-            prompt="Inspect the relevant tests",
-        ),
-        SubtaskSpec(
-            task_id="implement_fix",
-            kind="implement",
-            prompt="Implement the synthesized fix",
-            depends_on=("explore_api", "explore_tests"),
-            allowed_write_paths=("subject.py",),
-        ),
+def _git(root, *args):
+    result = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    validate_graph({}, specs)
-    records = {spec.task_id: SubtaskRecord(spec) for spec in specs}
-    targets = set(records)
-    first_ready = ready_task_ids(
-        records,
-        targets,
-        completed_ids=set(),
-        failed_ids=set(),
-    )
-    for task_id in first_ready:
-        records[task_id].status = "completed"
-    second_ready = ready_task_ids(
-        records,
-        targets,
-        completed_ids=set(first_ready),
-        failed_ids=set(),
-    )
-    order = implementation_order(records, ("implement_fix",))
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "git command failed")
+    return result.stdout.strip()
 
-    conflict = ""
-    try:
-        validate_graph(
-            {},
-            (
-                SubtaskSpec(
-                    task_id="implement_a",
-                    kind="implement",
-                    prompt="first writer",
-                    allowed_write_paths=("shared.py",),
-                ),
-                SubtaskSpec(
-                    task_id="implement_b",
-                    kind="implement",
-                    prompt="second writer",
-                    allowed_write_paths=("shared.py",),
-                ),
-            ),
-        )
-    except ValueError as exc:
-        conflict = str(exc)
 
-    assert first_ready == ["explore_api", "explore_tests"]
-    assert second_ready == ["implement_fix"]
-    assert order == ("implement_fix",)
-    assert "overlapping write paths" in conflict
+def _passing_runner(_root):
+    return SequenceCommandRunner(
+        [CommandResult(returncode=0, stdout="verification passed\n")]
+    )
+
+
+def _execute_parent_tool(parent, name, args, call_id):
+    call = ToolCall(name, args, call_id)
+    parent.apply_run_event(parent.run.run_log.append_tool_call(call))
+    return parent.tools.execute(call)
+
+
+def child_delegation_experiment(root):
+    target = root / "subject.py"
+    target.write_text("def value():\n    return 1\n", encoding="utf-8")
+    (root / ".gitignore").write_text(".pico/\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "pico@example.invalid")
+    _git(root, "config", "user.name", "Pico")
+    _git(root, "add", "subject.py", ".gitignore")
+    _git(root, "commit", "-qm", "base")
+
+    expected_revision = file_revision(target)
+    child_clients = []
+
+    def child_factory(spec):
+        if spec.role == "explore":
+            outputs = [
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "subject.py", "start_line": 1, "end_line": 20},
+                    call_id="child_explore_read",
+                ),
+                ModelAction.final("subject.py contains value() returning 1."),
+            ]
+        else:
+            outputs = [
+                ModelAction.tool(
+                    "read_file",
+                    {"path": "subject.py", "start_line": 1, "end_line": 20},
+                    call_id="child_implement_read",
+                ),
+                ModelAction.tool(
+                    "edit_file",
+                    {
+                        "path": "subject.py",
+                        "old_text": "return 1",
+                        "new_text": "return 2",
+                        "expected_revision": expected_revision,
+                    },
+                    call_id="child_implement_edit",
+                ),
+                ModelAction.final("Changed value() to return 2."),
+            ]
+        client = FakeModelClient(outputs)
+        child_clients.append(client)
+        return client
 
     parent = Pico(
         model_client=FakeModelClient([]),
@@ -542,106 +542,104 @@ def subagent_dag_experiment(root):
         config=PicoConfig(
             approval_policy="auto",
             verification_command="verify",
-            allowed_write_paths=("subject.py", "other.py"),
+            allowed_write_paths=("subject.py",),
         ),
-        subagent_model_client_factory=lambda _spec: FakeModelClient([]),
+        command_runner_factory=_passing_runner,
+        subagent_model_client_factory=child_factory,
     )
     activate(
         parent,
-        "task_day6_subagent_scope",
-        "run_day6_subagent_scope",
-        "Delegate only the permitted file",
+        "task_day6_children",
+        "run_day6_children",
+        "Inspect, implement, and explicitly integrate subject.py",
+        requires_workspace_change=True,
+        requires_verification=True,
         allowed_write_paths=("subject.py",),
     )
-    inside_spec = {
-        "task_id": "implement_inside",
-        "kind": "implement",
-        "prompt": "Edit the permitted file",
-        "allowed_write_paths": ["subject.py"],
-    }
-    outside_spec = {
-        "task_id": "implement_outside",
-        "kind": "implement",
-        "prompt": "Edit a file outside the parent contract",
-        "allowed_write_paths": ["other.py"],
-    }
-    validated_inside = parent.tools.validate(
-        "delegate_tasks",
-        {"tasks": [inside_spec]},
-    )
-    delegation_rejection = ""
-    try:
-        parent.tools.validate("delegate_tasks", {"tasks": [outside_spec]})
-    except ValueError as exc:
-        delegation_rejection = str(exc)
 
-    manager = parent.dependencies.subagents
-    assert manager is not None
-    inside_record = SubtaskRecord(
-        SubtaskSpec.model_validate(inside_spec),
-        status="completed",
-        changed_paths=("subject.py",),
+    explore = _execute_parent_tool(
+        parent,
+        "delegate",
+        {
+            "role": "explore",
+            "task": "Inspect subject.py and report the exact implementation fact.",
+            "allowed_write_paths": [],
+        },
+        "call_delegate_explore",
     )
-    manager._records_by_run[parent.run.projection.run_id] = {
-        inside_record.spec.task_id: inside_record
-    }
-    validated_apply = parent.tools.validate(
-        "apply_task_patches",
-        {"task_ids": [inside_record.spec.task_id]},
+    implement = _execute_parent_tool(
+        parent,
+        "delegate",
+        {
+            "role": "implement",
+            "task": "Change value() in subject.py to return 2.",
+            "allowed_write_paths": ["subject.py"],
+        },
+        "call_delegate_implement",
     )
+    child_id = implement.structured["child_id"]
+    parent_before_integration = target.read_text(encoding="utf-8")
+    blocked = CompletionController(parent).assess("done before integration")
 
-    synthetic_outside_receipt = SubtaskRecord(
-        SubtaskSpec.model_validate(outside_spec),
-        status="completed",
-        changed_paths=("other.py",),
+    integrated = _execute_parent_tool(
+        parent,
+        "integrate_child",
+        {"child_id": child_id},
+        "call_integrate_child",
     )
-    manager._records_by_run[parent.run.projection.run_id] = {
-        synthetic_outside_receipt.spec.task_id: synthetic_outside_receipt
-    }
-    apply_rejection = ""
-    try:
-        parent.tools.validate(
-            "apply_task_patches",
-            {"task_ids": [synthetic_outside_receipt.spec.task_id]},
-        )
-    except ValueError as exc:
-        apply_rejection = str(exc)
+    parent_after_integration = target.read_text(encoding="utf-8")
+    completed = CompletionController(parent).assess("done after integration")
 
-    assert validated_inside["tasks"][0]["allowed_write_paths"] == (
-        "subject.py",
+    assert explore.status == "success"
+    assert explore.structured["role"] == "explore"
+    assert explore.structured["changed_paths"] == []
+    assert implement.status == "success"
+    assert implement.structured["role"] == "implement"
+    assert implement.structured["changed_paths"] == ["subject.py"]
+    assert implement.structured["integrated"] is False
+    assert parent_before_integration == "def value():\n    return 1\n"
+    assert blocked.status == "subtasks_incomplete"
+    assert integrated.status == "success"
+    assert integrated.structured["status"] == "integrated"
+    assert integrated.structured["changed_paths"] == ["subject.py"]
+    assert integrated.structured["verification"]["status"] == "passed"
+    assert parent_after_integration == "def value():\n    return 2\n"
+    assert parent.run.evidence.changed_paths == ["subject.py"]
+    assert completed.allowed
+    assert all(
+        "delegate" not in client.action_tool_surfaces[0]
+        and "integrate_child" not in client.action_tool_surfaces[0]
+        for client in child_clients
     )
-    assert validated_apply["task_ids"] == ("implement_inside",)
-    assert "other.py" in delegation_rejection
-    assert "other.py" in apply_rejection
-    contract_scope = parent.run.task.contract.allowed_write_paths
-    config_scope = parent.config.allowed_write_paths
-    effective_scope = tuple(
-        path
-        for path in contract_scope
-        if config_scope is None or path in set(config_scope)
-    )
-    assert effective_scope == ("subject.py",)
 
     return {
-        "parallel_first_batch": first_ready,
-        "ready_after_dependencies": second_ready,
-        "implementation_order": list(order),
-        "rejected_parallel_write_conflict": conflict,
-        "parent_scope": {
-            "config_allows": ["subject.py", "other.py"],
-            "task_contract_allows": ["subject.py"],
-            "effective_scope": list(effective_scope),
-            "delegate_inside_scope": "accepted",
-            "delegate_outside_scope": delegation_rejection,
-            "apply_inside_scope": "accepted",
-            "apply_defensive_recheck": {
-                "fixture": (
-                    "synthetic corrupted-or-reloaded completed receipt; this "
-                    "outside path cannot pass normal delegate admission"
-                ),
-                "outside_scope_rejection": apply_rejection,
-            },
+        "explore": {
+            "child_id": explore.structured["child_id"],
+            "status": explore.structured["status"],
+            "read_only": explore.structured["changed_paths"] == [],
         },
+        "implement": {
+            "child_id": child_id,
+            "status": implement.structured["status"],
+            "base_sha": implement.structured["base_sha"],
+            "changed_paths": implement.structured["changed_paths"],
+            "patch_sha256": implement.structured["patch_sha256"],
+            "parent_unchanged_before_integration": (
+                "return 1" in parent_before_integration
+            ),
+        },
+        "completion_before_integration": blocked.status,
+        "integration": {
+            "status": integrated.structured["status"],
+            "base_revalidated": integrated.structured["base_sha"]
+            == implement.structured["base_sha"],
+            "verification": integrated.structured["verification"]["status"],
+            "parent_changed_after_explicit_action": (
+                "return 2" in parent_after_integration
+            ),
+        },
+        "child_tool_surface_excludes_nested_delegation": True,
+        "completion_after_integration": "allowed",
     }
 
 
@@ -670,8 +668,8 @@ def main():
             active_reset_experiment(reset_root),
         )
         print_section(
-            "Subagent DAG 与父级写范围（附录）",
-            subagent_dag_experiment(subagent_root),
+            "单 Child 委派与显式集成（附录）",
+            child_delegation_experiment(subagent_root),
         )
 
 

@@ -45,13 +45,14 @@ final   -> 交给 CompletionController
 
 ```text
 assistant_tool_call
--> ToolRuntime 准入与私有 tool-execution helpers
+-> ToolRuntime 按 call_id 取回持久化 ToolCall，再完成准入与私有 helpers
 -> fsynced tool_started + before-state paths
 -> ToolContext-bound Tool Runner
 -> tool_result + side-effect state
 ```
 
-强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界；参数校验、Approval、preimage 和
+强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界；调用方不能用相同 call ID 替换
+持久化 name/args。参数校验、Approval、preimage 和
 Fact 写入仍由它保持因果顺序，纯值计算下沉到私有 `tool_execution.py`，具体 Runner 只获得
 `ToolContext` 中的受限能力。
 
@@ -61,7 +62,8 @@ Fact 写入仍由它保持因果顺序，纯值计算下沉到私有 `tool_execu
 
 Session 只保存 `active_run_id`。重启时 Runtime 重放 RunLog；未完成工具不会盲目重试，
 而是比较声明路径的 before/current state，追加 `not_started`、`error`、`partial` 或
-`unknown` ToolOutcome。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
+`unknown` ToolOutcome。每次 Resume 输入先写 `user_guidance` Fact，因此二次崩溃后仍能
+重建当时交给模型的约束。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
 Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
 持久 Run ID 由 `RunStore.load_run` 单次读取并返回 Events + Projection；
 `RunStore.replay` 只是 Projection-only 委托。Live 路径只对新 Fact 调用
@@ -69,7 +71,7 @@ Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 
 
 ### 2:30～3:00：完成权
 
-打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 按 TaskContract 检查 Observation、最终净 RunChangeSet 和明确要求的 Verification，再检查 partial/unknown 副作用与未应用 Child Patch。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
+打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 按 TaskContract 检查 Observation、最终净 RunChangeSet 和明确要求的 Verification，再检查 partial/unknown 副作用与尚未集成的 Implement Child。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
 
 ## 5 分钟现场 Demo `[Core + 默认上下文增强]`
 
@@ -87,15 +89,6 @@ uv run python scripts/day7_runtime_capstone.py
 - `tool_transactions`：每个调用都有 Call/Started/Result；
 - `outcome_matches_replay`：返回值与 durable Replay 的终态一致。
 
-如需补充默认上下文增强，再运行：
-
-```bash
-uv run python scripts/demo_runtime.py
-```
-
-只讲 `Memory Catalog → memory_recall → Card 正文`，以及输出中的七类 Effective Recovery
-Context 来源；不要把它混进 Core Patch 主线，也不要把该教学视图称为七段压缩结果。
-
 ### 2. 运行机制评测 `[默认上下文增强 + Context Pressure]`
 
 ```bash
@@ -106,7 +99,6 @@ uv run python scripts/run_evaluations.py
 
 - Native Harness 真实运行 Pico、工具和外部 verifier；
 - Context v5 真实触发 ContextManager/RunLog Compaction；
-- Project Memory v2 真实运行 `memory_store -> memory_recall -> final`；
 - RepoMap v1 验证 tree-sitter 图、任务命中和 Token Budget。
 
 ### 3. 可选回归证明
@@ -121,14 +113,14 @@ uv run ruff check pico tests scripts
 ### 1. 单一事实源 `[Core]`
 
 `events.jsonl` 保存 User、Tool Call/Started/Result、Verification、Compaction 和终态。
-Session 指针、Workspace 内容、Project Memory Card 和 Artifact 各有独立且明确的所有权；
+Session 指针、Workspace 内容和 Artifact 各有独立且明确的所有权；
 没有第二份可变 `task_state.json` 或 `context.jsonl`。
 
 ### 2. Context 治理 `[Context Pressure]`
 
 固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
 只包含 Runtime task policy、非空的有界不可信 Context 和 Task Request；仅 Resume 且请求改变时
-才追加 latest request。空 RepoMap/Memory/WorkingState/History 不渲染，普通 Function Call 续接
+才追加 latest request。空 RepoMap/WorkingState/History 不渲染，普通 Function Call 续接
 只追加 Call/Output。原生 Function Schema 只在 `tools`；支持 `allowed_tools` 的 Provider 在
 普通阶段获得稳定完整 Schema 和动态允许名称，final-only 边界则物理缩成 `submit_final` 并
 重建 Provider Session。Runtime 的 Token 预算按实际 wire tools 计算。稳定
@@ -143,11 +135,11 @@ RunEvidence 组合成七类 Effective Recovery Context。七类只是逐项标�
 
 Provider Context Overflow 由 Adapter 归一化为一个类型；AgentLoop 只允许一次重建重试，不通过厂商错误字符串猜测控制流。
 
-### 3. WorkingState 与 Project Memory `[Core + 默认上下文增强]`
+### 3. WorkingState `[Core]`
 
-TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；成功的增量 `update_working_state` Tool 事务是事实来源。Project Memory 属于跨 Session 项目知识；
-非空 Catalog 才进入首轮 Prompt，主模型按描述显式调用 `memory_recall`，Card 作为不可信历史数据
-返回，不能改变工具权限或代替 Workspace 当前事实。
+TaskContract 保存 Goal；WorkingState 属于当前 Run，只保存 Constraints、Decisions 和 Next Steps；
+成功的增量 `update_working_state` Tool 事务是事实来源。它不能改变工具权限，也不能代替
+Workspace 当前事实。
 
 ### 4. RepoMap `[默认上下文增强]`
 
@@ -157,10 +149,11 @@ RepoMap 使用 tree-sitter 提取 Python Symbol 和静态 Call/Import/Inheritanc
 
 ### 5. 多 Agent 附录 `[Orchestration Appendix]`
 
-Parent 可以委派 Explore/Implement DAG。Explore Child 只读；Implement Child 在独立 Git
-Worktree 中执行并返回 Patch receipt。PatchIntegrator 在独立 Integration Worktree 按依赖
-应用、验证，并在 Parent HEAD 未变化时才写回。调度同步且进程内，不宣称分布式 Worker
-或跨进程 Child 调度恢复。
+Parent 每次用 `delegate` 创建一个 Explore 或 Implement Child。Explore 只读且不建
+Worktree；Implement 必须声明允许写路径并始终在独立 Git Worktree 中执行。Child 不能再次
+委派。Implement 完成后不会自动 merge，Parent 必须用 `integrate_child` 按 child ID 显式
+集成；Runtime 复验 delegation base，在临时 Worktree 应用 Patch、运行固定 Verification，
+成功后才写回 Parent。这里没有 DAG、批量委派、后台队列或并行 worker。
 
 ## 应用层追问 `[Applications]`
 
@@ -191,20 +184,22 @@ CompletionController。
 模型可能在没有真实修改、验证失败或副作用未知时声称完成。Completion Gate 使用
 TaskContract 和 Runtime 观察到的当前 Workspace 证据决定是否接受 `final`。
 
-### WorkingState 与 Project Memory 有什么区别？
+### Verification 是否被 Workspace 路径约束保护？
 
-WorkingState 是当前 Run 的计划白板；Project Memory 是跨 Session 的显式稳定知识。
-前者不能授予权限，后者不能代替当前文件事实。
+不是。模型没有通用 Shell 工具，但用户显式配置的固定 Verification 会在 Workspace 中以
+当前用户权限本机运行。文件工具的路径检查不能限制该进程访问其他目录、网络或子进程。
+因此 Pico 只运行可信仓库；未知仓库或 PR 应交给外部 CI、VM 或容器。
 
-### 为什么 Memory 显式 Recall，而 RepoMap 自动注入？
+### WorkingState 能授予权限吗？
 
-Memory Catalog 已提供语义标题，模型能判断是否需要正文；显式 Recall 让调用和成本进入
-正常 RunLog。RepoMap 是有界的小型仓库导航投影，因此由Runtime自动注入。
+不能。WorkingState 是当前 Run 的计划白板；TaskContract 和 Runtime policy 才拥有任务类型、
+写入范围与验证要求，Workspace 当前事实仍必须通过工具观察。
 
 ### 多 Agent 为什么需要 Worktree？
 
-共享工作区会让 Child 互相覆盖并污染 Parent。Worktree 让每个实现拥有独立 Diff，组合
-Patch 在写回 Parent 前可以单独验证。
+Implement Child 不能在委派阶段直接污染 Parent。独立 Worktree 让 Runtime 先生成不可变
+Patch receipt；`integrate_child` 再在临时 Worktree 复验 base、应用 Patch 和运行 Verification，
+成功后才显式写回 Parent。
 
 ### 这是生产系统吗？
 
@@ -213,7 +208,8 @@ Mailbox、跨进程 Child 调度恢复和通用 MCP/Skills 都明确不在范围
 
 ## 证据边界
 
-- 当前确定性证据：pytest、Native Harness、Context v5、Project Memory v2、RepoMap v1。
-- 当前真实模型证据：三个 Triage 案例；必须同时说明
-  它们绑定的 Runtime commit/fixture/model，不宣称是当前未提交工作树的实时成绩。
-- Docker 隔离、可选网络和模型后端仍是环境信任边界。
+- 当前确定性证据：pytest、Native Harness、Context v5、RepoMap v1。
+- 当前保留的真实模型证据是受控的 Compaction Artifact；旧 Docker 边界产生的三个 Triage
+  Artifact 已退役并删除，不能作为当前 Runtime 成绩。
+- 固定 Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
+- 模型后端仍是外部信任边界。

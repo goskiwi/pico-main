@@ -11,11 +11,11 @@ from pico import (
     WorkspaceContext,
 )
 from pico.agent_loop import AgentLoop
+from pico.command_runner import CommandResult
 from pico.contracts import ToolOutcome
 from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
 from pico.providers import ProviderContextOverflow
-from pico.sandbox import SandboxResult
 
 READ_TASK = {
     "task_kind": "read_only",
@@ -98,11 +98,11 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
                 target.write_text(external_content, encoding="utf-8")
             return super().complete_action(*args, **kwargs)
 
-    class RecordingVerificationSandbox:
+    class RecordingVerificationCommandRunner:
         @staticmethod
         def run(*_args, **_kwargs):
             verified_contents.append(target.read_text(encoding="utf-8"))
-            return SandboxResult(returncode=0, stdout="1 passed\n")
+            return CommandResult(returncode=0, stdout="1 passed\n")
 
     client = DriftBeforeFirstEditClient(
         [
@@ -147,7 +147,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
             approval_policy="auto",
             verification_command="verify",
         ),
-        sandbox=RecordingVerificationSandbox(),
+        command_runner=RecordingVerificationCommandRunner(),
     )
 
     outcome = agent.ask(
@@ -226,10 +226,10 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
 
 
 def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
-    class FailingSandbox:
+    class FailingCommandRunner:
         @staticmethod
         def run(*_args, **_kwargs):
-            return SandboxResult(returncode=1, stderr="assertion failed")
+            return CommandResult(returncode=1, stderr="assertion failed")
 
     client = FakeModelClient(
         [
@@ -253,7 +253,7 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
             approval_policy="auto",
             verification_command="verify",
         ),
-        sandbox=FailingSandbox(),
+        command_runner=FailingCommandRunner(),
     )
 
     outcome = agent.ask("Create subject.txt", **VERIFIED_MODIFY_TASK)
@@ -637,7 +637,6 @@ def test_allowed_tools_provider_keeps_wire_schema_stable_for_read_only_run(
     assert "read_file" in client.allowed_tool_name_surfaces[0]
     assert "submit_final" in client.allowed_tool_name_surfaces[0]
     assert "write_file" not in client.allowed_tool_name_surfaces[0]
-    assert "memory_store" not in client.allowed_tool_name_surfaces[0]
     turns = [
         event
         for event in agent.run.run_log.events
@@ -725,7 +724,6 @@ def test_unsupported_provider_uses_run_fixed_read_only_wire_surface(tmp_path):
     assert client.action_tool_surfaces == client.allowed_tool_name_surfaces
     assert "read_file" in client.action_tool_surfaces[0]
     assert "write_file" not in client.action_tool_surfaces[0]
-    assert "memory_store" not in client.action_tool_surfaces[0]
     turns = [
         event
         for event in agent.run.run_log.events
@@ -838,74 +836,3 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     ]
     assert sum(entry.payload["outcome"]["status"] == "rejected" for entry in results) == 1
     assert sum(entry.payload["outcome"]["execution_state"] == "completed" for entry in results) == 1
-
-
-def test_project_memory_recall_is_an_explicit_tool_transaction(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tool(
-                "memory_recall",
-                {"filenames": ["project_deploy.md"]},
-            ),
-            ModelAction.final("staging"),
-        ],
-    )
-    agent.dependencies.project_memory.store(
-        action="create",
-        filename="project_deploy.md",
-        name="Deploy target",
-        description="Stable deployment target.",
-        memory_type="project",
-        content="deploy target is staging",
-        why="Deploy commands require the correct environment.",
-        how_to_apply="Use staging unless the user overrides it.",
-        source_run_id="bootstrap",
-    )
-    assert agent.ask("What is the deploy target?", **READ_TASK).answer == "staging"
-    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
-    recall_call = next(
-        entry
-        for entry in entries
-        if entry.kind == "assistant_tool_call" and entry.name == "memory_recall"
-    )
-    recall_result = next(
-        entry
-        for entry in entries
-        if entry.kind == "tool_result" and entry.call_id == recall_call.call_id
-    )
-    assert recall_result.outcome_status == "success"
-    assert "deploy target is staging" in recall_result.content
-    assert agent.run.metrics.model_request_count == 2
-
-
-def test_memory_recall_rejects_unavailable_filenames(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tool(
-                "memory_recall",
-                {"filenames": ["project_unavailable.md"]},
-            ),
-            ModelAction.final("Done."),
-        ],
-    )
-    agent.dependencies.project_memory.store(
-        action="create",
-        filename="project_available.md",
-        name="Available",
-        description="Available memory.",
-        memory_type="project",
-        content="available",
-        why="test",
-        how_to_apply="test",
-        source_run_id="bootstrap",
-    )
-    assert agent.ask("Inspect memory", **NO_CHANGE_TASK).answer == "Done."
-    result = next(
-        entry
-        for entry in agent.run.run_log.events
-        if entry.kind == "tool_result" and entry.name == "memory_recall"
-    )
-    assert result.outcome_status == "rejected"
-    assert "unavailable filename" in result.content

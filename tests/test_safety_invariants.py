@@ -1,36 +1,17 @@
-import os
-from unittest.mock import patch
-
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
-from pico.sandbox import (
-    DockerSandbox,
-    SandboxResult,
-    docker_exit_is_infrastructure,
-    shell_argv,
-)
 from pico.task_state import TaskContract
 
 
-class FakeSandbox:
-    def __init__(self, result=None):
-        self.calls = []
-        self.result = result or SandboxResult(returncode=0, stdout="sandbox-ok\n")
-
-    def run(self, argv, **kwargs):
-        self.calls.append((argv, kwargs))
-        return self.result
-
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
-    sandbox = kwargs.pop("sandbox", None)
     return Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
                 SessionStore(tmp_path / ".pico/sessions"),
                 config=PicoConfig(approval_policy="auto", verification_command=""),
-                sandbox=sandbox, **kwargs)
+                **kwargs)
 
 
 def run_active(agent, call):
@@ -96,107 +77,3 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
     assert write_pico.status == "rejected"
     assert not (tmp_path / ".pico" / "injected.txt").exists()
     assert write_gitignore.status == "success"
-
-
-def test_shell_runs_inside_docker_and_env_is_filtered(tmp_path):
-    sandbox = FakeSandbox()
-    agent = build_agent(tmp_path, sandbox=sandbox)
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "secret", "LANG": "C"}, clear=True):
-        outcome = agent.tools.execute(
-            "run_shell", {"command": "python -c 'print(1)'", "timeout_seconds": 3}
-        )
-    assert outcome.status == "success"
-    assert outcome.structured["exit_code"] == 0
-    assert outcome.structured["timed_out"] is False
-    argv, options = sandbox.calls[0]
-    assert argv == ("/bin/sh", "-c", "python -c 'print(1)'")
-    assert "OPENAI_API_KEY" not in options["env"]
-    assert options["timeout"] == 3
-
-
-def test_shell_failure_is_structured_before_tool_runtime_classification(tmp_path):
-    sandbox = FakeSandbox(
-        SandboxResult(returncode=7, stderr="command failed\n")
-    )
-    agent = build_agent(tmp_path, sandbox=sandbox)
-
-    outcome = agent.tools.execute(
-        "run_shell", {"command": "false", "timeout_seconds": 3}
-    )
-
-    assert outcome.status == "error"
-    assert outcome.execution_state == "completed"
-    assert outcome.side_effect_state == "none"
-    assert outcome.failure.code == "command_failed"
-    assert outcome.failure.detail == "command exited with 7"
-    assert outcome.structured["exit_code"] == 7
-
-
-def test_shell_argv_preserves_compound_command_for_container_shell():
-    command = "MODE=test python -m pytest -q && git diff --check"
-    assert shell_argv(command) == ("/bin/sh", "-c", command)
-
-
-def test_docker_exit_125_is_classified_as_infrastructure_failure():
-    assert docker_exit_is_infrastructure(125) is True
-    assert docker_exit_is_infrastructure(1) is False
-
-
-def test_approval_denial_prevents_sandbox_start(tmp_path):
-    sandbox = FakeSandbox()
-    agent = build_agent(tmp_path, sandbox=sandbox)
-    agent.config = PicoConfig.build(agent.config, approval_policy="deny")
-    outcome = agent.tools.execute("run_shell", {"command": "echo hi"})
-    assert outcome.status == "rejected"
-    assert outcome.correction_action == "stop_route"
-    assert sandbox.calls == []
-
-
-def test_sandbox_infrastructure_failure_requests_user_action(tmp_path):
-    sandbox = FakeSandbox(
-        SandboxResult(
-            returncode=125,
-            stderr="docker unavailable",
-            infrastructure_error=True,
-        )
-    )
-    agent = build_agent(tmp_path, sandbox=sandbox)
-
-    outcome = agent.tools.execute(
-        "run_shell",
-        {"command": "true", "timeout_seconds": 3},
-    )
-
-    assert outcome.status == "error"
-    assert outcome.failure.recovery == "user_action_required"
-    assert outcome.correction_action == "request_user_action"
-
-
-def test_docker_mounts_workspace_read_only(tmp_path):
-    (tmp_path / "src").mkdir()
-    sandbox = DockerSandbox(tmp_path, docker_binary="docker")
-    args = sandbox._docker_args(
-        container_name="pico-test",
-        container_cwd="/workspace",
-        argv=("pytest", "-q"),
-        env={},
-    )
-    mount = args[args.index("--mount") + 1]
-    assert "target=/workspace,readonly" in mount
-    assert "--read-only" in args
-    assert not any("/workspace/.venv:" in item for item in args)
-    assert "PYTHONPATH=/workspace/src" in args
-    assert "PYTHONNOUSERSITE=1" in args
-
-
-def test_explicit_pythonpath_is_not_overwritten(tmp_path):
-    sandbox = DockerSandbox(tmp_path, docker_binary="docker")
-    args = sandbox._docker_args(
-        container_name="pico-test",
-        container_cwd="/workspace",
-        argv=("python", "-c", "pass"),
-        env={"PYTHONPATH": "/workspace/custom"},
-    )
-
-    assert "PYTHONPATH=/workspace/custom" in args
-    assert args.count("PYTHONPATH=/workspace/custom") == 1

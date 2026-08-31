@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .features.memory import WorkingState
+from .working_state import WorkingState
 from .workspace import normalize_relative_file
 
 STATUS_RUNNING = "running"

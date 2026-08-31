@@ -107,6 +107,10 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     prompt = resumed.model_client.prompts[0]
     assert prompt.count('latest_user_request:\n"Continue"') == 1
     assert "Resume request: Continue" not in prompt
+    assert any(
+        event.kind == "user_guidance" and event.content == "Continue"
+        for event in resumed.run.run_log.events
+    )
     assert sum(
         event.kind == "run_resumed" for event in resumed.run.run_log.events
     ) == 1
@@ -114,6 +118,31 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
         event.kind == "model_instruction"
         for event in resumed.run.run_log.events
     )
+
+
+def test_resume_guidance_survives_another_process_failure(tmp_path):
+    agent, store, _projection, _log = build_interrupted_run(tmp_path)
+    first_resume = resumed_agent(agent, store, [])
+
+    with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
+        first_resume.ask(
+            "Continue, but never touch config.py",
+            **NO_CHANGE_TASK,
+        )
+
+    second_resume = resumed_agent(
+        first_resume,
+        store,
+        [ModelAction.final("Recovered.")],
+    )
+    assert second_resume.ask("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    prompt = second_resume.model_client.prompts[0]
+    assert "never touch config.py" in prompt
+    assert [
+        event.content
+        for event in second_resume.run.run_log.events
+        if event.kind == "user_guidance"
+    ] == ["Continue, but never touch config.py", "Continue"]
 
 
 def test_incremental_working_state_restores_from_tool_events(tmp_path):

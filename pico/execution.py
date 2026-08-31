@@ -18,7 +18,7 @@ class ExecutionCancelled(RuntimeError):
 
 @dataclass(frozen=True)
 class ExecutionBudget:
-    """One immutable resource contract for a sandbox execution attempt."""
+    """One immutable resource contract for a command execution attempt."""
 
     deadline: float
     max_output_bytes: int

@@ -18,14 +18,14 @@ class TriageWorkflow:
         *,
         config: PicoConfig | None = None,
         subagent_model_client_factory=None,
-        sandbox=None,
-        sandbox_factory=None,
+        command_runner=None,
+        command_runner_factory=None,
     ):
         self.model_client = model_client
         self.config = PicoConfig.build(config)
         self.subagent_model_client_factory = subagent_model_client_factory
-        self.sandbox = sandbox
-        self.sandbox_factory = sandbox_factory
+        self.command_runner = command_runner
+        self.command_runner_factory = command_runner_factory
 
     @staticmethod
     def _check_revision(case: TriageCase):
@@ -72,8 +72,8 @@ class TriageWorkflow:
                 case.repository_root / ".pico" / "sessions"
             ),
             config=config,
-            sandbox=self.sandbox,
-            sandbox_factory=self.sandbox_factory,
+            command_runner=self.command_runner,
+            command_runner_factory=self.command_runner_factory,
             subagent_model_client_factory=self.subagent_model_client_factory,
         )
         outcome = agent.ask(

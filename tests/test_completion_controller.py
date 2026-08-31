@@ -247,42 +247,6 @@ def test_repaired_partial_requires_current_verification(tmp_path):
     assert calls == [2]
 
 
-def test_repaired_project_memory_partial_does_not_run_workspace_verifier(tmp_path):
-    agent = active_agent(tmp_path, NO_CHANGE_TASK, "verify")
-    path = ".pico/memory/cards/decision.md"
-    agent.run.evidence.effects.extend(
-        [
-            {
-                "tool_call_id": "memory_partial",
-                "tool": "memory_store",
-                "status": "partial_success",
-                "execution_state": "failed",
-                "side_effect_state": "partial",
-                "affected_paths": (path,),
-                "effect_scope": "project_memory",
-                "event_sequence": 1,
-                "path_transitions": (),
-            },
-            {
-                "tool_call_id": "memory_repair",
-                "tool": "memory_store",
-                "status": "success",
-                "execution_state": "completed",
-                "side_effect_state": "changed",
-                "affected_paths": (path,),
-                "effect_scope": "project_memory",
-                "event_sequence": 2,
-                "path_transitions": (),
-            },
-        ]
-    )
-    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
-        AssertionError("project-memory repair must not run workspace verification")
-    )
-
-    assert CompletionController(agent).assess("done").allowed
-
-
 def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
     agent.dependencies.subagents = SimpleNamespace(

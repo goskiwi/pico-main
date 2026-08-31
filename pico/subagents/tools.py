@@ -1,61 +1,63 @@
-"""Parent-only tool surface for bounded subtask orchestration."""
+"""Parent-only tools for one synchronous Child at a time."""
 
 from __future__ import annotations
 
 from pydantic import Field
 
-from ..contracts import ToolRunnerResult
-from .contracts import StrictModel, SubtaskSpec
-from .dag import implementation_order
+from ..contracts import FailureInfo, ToolRunnerResult
+from .contracts import ChildSpec, StrictModel
 
 
-class DelegateTasksArgs(StrictModel):
-    tasks: tuple[SubtaskSpec, ...] = Field(min_length=1, max_length=8)
+class DelegateArgs(ChildSpec):
+    pass
 
 
-class ApplyTaskPatchesArgs(StrictModel):
-    task_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+class IntegrateChildArgs(StrictModel):
+    child_id: str = Field(pattern=r"^child_[a-f0-9]{12}$")
 
 
 def _delegate(manager, args):
-    result = manager.delegate(tuple(SubtaskSpec.model_validate(item) for item in args["tasks"]))
+    receipt = manager.delegate(
+        args["role"],
+        args["task"],
+        args["allowed_write_paths"],
+    )
     return ToolRunnerResult(
-        f"delegated {len(result['tasks'])} tasks",
-        structured=dict(result),
+        f"Child {receipt['child_id']} finished with status {receipt['status']}",
+        structured=dict(receipt),
+        failure=(
+            None
+            if receipt["status"] == "completed"
+            else FailureInfo(
+                "child_failed",
+                receipt["error"] or "Child did not complete",
+                "retry_after_change",
+            )
+        ),
     )
 
 
-def _apply_paths(manager, task_ids):
-    records = manager._records_by_run.get(manager._parent_run_id(), {})
-    order = implementation_order(records, tuple(task_ids))
-    return tuple(
-        sorted(
-            {
-                path
-                for task_id in order
-                for path in records[task_id].changed_paths
-            }
-        )
-    )
+def _integration_paths(manager, child_id):
+    record = manager._record(manager._parent_run_id(), child_id)
+    return tuple(record.changed_paths)
 
 
-def _apply_effects(manager, args):
-    paths = _apply_paths(manager, args["task_ids"])
+def _integration_effects(manager, args):
+    paths = _integration_paths(manager, args["child_id"])
     return "workspace", tuple(
         (path, manager.parent.workspace.resolve_tool_path(path)) for path in paths
     )
 
 
-def _apply(manager, args):
-    planned_paths = _apply_paths(manager, args["task_ids"])
+def _integrate(manager, args):
+    paths = _integration_paths(manager, args["child_id"])
     before = {
         path: manager.parent.workspace.path_state(
             manager.parent.workspace.resolve_tool_path(path)
         )
-        for path in planned_paths
+        for path in paths
     }
-    result = manager.integration.apply(tuple(args["task_ids"]))
-    changed = tuple(result["changed_paths"])
+    result = manager.integrate_child(args["child_id"])
     result["path_transitions"] = [
         {
             "path": path,
@@ -65,40 +67,39 @@ def _apply(manager, args):
             ),
             "before_artifact_id": "",
         }
-        for path in changed
+        for path in paths
     ]
     return ToolRunnerResult(
-        content=f"applied {len(result['task_ids'])} task patches",
+        content=f"integrated Child {result['child_id']}",
         structured=dict(result),
-        affected_paths=changed,
-        effect_scope="workspace" if changed else "none",
+        affected_paths=paths,
+        effect_scope="workspace" if paths else "none",
     )
 
 
 def build_tool_registry(manager):
     return {
-        "delegate_tasks": {
-            "args_schema": DelegateTasksArgs,
+        "delegate": {
+            "args_schema": DelegateArgs,
             "risky": False,
             "description": (
-                "Delegate one bounded batch of only Explore tasks or only Implement tasks "
-                "to independent Pico children; mixed batches are rejected. Declare semantic "
-                "dependencies explicitly. Explore tasks are read-only and return structured "
-                "evidence handoffs. Implement tasks require exact allowed_write_paths and run "
-                "in isolated worktrees. Every child has a hard maximum of 12 tool executions."
+                "Run one synchronous Explore or Implement Child. Explore shares the "
+                "parent workspace read-only. Implement requires exact allowed write paths, "
+                "a configured verifier, and an isolated Git worktree; it returns an "
+                "immutable patch receipt but never integrates automatically."
             ),
             "run": lambda args: _delegate(manager, args),
         },
-        "apply_task_patches": {
-            "args_schema": ApplyTaskPatchesArgs,
+        "integrate_child": {
+            "args_schema": IntegrateChildArgs,
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "potential_effects": lambda args: _apply_effects(manager, args),
+            "potential_effects": lambda args: _integration_effects(manager, args),
             "description": (
-                "Verify and atomically integrate completed implementation task patches into "
-                "the parent workspace."
+                "Explicitly verify and integrate one completed Implement Child patch into "
+                "the unchanged parent repository."
             ),
-            "run": lambda args: _apply(manager, args),
+            "run": lambda args: _integrate(manager, args),
         },
     }

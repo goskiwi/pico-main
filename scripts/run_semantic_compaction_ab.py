@@ -21,9 +21,9 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.command_runner import CommandRunner
 from pico.config import load_project_env, provider_env
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
-from pico.sandbox import DockerSandbox, DockerSandboxConfig
 from scripts.real_case_support import git_metadata, require_clean_runtime
 from scripts.run_real_compaction import (
     CONTROLLED_CONTEXT_LIMIT,
@@ -79,9 +79,9 @@ def run_variant(args, variant, api_key, base_url, run_group):
         args.workspace_root / f"semantic-compaction-{run_group}-{variant}"
     )
     print(f"[semantic-compaction] starting {variant}", file=sys.stderr, flush=True)
-    initial = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
+    initial = run_command(workspace, VISIBLE_COMMAND)
     if initial["infrastructure_error"]:
-        raise RuntimeError(f"{variant} baseline sandbox could not start")
+        raise RuntimeError(f"{variant} baseline command could not start")
     if initial["ok"]:
         raise RuntimeError(f"{variant} baseline must fail before the Agent runs")
     agent = Pico(
@@ -100,13 +100,9 @@ def run_variant(args, variant, api_key, base_url, run_group):
             provider_context_limit_tokens=CONTROLLED_CONTEXT_LIMIT,
             compaction_reserve_tokens=8192,
             compaction_keep_recent_tokens=8000,
-            sandbox_image=args.sandbox_image,
             verification_command=VISIBLE_COMMAND,
         ),
-        sandbox=DockerSandbox(
-            workspace,
-            DockerSandboxConfig(image=args.sandbox_image),
-        ),
+        command_runner=CommandRunner(workspace),
     )
     if variant == "fallback":
         agent.prompt.context.semantic_summarizer = None
@@ -121,8 +117,8 @@ def run_variant(args, variant, api_key, base_url, run_group):
     wall_duration_ms = int((time.monotonic() - started) * 1000)
     events = agent.dependencies.run_store.read_events(outcome.run_id)
     analysis = analyze_run(events, agent.run.task)
-    visible = run_command(workspace, args.sandbox_image, VISIBLE_COMMAND)
-    hidden = run_command(workspace, args.sandbox_image, HIDDEN_COMMAND)
+    visible = run_command(workspace, VISIBLE_COMMAND)
+    hidden = run_command(workspace, HIDDEN_COMMAND)
     patch_text = _git(workspace, "diff", "--binary", "--unified=1", "HEAD")
     changed_paths = _git(workspace, "diff", "--name-only", "HEAD").splitlines()
     token_in_working_state = CRITICAL_TOKEN in json.dumps(
@@ -183,7 +179,6 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--run-timeout-seconds", type=int, default=900)
-    parser.add_argument("--sandbox-image", default="pico/sandbox:latest")
     parser.add_argument(
         "--workspace-root",
         type=Path,

@@ -118,22 +118,6 @@ class GitWorktree:
     def apply_patch(self, patch):
         apply_patch(self.path, patch)
 
-    def commit_dependency_baseline(self):
-        changed = self.changed_paths()
-        if not changed:
-            return
-        _git(self.path, "add", "--", *changed)
-        _git(
-            self.path,
-            "-c",
-            "user.name=Pico",
-            "-c",
-            "user.email=pico@example.invalid",
-            "commit",
-            "-m",
-            "pico dependency baseline",
-        )
-
     def changed_paths(self):
         return repository_changed_paths(self.path)
 

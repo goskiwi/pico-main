@@ -1,6 +1,6 @@
-"""Bounded parent/child orchestration for Pico."""
+"""Synchronous parent/child orchestration for Pico."""
 
-from .contracts import SubtaskRecord, SubtaskSpec
-from .manager import SubagentManager
+from .contracts import ChildRecord, ChildSpec
+from .runner import SubagentRunner
 
-__all__ = ["SubagentManager", "SubtaskRecord", "SubtaskSpec"]
+__all__ = ["ChildRecord", "ChildSpec", "SubagentRunner"]

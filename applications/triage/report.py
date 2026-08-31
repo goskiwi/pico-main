@@ -87,33 +87,6 @@ def _parse_diagnosis(answer) -> ModelDiagnosis:
     return ModelDiagnosis.model_validate(value)
 
 
-def _reproduction(case, calls, results):
-    call = next(
-        (
-            entry
-            for entry in calls.values()
-            if entry.name == "run_shell"
-            and str(entry.args.get("command", "")).strip() == case.failing_command
-        ),
-        None,
-    )
-    if call is None:
-        return Reproduction(command=case.failing_command, status="not_run")
-    result = results.get(call.call_id)
-    if result is None or result.outcome_status == "rejected":
-        status = "blocked"
-    elif result.outcome_status in {"error", "partial_success"}:
-        status = "reproduced"
-    else:
-        status = "passed"
-    return Reproduction(
-        command=case.failing_command,
-        status=status,
-        tool_call_id=call.call_id,
-        output=clip(result.content if result is not None else "", 2000),
-    )
-
-
 def _resolve_evidence(items, ordered_calls, results):
     completed_call_ids = {
         entry.call_id for entry in ordered_calls if entry.call_id in results
@@ -148,9 +121,6 @@ def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
     ordered_calls = [
         entry for entry in events if entry.kind == "assistant_tool_call"
     ]
-    calls = {
-        entry.call_id: entry for entry in ordered_calls
-    }
     results = {
         entry.call_id: entry for entry in events if entry.kind == "tool_result"
     }
@@ -175,14 +145,18 @@ def build_triage_report(case: TriageCase, answer, events) -> TriageReport:
         output=clip(verification_payload.get("output", ""), 2000),
     )
     changed_paths = tuple(run_evidence.changed_paths)
-    reproduction = _reproduction(case, calls, results)
+    reproduction = Reproduction(
+        command=case.failing_command,
+        status="reproduced",
+        output=clip(case.ci_log, 2000),
+    )
     if diagnosis.status == "fixed" and (
         reproduction.status != "reproduced"
         or not changed_paths
         or verification.status != "passed"
     ):
         raise ValueError(
-            "A fixed Triage report requires reproduction, a patch, and passed verification"
+            "A fixed Triage report requires failure evidence, a patch, and passed verification"
         )
 
     return TriageReport(

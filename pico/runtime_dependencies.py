@@ -5,31 +5,26 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactStore
+from .command_runner import CommandRunner
 from .execution import CancellationToken
 from .mutations import WorkspaceMutationService
-from .project_memory import ProjectMemoryStore
 from .repo_map import RepoMap
 from .run_store import RunStore
 
 if TYPE_CHECKING:
-    from .subagents import SubagentManager
-
-
-class SandboxRunner(Protocol):
-    def run(self, argv, **kwargs): ...
+    from .subagents import SubagentRunner
 
 
 @dataclass(slots=True)
 class RuntimeDependencies:
     run_store: RunStore
     artifacts: ArtifactStore
-    project_memory: ProjectMemoryStore
     mutations: WorkspaceMutationService
-    sandbox: SandboxRunner
-    sandbox_factory: Callable[[Path], SandboxRunner]
+    command_runner: CommandRunner
+    command_runner_factory: Callable[[Path], CommandRunner]
     repo_map: RepoMap
-    subagents: SubagentManager | None = None
+    subagents: SubagentRunner | None = None
     parent_cancellation_token: CancellationToken | None = None

@@ -6,7 +6,7 @@ from applications.triage import TriageCase, TriageWorkflow
 from applications.triage.prompt import build_triage_prompt
 from applications.triage.report import build_triage_report
 from evals.triage import run_triage_evaluation
-from evals.triage.evaluator import EvalCase, HostEvaluationSandbox, ScriptedTriageModel
+from evals.triage.evaluator import EvalCase, ScriptedTriageModel
 from pico import PicoConfig
 from pico.contracts import ToolCall, ToolOutcome
 from pico.run_log import RunLog
@@ -48,14 +48,13 @@ def test_triage_prompt_marks_incident_text_as_untrusted(tmp_path):
 
     assert '<incident_data trust="untrusted_data">' in prompt
     assert "JSON only" in prompt
-    assert "delegate_tasks" in prompt
+    assert "delegate" in prompt
     assert "more than three" in prompt
     assert "rather than a fourth" in prompt
-    assert "Never combine Explore and Implement" in prompt
     assert "passing cases" in prompt
     assert "negative evidence" in prompt
     assert "exact failing test names" in prompt
-    assert "next action must be apply_task_patches" in prompt
+    assert "next action must be integrate_child" in prompt
     assert "Never reread and reproduce" in prompt
 
 
@@ -174,7 +173,6 @@ def test_triage_report_records_non_git_working_tree_revision(tmp_path):
     report = TriageWorkflow(
         ScriptedTriageModel(eval_case),
         config=PicoConfig(approval_policy="auto", max_tool_executions=4),
-        sandbox=HostEvaluationSandbox(),
     ).run(case)
 
     assert report.repository_revision == "working-tree"

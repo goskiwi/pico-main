@@ -1,6 +1,6 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, the single Pending Call and final Diff receipt for live execution and replay. Workspace, Project Memory, RepoMap and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, the single Pending Call and final Diff receipt for live execution and replay. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
 
 ## Current execution paths
 
@@ -14,7 +14,7 @@ CLI build_agent
   -> resume: RunStore.load_run reads once, validates Run Log v15 / terminal Artifact,
      and returns that Event snapshot with its Projection
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
-  -> run_started / run_resumed
+  -> resumed input is appended as user_guidance before run_resumed; new Runs append run_started
   -> Provider action session reset
   -> AgentLoop
 ```
@@ -26,11 +26,12 @@ AgentLoop
   -> PromptBuilder / ContextManager
   -> OpenAICompatibleModelClient -> ModelAction.tool
   -> append assistant_tool_call Fact
+  -> ToolRuntime resolves the canonical pending ToolCall from that durable Fact
   -> ToolRuntime validates Registry / Surface / Schema / Policy / Approval
   -> ToolRuntime enforces protocol/repeat guards and captures effects/preimages
   -> private tool_execution helpers calculate preview/redaction/drift/diff/transitions/classification
-  -> append + fsync tool_started Fact
-  -> ToolContext supplies bounded Workspace / Store / Sandbox / Run capabilities
+  -> append + fsync tool_started Fact with planned effect paths
+  -> ToolContext supplies bounded Workspace / Store / Run capabilities
   -> concrete Tool Runner -> ToolRunnerResult
   -> ToolRuntime uses those pure values to construct ToolOutcome
   -> append + fsync tool_result Fact
@@ -46,7 +47,7 @@ Concrete runners receive only a `ToolContext` rather than the whole Pico object.
 
 ```text
 ModelAction.final
-  -> CompletionController assesses TaskContract + Subagents + Evidence + Verifier
+  -> CompletionController assesses TaskContract + Child receipts + Evidence + Verifier
   -> blocked: model_instruction + completion_blocked, then continue Provider
   -> allowed: RunLifecycle builds the net final Diff receipt
   -> append assistant_final Fact
@@ -62,9 +63,9 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 
 ## Terminology
 
-- **Fact**: an accepted durable Run Event in `events.jsonl`. Tool Call, `tool_started`, Tool
-  Result, Verification, Compaction and terminal events are Facts. Workspace files, Memory Cards
-  and Artifact contents remain facts of their own stores, not duplicated Run Facts.
+- **Fact**: an accepted durable Run Event in `events.jsonl`. Tool Call, resumed `user_guidance`, `tool_started`, Tool
+  Result, Verification, Compaction and terminal events are Facts. Workspace files and Artifact
+  contents remain facts of their own stores, not duplicated Run Facts.
 - **Projection**: the rebuildable in-memory `RunProjection` produced by reducing Facts. It is not
   a second persistence format. Live execution calls `apply_event`; `RunStore.load_run` returns one
   validated Event snapshot and its Projection, while `RunStore.replay` delegates to it and returns
@@ -84,10 +85,8 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 | Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
 | Task contract | First `user_message.contract` | Goal, task kind, write scope and completion requirements |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
-| Project memory catalog | Generated `MEMORY.md` | Bounded resident section |
-| Recalled project knowledge | Explicit `memory_recall` Tool Call/Result | Complete Markdown Card bodies under a bounded recall budget |
 | Large redacted output | Artifact files | Run Log artifact reference |
-| Child receipts | Child Run Logs and Patch files | In-process Subagent DAG state |
+| Child receipts | Child Run Logs and Patch files | One explicit Child receipt and integration state |
 
 `task_state.json`, `context.jsonl` and Checkpoint snapshots do not exist.
 
@@ -97,6 +96,7 @@ Every event has one strict schema, contiguous sequence and stable ID:
 
 ```text
 user_message
+user_guidance
 run_started / run_resumed
 model_requested / turn_metrics
 assistant_tool_call
@@ -118,7 +118,7 @@ Replaceable snapshots and Workspace mutations use same-directory temporary files
 
 Before execution, `tool_started` records:
 
-- stable call ID and canonical arguments from `assistant_tool_call`;
+- stable call ID bound to the persisted `assistant_tool_call`;
 - effect scope;
 - exact potential paths;
 - each path's before state/revision.
@@ -147,8 +147,8 @@ Responses `instructions`. The first request of a Provider action session sends a
 untrusted-context envelope only when at least one bounded projection is non-empty, and adds a
 differing latest request only on Resume. The envelope can include minimal Workspace facts and
 document names, WorkingState,
-`AGENTS.md` repository conventions, RepoMap, Memory Catalog and History. Empty RepoMap, Memory,
-WorkingState and History sections are not rendered; project-document bodies are not preloaded.
+`AGENTS.md` repository conventions, RepoMap and History. Empty RepoMap, WorkingState and History
+sections are not rendered; project-document bodies are not preloaded.
 Normal Tool continuation appends the native `function_call` and `function_call_output` to the same
 manual Responses replay instead of rebuilding or resending the dynamic suffix.
 
@@ -184,7 +184,7 @@ sections, `Progress` and `Critical Context`. Its input is escaped compact JSON b
 canonical Event payload, so ToolOutcome status, execution, side-effect, failure, path and artifact
 facts stay together without opening a second trust boundary. The persisted Compaction Fact contains
 that two-section summary plus coverage metadata; it never contains a seven-part generated summary.
-TaskContract, WorkingState, Project Memory and RunEvidence keep their existing owners. A Summary is
+TaskContract, WorkingState and RunEvidence keep their existing owners. A Summary is
 committed only when replacing the covered prefix reduces the final escaped History Wire. Invalid,
 failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool
 Call/Result transactions. Semantic Summary uses one strict request; any failure takes that existing
@@ -197,7 +197,7 @@ Prompt payload:
 | Effective category | Source |
 |---|---|
 | Goal | Immutable TaskContract from the first `user_message` |
-| Constraints & Preferences | Run WorkingState constraints; explicitly recalled Project Memory only when relevant |
+| Constraints & Preferences | Run WorkingState constraints |
 | Progress | Semantic `Progress` after Compaction, otherwise retained complete History facts |
 | Key Decisions | Run WorkingState decisions |
 | Next Steps | Run WorkingState next steps |
@@ -206,7 +206,7 @@ Prompt payload:
 
 Only Progress and Critical Context can come from the semantic summarizer. The seven-category view is
 not persisted, is not fed back as another seven-section suffix, and is not an input to completion.
-`CompletionController` continues to decide from TaskContract, RunEvidence, Subagent state,
+`CompletionController` continues to decide from TaskContract, RunEvidence, Child integration state,
 verification and the current Workspace.
 
 The OpenAI-compatible adapter classifies structured HTTP/JSON/SSE context failures as
@@ -216,13 +216,43 @@ second consecutive overflow propagates. Other `RuntimeError` values never enter 
 
 ## Resume
 
-Session stores only `active_run_id`. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, rebuilds Context, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced; a transient reload failure leaves the process-local `reload_required` cache-validity bit set so the next request retries before using Task state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
+Session stores only `active_run_id`. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, persists the new resume input as `user_guidance`, rebuilds Context from durable Facts, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced; a transient reload failure leaves the process-local `reload_required` cache-validity bit set so the next request retries before using Task state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
 
 ## Completion
 
-`CompletionController` is the only completion-policy owner. It checks, in order: unapplied or running Subagents; the persisted TaskContract; unrepaired `unknown/partial` effects; external Workspace drift; required/current verification; and effects that remain unresolved after verification. This ordering prevents meaningless verifier runs for unrepaired uncertainty, while a repaired Workspace partial must receive a passing verifier for the current mutation/path state. A repaired Project Memory partial does not trigger a Workspace verifier. `RunEvidence` only answers factual relationship queries such as repair and unresolved-effect lookup; it does not return a completion decision.
+`CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; the persisted TaskContract; unrepaired `unknown/partial` effects; external Workspace drift; required/current verification; and effects that remain unresolved after verification. This ordering prevents meaningless verifier runs for unrepaired uncertainty, while a repaired Workspace partial must receive a passing verifier for the current mutation/path state. `RunEvidence` only answers factual relationship queries such as repair and unresolved-effect lookup; it does not return a completion decision.
+
+## Child delegation and integration
+
+The Parent exposes two synchronous Tools. `delegate` creates exactly one Child with role `explore`
+or `implement`; `integrate_child` accepts exactly one completed implementation receipt by child ID.
+There is no batch request, dependency graph, background queue, or worker-pool scheduler.
+
+An explore Child uses read-only Tools against the Parent Workspace and does not create a Worktree.
+An implement Child must declare non-empty allowed write paths and always runs in a dedicated Git
+Worktree rooted at the delegation base. Child Tool surfaces exclude `delegate`, so delegation cannot
+recurse. The Parent receives a compact result plus a receipt; Child Tool history remains in the
+Child Run Log.
+
+Implementation completion never mutates the Parent automatically. `integrate_child` revalidates the
+recorded base, applies the Patch in a temporary integration Worktree, runs the user-fixed
+Verification there, and only then writes the verified result into the Parent Workspace. A base
+change, path-scope mismatch, Patch failure, or failed Verification rejects integration without
+claiming success.
 
 Read-only tasks need a successful Observation; modify tasks that require change need a non-empty final RunChangeSet. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but its receipt explicitly records `unavailable_reason=workspace_drift` instead of claiming a trustworthy Diff. Verification freshness is derived from its mutation sequence and path states rather than stored as a mutable label. There is no implicit language-specific AST gate.
+
+### Local verification trust boundary
+
+The model has no general-purpose shell Tool. Verification is the one command-execution path: the
+user supplies a fixed command explicitly, and the Completion boundary runs it from the Workspace
+under the same operating-system account that launched Pico. The model cannot generate or alter
+that command.
+
+This is host execution, not a sandbox. Workspace path checks constrain Pico's structured file
+Tools; they do not constrain the verifier's system calls, filesystem access, child processes, or
+network access. Pico is therefore suitable only for repositories the user already trusts. Unknown
+repositories and pull requests require an external CI runner, VM, or container boundary.
 
 ### Bounded workspace freshness design
 

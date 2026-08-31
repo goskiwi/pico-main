@@ -1,4 +1,4 @@
-"""Run-scoped structured working state projected from durable tool events."""
+"""Run-scoped WorkingState projected from durable tool events."""
 
 from dataclasses import dataclass, field
 

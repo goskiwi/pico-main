@@ -88,8 +88,8 @@ class ToolRuntime:
         if (
             contract is not None
             and contract.task_kind == "read_only"
-            and name == "delegate_tasks"
-            and any(item.get("kind") == "implement" for item in validated["tasks"])
+            and name == "delegate"
+            and validated.get("role") == "implement"
         ):
             raise ToolFailureError(
                 "read_only_task",
@@ -101,15 +101,15 @@ class ToolRuntime:
             target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
             self._require_write_scope((relative,), allowed_paths)
-        if name == "delegate_tasks" and allowed_paths is not None:
-            declared_paths = tuple(
-                path
-                for task_spec in validated["tasks"]
-                if task_spec["kind"] == "implement"
-                for path in task_spec["allowed_write_paths"]
+        if (
+            name == "delegate"
+            and validated.get("role") == "implement"
+            and allowed_paths is not None
+        ):
+            self._require_write_scope(
+                validated["allowed_write_paths"], allowed_paths
             )
-            self._require_write_scope(declared_paths, allowed_paths)
-        if name == "apply_task_patches" and allowed_paths is not None:
+        if name == "integrate_child" and allowed_paths is not None:
             _scope, planned_paths = self._potential_effects(tool, validated)
             self._require_write_scope(
                 (logical for logical, _path in planned_paths),
@@ -154,8 +154,6 @@ class ToolRuntime:
         return ToolContext(
             workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_tool_path,
-            shell_env_provider=runtime.shell_env,
-            project_memory=runtime.dependencies.project_memory,
             artifact_store=runtime.dependencies.artifacts,
             run_id_provider=lambda: str(runtime.run.projection.run_id or "manual"),
             tool_call_id_provider=lambda: (
@@ -166,16 +164,7 @@ class ToolRuntime:
             working_state_provider=lambda: (
                 runtime.run.task.working if runtime.run.task is not None else None
             ),
-            token_counter_provider=lambda text: runtime.prompt.context.tokenizer.count(
-                text
-            ),
             mutation_service=runtime.dependencies.mutations,
-            sandbox=runtime.dependencies.sandbox,
-            execution_context_provider=lambda: (
-                runtime.run.execution_context.child()
-                if runtime.run.execution_context is not None
-                else None
-            ),
         )
 
     def approve(self, name, args):
@@ -222,6 +211,25 @@ class ToolRuntime:
             "no_retry",
             record=False,
         )
+
+    def _canonical_call(self, submitted):
+        """Resolve active execution from the durable pending ToolCall fact.
+
+        The caller supplies only the identity of the pending operation.  Tool
+        name and arguments are owned by the Run Log once assistant_tool_call is
+        accepted, so approval, effect planning, and execution must all use that
+        persisted value.
+        """
+
+        run_log = self.runtime.run.run_log
+        if self.runtime.run.task is None or run_log is None:
+            return submitted
+        persisted = run_log.pending_tool_call()
+        if persisted is None:
+            raise RuntimeError("active Run has no pending ToolCall fact")
+        if persisted.call_id != submitted.call_id:
+            raise RuntimeError("submitted call does not match the pending ToolCall")
+        return persisted
 
     def _resolve_tool(self, call):
         tool = self.registry.get(call.name)
@@ -310,7 +318,7 @@ class ToolRuntime:
     @staticmethod
     def _preimage_artifacts(agent, call, paths, states, effect_scope):
         if (
-            effect_scope not in {"workspace", "mixed"}
+            effect_scope != "workspace"
             or agent.run.run_log is None
             or agent.run.task is None
         ):
@@ -360,10 +368,11 @@ class ToolRuntime:
             else ToolCall(str(call_or_name), dict(args or {}))
         )
         agent = self.runtime
-        name, args = call.name, call.args
         boundary_rejection = self._reject_out_of_protocol_call(call)
         if boundary_rejection is not None:
             return boundary_rejection
+        call = self._canonical_call(call)
+        name, args = call.name, call.args
         run_id = _run_id(agent)
         tool, admission_rejection = self._resolve_tool(call)
         if admission_rejection is not None:
@@ -460,7 +469,7 @@ class ToolRuntime:
             observed_workspace_drift = bool(
                 typed_error
                 and detected_paths
-                and potential_scope in {"workspace", "mixed"}
+                and potential_scope == "workspace"
             )
             paths = [] if typed_error else detected_paths
             unknown = bool(not typed_error and workspace_mutating and not potential_paths)
@@ -496,7 +505,7 @@ class ToolRuntime:
 
         if (
             outcome.side_effect_state != "none"
-            and outcome.effect_scope in {"workspace", "mixed"}
+            and outcome.effect_scope == "workspace"
         ) or observed_workspace_drift:
             agent.prompt.refresh(force=True)
         self._record_tool_result(agent, outcome)

@@ -3,12 +3,6 @@ import pytest
 from pico import PicoConfig
 from pico.cli import build_arg_parser
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
-from pico.runtime_config import DEFAULT_SHELL_ENV_ALLOWLIST
-
-
-def test_default_and_explicit_empty_shell_allowlists_are_distinct():
-    assert PicoConfig().normalized().shell_env_allowlist == DEFAULT_SHELL_ENV_ALLOWLIST
-    assert PicoConfig(shell_env_allowlist=()).normalized().shell_env_allowlist == ()
 
 
 def test_runtime_context_defaults_match_cli():
@@ -119,8 +113,6 @@ def test_read_only_is_owned_by_task_contract_not_runtime_config():
             "max_tool_executions must be positive",
         ),
         ({"run_timeout_seconds": 0}, "run_timeout_seconds must be positive"),
-        ({"subagent_max_workers": 0}, "subagent_max_workers must be between"),
-        ({"subagent_max_workers": 4}, "subagent_max_workers must be between"),
     ],
 )
 def test_runtime_limits_reject_invalid_values_instead_of_clamping(

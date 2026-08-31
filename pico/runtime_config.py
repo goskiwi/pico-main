@@ -7,13 +7,6 @@ from typing import Any
 
 from .workspace import normalize_relative_file
 
-DEFAULT_SHELL_ENV_ALLOWLIST = (
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TERM",
-)
-
 
 def _allowed_tools(value):
     if value is None:
@@ -40,17 +33,14 @@ class PicoConfig:
     approval_policy: str = "ask"
     max_tool_executions: int | None = None
     max_new_tokens: int = 1024
-    shell_env_allowlist: tuple[str, ...] = DEFAULT_SHELL_ENV_ALLOWLIST
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
     allowed_tools: tuple[str, ...] | None = None
     run_timeout_seconds: int = 600
     provider_context_limit_tokens: int = 272000
     compaction_reserve_tokens: int = 16384
     compaction_keep_recent_tokens: int = 20000
-    sandbox_image: str = "pico/sandbox:latest"
     verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
-    subagent_max_workers: int = 3
 
     @classmethod
     def build(cls, config: PicoConfig | None = None, **overrides: Any) -> PicoConfig:
@@ -79,9 +69,6 @@ class PicoConfig:
         run_timeout_seconds = int(self.run_timeout_seconds)
         if run_timeout_seconds < 1:
             raise ValueError("run_timeout_seconds must be positive")
-        subagent_max_workers = int(self.subagent_max_workers)
-        if not 1 <= subagent_max_workers <= 3:
-            raise ValueError("subagent_max_workers must be between 1 and 3")
         provider_context_limit_tokens = int(self.provider_context_limit_tokens)
         compaction_reserve_tokens = int(self.compaction_reserve_tokens)
         compaction_keep_recent_tokens = int(self.compaction_keep_recent_tokens)
@@ -109,7 +96,6 @@ class PicoConfig:
             approval_policy=str(self.approval_policy),
             max_tool_executions=max_tool_executions,
             max_new_tokens=max_new_tokens,
-            shell_env_allowlist=tuple(self.shell_env_allowlist),
             secret_env_names=frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
             ),
@@ -118,8 +104,6 @@ class PicoConfig:
             provider_context_limit_tokens=provider_context_limit_tokens,
             compaction_reserve_tokens=compaction_reserve_tokens,
             compaction_keep_recent_tokens=compaction_keep_recent_tokens,
-            sandbox_image=str(self.sandbox_image),
             verification_command=self.verification_command,
             allowed_write_paths=_allowed_write_paths(self.allowed_write_paths),
-            subagent_max_workers=subagent_max_workers,
         )

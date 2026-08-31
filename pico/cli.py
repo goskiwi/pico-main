@@ -39,7 +39,7 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
-    /memory  Show the current Run WorkingState and project-memory catalog.
+    /state   Show the current Run WorkingState.
     /session Show the path to the saved session file.
     /reset   Stop the active Run and clear the Session pointer.
     /exit    Exit the agent.
@@ -172,7 +172,6 @@ def build_agent(args):
         provider_context_limit_tokens=args.provider_context_limit,
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
-        sandbox_image=args.sandbox_image,
         verification_command=args.verify_command,
     )
 
@@ -300,14 +299,12 @@ def build_arg_parser():
         help="Approximate recent Run Log tokens retained after compaction.",
     )
     parser.add_argument(
-        "--sandbox-image",
-        default=defaults.sandbox_image,
-        help="Docker image for run_shell.",
-    )
-    parser.add_argument(
         "--verify-command",
         default=defaults.verification_command,
-        help="Explicit Runtime verifier; empty means unavailable.",
+        help=(
+            "Trusted local verification command owned by the Runtime; "
+            "empty means unavailable."
+        ),
     )
     parser.add_argument(
         "--temperature", type=float, default=0.2, help="Sampling temperature."
@@ -367,8 +364,8 @@ def main(argv=None):
         if user_input == "/help":
             print(HELP_DETAILS)
             continue
-        if user_input == "/memory":
-            print(agent.prompt.memory_text())
+        if user_input == "/state":
+            print(agent.prompt.working_state_text())
             continue
         if user_input == "/session":
             print(agent.session.path)

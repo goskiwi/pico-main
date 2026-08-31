@@ -12,11 +12,11 @@ from pico import (
     SessionStore,
     WorkspaceContext,
 )
+from pico.command_runner import CommandResult
 from pico.mutations import file_revision
-from pico.sandbox import SandboxResult
 
 
-class RecordingVerificationSandbox:
+class RecordingVerificationCommandRunner:
     def __init__(self, target):
         self.target = Path(target)
         self.calls = []
@@ -31,7 +31,7 @@ class RecordingVerificationSandbox:
                 "timeout": kwargs.get("timeout"),
             }
         )
-        return SandboxResult(
+        return CommandResult(
             returncode=0 if passed else 1,
             stdout="1 passed\n" if passed else "1 failed\n",
             cleanup_state="completed",
@@ -61,7 +61,7 @@ def main():
         )
         initial_revision = file_revision(target)
         verify_command = "python -m pytest -q"
-        sandbox = RecordingVerificationSandbox(target)
+        command_runner = RecordingVerificationCommandRunner(target)
         model = FakeModelClient(
             [
                 ModelAction.tool(
@@ -114,7 +114,7 @@ def main():
                 approval_policy="auto",
                 verification_command=verify_command,
             ),
-            sandbox=sandbox,
+            command_runner=command_runner,
         )
 
         outcome = agent.ask(
@@ -183,10 +183,9 @@ def main():
             evidence.last_workspace_mutation_sequence,
             verification_events[-1]["finished_changed_path_states"],
         ) is not None
-        assert len(sandbox.calls) == 1
+        assert len(command_runner.calls) == 1
         assert "source_tool_call_id" not in verification_events[0]
         assert "calculator.py" in model.prompts[0]
-        assert "memory_store" not in {item["tool"] for item in transactions}
         assert diff_descriptor["size_bytes"] == outcome.final_diff.diff_bytes
         assert "-    return left - right" in final_diff_text
         assert "+    return left + right" in final_diff_text
@@ -212,8 +211,8 @@ def main():
             {
                 "transactions": transactions,
                 "verification_events": verification_events,
-                "sandbox_calls": sandbox.calls,
-                "verification_was_run_once_by_completion_gate": len(sandbox.calls)
+                "command_runner_calls": command_runner.calls,
+                "verification_was_run_once_by_completion_gate": len(command_runner.calls)
                 == 1,
             },
         )

@@ -5,7 +5,7 @@ import pytest
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.delivery import FinalDiffDescriptor
 from pico.run_cli import run_main
-from pico.run_log import RunEvent, RunLog
+from pico.run_log import RunEvent, RunLog, replay_events
 from pico.run_store import RunStore
 from pico.task_state import TaskContract
 
@@ -86,6 +86,29 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
     assert summary["pending_call_id"] is None
     assert run_main(["show", "run", "--cwd", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out)["run_cursor"]["sequence"] == 4
+
+
+def test_replay_snapshots_one_iterable_and_validates_event_identity(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    append(store, "run", "user_message", {"content": "inspect"})
+    events = tuple(store.read_events("run"))
+
+    replayed = replay_events(iter(events))
+    assert replayed.run_id == "run"
+    assert replayed.task.contract.goal == "inspect"
+
+    malformed = RunEvent(
+        event_id="arbitrary",
+        sequence=7,
+        run_id="run",
+        task_id="task",
+        session_id="session",
+        kind="user_message",
+        timestamp="now",
+        payload={"contract": TaskContract("inspect", **READ_TASK).to_dict()},
+    )
+    with pytest.raises(ValueError, match="sequence is not contiguous"):
+        replay_events([malformed])
 
 
 def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):

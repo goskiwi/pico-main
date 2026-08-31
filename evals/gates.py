@@ -23,7 +23,7 @@ def evaluation_failures(results):
     if context["mean_token_reduction"] <= 0:
         failures.append("context governance did not reduce tokens")
 
-    for name in ("project_memory", "repo_map"):
+    for name in ("repo_map",):
         failed_checks = [
             key for key, passed in results[name]["summary"].items() if passed is not True
         ]

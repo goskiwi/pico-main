@@ -3,7 +3,6 @@ from pico.security import (
     detected_secret_env_items,
     looks_sensitive_env_name,
     redact_value,
-    shell_env,
 )
 
 
@@ -40,11 +39,3 @@ def test_redact_value_recurses_through_values_and_secret_keys():
 
     assert redacted["OPENAI_API_KEY"] == REDACTED_VALUE
     assert redacted["payload"] == [REDACTED_VALUE, {"nested": REDACTED_VALUE}]
-
-
-def test_shell_env_uses_only_the_explicit_allowlist():
-    env = {"PATH": "/usr/bin", "HOME": "/home/user", "SECRET": "nope"}
-
-    filtered = shell_env(env=env, allowlist=("HOME",))
-
-    assert filtered == {"HOME": "/home/user"}

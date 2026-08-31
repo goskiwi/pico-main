@@ -1,7 +1,7 @@
 from evals.pytest_output import parse_pytest_output
+from pico.command_runner import CommandResult
 from pico.evidence import verification_is_current
 from pico.mutations import file_revision
-from pico.sandbox import SandboxResult
 from pico.verification import verify_workspace
 
 READ_TASK = {
@@ -47,16 +47,16 @@ def test_double_quiet_pytest_progress_is_counted():
 def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_path):
     recorded = {}
 
-    class Sandbox:
+    class Runner:
         def run(self, argv, **kwargs):
             recorded["argv"] = argv
             recorded.update(kwargs)
-            return SandboxResult(returncode=0, stdout="2 passed")
+            return CommandResult(returncode=0, stdout="2 passed")
 
     result = verify_workspace(
         root=tmp_path,
         command="MODE=test python -m pytest -q",
-        sandbox=Sandbox(),
+        command_runner=Runner(),
         timeout_seconds=600,
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
@@ -83,11 +83,11 @@ def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_pat
     }
 
 
-def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
-    class Sandbox:
+def test_runtime_verification_classifies_command_start_failure(tmp_path):
+    class Runner:
         @staticmethod
         def run(*_args, **_kwargs):
-            return SandboxResult(
+            return CommandResult(
                 returncode=125,
                 stderr="invalid mount config",
                 infrastructure_error=True,
@@ -96,7 +96,7 @@ def test_runtime_verification_classifies_sandbox_start_failure(tmp_path):
     result = verify_workspace(
         root=tmp_path,
         command="python -m pytest -q",
-        sandbox=Sandbox(),
+        command_runner=Runner(),
         timeout_seconds=60,
         redact_text=str,
         mutation_sequence_provider=lambda: 7,
@@ -114,16 +114,16 @@ def test_runtime_verification_records_mutation_cursor_drift(
 ):
     mutation_sequence = [7]
 
-    class Sandbox:
+    class Runner:
         @staticmethod
         def run(*_args, **_kwargs):
             mutation_sequence[0] = 9
-            return SandboxResult(returncode=0, stdout="2 passed")
+            return CommandResult(returncode=0, stdout="2 passed")
 
     result = verify_workspace(
         root=tmp_path,
         command="python -m pytest -q",
-        sandbox=Sandbox(),
+        command_runner=Runner(),
         timeout_seconds=60,
         redact_text=str,
         mutation_sequence_provider=lambda: mutation_sequence[0],
@@ -145,16 +145,16 @@ def test_runtime_verification_records_changed_path_drift(
     target.write_text("before\n", encoding="utf-8")
     before = file_revision(target)
 
-    class Sandbox:
+    class Runner:
         @staticmethod
         def run(*_args, **_kwargs):
             target.write_text("external\n", encoding="utf-8")
-            return SandboxResult(returncode=0, stdout="2 passed")
+            return CommandResult(returncode=0, stdout="2 passed")
 
     result = verify_workspace(
         root=tmp_path,
         command="python -m pytest -q",
-        sandbox=Sandbox(),
+        command_runner=Runner(),
         timeout_seconds=60,
         redact_text=str,
         mutation_sequence_provider=lambda: 7,

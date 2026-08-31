@@ -3,29 +3,21 @@
 import json
 
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
-SHELL_TOOL_PREVIEW_BYTES = 16 * 1024
 
 
 def _tool_preview_limit(tool_name):
-    return (
-        SHELL_TOOL_PREVIEW_BYTES
-        if tool_name == "run_shell"
-        else DEFAULT_TOOL_PREVIEW_BYTES
-    )
+    return DEFAULT_TOOL_PREVIEW_BYTES
 
 
-def _complete_lines_within_budget(lines, budget, *, from_tail=False):
+def _complete_lines_within_budget(lines, budget):
     selected = []
     used = 0
-    candidates = reversed(lines) if from_tail else iter(lines)
-    for line in candidates:
+    for line in lines:
         encoded_size = len(line.encode("utf-8")) + (1 if selected else 0)
         if used + encoded_size > budget:
             break
         selected.append(line)
         used += encoded_size
-    if from_tail:
-        selected.reverse()
     return selected
 
 
@@ -38,18 +30,9 @@ def model_tool_output(content, tool_name, descriptor):
     if not descriptor.get("artifact_id"):
         raise RuntimeError("truncated tool output requires an artifact")
     lines = content.splitlines()
-    from_tail = tool_name == "run_shell"
-    selected = _complete_lines_within_budget(
-        lines,
-        limit - 512,
-        from_tail=from_tail,
-    )
-    if from_tail:
-        start_line = len(lines) - len(selected) + 1
-        end_line = len(lines)
-    else:
-        start_line = 1
-        end_line = len(selected)
+    selected = _complete_lines_within_budget(lines, limit - 512)
+    start_line = 1
+    end_line = len(selected)
     preview = "\n".join(selected)
     notice = (
         f"[Output truncated: showing lines {start_line}-{end_line} of {len(lines)}; "
@@ -98,7 +81,7 @@ def repeat_key(run_id, name, args):
 
 
 def tracked_workspace_drift(states, effect_scope, tracked_files):
-    if effect_scope not in {"workspace", "mixed"}:
+    if effect_scope != "workspace":
         return ()
     drift = []
     for path, actual_state in sorted(states.items()):

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 from . import security as securitylib
 from .artifacts import ArtifactStore
+from .command_runner import CommandRunner
 from .delivery import build_stopped_final_diff_descriptor
 from .mutations import WorkspaceMutationService
-from .project_memory import ProjectMemoryStore
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
 from .run_lifecycle import load_resumable_run, reload_current_run
@@ -20,7 +19,6 @@ from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
-from .sandbox import DockerSandbox, DockerSandboxConfig
 from .session_store import SessionStore
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
@@ -41,9 +39,8 @@ class Pico:
         config: PicoConfig | None = None,
         session=None,
         run_store=None,
-        sandbox=None,
-        project_memory_root=None,
-        sandbox_factory=None,
+        command_runner=None,
+        command_runner_factory=None,
         subagent_model_client_factory=None,
         parent_cancellation_token=None,
     ):
@@ -61,35 +58,28 @@ class Pico:
             self.workspace.root / ".pico" / "runs"
         )
         artifacts = ArtifactStore(effective_run_store, self.redact_text)
-        memory_root = (
-            Path(project_memory_root)
-            if project_memory_root is not None
-            else self.workspace.root / ".pico" / "memory"
-        )
-        project_memory = ProjectMemoryStore(memory_root)
         mutations = WorkspaceMutationService(self.workspace.root)
 
-        if sandbox_factory is None:
-            sandbox_config = DockerSandboxConfig(image=self.config.sandbox_image)
-            sandbox_factory = lambda root: DockerSandbox(root, sandbox_config)
-        effective_sandbox = sandbox or sandbox_factory(self.workspace.root)
+        if command_runner_factory is None:
+            command_runner_factory = CommandRunner
+        effective_command_runner = (
+            command_runner or command_runner_factory(self.workspace.root)
+        )
         self.dependencies = RuntimeDependencies(
             run_store=effective_run_store,
             artifacts=artifacts,
-            project_memory=project_memory,
             mutations=mutations,
-            sandbox=effective_sandbox,
-            sandbox_factory=sandbox_factory,
+            command_runner=effective_command_runner,
+            command_runner_factory=command_runner_factory,
             repo_map=RepoMap(self.workspace.root),
             parent_cancellation_token=parent_cancellation_token,
         )
         if subagent_model_client_factory is not None:
-            from .subagents import SubagentManager
+            from .subagents import SubagentRunner
 
-            self.dependencies.subagents = SubagentManager(
+            self.dependencies.subagents = SubagentRunner(
                 self,
                 subagent_model_client_factory,
-                max_workers=self.config.subagent_max_workers,
             )
 
         self.tools = ToolRuntime(self)
@@ -108,11 +98,6 @@ class Pico:
             value,
             key=key,
             secret_env_names=self.config.secret_env_names,
-        )
-
-    def shell_env(self):
-        return securitylib.shell_env(
-            allowlist=self.config.shell_env_allowlist,
         )
 
     def emit_event(self, event_type, payload=None):

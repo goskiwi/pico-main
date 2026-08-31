@@ -175,53 +175,6 @@ def test_partial_requires_repair_and_current_passing_verification():
     assert evidence.unresolved_effects(current) == []
 
 
-def test_repaired_project_memory_partial_does_not_require_workspace_verification():
-    path = ".pico/memory/cards/decision.md"
-    partial = ToolOutcome(
-        "memory_partial",
-        "memory_store",
-        "partial_success",
-        "failed",
-        "partial",
-        "memory write was interrupted",
-        failure=FailureInfo("interrupted", "interrupted", "no_retry"),
-        affected_paths=(path,),
-        effect_scope="project_memory",
-    )
-    repair = ToolOutcome(
-        "memory_repair",
-        "memory_store",
-        "success",
-        "completed",
-        "changed",
-        "memory card replaced",
-        affected_paths=(path,),
-        effect_scope="project_memory",
-    )
-    evidence = project_evidence(
-        [
-            event(
-                "tool_result",
-                {
-                    "outcome": partial.to_dict(),
-                },
-                1,
-            ),
-            event(
-                "tool_result",
-                {
-                    "outcome": repair.to_dict(),
-                },
-                2,
-            ),
-        ]
-    )
-
-    assert evidence.repaired_partials_requiring_verification() == []
-    assert evidence.unrepaired_uncertain_effects() == []
-    assert evidence.unresolved_effects() == []
-
-
 def test_unknown_effect_is_never_cleared_by_verification():
     evidence = project_evidence(
         [

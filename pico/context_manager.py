@@ -8,13 +8,12 @@ from html import escape
 import tiktoken
 
 from .compaction_summary import CompactionSummarizer, SemanticCompactionError
-from .features.memory import WorkingState
 from .run_log import COMPACTED_HISTORY_OMITTED
+from .working_state import WorkingState
 
 DEFAULT_SECTION_CAPS = {
     "workspace": 600,
     "repository_conventions": 800,
-    "memory_catalog": 600,
     "repo_map": 1200,
     "working_state": 300,
 }
@@ -23,7 +22,6 @@ FIXED_SECTION_ALLOCATION_ORDER = (
     "working_state",
     "repository_conventions",
     "repo_map",
-    "memory_catalog",
 )
 UNTRUSTED_SECTION_ORDER = (
     *FIXED_SECTION_ALLOCATION_ORDER,
@@ -389,12 +387,12 @@ class ContextManager:
     def _raw_sections(self, user_message, *, history_override=None):
         task = self.agent.run.task
         goal = task.contract.goal if task is not None else str(user_message)
-        latest = str(user_message) if str(user_message) != goal else ""
+        run_log = self.agent.run.run_log
+        latest = run_log.latest_user_guidance() if run_log is not None else ""
         return {
             "runtime_policy": self._runtime_policy_text(),
             "workspace": self._workspace_text(),
             "repository_conventions": self._repository_conventions_text(),
-            "memory_catalog": self._memory_catalog_text(),
             "repo_map": self._repo_map_text(user_message),
             "working_state": self._working_state_text(),
             "history": (
@@ -682,11 +680,6 @@ class ContextManager:
                 lines.append(label + ":")
                 lines.extend(f"- {value}" for value in values)
         return "\n".join(lines)
-
-    def _memory_catalog_text(self):
-        text = str(self.agent.dependencies.project_memory.index_text())
-        entries = [line for line in text.splitlines() if line.startswith("- [")]
-        return "\n".join(entries)
 
     def _repo_map_text(self, query):
         result = self.agent.dependencies.repo_map.render(

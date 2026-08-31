@@ -61,6 +61,30 @@ def run_active(agent, call):
     return agent.tools.execute(call)
 
 
+def test_active_run_executes_the_persisted_tool_call_not_retransmitted_args(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    persisted = ToolCall(
+        "write_file",
+        {"path": "declared.txt", "content": "declared\n"},
+        "call_persisted",
+    )
+    agent.apply_run_event(run_log.append_tool_call(persisted))
+
+    outcome = agent.tools.execute(
+        ToolCall(
+            "write_file",
+            {"path": "substituted.txt", "content": "substituted\n"},
+            persisted.call_id,
+        )
+    )
+
+    assert outcome.status == "success"
+    assert outcome.affected_paths == ("declared.txt",)
+    assert (tmp_path / "declared.txt").read_text(encoding="utf-8") == "declared\n"
+    assert not (tmp_path / "substituted.txt").exists()
+
+
 def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
     agent = build_agent(tmp_path)
 
@@ -250,59 +274,6 @@ def test_manual_observation_can_page_its_own_large_artifact(tmp_path):
     assert page.structured["artifact_id"] == source.artifact_id
 
 
-def test_large_shell_output_keeps_tail_and_points_to_artifact(tmp_path):
-    agent = build_agent(tmp_path)
-    output = "head-marker\n" + "noise\n" * 5000 + "tail-marker\n"
-    agent.tools.registry["run_shell"]["run"] = (
-        lambda _args: ToolRunnerResult("exit_code: 0\n" + output)
-    )
-
-    outcome = agent.tools.execute(
-        ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_shell_large")
-    )
-
-    assert "head-marker" not in outcome.content
-    assert "tail-marker" in outcome.content
-    assert "read_artifact" in outcome.content
-    artifact = (
-        tmp_path / ".pico" / "runs" / "manual" / "artifacts"
-        / f"{outcome.artifact_id}.txt"
-    )
-    assert "head-marker" in artifact.read_text(encoding="utf-8")
-
-
-def test_runner_failure_is_structured_and_content_is_not_parsed(tmp_path):
-    failed_agent = build_agent(tmp_path)
-    failed_agent.tools.registry["run_shell"]["run"] = lambda _args: ToolRunnerResult(
-        "command display format changed",
-        failure=FailureInfo(
-            "command_failed",
-            "command exited with 7",
-            "retry_after_change",
-        ),
-    )
-
-    failed = failed_agent.tools.execute(
-        ToolCall("run_shell", {"command": "false", "timeout_seconds": 20}, "call_failed")
-    )
-
-    assert failed.status == "error"
-    assert failed.execution_state == "completed"
-    assert failed.failure.code == "command_failed"
-
-    successful_agent = build_agent(tmp_path)
-    successful_agent.tools.registry["run_shell"]["run"] = (
-        lambda _args: ToolRunnerResult("exit_code: 99")
-    )
-
-    successful = successful_agent.tools.execute(
-        ToolCall("run_shell", {"command": "true", "timeout_seconds": 20}, "call_success")
-    )
-
-    assert successful.status == "success"
-    assert successful.failure is None
-
-
 def test_tool_outcome_rejects_impossible_execution_states():
     with pytest.raises(ValueError, match="successful outcome must complete"):
         ToolOutcome(
@@ -486,44 +457,6 @@ def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path
     ) == "alpha\n"
 
 
-def test_memory_write_is_audited_as_control_effect_with_runtime_provenance(tmp_path):
-    agent = build_agent(tmp_path)
-    run_log = start_run(agent, run_id="run_memory", goal="Remember")
-    call = ToolCall(
-        "memory_store",
-        {
-            "action": "create",
-            "filename": "project_release_command.md",
-            "name": "Release command",
-            "description": "Stable command used before release.",
-            "memory_type": "project",
-            "content": "Run `python -m pytest -q`.",
-            "why": "The user explicitly requested this convention.",
-            "how_to_apply": "Run it before release.",
-            "expires_at": "",
-        },
-        "call_memory",
-    )
-    source = agent.apply_run_event(run_log.append_tool_call(call))
-
-    outcome = agent.tools.execute(call)
-
-    card = agent.dependencies.project_memory.recall("project_release_command.md")
-    assert outcome.status == "success"
-    assert outcome.side_effect_state == "changed"
-    assert outcome.effect_scope == "project_memory"
-    assert ".pico/memory/cards/project_release_command.md" in outcome.affected_paths
-    assert agent.run.evidence.changed_paths == []
-    assert (
-        ".pico/memory/cards/project_release_command.md"
-        in agent.run.evidence.effects[-1]["affected_paths"]
-    )
-    assert agent.run.evidence.effects[-1]["effect_scope"] == "project_memory"
-    assert source.call_id == call.call_id
-    assert card.source_run_id == "run_memory"
-    assert card.source_tool_call_id == call.call_id
-
-
 def test_successful_identical_observation_is_allowed(tmp_path):
     agent = build_agent(tmp_path)
     args = {"path": "README.md", "start_line": 1, "end_line": 1}
@@ -562,75 +495,6 @@ def test_repeated_read_remains_allowed_across_workspace_change(tmp_path):
     assert first.status == "success"
     assert changed.status == "success"
     assert repeated.status == "success"
-
-
-def test_workspace_wide_observation_can_repeat_without_workspace_change(tmp_path):
-    agent = build_agent(tmp_path)
-    executions = []
-    agent.tools.registry["run_shell"]["run"] = lambda _args: (
-        executions.append(1) or ToolRunnerResult("exit_code: 0")
-    )
-    shell_args = {"command": "true", "timeout_seconds": 20}
-
-    first = agent.tools.execute(ToolCall("run_shell", shell_args, "call_shell_before"))
-    second = agent.tools.execute(ToolCall("run_shell", shell_args, "call_shell_after"))
-
-    assert first.status == "success"
-    assert second.status == "success"
-    assert len(executions) == 2
-
-
-def test_retry_after_wait_error_does_not_block_identical_retries(tmp_path):
-    agent = build_agent(tmp_path)
-    executions = []
-
-    def fail(_args):
-        executions.append(1)
-        return ToolRunnerResult(
-            "command did not report an exit code",
-            failure=FailureInfo(
-                "command_result_missing",
-                "command did not report an exit code",
-                "retry_after_wait",
-            ),
-        )
-
-    agent.tools.registry["run_shell"]["run"] = fail
-    args = {"command": "true", "timeout_seconds": 20}
-
-    first = agent.tools.execute(ToolCall("run_shell", args, "call_shell_1"))
-    second = agent.tools.execute(ToolCall("run_shell", args, "call_shell_2"))
-    third = agent.tools.execute(ToolCall("run_shell", args, "call_shell_3"))
-
-    assert first.status == "error"
-    assert first.correction_action == "wait"
-    assert second.status == "error"
-    assert second.correction_action == "wait"
-    assert third.status == "error"
-    assert third.correction_action == "wait"
-    assert len(executions) == 3
-
-
-def test_retry_after_change_error_does_not_block_identical_retry(tmp_path):
-    agent = build_agent(tmp_path)
-    executions = []
-
-    def fail(_args):
-        executions.append(1)
-        raise RuntimeError("deterministic executor failure")
-
-    agent.tools.registry["run_shell"]["run"] = fail
-    args = {"command": "true", "timeout_seconds": 20}
-
-    first = agent.tools.execute(ToolCall("run_shell", args, "call_change_1"))
-    second = agent.tools.execute(ToolCall("run_shell", args, "call_change_2"))
-
-    assert first.status == "error"
-    assert first.failure.recovery == "retry_after_change"
-    assert first.correction_action == "repair"
-    assert second.status == "error"
-    assert second.correction_action == "repair"
-    assert len(executions) == 2
 
 
 def test_workspace_mutation_forces_prompt_refresh(

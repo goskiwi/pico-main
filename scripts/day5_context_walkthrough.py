@@ -1,4 +1,4 @@
-"""Day 5: separate default context enhancement from Context Pressure."""
+"""Day 5: separate RepoMap context from Context Pressure."""
 
 import json
 import re
@@ -21,8 +21,6 @@ from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 QUERY = "Where is calculate_invoice_total used?"
-MEMORY_FILENAME = "reference_invoice_checks.md"
-MEMORY_LITERAL = "RUN_ONLY_THE_TARGETED_INVOICE_TEST_FIRST"
 SUMMARY_MARKER = "SEMANTIC-SUMMARY-MARKER"
 WORKING_CONSTRAINT = "Prefer the targeted invoice test first"
 WORKING_DECISION = "calculate_invoice_total is called by create_invoice"
@@ -124,16 +122,6 @@ def append_synthetic_historical_transaction(agent, index):
         content=(f"historical fact {index}: " + "invoice evidence " * 220),
     )
     agent.apply_run_event(run_log.append_tool_result(outcome))
-
-
-def call_transaction(agent, call_id):
-    return [
-        event.kind
-        for event in agent.run.run_log.events
-        if (event.kind == "assistant_tool_call" and event.call_id == call_id)
-        or (event.kind == "tool_started" and event.call_id == call_id)
-        or (event.kind == "tool_result" and event.call_id == call_id)
-    ]
 
 
 def untrusted_context(input_text):
@@ -255,18 +243,9 @@ def durable_kind_counts(events):
     }
 
 
-def default_context_experiment(root):
+def repo_map_experiment(root):
     create_repository(root)
     agent = build_agent(root)
-    agent.dependencies.project_memory.store(
-        action="create",
-        filename=MEMORY_FILENAME,
-        name="Invoice verification procedure",
-        description="How invoice changes should be checked.",
-        memory_type="reference",
-        content=MEMORY_LITERAL,
-        source_run_id="bootstrap",
-    )
     run_log = activate(agent, "run_day5_default", QUERY)
 
     prompt, metadata = agent.prompt.build(QUERY)
@@ -274,16 +253,6 @@ def default_context_experiment(root):
     context = untrusted_context(input_text)
     rendered_repo_map = context["repo_map"]
 
-    recall_call = ToolCall(
-        "memory_recall",
-        {"filenames": [MEMORY_FILENAME]},
-        "call_memory_recall",
-    )
-    agent.apply_run_event(run_log.append_tool_call(recall_call))
-    recall_outcome = agent.tools.execute(recall_call)
-    recall_transaction = call_transaction(agent, recall_call.call_id)
-
-    assert agent.dependencies.project_memory is not None
     assert agent.dependencies.repo_map is not None
     assert metadata["compaction"] is None
     assert all(event.kind != "compaction" for event in run_log.events)
@@ -295,25 +264,13 @@ def default_context_experiment(root):
     assert metadata["included_context_sections"] == [
         "workspace",
         "repo_map",
-        "memory_catalog",
     ]
-    assert MEMORY_FILENAME in context["memory_catalog"]
-    assert MEMORY_LITERAL not in context["memory_catalog"]
     assert "calculate_invoice_total" in rendered_repo_map
-    assert MEMORY_LITERAL in recall_outcome.content
-    assert recall_transaction == [
-        "assistant_tool_call",
-        "tool_started",
-        "tool_result",
-    ]
 
     print_section(
-        "A. 默认上下文增强（没有 Context Pressure）",
+        "A. RepoMap 上下文（没有 Context Pressure）",
         {
-            "default_components": {
-                "project_memory": type(agent.dependencies.project_memory).__name__,
-                "repo_map": type(agent.dependencies.repo_map).__name__,
-            },
+            "repo_map": type(agent.dependencies.repo_map).__name__,
             "provider_context_limit_tokens": (
                 agent.config.provider_context_limit_tokens
             ),
@@ -328,17 +285,6 @@ def default_context_experiment(root):
                 ),
             },
             "repo_map_section": rendered_repo_map,
-            "memory": {
-                "catalog_contains_filename": (
-                    MEMORY_FILENAME in context["memory_catalog"]
-                ),
-                "prompt_contains_full_card": (
-                    MEMORY_LITERAL in context["memory_catalog"]
-                ),
-                "recall_transaction": recall_transaction,
-                "recall_status": recall_outcome.status,
-                "recall_contains_full_card": MEMORY_LITERAL in recall_outcome.content,
-            },
         },
     )
 
@@ -576,7 +522,7 @@ def semantic_compaction_experiment(root):
 def main():
     with tempfile.TemporaryDirectory(prefix="pico-day5-") as directory:
         root = Path(directory)
-        default_context_experiment(root / "default")
+        repo_map_experiment(root / "repo-map")
         bounded_fallback_experiment(root / "fallback")
         semantic_compaction_experiment(root / "semantic")
 

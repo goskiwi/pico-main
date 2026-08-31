@@ -1,8 +1,9 @@
-"""Strict, human-readable project memory owned by the Runtime.
+"""Strict, human-readable storage for the optional Project Memory extension.
 
 Markdown topic files are the only durable facts. ``MEMORY.md`` is a generated
-index, never a second source of truth. Models may propose structured changes;
-only this module validates and atomically commits them.
+index, never a second source of truth. Consumers may propose structured changes;
+only this module validates and atomically commits them. Pico does not load this
+extension automatically.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .persistence import atomic_replace_bytes
+from pico.persistence import atomic_replace_bytes
 
 PROJECT_MEMORY_SCHEMA_VERSION = "pico-markdown-project-memory-v5"
 MEMORY_INDEX_SCHEMA_VERSION = "pico-markdown-memory-index"

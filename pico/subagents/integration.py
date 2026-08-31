@@ -1,4 +1,4 @@
-"""Receipt-bound verification and integration of Child patches."""
+"""Explicit verification and integration of one immutable Child patch."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from pathlib import Path
 from ..execution import ExecutionContext
 from ..verification import verify_workspace
 from ..workspace import clip
-from .dag import implementation_order
 from .worktree import (
     GitWorktree,
     GitWorktreeError,
@@ -22,46 +21,43 @@ class PatchIntegrator:
         self.manager = manager
         self.parent = manager.parent
 
-    def verify_record_receipt(self, run_id, record):
+    def _verified_patch(self, run_id, record):
         projection = self.manager._child_projection(run_id, record)
         if projection.status != "completed":
-            raise ValueError(
-                f"subtask child run did not complete: {record.spec.task_id}"
-            )
-        if record.spec.kind == "implement":
-            path = Path(record.patch_path)
-            if not path.is_file():
-                raise ValueError(f"subtask patch is missing: {record.spec.task_id}")
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != record.patch_sha256:
-                raise ValueError(
-                    f"subtask patch digest is invalid: {record.spec.task_id}"
-                )
-        return projection
+            raise ValueError(f"Child Run did not complete: {record.child_id}")
+        path = Path(record.patch_path)
+        if not path.is_file():
+            raise ValueError(f"Child patch is missing: {record.child_id}")
+        patch = path.read_bytes()
+        digest = hashlib.sha256(patch).hexdigest()
+        if digest != record.patch_sha256:
+            raise ValueError(f"Child patch digest is invalid: {record.child_id}")
+        return patch
 
     def _verify_integration(self, worktree):
         command = str(self.parent.config.verification_command or "").strip()
         if not command:
-            raise ValueError("patch integration requires a verification command")
+            raise ValueError("Child integration requires a verification command")
         execution = ExecutionContext.standalone(
             max_seconds=self.parent.config.run_timeout_seconds,
         )
-        started_workspace_mutation_sequence = 0
         verification = verify_workspace(
             root=worktree.path,
             command=command,
-            sandbox=self.parent.dependencies.sandbox_factory(worktree.path),
+            command_runner=(
+                self.parent.dependencies.command_runner_factory(worktree.path)
+            ),
             timeout_seconds=self.parent.config.run_timeout_seconds,
             redact_text=self.parent.redact_text,
             mutation_sequence_provider=lambda: 0,
-            started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
+            started_workspace_mutation_sequence=0,
             changed_paths=worktree.changed_paths(),
             execution_context=execution,
         )
         if not verification or verification["status"] != "passed":
             detail = str((verification or {}).get("output", ""))
             raise RuntimeError(
-                "integrated subtask verification failed"
+                "integrated Child verification failed"
                 + (f": {clip(detail, 2000)}" if detail else "")
             )
         return verification
@@ -72,72 +68,51 @@ class PatchIntegrator:
         except GitWorktreeError as exc:
             raise ValueError(f"parent workspace changed {phase}") from exc
         if current != base_sha:
-            raise ValueError(f"parent workspace changed {phase}")
+            raise ValueError(f"parent base changed {phase}")
 
-    def apply(self, task_ids):
+    def integrate_child(self, child_id):
         run_id = self.manager._parent_run_id()
-        records = self.manager._records(run_id)
-        for task_id in task_ids:
-            if task_id not in records:
-                raise ValueError(f"unknown subtask: {task_id}")
-            if records[task_id].spec.kind != "implement":
-                raise ValueError(f"subtask is not an implementation: {task_id}")
-        order = implementation_order(records, tuple(task_ids))
-        selected = [records[task_id] for task_id in order]
-        if any(record.status != "completed" for record in selected):
-            raise ValueError("all implementation subtasks must be completed")
-        if any(record.applied for record in selected):
-            raise ValueError("implementation subtask was already integrated")
-        for record in selected:
-            self.verify_record_receipt(run_id, record)
-        base_shas = {record.base_sha for record in selected}
-        if len(base_shas) != 1:
-            raise ValueError("implementation patches do not share one base revision")
-        base_sha = next(iter(base_shas))
-        outstanding = {
-            task_id
-            for task_id, record in records.items()
-            if record.spec.kind == "implement"
-            and record.base_sha == base_sha
-            and record.status == "completed"
-            and not record.applied
-        }
-        if set(order) != outstanding:
-            raise ValueError(
-                "apply all completed patches together: "
-                + ", ".join(sorted(outstanding))
-            )
-        self._require_parent_base(base_sha, "after implementation delegation")
+        record = self.manager._record(run_id, child_id)
+        if record.spec.role != "implement":
+            raise ValueError(f"Child is not an implementation: {child_id}")
+        if record.status != "completed":
+            raise ValueError(f"Child is not completed: {child_id}")
+        if record.integrated:
+            raise ValueError(f"Child patch is already integrated: {child_id}")
+        patch = self._verified_patch(run_id, record)
+        self._require_parent_base(record.base_sha, "after Child delegation")
 
-        integration = GitWorktree(self.parent.workspace.root, base_sha, "integration")
+        integration = GitWorktree(
+            self.parent.workspace.root,
+            record.base_sha,
+            "integration-" + record.child_id,
+        )
         try:
             integration.create()
-            for record in selected:
-                if not record.patch_path:
-                    raise ValueError(
-                        f"implementation subtask has no patch: {record.spec.task_id}"
-                    )
-                integration.apply_patch(Path(record.patch_path).read_bytes())
+            integration.apply_patch(patch)
+            changed_paths = integration.changed_paths()
+            if changed_paths != record.changed_paths:
+                raise ValueError("integrated paths do not match the Child receipt")
             verification = self._verify_integration(integration)
-            aggregate = integration.patch()
-            if not aggregate:
-                raise ValueError("integrated subtasks produced no aggregate patch")
-            self._require_parent_base(base_sha, "during patch verification")
-            apply_patch(self.parent.workspace.root, aggregate)
+            verified_paths = integration.changed_paths()
+            verified_patch = integration.patch()
+            if verified_paths != record.changed_paths:
+                raise ValueError("verification changed paths outside the Child receipt")
+            if hashlib.sha256(verified_patch).hexdigest() != record.patch_sha256:
+                raise ValueError("verification changed the immutable Child patch")
+            self._require_parent_base(record.base_sha, "during patch verification")
+            apply_patch(self.parent.workspace.root, patch)
         finally:
             integration.cleanup()
 
-        for record in selected:
-            record.applied = True
-            handle = self.manager._release_worktree(run_id, record.spec.task_id)
-            if handle is not None:
-                handle.cleanup()
+        record.integrated = True
+        handle = self.manager._release_worktree(run_id, record.child_id)
+        if handle is not None:
+            handle.cleanup()
         return {
-            "status": "applied",
-            "task_ids": list(order),
-            "base_sha": base_sha,
-            "changed_paths": sorted(
-                {path for record in selected for path in record.changed_paths}
-            ),
+            "status": "integrated",
+            "child_id": record.child_id,
+            "base_sha": record.base_sha,
+            "changed_paths": list(record.changed_paths),
             "verification": verification,
         }
