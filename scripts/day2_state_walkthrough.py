@@ -1,4 +1,4 @@
-"""Day 2: inspect Run Log v17 facts, Projection replay, and safe resume.
+"""Day 2: inspect Run Log facts, Projection replay, and safe resume.
 
 The three experiments keep separate questions separate:
 
@@ -23,7 +23,7 @@ from pico import (
 )
 from pico.contracts import ToolOutcome
 from pico.run_lifecycle import RunLifecycle
-from pico.run_log import RUN_LOG_SCHEMA_VERSION, replay_events
+from pico.run_log import replay_events
 
 
 def print_section(title, value):
@@ -109,9 +109,6 @@ def fact_projection_experiment(root):
         if value["kind"] == "tool_result"
         and value["payload"]["outcome"]["tool_name"] == "read_file"
     )
-    assert {value["schema_version"] for value in raw_lines} == {
-        RUN_LOG_SCHEMA_VERSION
-    }
     assert set(raw_result["payload"]) == {"outcome"}
     assert "tool_call_id" not in raw_result["payload"]
     assert "tool_name" not in raw_result["payload"]
@@ -146,9 +143,8 @@ def fact_projection_experiment(root):
     }
 
     print_section(
-        "A1. Run Log v17 保存的是 Fact",
+        "A1. Run Log 保存的是 Fact",
         {
-            "schema_version": RUN_LOG_SCHEMA_VERSION,
             "events_path": f".pico/runs/{run_id}/events.jsonl",
             "event_sequence": [
                 {

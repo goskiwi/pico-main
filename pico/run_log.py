@@ -11,7 +11,6 @@ from .delivery import FinalDiffDescriptor
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v17"
 COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
@@ -370,7 +369,6 @@ class RunEvent:
 
     def to_dict(self):
         return {
-            "schema_version": RUN_LOG_SCHEMA_VERSION,
             "event_id": self.event_id,
             "sequence": self.sequence,
             "run_id": self.run_id,
@@ -384,7 +382,6 @@ class RunEvent:
     @classmethod
     def from_dict(cls, value):
         expected = {
-            "schema_version",
             "event_id",
             "sequence",
             "run_id",
@@ -394,11 +391,7 @@ class RunEvent:
             "timestamp",
             "payload",
         }
-        if (
-            not isinstance(value, dict)
-            or set(value) != expected
-            or value.get("schema_version") != RUN_LOG_SCHEMA_VERSION
-        ):
+        if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid Run event")
         return cls(
             event_id=str(value["event_id"]),

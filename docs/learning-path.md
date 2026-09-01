@@ -141,10 +141,10 @@ Subagent 实现。
 
 ### Day 2：State、Fact 与 Projection
 
-- 阅读 TaskContract、`pico/working_state.py` 的六字段 add/remove WorkingState、RunLog v17 和
+- 阅读 TaskContract、`pico/working_state.py` 的六字段 add/remove WorkingState、RunLog 和
   RunProjection；交互 CLI 使用 `/state` 查看这一当前 Run 投影。
 - 运行 `scripts/day2_state_walkthrough.py` 的三段实验：
-  1. 查看原始 v17 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
+  1. 查看原始 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
   2. Replay 单 Call 前缀，并观察 ordered Observation Batch 的 Pending Call IDs；
   3. 用新 `Pico` 加载无副作用的中断调用，在下一次 `ask()` 自动对账且不盲目重放 Runner。
 - `reload_required` 是未处理异常后的进程内缓存可信度标记。Day 6 先学习真实 Crash Resume
@@ -174,7 +174,7 @@ Subagent 实现。
 - 阅读步骤 7～10：ToolRuntime、私有 tool-execution helpers、ToolContext、文件 Runner 和 Mutation Service。
 - 运行 `scripts/day4_tool_boundary_walkthrough.py`，跟踪 `alpha -> agent`，同时保留外部追加的
   `external` 内容。
-- 对照输出解释 stale Revision、v17 ToolOutcome、Preimage、PathTransition、Unified Diff，以及
+- 对照输出解释 stale Revision、ToolOutcome、Preimage、PathTransition、Unified Diff，以及
   为什么 Observation 可并行而 Edit/Approval 仍必须独占一轮。
 
 完成标准：能说明模型为什么不能直接写文件。

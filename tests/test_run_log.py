@@ -142,7 +142,7 @@ def test_projection_tracks_one_pending_tool_transaction(tmp_path):
         )
 
 
-def test_v17_observation_batch_round_trips_in_original_order(tmp_path):
+def test_observation_batch_round_trips_in_original_order(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(TaskContract("inspect", **READ_TASK))
@@ -202,7 +202,7 @@ def test_v17_observation_batch_round_trips_in_original_order(tmp_path):
         },
     ],
 )
-def test_v17_observation_batch_payload_is_strict(payload):
+def test_observation_batch_payload_is_strict(payload):
     with pytest.raises(ValueError):
         RunEvent(
             "event",
@@ -216,7 +216,7 @@ def test_v17_observation_batch_payload_is_strict(payload):
         )
 
 
-def test_v17_observation_batch_rejects_out_of_order_results(tmp_path):
+def test_observation_batch_rejects_out_of_order_results(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(TaskContract("inspect", **READ_TASK))
@@ -268,23 +268,9 @@ def test_run_log_repairs_only_incomplete_tail(tmp_path):
         store.read_events("tail")
 
 
-def test_v17_rejects_legacy_payload_shapes():
+def test_rejects_legacy_payload_shapes():
     with pytest.raises(ValueError, match="invalid user_message payload"):
         RunEvent("e", 1, "run", "task", "session", "user_message", "now", {"content": "old"})
-
-    value = RunEvent(
-        "e",
-        1,
-        "run",
-        "task",
-        "session",
-        "user_message",
-        "now",
-        {"contract": TaskContract("inspect", **READ_TASK).to_dict()},
-    ).to_dict()
-    value["schema_version"] = "run-log-v16"
-    with pytest.raises(ValueError, match="invalid Run event"):
-        RunEvent.from_dict(value)
 
     with pytest.raises(ValueError, match="requires a call id"):
         RunEvent(

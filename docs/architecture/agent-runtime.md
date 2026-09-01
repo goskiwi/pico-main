@@ -12,7 +12,7 @@ CLI build_agent
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
   -> new: isolated TaskIntentClassifier returns read_only / modify / modify_optional
   -> new: RunLifecycle derives and appends the TaskContract before the Session pointer
-  -> resume: RunStore.load_run reads once, validates Run Log v17 / terminal Artifact,
+  -> resume: RunStore.load_run reads once, validates the Run Log / terminal Artifact,
      and returns that Event snapshot with its Projection
   -> resume: persisted TaskContract is reused without another classification call
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay

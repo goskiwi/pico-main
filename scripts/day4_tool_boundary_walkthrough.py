@@ -248,7 +248,7 @@ def main():
         assert not (denied_root / "created.txt").exists()
 
         print_section(
-            "Run Log v17 与安全 Edit",
+            "Run Log 与安全 Edit",
             {
                 "answer": run_outcome.answer,
                 "final_content": target.read_text(encoding="utf-8"),
