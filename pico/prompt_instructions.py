@@ -1,13 +1,11 @@
 """Stable Responses instructions construction."""
 
-import hashlib
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
 class PromptInstructions:
     text: str
-    content_hash: str
 
 
 def build_prompt_instructions():
@@ -33,6 +31,7 @@ def build_prompt_instructions():
             (
                 "The Responses tools field declares schemas; the current allowed tool choice and Runtime policy define what may actually be called.",
                 "Use exactly one provided function per turn.",
+                "Use run_command only for diagnostics expected not to modify repository files; mutating shell commands are not supported by this Runtime.",
             ),
         ),
         (
@@ -56,7 +55,4 @@ def build_prompt_instructions():
         f"{title}:\n" + "\n".join(f"- {rule}" for rule in rules)
         for title, rules in sections
     )
-    return PromptInstructions(
-        text=text,
-        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-    )
+    return PromptInstructions(text=text)

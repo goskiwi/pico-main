@@ -32,20 +32,8 @@ tmp/
 .pico/
 .mini-pico/
 artifacts/*
-!artifacts/context-governance.json
-!artifacts/harness-regression.json
-!artifacts/project-memory.json
-!artifacts/repo-map.json
-!artifacts/triage-evaluation.json
-!artifacts/triage-click-real.json
-!artifacts/triage-click-real.patch
-!artifacts/triage-packaging-real.json
-!artifacts/triage-packaging-real.patch
-!artifacts/triage-urllib3-real.json
-!artifacts/triage-urllib3-real.patch
 !artifacts/real-compaction.json
 !artifacts/real-compaction.patch
-!artifacts/semantic-compaction-ab.json
 release/
 readme_intro_locked/
 output/
@@ -67,8 +55,6 @@ docs/*
 !docs/review-pack/**
 !docs/architecture/
 !docs/architecture/**
-!docs/metrics/
-!docs/metrics/**
 
 # OS files
 .DS_Store

@@ -35,16 +35,20 @@ def run_active(agent, call):
         agent.run.run_log = run_log
         agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     agent.apply_run_event(run_log.append_tool_call(call))
-    return agent.tools.execute(call)
+    return agent.tools.execute_pending(call.call_id)
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.write_text("secret")
     agent = build_agent(tmp_path)
-    assert agent.tools.execute("read_file", {"path": "../" + outside.name}).status == "rejected"
+    assert agent.tools.execute_manual(
+        "read_file", {"path": "../" + outside.name}
+    ).status == "rejected"
     (tmp_path / "link").symlink_to(outside)
-    assert agent.tools.execute("read_file", {"path": "link"}).status == "rejected"
+    assert agent.tools.execute_manual("read_file", {"path": "link"}).status == (
+        "rejected"
+    )
 
 
 def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
@@ -52,7 +56,7 @@ def test_file_tools_reject_git_and_pico_internal_paths(tmp_path):
     (tmp_path / ".git" / "config").write_text("internal\n", encoding="utf-8")
     agent = build_agent(tmp_path)
 
-    read_git = agent.tools.execute(
+    read_git = agent.tools.execute_manual(
         "read_file",
         {"path": ".git/config", "start_line": 1, "end_line": 10},
     )

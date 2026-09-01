@@ -19,11 +19,17 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .command_runner import shell_argv
 from .contracts import (
     TOOL_ARTIFACT_ID_PATTERN,
     FailureInfo,
     ToolFailureError,
     ToolRunnerResult,
+)
+from .verification import (
+    RepositorySnapshotError,
+    capture_repository_state,
+    repository_state_changes,
 )
 from .working_state import normalize_working_update
 from .workspace import IGNORED_PATH_NAMES
@@ -35,6 +41,7 @@ SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
+RUN_COMMAND_TIMEOUT_SECONDS = 120
 
 
 class ToolArgs(BaseModel):
@@ -60,6 +67,10 @@ class ReadArtifactArgs(ToolArgs):
 class SearchArgs(ToolArgs):
     pattern: str = Field(min_length=1)
     path: str = "."
+
+
+class RunCommandArgs(ToolArgs):
+    command: str = Field(min_length=1)
 
 
 class WriteFileArgs(ToolArgs):
@@ -116,6 +127,17 @@ BASE_TOOL_SPECS = {
         "risky": False,
         "manual_observation": True,
         "description": "Search the workspace with rg or a simple fallback.",
+    },
+    "run_command": {
+        "args_schema": RunCommandArgs,
+        "risky": True,
+        "workspace_mutating": True,
+        "description": (
+            "Run one user-approved diagnostic command from the trusted workspace root. "
+            "Use it for tests, linters, type checks, git status/diff, and reproductions. "
+            "It is host execution, not a sandbox, and must not modify repository files. "
+            "Mutating shell commands are not supported by this Runtime."
+        ),
     },
     "write_file": {
         "args_schema": WriteFileArgs,
@@ -303,11 +325,21 @@ def _validate_working_state(context, args):
     return normalized
 
 
+def _validate_run_command(context, args):
+    command = str(args["command"]).strip()
+    if not command:
+        raise ValueError("run_command requires a non-blank command")
+    if context.command_runner is None:
+        raise RuntimeError("run_command requires a CommandRunner")
+    return {"command": command}
+
+
 _TOOL_VALIDATORS = {
     "list_files": _validate_list_files,
     "read_file": _validate_read_file,
     "read_artifact": _validate_read_artifact,
     "search": _validate_search,
+    "run_command": _validate_run_command,
     "write_file": _validate_write_file,
     "edit_file": _validate_edit_file,
     "update_working_state": _validate_working_state,
@@ -691,11 +723,95 @@ def tool_update_working_state(_context, _args):
     return ToolRunnerResult("working state update accepted")
 
 
+def tool_run_command(context, args):
+    command = str(args["command"])
+    try:
+        before = capture_repository_state(context.workspace_root)
+    except RepositorySnapshotError as exc:
+        return ToolRunnerResult(
+            f"command not started: {exc}",
+            structured={"command": command, "repository_changes": []},
+            failure=FailureInfo(
+                "repository_snapshot_unavailable",
+                str(exc),
+                "retry_after_change",
+            ),
+        )
+    result = context.command_runner.run(
+        shell_argv(command),
+        cwd=context.workspace_root,
+        timeout=RUN_COMMAND_TIMEOUT_SECONDS,
+        env={},
+        execution_context=context.execution_context(),
+    )
+    snapshot_failure = None
+    try:
+        after = capture_repository_state(context.workspace_root)
+        changes = repository_state_changes(before, after)
+    except RepositorySnapshotError as exc:
+        changes = ()
+        snapshot_failure = exc
+    output = "\n".join(
+        part
+        for part in (
+            f"command: {command}",
+            f"exit_code: {result.returncode}",
+            result.stdout.strip(),
+            result.stderr.strip(),
+            f"stop_reason: {result.stop_reason}" if result.stop_reason else "",
+        )
+        if part
+    )
+    failure = None
+    effect_scope = "none"
+    if snapshot_failure is not None:
+        effect_scope = "workspace"
+        failure = FailureInfo(
+            "repository_snapshot_unavailable",
+            str(snapshot_failure),
+            "user_action_required",
+        )
+    elif changes:
+        effect_scope = "workspace"
+        failure = FailureInfo(
+            "command_modified_repository",
+            "diagnostic command changed repository-visible state without "
+            "a trustworthy Run-start preimage: "
+            + ", ".join(changes[:20]),
+            "user_action_required",
+        )
+    elif result.infrastructure_error:
+        failure = FailureInfo(
+            "command_infrastructure_error",
+            result.stderr or "command could not start",
+            "retry_after_change",
+        )
+    elif result.returncode != 0 or result.stop_reason:
+        failure = FailureInfo(
+            "command_failed",
+            result.stop_reason or f"command exited with {result.returncode}",
+            "retry_after_change",
+        )
+    return ToolRunnerResult(
+        output,
+        structured={
+            "command": command,
+            "exit_code": result.returncode,
+            "stop_reason": result.stop_reason,
+            "output_limited": result.output_limited,
+            "repository_changes": list(changes[:20]),
+        },
+        effect_scope=effect_scope,
+        failure=failure,
+    )
+
+
 _TOOL_RUNNERS = {
     "list_files": tool_list_files,
     "read_file": tool_read_file,
     "read_artifact": tool_read_artifact,
     "search": tool_search,
+    "run_command": tool_run_command,
     "write_file": tool_write_file,
     "edit_file": tool_edit_file,
     "update_working_state": tool_update_working_state,

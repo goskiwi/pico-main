@@ -150,8 +150,8 @@ def main():
             for event in events
             if event.kind == "verification_result"
         ]
-        turn_reuse = [
-            event.payload["prompt_reused"]
+        provider_usage = [
+            dict(event.payload)
             for event in events
             if event.kind == "turn_metrics"
         ]
@@ -182,7 +182,6 @@ def main():
             verification_events[-1]["finished_changed_path_states"],
         ) is not None
         assert len(command_runner.calls) == 1
-        assert "source_tool_call_id" not in verification_events[0]
         assert "calculator.py" in model.prompts[0]
         assert diff_descriptor["size_bytes"] == outcome.final_diff.diff_bytes
         assert "-    return left - right" in final_diff_text
@@ -224,7 +223,7 @@ def main():
                     "final_diff": outcome.final_diff == replayed.final_diff,
                     "metrics": outcome.metrics == replayed.metrics.to_dict(),
                 },
-                "prompt_reused_by_turn": turn_reuse,
+                "provider_usage_by_turn": provider_usage,
                 "repo_map_in_initial_prompt": "calculator.py"
                 in model.prompts[0],
                 "changed_paths_from_evidence": evidence.changed_paths,

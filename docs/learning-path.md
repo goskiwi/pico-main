@@ -6,7 +6,7 @@
 顺序阅读，不改变任何 Runtime 默认行为。
 
 RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非空才进入 Prompt”的有界
-仓库导航，到 Day 5 再阅读内部实现。Semantic Compaction、Subagents 和 Triage 也都不是
+仓库导航，到 Day 5 再阅读内部实现。Semantic Compaction 和 Subagents 也都不是
 理解一次普通单 Agent 请求的前置条件。
 
 ## 15 分钟核心路径
@@ -15,7 +15,7 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 
 1. `TaskIntentClassifier.classify()`：自然语言只生成内部 Intent，不授予工具权限；Resume 跳过分类。
 2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支。
-3. `AgentLoop._handle_tool_action()` → `ToolRuntime.execute()`：Call 由 Loop 接受并持久化，
+3. `AgentLoop._handle_tool_action()` → `ToolRuntime.execute_pending()`：Call 由 Loop 接受并持久化，
    Started/Result 由 ToolRuntime 持久化。
 4. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
    单 Pending 与 Crash recovery；第一遍在 `compact()` 前停止，不读 History projection。
@@ -24,7 +24,7 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
    Verification 的顺序理解 Runtime 完成权。
 
 到这里已经能完成面试主线。只有被追问 Child delegation 时才运行 Day 6；RepoMap、Provider
-cache、Semantic Compaction、Triage 和完整 Evals 都留到后续章节。
+Adapter 细节和 Semantic Compaction 都留到后续章节。
 
 ## 六个核心 Ownership 文件
 
@@ -55,8 +55,9 @@ uv run pico \
   "Fix calculator.add so the existing addition test passes"
 ```
 
-真实 Provider 需要模型配置。模型没有通用 `run_shell`；示例中的固定 Verification 命令会
-以当前用户权限在本机运行，因此只应对可信仓库使用。未知代码应先放进外部 CI、VM 或容器。
+真实 Provider 需要模型配置。模型可以申请默认审批的诊断型 `run_command`；固定 Verification
+仍由 CompletionController 拥有。两者都以当前用户权限在本机运行，因此只应对可信仓库使用。
+未知代码应先放进外部 CI、VM 或容器。
 只想看确定性本地演示时，运行：
 
 ```bash
@@ -75,10 +76,10 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
 | 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先用隔离结构化分类生成 TaskContract；恢复 Run 复用原 Contract，并在 Provider 前持久化 `user_guidance` |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction |
-| 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；PromptBuilder 内部按需组装最小 Runtime policy、仓库定位、当前状态、历史和任务请求；原生 Schema 进 `tools`，支持时用 `allowed_tools` 动态限名 |
+| 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；动态 `input` 按 Runtime policy、Task Request、非空有界 Context 组装，仅恢复时追加不同的 latest request；当前允许的原生 Schema 直接进入 `tools` |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 只有恰好一个带 `call_id` 的 Function Call 才形成 Provider Pending Call |
 | 7 | `AgentLoop._handle_tool_action` | Tool 执行前先持久化 `assistant_tool_call` Fact |
-| 8 | `ToolRuntime.execute` | 按 call ID 取回持久化 ToolCall，完成准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result` |
+| 8 | `ToolRuntime.execute_pending` | 只接收 call ID，取回持久化 ToolCall，完成准入、Approval、影响路径、Preimage、`tool_started`、Runner、ToolOutcome、`tool_result`；无 Run 的人工观察走 `execute_manual` |
 | 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换；失败用相近代码、匹配行号和建议读取参数驱动重读修正 |
 | 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
@@ -112,12 +113,13 @@ Projection 的委托。Live 路径只调用 `apply_event`。
 | 默认上下文增强 | 非空 RepoMap 自动提供有界仓库导航 | 功能始终启用；空投影不发送；内部实现第二遍再学 |
 | Context Pressure | Token Budget、Provider Session Rotation、Semantic Compaction、失败后的事务级 Fallback | 仅超长任务需要 |
 | Orchestration Appendix | 单个 Explore/Implement Child、Git Worktree、显式 `integrate_child` | 单 Agent Core 完成后选学 |
-| Applications | Coding Workflow 的终态 Git Commit、Triage Workflow、Report、真实 Fixture 与 Evals | 最后学习 |
+| Application | Coding Workflow 在成功终态后的可选 Git Commit | 最后学习 |
 
-Semantic Compaction 不是每轮执行：必须已有 Run Log、当前没有 Pending Call，并且本地估算与
-Provider 报告的 Context Token 较大者超过
-`total_budget - max(max_new_tokens, compaction_reserve_tokens)`，才进入准备分支；失败时只使用
-完整 Tool 事务组成的 bounded fallback。
+Semantic Compaction 不是每轮执行：必须已有 Run Log、当前没有 Pending Call，并且新 Prompt
+的本地实际组装量或 Provider 上一轮报告的 `input_tokens` 达到
+`provider_context_limit_tokens - compaction_reserve_tokens`，才进入准备分支。AgentLoop 不再用
+output、Tool Result 与 `max_new_tokens` 预测下一轮大小；缺少 Provider usage 时只依赖本地新
+Prompt 计数和真实 typed overflow。失败时使用完整 Tool 事务组成的 bounded fallback。
 
 Subagents 在 CLI 中默认提供，因为 `build_agent()` 会安装 Child Model Client Factory；直接使用
 `Pico(...)` API 时只有显式传入该 Factory 才启用。无论是否启用，普通单 Agent Core 都不依赖
@@ -139,27 +141,25 @@ Subagent 实现。
 
 ### Day 2：State、Fact 与 Projection
 
-- 阅读 TaskContract、`pico/working_state.py` 的六字段 add/remove WorkingState、RunLog v15 和
+- 阅读 TaskContract、`pico/working_state.py` 的六字段 add/remove WorkingState、RunLog v16 和
   RunProjection；交互 CLI 使用 `/state` 查看这一当前 Run 投影。
 - 运行 `scripts/day2_state_walkthrough.py` 的三段实验：
-  1. 查看原始 v15 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
+  1. 查看原始 v16 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
   2. Replay 合法 Event 前缀，观察单 Pending Call 在 Call、Started、Result 之间的变化；
   3. 用新 `Pico` 加载无副作用的中断调用，在下一次 `ask()` 自动对账且不盲目重放 Runner。
 - `reload_required` 是未处理异常后的进程内缓存可信度标记。Day 6 先学习真实 Crash Resume
-  和 Active Reset；需要故障注入细节时，再阅读 `tests/test_resume_runtime.py` 中的 ambiguous
-  append / transient reload 回归。
+  和 Active Reset；需要故障注入细节时，再阅读 `tests/test_resume_runtime.py` 中保留的
+  ambiguous append 与 Call/Started 中断对账回归。
 
 完成标准：能解释 Fact 与 Projection 的区别，以及为什么不保存第二份 Task 快照。
 
 ### Day 3：Prompt 与 Provider
 
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
-- 区分 `declared_tools / allowed_tool_names / wire_tools`：支持 `allowed_tools` 的 Provider
-  在普通阶段接收稳定完整 native schemas，只动态改变允许名称；final-only 边界会物理缩成
-  `submit_final` 并重建 Session。Prompt Token 预算按真实 wire surface 计算。
-- 首轮动态 Input 只保留 Runtime policy、非空的有界 Context 与 Task Request；普通 Tool 续接
-  只追加 Call/Output，不重发另一份 Workspace/History。观察 `prompt_cache_key`、
-  `cached_tokens` 与 uncached input，而不是只凭请求相似猜缓存命中。
+- 每轮只向 Provider 发送当前 TaskContract 与工具预算允许的 native schemas；final-only 边界
+  缩成 `submit_final` 并重建 Session。Prompt Token 预算按这个真实表面计算。
+- 首轮动态 Input 按 Runtime policy、Task Request、非空的有界 Context 排列；普通 Tool 续接
+  只追加 Call/Output，不重发另一份 Workspace/History。
 - 理解 Provider Adapter 如何把结构化 Context Overflow 转成唯一的
   `ProviderContextOverflow`；AgentLoop 不读取厂商错误文案，只允许一次重建重试。
 - 运行 `scripts/day3_prompt_provider_walkthrough.py` 的四段实验：最小三通道与稳定 Tool
@@ -174,7 +174,7 @@ Subagent 实现。
 - 阅读步骤 7～10：ToolRuntime、私有 tool-execution helpers、ToolContext、文件 Runner 和 Mutation Service。
 - 运行 `scripts/day4_tool_boundary_walkthrough.py`，跟踪 `alpha -> agent`，同时保留外部追加的
   `external` 内容。
-- 对照输出解释 stale Revision、v15 ToolOutcome、Preimage、PathTransition、Unified Diff，以及
+- 对照输出解释 stale Revision、v16 ToolOutcome、Preimage、PathTransition、Unified Diff，以及
   Approval Deny 为什么只有 Call/Result 而没有 Started。
 
 完成标准：能说明模型为什么不能直接写文件。
@@ -215,11 +215,11 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
 ### Day 7：Capstone 与面试表达
 
 - 运行 `scripts/day7_runtime_capstone.py`，把前六天串成一条完整请求。
-- 直接核对 `RunOutcome.to_dict()`、Final Diff Artifact、Metrics 与 `RunStore.replay()` 的终态
+- 直接核对 `RunOutcome.to_dict()` 中的 changed paths、Final Diff、Metrics 与 `RunStore.replay()` 的终态
   一致性。
 - 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和
   10 分钟三种表达。
-- 最后再进入 **Applications**：先看 `applications/coding.py` 如何在终态后只提交本 Run 的干净路径，再看 `applications/triage/workflow.py`、`report.py` 与相关 Evals。
+- 最后再进入 **Application**：看 `applications/coding.py` 如何在终态后只提交本 Run 的干净路径；它不参与 Core 的恢复与完成判断。
 
 完成标准：不用枚举所有类，也能先讲清 Core；面试官追问时再进入 Enhancement、Pressure、
 Appendix 或 Application。
@@ -229,6 +229,6 @@ Appendix 或 Application。
 - `repo_map.py` 的 Tree-sitter 图构建与 PageRank 细节；
 - `compaction_summary.py` 的 Summary Schema；
 - `pico/subagents/` 的 Child receipt、Worktree 和显式集成；
-- `applications/`、`evals/` 与真实 OSS Fixture。
+- `applications/coding.py` 的终态 Git Commit 和真实 Compaction 评测脚本。
 
 跳过这些实现不等于关闭功能。它们仍按当前 Runtime 默认与条件路径正常工作。

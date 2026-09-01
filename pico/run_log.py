@@ -11,7 +11,7 @@ from .delivery import FinalDiffDescriptor
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v15"
+RUN_LOG_SCHEMA_VERSION = "run-log-v16"
 COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
@@ -74,7 +74,6 @@ def _validate_tool_started_payload(kind, payload):
         {
             "tool_call_id",
             "tool_name",
-            "risky",
             "effect_scope",
             "potential_effects",
         },
@@ -83,9 +82,7 @@ def _validate_tool_started_payload(kind, payload):
         raise ValueError("tool_started requires call and tool names")
     if payload["effect_scope"] not in EFFECT_SCOPES:
         raise ValueError("tool_started has invalid effect scope")
-    if not isinstance(payload["risky"], bool) or not isinstance(
-        payload["potential_effects"], list
-    ):
+    if not isinstance(payload["potential_effects"], list):
         raise TypeError("tool_started has invalid field types")
     for effect in payload["potential_effects"]:
         if not isinstance(effect, dict) or set(effect) != {
@@ -155,7 +152,6 @@ def _validate_verification_payload(kind, payload):
             "command",
             "exit_code",
             "output",
-            "source_tool_call_id",
         },
     )
     if payload["status"] not in {"passed", "failed", "infrastructure_error"}:
@@ -430,7 +426,6 @@ class RunLog:
         self.task_id = str(task_id)
         self.session_id = str(session_id)
         self.store = store
-        self.generation = 1
         self._events = list(events)
         self._protocol = validate_run_events(self._events)
         compactions = [entry for entry in self._events if entry.kind == "compaction"]
@@ -487,7 +482,6 @@ class RunLog:
         self,
         call,
         *,
-        risky,
         effect_scope,
         potential_effects,
     ):
@@ -496,7 +490,6 @@ class RunLog:
             {
                 "tool_call_id": call.call_id,
                 "tool_name": call.name,
-                "risky": bool(risky),
                 "effect_scope": str(effect_scope),
                 "potential_effects": list(potential_effects),
             },

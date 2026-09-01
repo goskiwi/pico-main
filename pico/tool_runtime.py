@@ -164,7 +164,9 @@ class ToolRuntime:
             working_state_provider=lambda: (
                 runtime.run.task.working if runtime.run.task is not None else None
             ),
+            execution_context_provider=lambda: runtime.run.execution_context,
             mutation_service=runtime.dependencies.mutations,
+            command_runner=runtime.dependencies.command_runner,
         )
 
     def approve(self, name, args):
@@ -181,55 +183,20 @@ class ToolRuntime:
             return False
         return answer.strip().lower() in {"y", "yes"}
 
-    @staticmethod
-    def _run_boundary_reason(agent, call_id):
-        if agent.run.reload_required or agent.run.resumable:
-            return "a resumable Run must be resumed or reset before manual tools"
-        task = agent.run.task
-        if task is None:
-            return ""
-        run_log = agent.run.run_log
-        if run_log is None:
-            return "active Run tool execution requires its Run Log"
-        if agent.run.projection.terminal:
-            return "terminal Run cannot execute additional tools"
-        pending = run_log.pending_call_id()
-        if not pending:
-            return "active Run tools require a persisted assistant_tool_call"
-        if pending != str(call_id):
-            return "tool execution does not match the pending Run call"
-        return ""
-
-    def _reject_out_of_protocol_call(self, call):
-        reason = self._run_boundary_reason(self.runtime, call.call_id)
-        if not reason:
-            return None
-        return self._rejected(
-            call,
-            "run_protocol_violation",
-            reason,
-            "no_retry",
-            record=False,
-        )
-
-    def _canonical_call(self, submitted):
-        """Resolve active execution from the durable pending ToolCall fact.
-
-        The caller supplies only the identity of the pending operation.  Tool
-        name and arguments are owned by the Run Log once assistant_tool_call is
-        accepted, so approval, effect planning, and execution must all use that
-        persisted value.
-        """
-
-        run_log = self.runtime.run.run_log
-        if self.runtime.run.task is None or run_log is None:
-            return submitted
-        persisted = run_log.pending_tool_call()
-        if persisted is None:
+    def _pending_call(self, call_id):
+        runtime = self.runtime
+        if runtime.run.reload_required or runtime.run.resumable:
+            raise RuntimeError("a dormant Run must be resumed before tool execution")
+        if runtime.run.task is None or runtime.run.run_log is None:
+            raise RuntimeError("pending tool execution requires an active Run")
+        if runtime.run.projection.terminal:
+            raise RuntimeError("terminal Run cannot execute additional tools")
+        call = runtime.run.run_log.pending_tool_call()
+        if call is None:
             raise RuntimeError("active Run has no pending ToolCall fact")
-        if persisted.call_id != submitted.call_id:
-            raise RuntimeError("submitted call does not match the pending ToolCall")
-        return persisted
+        if call.call_id != str(call_id):
+            raise RuntimeError("call id does not match the pending ToolCall")
+        return call
 
     def _resolve_tool(self, call):
         tool = self.registry.get(call.name)
@@ -267,7 +234,7 @@ class ToolRuntime:
 
     @classmethod
     def _record_tool_started(
-        cls, agent, call, *, risky, effect_scope, potential_effects
+        cls, agent, call, *, effect_scope, potential_effects
     ):
         run_log = cls._recorded_run_log(agent, call.call_id)
         if run_log is None:
@@ -275,7 +242,6 @@ class ToolRuntime:
         return agent.apply_run_event(
             run_log.append_tool_started(
                 call,
-                risky=risky,
                 effect_scope=effect_scope,
                 potential_effects=potential_effects,
             )
@@ -361,17 +327,32 @@ class ToolRuntime:
             )
         return ToolCall(call.name, args, call.call_id), None
 
-    def execute(self, call_or_name, args=None):
-        call = (
-            call_or_name
-            if isinstance(call_or_name, ToolCall)
-            else ToolCall(str(call_or_name), dict(args or {}))
-        )
+    def execute_pending(self, call_id):
+        return self._execute(self._pending_call(call_id))
+
+    def execute_manual(self, name, args=None):
+        call = ToolCall(str(name), dict(args or {}))
         agent = self.runtime
-        boundary_rejection = self._reject_out_of_protocol_call(call)
-        if boundary_rejection is not None:
-            return boundary_rejection
-        call = self._canonical_call(call)
+        if agent.run.reload_required or agent.run.resumable:
+            return self._rejected(
+                call,
+                "run_protocol_violation",
+                "a dormant Run must be resumed before manual tools",
+                "no_retry",
+                record=False,
+            )
+        if agent.run.task is not None:
+            return self._rejected(
+                call,
+                "run_protocol_violation",
+                "manual tools require no active or terminal Run",
+                "no_retry",
+                record=False,
+            )
+        return self._execute(call)
+
+    def _execute(self, call):
+        agent = self.runtime
         name, args = call.name, call.args
         run_id = _run_id(agent)
         tool, admission_rejection = self._resolve_tool(call)
@@ -387,7 +368,7 @@ class ToolRuntime:
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
-        agent.prompt.refresh()
+        agent.workspace.refresh()
         normalized_repeat_key = repeat_key(run_id, name, args)
         repeated = self._reject_repeated_call(call, normalized_repeat_key)
         if repeated is not None:
@@ -427,7 +408,6 @@ class ToolRuntime:
         self._record_tool_started(
             agent,
             call,
-            risky=bool(tool["risky"]),
             effect_scope=potential_scope,
             potential_effects=[
                 {
@@ -448,6 +428,7 @@ class ToolRuntime:
             status, side_effect, paths = classify_runner_result(
                 failure,
                 execution.affected_paths,
+                execution.effect_scope,
             )
             outcome = self._outcome(
                 call,
@@ -507,7 +488,7 @@ class ToolRuntime:
             outcome.side_effect_state != "none"
             and outcome.effect_scope == "workspace"
         ) or observed_workspace_drift:
-            agent.prompt.refresh(force=True)
+            agent.workspace.refresh(force=True)
         self._record_tool_result(agent, outcome)
         if normalized_repeat_key is not None and outcome.side_effect_state in {
             "partial",

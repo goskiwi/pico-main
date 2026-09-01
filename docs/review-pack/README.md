@@ -6,23 +6,20 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.run_log` / `pico.prompt_builder`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
 - `pico.working_state`: RunLog-projected constraints, decisions and next steps. Goal belongs to TaskContract.
-- `pico.tool_runtime` / `pico.mutations`: staged admission and revision-bound atomic edits; the model has no general-purpose shell Tool.
+- `pico.tool_runtime` / `pico.mutations`: staged admission, revision-bound atomic edits, and one approval-bound diagnostic command.
 - `pico.run_lifecycle` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts without a second recovery-state object.
 - `pico.command_runner` / `pico.verification`: trusted host execution for the one user-fixed Verification command, not a sandbox.
 - `pico.evidence` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: one synchronous Child delegation at a time, read-only explore, Worktree-isolated implement, and explicit receipt-bound integration.
-- `applications.coding`: opt-in post-Completion Git commit restricted to clean Run-changed paths.
-- `evals`: repository-local deterministic Runtime regressions and mechanism evaluations; it is excluded from the installable `pico` package.
+- `applications.coding`: opt-in post-Verification Git commit restricted to clean Run-changed paths.
 - `pico.runtime_*`: explicit Config, Workspace, Session, Run, Tool and Prompt ownership;
   `pico.runtime.Pico` is the small composition root.
 - `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,
   durable Run lifecycle and completion authority have separate owners.
 
-Prompt/Provider review uses three explicit Tool surfaces: complete native `declared_tools`, dynamic
-`allowed_tool_names`, and Token-accounted `wire_tools`. Verified backends can keep complete schemas
-stable and restrict `tool_choice.allowed_tools` during ordinary execution. The final-only boundary
-physically narrows the wire schema to `submit_final` and rebuilds the Provider session; cache evidence
-comes from Provider usage fields.
+Prompt/Provider review uses one current Tool surface derived from TaskContract and the remaining
+Tool budget. That exact schema set is sent to the Provider and charged to the Token budget; the
+final-only boundary narrows it to `submit_final` and rebuilds the Provider session.
 
 The review demo's seven-category Effective Recovery Context is a teaching/observability composition,
 not a seven-section summary. Semantic Compaction generates and persists only Progress and Critical

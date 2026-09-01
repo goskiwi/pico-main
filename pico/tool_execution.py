@@ -137,12 +137,17 @@ def path_transitions(before, after, preimages, paths):
     ]
 
 
-def classify_runner_result(failure, affected_paths):
+def classify_runner_result(failure, affected_paths, effect_scope):
     paths = list(affected_paths)
-    status = "success" if failure is None else ("partial_success" if paths else "error")
+    unknown = failure is not None and not paths and effect_scope != "none"
+    status = (
+        "success"
+        if failure is None
+        else ("partial_success" if paths or unknown else "error")
+    )
     side_effect = (
         "partial"
         if failure is not None and paths
-        else ("changed" if paths else "none")
+        else ("unknown" if unknown else ("changed" if paths else "none"))
     )
     return status, side_effect, paths

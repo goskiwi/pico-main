@@ -18,20 +18,17 @@ if TYPE_CHECKING:
 class ModelTurn:
     action: Any
     provider_input_tokens: int | None
-    provider_output_tokens: int | None
-    provider_total_tokens: int | None
 
 
 @dataclass(frozen=True)
 class ActionToolSurface:
-    """One turn's wire-visible and Runtime-allowed tool surface."""
+    """One turn's model-visible and Runtime-allowed tool surface."""
 
-    wire_tools: tuple[dict[str, Any], ...]
-    allowed_names: tuple[str, ...]
+    tools: tuple[dict[str, Any], ...]
 
     @property
-    def wire_names(self):
-        return tuple(str(tool["name"]) for tool in self.wire_tools)
+    def names(self):
+        return tuple(str(tool["name"]) for tool in self.tools)
 
 
 class AgentLoop:
@@ -89,67 +86,39 @@ class AgentLoop:
     def _next_model_turn(self, loop_state):
         agent = self.agent
         tool_surface = self._resolve_action_tool_surface()
-        prompt, prompt_metadata = self._prepare_prompt(loop_state, tool_surface)
-        agent.emit_event(
-            "model_requested",
-            {
-                "prompt_cache_key": prompt_metadata.get("prompt_cache_key"),
-            },
-        )
+        prompt = self._prepare_prompt(loop_state, tool_surface)
+        agent.emit_event("model_requested")
         action, completion_metadata = self._request_action(
             loop_state,
             prompt,
-            prompt_metadata,
             tool_surface,
         )
         provider_input_tokens = completion_metadata.get("input_tokens")
-        provider_output_tokens = completion_metadata.get("output_tokens")
-        provider_total_tokens = completion_metadata.get("total_tokens")
         loop_state.overflow_recovery_attempted = False
         return ModelTurn(
             action=action,
             provider_input_tokens=provider_input_tokens,
-            provider_output_tokens=provider_output_tokens,
-            provider_total_tokens=provider_total_tokens,
         )
 
     def _resolve_action_tool_surface(self):
         agent = self.agent
-        declared_tools = tuple(agent.tools.action_schemas)
-        allowed_tools = tuple(agent.tools.model_action_tools())
+        tools = tuple(agent.tools.model_action_tools())
         if (
             agent.config.max_tool_executions is not None
             and agent.run.metrics.executed_tool_count
             >= agent.config.max_tool_executions
         ):
-            allowed_tools = tuple(
-                tool for tool in allowed_tools if tool["name"] == "submit_final"
+            tools = tuple(
+                tool for tool in tools if tool["name"] == "submit_final"
             )
-        allowed_names = tuple(str(tool["name"]) for tool in allowed_tools)
-        final_only = allowed_names == ("submit_final",)
-        wire_tools = (
-            declared_tools
-            if getattr(agent.model_client, "supports_allowed_tools", False)
-            and not final_only
-            else allowed_tools
-        )
-        return ActionToolSurface(
-            wire_tools=wire_tools,
-            allowed_names=allowed_names,
-        )
+        return ActionToolSurface(tools=tools)
 
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
         if loop_state.prompt_snapshot is not None:
             _prompt, snapshot_metadata = loop_state.prompt_snapshot
-            prior_wire = tuple(snapshot_metadata.get("wire_tool_names", ()))
-            prior_allowed = tuple(
-                snapshot_metadata.get("allowed_tool_names", ())
-            )
-            if (
-                prior_wire != tool_surface.wire_names
-                or prior_allowed != tool_surface.allowed_names
-            ):
+            prior_names = tuple(snapshot_metadata.get("tool_names", ()))
+            if prior_names != tool_surface.names:
                 agent.model_client.reset_action_session()
                 loop_state.prompt_snapshot = None
                 loop_state.provider_context_tokens = None
@@ -157,175 +126,86 @@ class AgentLoop:
                     "provider_session_reset",
                     {
                         "reason": "tool_surface_changed",
-                        "wire_tool_names": list(tool_surface.wire_names),
-                        "allowed_tool_names": list(tool_surface.allowed_names),
+                        "tool_names": list(tool_surface.names),
                     },
                 )
-        prompt_reused = loop_state.prompt_snapshot is not None
         if loop_state.prompt_snapshot is None:
             compaction_metadata, history_override = agent.prompt.prepare_compaction(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
-                provider_overhead_tokens=loop_state.provider_overhead_tokens,
-                action_tools=tool_surface.wire_tools,
+                action_tools=tool_surface.tools,
             )
             prompt, prompt_metadata = agent.prompt.build(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
-                provider_overhead_tokens=loop_state.provider_overhead_tokens,
                 compaction_metadata=compaction_metadata,
                 history_override=history_override,
-                action_tools=tool_surface.wire_tools,
+                action_tools=tool_surface.tools,
             )
-            prompt_metadata["wire_tool_names"] = list(tool_surface.wire_names)
-            prompt_metadata["allowed_tool_names"] = list(
-                tool_surface.allowed_names
-            )
+            prompt_metadata["tool_names"] = list(tool_surface.names)
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
         else:
             prompt, original_metadata = loop_state.prompt_snapshot
             prompt_metadata = dict(original_metadata)
-        prompt_metadata["wire_tool_names"] = list(tool_surface.wire_names)
-        prompt_metadata["allowed_tool_names"] = list(tool_surface.allowed_names)
-        prompt_metadata["prompt_reused"] = prompt_reused
-        return prompt, prompt_metadata
+        prompt_metadata["tool_names"] = list(tool_surface.names)
+        return prompt
 
     def _request_action(
         self,
         loop_state,
         prompt,
-        prompt_metadata,
         tool_surface,
     ):
         agent = self.agent
-        prompt_cache_key = (
-            prompt_metadata.get("prompt_cache_key")
-            if getattr(agent.model_client, "supports_prompt_cache", False)
-            else None
-        )
         action = agent.model_client.complete_action(
             prompt.input_text,
             agent.config.max_new_tokens,
             instructions=prompt.instructions,
-            action_tools=tool_surface.wire_tools,
-            allowed_tool_names=tool_surface.allowed_names,
-            prompt_cache_key=prompt_cache_key,
+            action_tools=tool_surface.tools,
             request_timeout=agent.run.execution_context.bounded_timeout(),
         )
         completion_metadata = dict(
             getattr(agent.model_client, "last_completion_metadata", {}) or {}
         )
-        self._observe_provider_overhead(
-            loop_state,
-            prompt_metadata,
-            completion_metadata,
-        )
-        persisted_prompt_metadata = self._persisted_prompt_metadata(prompt_metadata)
         agent.emit_event(
             "turn_metrics",
             {
-                "completion_metadata": completion_metadata,
-                "prompt_metadata": persisted_prompt_metadata,
-                "prompt_reused": bool(prompt_metadata.get("prompt_reused")),
+                "input_tokens": completion_metadata.get("input_tokens"),
+                "output_tokens": completion_metadata.get("output_tokens"),
             },
         )
         return action, completion_metadata
 
-    @staticmethod
-    def _observe_provider_overhead(
-        loop_state,
-        prompt_metadata,
-        completion_metadata,
-    ):
-        if prompt_metadata.get("prompt_reused"):
-            return
-        input_tokens = completion_metadata.get("input_tokens")
-        if not isinstance(input_tokens, int) or input_tokens < 0:
-            return
-        known_input_tokens = int(prompt_metadata.get("prompt_tokens") or 0) + int(
-            prompt_metadata.get("tool_schema_tokens") or 0
-        )
-        observed = max(0, input_tokens - known_input_tokens)
-        loop_state.provider_overhead_tokens = observed
-        prompt_metadata["observed_provider_overhead_tokens"] = observed
-
-    @staticmethod
-    def _persisted_prompt_metadata(prompt_metadata):
-        if not prompt_metadata.get("prompt_reused"):
-            persisted = dict(prompt_metadata)
-            persisted.pop("prompt_reused", None)
-            return persisted
-        keys = (
-            "prompt_cache_key",
-            "run_log_generation",
-            "provider_context_tokens",
-            "instructions_tokens",
-            "input_text_tokens",
-            "tool_schema_tokens",
-            "provider_overhead_tokens",
-            "estimated_input_tokens",
-            "observed_provider_overhead_tokens",
-            "wire_tool_names",
-            "allowed_tool_names",
-        )
-        return {key: prompt_metadata.get(key) for key in keys}
-
-    def _context_tokens_after_result(self, turn, provider_result):
-        input_tokens = turn.provider_input_tokens
-        if not isinstance(input_tokens, int):
-            return None
-        output_tokens = (
-            turn.provider_output_tokens
-            if isinstance(turn.provider_output_tokens, int)
-            else 0
-        )
-        base_tokens = (
-            turn.provider_total_tokens
-            if isinstance(turn.provider_total_tokens, int)
-            and turn.provider_total_tokens > 0
-            else input_tokens + output_tokens
-        )
-        result_tokens = self.agent.prompt.count_tokens(provider_result)
-        return base_tokens + result_tokens
-
-    def _should_rotate_provider(self, turn, provider_result):
-        context_tokens = self._context_tokens_after_result(turn, provider_result)
-        if context_tokens is None:
-            return False
+    def _provider_high_watermark(self):
+        config = self.agent.config
         return (
-            context_tokens + self.agent.config.max_new_tokens
-            >= self.agent.config.provider_context_limit_tokens
+            config.provider_context_limit_tokens
+            - config.compaction_reserve_tokens
         )
 
-    def _continue_provider(self, loop_state, turn, provider_result, tool_call_id=""):
+    def _should_rotate_provider(self, turn):
+        return isinstance(turn.provider_input_tokens, int) and (
+            turn.provider_input_tokens >= self._provider_high_watermark()
+        )
+
+    def _continue_provider(self, loop_state, turn, provider_result):
         agent = self.agent
-        if self._should_rotate_provider(turn, provider_result):
-            output_tokens = (
-                turn.provider_output_tokens
-                if isinstance(turn.provider_output_tokens, int)
-                else 0
-            )
-            result_tokens = agent.prompt.count_tokens(provider_result)
-            context_tokens = self._context_tokens_after_result(turn, provider_result)
-            estimated_next_total = context_tokens + agent.config.max_new_tokens
+        if self._should_rotate_provider(turn):
+            threshold_tokens = self._provider_high_watermark()
             agent.model_client.reset_action_session()
             loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = context_tokens
+            loop_state.provider_context_tokens = turn.provider_input_tokens
             agent.emit_event(
                 "provider_session_reset",
                 {
-                    "reason": "next_input_threshold",
+                    "reason": "context_high_watermark",
                     "input_tokens": turn.provider_input_tokens,
-                    "output_tokens": output_tokens,
-                    "tool_result_tokens": result_tokens,
-                    "estimated_next_total": estimated_next_total,
-                    "provider_context_tokens": context_tokens,
-                    "tool_call_id": tool_call_id,
+                    "threshold_tokens": threshold_tokens,
                 },
             )
             return
-        agent.model_client.record_action_result(turn.action, provider_result)
+        agent.model_client.record_action_result(provider_result)
 
     def _recover_context_overflow(self, loop_state):
         if loop_state.overflow_recovery_attempted:
@@ -338,11 +218,7 @@ class AgentLoop:
         self.agent.model_client.reset_action_session()
         self.agent.emit_event(
             "provider_session_reset",
-            {
-                "reason": "context_overflow_retry",
-                "provider_context_tokens": loop_state.provider_context_tokens,
-                "tool_call_id": "",
-            },
+            {"reason": "context_overflow_retry"},
         )
         return True
 
@@ -358,7 +234,7 @@ class AgentLoop:
         loop_state.completion_block_count = 0
         call = turn.action.tool_call
         agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-        outcome = agent.tools.execute(call)
+        outcome = agent.tools.execute_pending(call.call_id)
 
         model_instruction = self._append_budget_instruction(loop_state)
         provider_result = outcome.render_for_model()
@@ -368,7 +244,6 @@ class AgentLoop:
             loop_state,
             turn,
             provider_result,
-            tool_call_id=call.call_id,
         )
         return ""
 

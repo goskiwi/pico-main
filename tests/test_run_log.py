@@ -62,7 +62,6 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
         {
             "tool_call_id": "read",
             "tool_name": "read_file",
-            "risky": False,
             "effect_scope": "none",
             "potential_effects": [],
         },
@@ -182,7 +181,7 @@ def test_v15_rejects_legacy_payload_shapes():
         "now",
         {"contract": TaskContract("inspect", **READ_TASK).to_dict()},
     ).to_dict()
-    value["schema_version"] = "run-log-v14"
+    value["schema_version"] = "run-log-v15"
     with pytest.raises(ValueError, match="invalid Run event"):
         RunEvent.from_dict(value)
 
@@ -246,7 +245,7 @@ def test_tool_result_rejects_workspace_revision_and_correction_fields(tmp_path):
     log.append_model_instruction("historical fact that must be summarized")
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     log.append_tool_call(call)
-    log.append_tool_started(call, risky=False, effect_scope="none", potential_effects=[])
+    log.append_tool_started(call, effect_scope="none", potential_effects=[])
     payload = read_outcome().to_dict()
     assert "correction_action" not in payload
     with pytest.raises(TypeError):
@@ -358,7 +357,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
         "state",
     )
     log.append_tool_call(call)
-    log.append_tool_started(call, risky=False, effect_scope="none", potential_effects=[])
+    log.append_tool_started(call, effect_scope="none", potential_effects=[])
     log.append_tool_result(
         ToolOutcome(
             "state",
@@ -459,7 +458,6 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
         log.append_tool_call(call)
         log.append_tool_started(
             call,
-            risky=False,
             effect_scope="none",
             potential_effects=[],
         )

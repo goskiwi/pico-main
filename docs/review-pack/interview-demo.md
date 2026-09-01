@@ -52,8 +52,8 @@ assistant_tool_call
 -> tool_result + side-effect state
 ```
 
-强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界；调用方不能用相同 call ID 替换
-持久化 name/args。AgentLoop 接受并持久化 `assistant_tool_call`，ToolRuntime 负责参数校验、
+强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界。AgentLoop 接受并持久化
+`assistant_tool_call` 后只把 call ID 交给 `execute_pending`；ToolRuntime 取回完整调用并负责参数校验、
 Approval、preimage 以及执行事务的 `tool_started/tool_result`。纯值计算下沉到私有
 `tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
 
@@ -85,7 +85,7 @@ uv run python scripts/day7_runtime_capstone.py
 
 指出输出中的：
 
-- `RunOutcome`：公开终态结果包含状态、答案、停止原因、Final Diff 和 Metrics；
+- `RunOutcome`：公开终态结果包含状态、答案、停止原因、Changed Paths、Final Diff 和 Metrics；
 - `Final Diff`：receipt 指向经过校验的真实 Diff Artifact；
 - `working_state`：当前 Run 的约束、决定和已清空 Next Steps；
 - `tool_transactions`：每个调用都有 Call/Started/Result；
@@ -105,14 +105,13 @@ Session 指针、Workspace 内容和 Artifact 各有独立且明确的所有权�
 ### 2. Context 治理 `[Context Pressure]`
 
 固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
-只包含 Runtime task policy、非空的有界不可信 Context 和 Task Request；仅 Resume 且请求改变时
-才追加 latest request。RepoMap 用 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径排序；
-History 位于当前 WorkingState 之前，避免旧摘要覆盖当前状态。空 RepoMap/WorkingState/History 不渲染，普通 Function Call 续接
-只追加 Call/Output。原生 Function Schema 只在 `tools`；支持 `allowed_tools` 的 Provider 在
-普通阶段获得稳定完整 Schema 和动态允许名称，final-only 边界则物理缩成 `submit_final` 并
-重建 Provider Session。Runtime 的 Token 预算按实际 wire tools 计算。稳定
-instructions hash 用作受支持 Provider 的 `prompt_cache_key`，并记录 cached/uncached
-Token 指标。
+按 Runtime task policy、Task Request、非空有界 Context 排列；仅 Resume 且请求改变时
+才在最后追加 latest request。RepoMap 用 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径排序；
+History 位于当前 WorkingState 之前，避免旧摘要覆盖当前状态。空 RepoMap/WorkingState/History
+不渲染，普通 Function Call 续接只追加 Call/Output。原生 Function Schema 只在 `tools`；每轮
+直接发送当前 TaskContract 和工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并
+重建 Provider Session。Runtime 的 Token 预算按这个实际工具表面计算，不维护 Provider Host
+能力矩阵或 Cache Key。
 
 Prompt build 只读；Compaction 在 build 前准备，独立 LLM 的输出与持久 Summary 始终只有
 `Progress`、`Critical Context` 两段，失败时使用近期完整事务的 bounded fallback。演示中可把
@@ -144,11 +143,11 @@ Worktree；Implement 必须声明允许写路径并始终在独立 Git Worktree 
 
 ## 应用层追问 `[Applications]`
 
-只有在 Core 和默认上下文增强讲清后，再用 `applications/coding.py` 和
-`applications/triage` 说明 Pico 如何被薄应用层复用；它们都不拥有第二套 Agent Loop、
-ToolRuntime、RunLog 或 Completion。CodingWorkflow 只在成功终态后从 replay 取得净变化路径，
+只有在 Core 和默认上下文增强讲清后，再用 `applications/coding.py` 说明 Pico 如何被薄应用层
+复用；它不拥有第二套 Agent Loop、ToolRuntime、RunLog 或 Completion。CodingWorkflow 只在
+成功终态后从 RunOutcome 取得净变化路径，
 跳过运行前已经脏的同路径，并用显式 pathspec 创建一个不包含用户其他 staged 内容的 Commit；
-它不 reset、不 push，也不让 Git Commit 参与 Core 的恢复和完成判断。
+它要求 Runtime Verification，不 reset、不 push，也不让 Git Commit 参与 Core 的恢复和完成判断。
 
 ## 常见追问
 
@@ -176,9 +175,10 @@ TaskContract 和 Runtime 观察到的当前 Workspace 证据决定是否接受 `
 
 ### Verification 是否被 Workspace 路径约束保护？
 
-不是。模型没有通用 Shell 工具，但用户显式配置的固定 Verification 会在 Workspace 中以
-当前用户权限本机运行。文件工具的路径检查不能限制该进程访问其他目录、网络或子进程。
-因此 Pico 只运行可信仓库；未知仓库或 PR 应交给外部 CI、VM 或容器。
+不是。模型可以申请默认审批的诊断型 `run_command`，用户固定 Verification 也会在 Workspace
+中以当前用户权限本机运行。文件工具的路径检查不能限制这些进程访问其他目录、网络或子进程。
+Pico 只观察 Git 可见的净仓库变化；`none` 不代表整台机器没有副作用。因此 Pico 只运行可信
+仓库；未知仓库或 PR 应交给外部 CI、VM 或容器。
 
 ### WorkingState 能授予权限吗？
 
@@ -199,8 +199,9 @@ MCP/Skills 都明确不在范围内。
 
 ## 证据边界
 
-- 当前确定性证据：pytest、Native Harness、Context v5、RepoMap v1。
-- 当前保留的真实模型证据是受控的 Compaction Artifact；旧 Docker 边界产生的三个 Triage
-  Artifact 已退役并删除，不能作为当前 Runtime 成绩。
+- 当前确定性证据：130 项核心 pytest 与 Day 1–7 Walkthrough。
+- 当前发布的真实模型证据是受控的 `real-compaction.json/.patch`。
+- `run_command`、Crash Resume 与 Worktree Child 的真实回归在临时干净 Git Workspace 中运行，
+  不混入 Core 持久状态。
 - 固定 Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
 - 模型后端仍是外部信任边界。

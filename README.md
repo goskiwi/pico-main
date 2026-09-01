@@ -4,10 +4,11 @@ Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型每轮
 OpenAI-compatible Responses function calling 提出一个动作；Runtime 掌握工具准入、
 副作用、持久化、恢复、验证和最终完成权。CLI 还提供一次一个的显式 Child 委派。
 
-Pico 面向用户已经信任的本地仓库。模型没有通用 `run_shell`；只有用户通过
-`--verify-command` 配置的固定命令会在 Workspace 中以当前用户权限本机执行。文件工具的
-路径约束不能限制该命令访问其他目录、网络或子进程。未知仓库、未知 PR 或其他不可信代码
-必须放到 Pico 外部的 CI、VM 或容器中运行。
+Pico 面向用户已经信任的本地仓库。模型可以申请一个默认需要 Approval 的诊断型
+`run_command`；最终 Verification 仍由用户通过 `--verify-command` 固定。两者都在 Workspace
+中以当前用户权限执行，不是 Sandbox，文件工具的路径约束不能限制其访问其他目录、网络或
+子进程。Pico 只检测 Git 可见的净仓库变化，不追踪 ignored 文件或外部系统副作用；未知仓库、
+未知 PR 或其他不可信代码必须放到 Pico 外部的 CI、VM 或容器中运行。
 
 ## 快速开始
 
@@ -29,6 +30,9 @@ PICO_OPENAI_API_KEY="your-api-key"
 PICO_OPENAI_API_BASE="https://www.right.codes/codex/v1"
 PICO_OPENAI_MODEL="gpt-5.4"
 ```
+
+默认后端要求 `PICO_OPENAI_API_KEY`；有意连接无认证的本机兼容端点时，显式传入
+`--base-url http://127.0.0.1:PORT/v1`。
 
 用户只提交自然语言目标。新 Run 创建前，Runtime 使用隔离的结构化分类调用生成
 `read_only / modify / modify_optional` Intent，并据此持久化 TaskContract；分类不授予工具权限。
@@ -52,9 +56,9 @@ User request -> hidden TaskIntentClassifier -> TaskContract
 1. **单一事实源**：每个 Run 只有一个 Run Log；Live 与 Replay 共用 `RunProjection.apply_event`。
 2. **可恢复工具事务**：`assistant_tool_call -> tool_started -> tool_result`；副作用前先 fsync，
    崩溃后检查真实路径状态，不盲目重放未知操作。
-3. **Runtime 拥有执行权**：模型只提出 ToolCall；ToolRuntime 使用持久化的 name/args 完成
-   Schema、TaskContract、写范围与 Approval 检查。AgentLoop 接受并持久化 Call，ToolRuntime
-   持久化执行事务的 Started/Result。
+3. **Runtime 拥有执行权**：模型只提出 ToolCall；AgentLoop 先持久化 Call，再只把 call ID
+   交给 `ToolRuntime.execute_pending`。ToolRuntime 取回 name/args，完成 Schema、TaskContract、
+   写范围与 Approval 检查，并持久化执行事务的 Started/Result。
 4. **Revision-bound 原子修改**：`edit_file` 携带读取时 Revision，提交点再次复验后原子替换，
    外部修改不会被静默覆盖。
 5. **证据驱动完成**：模型调用 `submit_final` 后，Runtime 检查净变化与不确定副作用，运行用户
@@ -66,8 +70,8 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 
 ## 真实 CLI 工具面
 
-CLI 默认注册以下十个原生工具。支持 `allowed_tools` 的 Provider 可以保持完整 Schema 稳定并
-动态限制名称；其他 Provider 直接接收当前允许的较窄 Schema。
+CLI 默认注册以下十一个原生工具。每轮只把当前 TaskContract 和工具预算允许的 Schema 发送
+给 Provider；ToolRuntime 在本机再次执行准入。
 
 | 工具 | modify | read_only | 作用 |
 |---|:---:|:---:|---|
@@ -75,6 +79,7 @@ CLI 默认注册以下十个原生工具。支持 `allowed_tools` 的 Provider �
 | `read_file` | ✓ | ✓ | 按行读取并返回 Revision |
 | `read_artifact` | ✓ | ✓ | 分页读取当前 Run 的大输出 |
 | `search` | ✓ | ✓ | 有界搜索 Workspace |
+| `run_command` | ✓ | ✓ | 默认审批的可信本机诊断命令；Git 可见变化会阻止完成 |
 | `write_file` | ✓ | — | 只创建不存在的文件 |
 | `edit_file` | ✓ | — | 按 Revision 修改已有文件 |
 | `update_working_state` | ✓ | ✓ | 增量维护当前 Run 的约束、决定和下一步 |
@@ -116,7 +121,9 @@ Child Run Log、Session、Artifact 和 Patch 位于 Parent Run 的 `subagents/<c
 
 Session 只保存 `active_run_id`。恢复会重放 Run Log、修复末尾未完成的 Tool 事务，并把新的
 resume 请求作为 `user_guidance` Fact 持久化。文件工具不能访问 `.git/` 或 `.pico/`；固定
-Verification 则拥有当前用户的宿主权限，不能被描述为 Sandbox。
+`run_command` 和 Verification 都拥有当前用户的宿主权限，不能被描述为 Sandbox。
+两者共用 Repository 净状态观察：HEAD、staged/unstaged diff 与非忽略 untracked revision。
+`none` 只表示没有观察到该范围内的变化，不表示整台机器没有副作用。
 
 ## 阅读与演示
 
@@ -125,7 +132,6 @@ Verification 则拥有当前用户的宿主权限，不能被描述为 Sandbox�
 - [状态所有权](docs/architecture/state-ownership.md)
 - [面试讲解与 Demo](docs/review-pack/interview-demo.md)
 - [恢复/简历表述](docs/resume-project.md)
-- [确定性 Runtime 评测](docs/metrics/runtime-evaluation.md)
 
 五分钟现场只运行：
 
@@ -138,13 +144,10 @@ uv run python scripts/day7_runtime_capstone.py
 
 ```bash
 uv run pytest -q
-uv run ruff check pico applications tests scripts evals
-uv run python scripts/run_evaluations.py
+uv run ruff check pico applications tests scripts
 ```
 
-## Extensions
+## Scope
 
-[Project Memory](extensions/project_memory/README.md) 是未安装、未加载、无 Core 开关的参考扩展。
-导入 `pico` 不会创建 Memory 目录、注入 Prompt 内容或注册 Memory 工具。
-
-Pico 不做多 Provider、XML 工具协议、Skills、MCP、多租户、远程 Worker、分布式调度或旧状态迁移。
+Pico 不做 Project Memory、Triage、真实 OSS Benchmark、多 Provider、XML 工具协议、Skills、
+MCP、多租户、远程 Worker、分布式调度或旧状态迁移。这些外围实现不在当前面试分支中。

@@ -34,14 +34,6 @@ CONTEXT_WIRE_ORDER = (
     "history",
     "working_state",
 )
-SECTION_ORDER = (
-    "runtime_policy",
-    "untrusted_context",
-    "task_request",
-    "latest_user_request",
-)
-
-
 class ContextBudgetExceeded(RuntimeError):
     pass
 
@@ -55,16 +47,6 @@ class Tokenizer:
 
     def count(self, text):
         return len(self.encoding.encode(str(text or ""), disallowed_special=()))
-
-    def clip(self, text, limit):
-        text = str(text or "")
-        tokens = self.encoding.encode(text, disallowed_special=())
-        if len(tokens) <= limit:
-            return text
-        if limit <= 3:
-            return self.encoding.decode(tokens[: max(0, limit)])
-        return self.encoding.decode(tokens[: limit - 2]).rstrip() + " …"
-
 
 class _ContextAssembler:
     """Internal dynamic-input assembly used only by PromptBuilder."""
@@ -119,7 +101,6 @@ class _ContextAssembler:
         user_message,
         *,
         provider_context_tokens=None,
-        provider_overhead_tokens=0,
         compaction_metadata=None,
         history_override=None,
         action_tools=None,
@@ -128,10 +109,7 @@ class _ContextAssembler:
         output_reserve = int(self.agent.config.max_new_tokens)
         instructions_tokens = self.tokenizer.count(self.agent.prompt.instructions)
         tool_schema_tokens = self._tool_schema_tokens(action_tools=action_tools)
-        provider_overhead_tokens = max(0, int(provider_overhead_tokens or 0))
-        request_overhead_tokens = (
-            instructions_tokens + tool_schema_tokens + provider_overhead_tokens
-        )
+        request_overhead_tokens = instructions_tokens + tool_schema_tokens
         raw = self._raw_sections(user_message, history_override=history_override)
         available = self.total_budget - output_reserve - request_overhead_tokens
         minimum_input = self._assemble_input(raw, {})
@@ -203,15 +181,12 @@ class _ContextAssembler:
                 "rendered_tokens": self.tokenizer.count(envelope),
             }
         prompt_tokens = instructions_tokens + input_text_tokens
-        estimated_input_tokens = (
-            prompt_tokens + tool_schema_tokens + provider_overhead_tokens
-        )
+        estimated_input_tokens = prompt_tokens + tool_schema_tokens
         metadata = {
             "prompt_tokens": prompt_tokens,
             "instructions_tokens": instructions_tokens,
             "input_text_tokens": input_text_tokens,
             "tool_schema_tokens": tool_schema_tokens,
-            "provider_overhead_tokens": provider_overhead_tokens,
             "estimated_input_tokens": estimated_input_tokens,
             "reserved_output_tokens": output_reserve,
             "within_budget": (
@@ -220,8 +195,8 @@ class _ContextAssembler:
             "tokenizer": self.tokenizer.encoding.name,
             "section_order": [
                 "runtime_policy",
-                *(["untrusted_context"] if rendered_context else []),
                 "task_request",
+                *(["untrusted_context"] if rendered_context else []),
                 *(
                     ["latest_user_request"]
                     if raw["latest_user_request"]
@@ -249,7 +224,6 @@ class _ContextAssembler:
         user_message,
         *,
         provider_context_tokens=None,
-        provider_overhead_tokens=0,
         action_tools=None,
     ):
         """Commit semantic compaction or return a bounded read-only fallback."""
@@ -262,7 +236,6 @@ class _ContextAssembler:
         request_overhead_tokens = (
             instructions_tokens
             + self._tool_schema_tokens(action_tools=action_tools)
-            + max(0, int(provider_overhead_tokens or 0))
         )
         fixed_context = self._fixed_context(raw)
         full_context = dict(fixed_context)
@@ -281,7 +254,7 @@ class _ContextAssembler:
             self.compaction_reserve_tokens,
         )
         threshold_tokens = max(1, self.total_budget - reserve_tokens)
-        if context_tokens <= threshold_tokens:
+        if context_tokens < threshold_tokens:
             return None, None
 
         timeout = (
@@ -627,10 +600,9 @@ class _ContextAssembler:
         )
 
     def _assemble_input(self, raw, context):
-        parts = [raw["runtime_policy"]]
+        parts = [raw["runtime_policy"], raw["task_request"]]
         if context:
             parts.append(self._untrusted_envelope(context))
-        parts.append(raw["task_request"])
         if raw["latest_user_request"]:
             parts.append(raw["latest_user_request"])
         return "\n\n".join(parts)

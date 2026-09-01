@@ -1,4 +1,4 @@
-"""Day 2: inspect Run Log v15 facts, Projection replay, and safe resume.
+"""Day 2: inspect Run Log v16 facts, Projection replay, and safe resume.
 
 The three experiments keep separate questions separate:
 
@@ -145,7 +145,7 @@ def fact_projection_experiment(root):
     }
 
     print_section(
-        "A1. Run Log v15 保存的是 Fact",
+        "A1. Run Log v16 保存的是 Fact",
         {
             "schema_version": RUN_LOG_SCHEMA_VERSION,
             "events_path": f".pico/runs/{run_id}/events.jsonl",
@@ -261,7 +261,6 @@ def interrupted_read_experiment(root):
     original.apply_run_event(
         original.run.run_log.append_tool_started(
             call,
-            risky=False,
             effect_scope="none",
             potential_effects=[],
         )

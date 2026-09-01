@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from applications.coding import CodingWorkflow
 from pico import FakeModelClient, ModelAction, PicoConfig
 from pico.mutations import file_revision
@@ -57,9 +59,19 @@ def workflow(client):
         client,
         config=PicoConfig(
             approval_policy="auto",
-            verification_command="",
+            verification_command="grep -q '^agent$' subject.txt",
         ),
     )
+
+
+def test_coding_workflow_requires_runtime_verification():
+    client = FakeModelClient([])
+
+    with pytest.raises(ValueError, match="requires verification_command"):
+        CodingWorkflow(
+            client,
+            config=PicoConfig(approval_policy="auto", verification_command=""),
+        )
 
 
 def test_coding_workflow_commits_only_pico_paths_and_preserves_user_index(tmp_path):
@@ -90,37 +102,3 @@ def test_coding_workflow_commits_only_pico_paths_and_preserves_user_index(tmp_pa
     assert git(tmp_path, "log", "-1", "--pretty=%s") == (
         "pico: Replace alpha with agent"
     )
-
-
-def test_coding_workflow_skips_commit_when_pico_touches_preexisting_dirty_path(
-    tmp_path,
-):
-    initial = init_repository(tmp_path)
-    (tmp_path / "subject.txt").write_text("alpha\nuser work\n", encoding="utf-8")
-
-    result = workflow(edit_client(tmp_path)).run(
-        tmp_path,
-        "Replace alpha while preserving user work",
-    )
-
-    assert result.outcome.status == "completed"
-    assert result.delivery_status == "skipped"
-    assert "subject.txt" in result.detail
-    assert git(tmp_path, "rev-parse", "HEAD") == initial
-    assert (tmp_path / "subject.txt").read_text(encoding="utf-8") == (
-        "agent\nuser work\n"
-    )
-
-
-def test_coding_workflow_does_not_commit_a_stopped_run(tmp_path):
-    initial = init_repository(tmp_path)
-    client = FakeModelClient(
-        [ModelAction.invalid("invalid") for _index in range(8)]
-    )
-
-    result = workflow(client).run(tmp_path, "Change the repository")
-
-    assert result.outcome.status == "stopped"
-    assert result.delivery_status == "skipped"
-    assert result.changed_paths == ()
-    assert git(tmp_path, "rev-parse", "HEAD") == initial

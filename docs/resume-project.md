@@ -16,15 +16,15 @@ Session 只保存 `active_run_id`。恢复输入先作为 `user_guidance` Fact �
 
 ## 长上下文治理
 
-稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 只包含 Runtime task policy、非空的有界不可信 Context 与 Task Request。恢复输入从持久 `user_guidance` Fact 投影为 latest request；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前。空 RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；普通阶段在受支持 Backend 上以 `allowed_tools` 动态收窄名称，final-only 边界则把 Wire Schema 物理缩成 `submit_final` 并重建 Provider Session。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
+稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、Task Request 和非空的有界不可信 Context。恢复输入从持久 `user_guidance` Fact 投影为最后的 latest request；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前，因此重建 Session 时当前进度不会被原始任务中的步骤重新覆盖。空 RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
 
 ## 工具安全
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。每个路径只保存第一次修改前的 preimage，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置以明确的 unavailable receipt 受控收尾。模型没有通用 Shell 工具；用户固定 Verification 在 Workspace 中以当前用户权限本机执行，仅适用于可信仓库。不可信代码必须使用外部 CI、VM 或容器隔离。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只用于默认审批的本机诊断；它和固定 Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每个结构化修改路径只保存第一次修改前的 preimage，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置以明确的 unavailable receipt 受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
 
 ## 应用层 Git 交付
 
-`CodingWorkflow` 在 Core 成功终态后 replay RunLog 得到净变化路径，并只对运行前未脏的这些路径创建一个 Git Commit。显式 pathspec 不带入用户其他 staged 内容；提交前再次复验 RunChangeSet，不运行 hooks，不 reset、不 push。跳过或失败作为应用层 `CodingResult` 返回，不改变 Core 的 Completion 和恢复语义。
+`CodingWorkflow` 要求配置 Runtime Verification；在 Core 成功终态后从 RunOutcome 得到净变化路径，并只对运行前未脏的这些路径创建一个 Git Commit。显式 pathspec 不带入用户其他 staged 内容；提交前再次复验 RunChangeSet，不运行 hooks，不 reset、不 push。跳过或失败作为应用层 `CodingResult` 返回，不改变 Core 的 Completion 和恢复语义。
 
 ## 多 Agent
 

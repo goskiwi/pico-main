@@ -203,6 +203,7 @@ class RunOutcome:
     answer: str
     stop_reason: str
     final_diff: FinalDiffDescriptor
+    changed_paths: tuple[str, ...]
     metrics: dict[str, Any]
 
     def __init__(self, projection: RunProjection):
@@ -217,6 +218,11 @@ class RunOutcome:
         object.__setattr__(self, "answer", projection.final_answer)
         object.__setattr__(self, "stop_reason", projection.stop_reason)
         object.__setattr__(self, "final_diff", projection.final_diff)
+        object.__setattr__(
+            self,
+            "changed_paths",
+            tuple(projection.evidence.changed_paths),
+        )
         object.__setattr__(self, "metrics", projection.metrics.to_dict())
 
     def to_dict(self):
@@ -228,5 +234,6 @@ class RunOutcome:
             "answer": self.answer,
             "stop_reason": self.stop_reason,
             "final_diff": self.final_diff.to_dict(),
+            "changed_paths": list(self.changed_paths),
             "metrics": deepcopy(self.metrics),
         }

@@ -125,6 +125,9 @@ class Pico:
     def run_verification(self, started_workspace_mutation_sequence):
         return run_verification(self, started_workspace_mutation_sequence)
 
+    def read_run_events(self, run_id):
+        return self.dependencies.run_store.read_events(run_id)
+
     def ask(self, user_message) -> RunOutcome:
         from .agent_loop import AgentLoop
 

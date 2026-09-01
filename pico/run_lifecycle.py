@@ -27,7 +27,6 @@ class AgentLoopState:
     run_started_at: float
     prompt_snapshot: tuple[Any, dict[str, Any]] | None = None
     provider_context_tokens: int | None = None
-    provider_overhead_tokens: int = 0
     overflow_recovery_attempted: bool = False
     invalid_output_count: int = 0
     completion_block_count: int = 0

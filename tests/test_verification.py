@@ -1,143 +1,41 @@
 import subprocess
 
-from evals.pytest_output import parse_pytest_output
 from pico.command_runner import CommandResult
 from pico.evidence import verification_is_current
 from pico.mutations import file_revision
-from pico.verification import verify_workspace
-
-READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
-}
-MODIFY_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": True,
-    "requires_verification": False,
-}
+from pico.verification import (
+    capture_repository_state,
+    repository_state_changes,
+    verify_workspace,
+)
 
 
-def test_pytest_output_is_structured():
-    output = """collected 4 items
-tests/test_a.py ...F
-FAILED tests/test_a.py::test_four - AssertionError
-1 failed, 3 passed in 0.21s
-"""
-
-    first = parse_pytest_output(output)
-
-    assert first["collected"] == 4
-    assert first["passed"] == 3
-    assert first["failed"] == 1
-    assert first["failed_tests"] == ["tests/test_a.py::test_four"]
-
-
-def test_double_quiet_pytest_progress_is_counted():
-    result = parse_pytest_output(
-        "..                                                                       [100%]"
-    )
-    assert result["collected"] == 2
-    assert result["passed"] == 2
-
-
-def test_runtime_verification_uses_configured_timeout_and_minimal_result(tmp_path):
-    recorded = {}
-
-    class Runner:
-        def run(self, argv, **kwargs):
-            recorded["argv"] = argv
-            recorded.update(kwargs)
-            return CommandResult(returncode=0, stdout="2 passed")
-
-    result = verify_workspace(
-        root=tmp_path,
-        command="MODE=test python -m pytest -q",
-        command_runner=Runner(),
-        timeout_seconds=600,
-        redact_text=str,
-        mutation_sequence_provider=lambda: 7,
-        started_workspace_mutation_sequence=7,
-        changed_paths=(),
+def _git(root, *args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
-    assert recorded["argv"] == (
-        "/bin/sh",
+
+def _committed_git_workspace(root):
+    _git(root, "init", "--quiet")
+    (root / ".gitignore").write_text(".pico/\ncache/\n", encoding="utf-8")
+    (root / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _git(root, "add", "--all")
+    _git(
+        root,
         "-c",
-        "MODE=test python -m pytest -q",
+        "user.name=Pico Tests",
+        "-c",
+        "user.email=pico@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "baseline",
     )
-    assert recorded["env"] == {}
-    assert recorded["timeout"] == 600
-    assert result == {
-        "command": "MODE=test python -m pytest -q",
-        "status": "passed",
-        "started_workspace_mutation_sequence": 7,
-        "finished_workspace_mutation_sequence": 7,
-        "started_changed_path_states": {},
-        "finished_changed_path_states": {},
-        "exit_code": 0,
-        "output": "2 passed",
-    }
-
-
-def test_runtime_verification_classifies_command_start_failure(tmp_path):
-    class Runner:
-        @staticmethod
-        def run(*_args, **_kwargs):
-            return CommandResult(
-                returncode=125,
-                stderr="invalid mount config",
-                infrastructure_error=True,
-            )
-
-    result = verify_workspace(
-        root=tmp_path,
-        command="python -m pytest -q",
-        command_runner=Runner(),
-        timeout_seconds=60,
-        redact_text=str,
-        mutation_sequence_provider=lambda: 7,
-        started_workspace_mutation_sequence=7,
-        changed_paths=(),
-    )
-
-    assert result["status"] == "infrastructure_error"
-    assert result["exit_code"] == 125
-    assert "invalid mount config" in result["output"]
-
-
-def test_runtime_verification_records_mutation_cursor_drift(
-    tmp_path,
-):
-    mutation_sequence = [7]
-
-    class Runner:
-        @staticmethod
-        def run(*_args, **_kwargs):
-            mutation_sequence[0] = 9
-            return CommandResult(returncode=0, stdout="2 passed")
-
-    result = verify_workspace(
-        root=tmp_path,
-        command="python -m pytest -q",
-        command_runner=Runner(),
-        timeout_seconds=60,
-        redact_text=str,
-        mutation_sequence_provider=lambda: mutation_sequence[0],
-        started_workspace_mutation_sequence=7,
-        changed_paths=(),
-    )
-
-    assert result["status"] == "passed"
-    assert "freshness" not in result
-    assert not verification_is_current(result, 9, {})
-    assert result["started_workspace_mutation_sequence"] == 7
-    assert result["finished_workspace_mutation_sequence"] == 9
 
 
 def test_runtime_verification_records_changed_path_drift(
@@ -215,3 +113,72 @@ def test_runtime_verification_rejects_extra_git_workspace_changes(tmp_path):
     assert "changed additional workspace state" in result["output"]
     assert "verifier-extra.txt" in result["output"]
     assert (tmp_path / "verifier-extra.txt").is_file()
+
+
+def test_repository_state_detects_dirty_file_content_changing_again(tmp_path):
+    _committed_git_workspace(tmp_path)
+    target = tmp_path / "tracked.txt"
+    target.write_text("dirty-one\n", encoding="utf-8")
+    before = capture_repository_state(tmp_path)
+
+    target.write_text("dirty-two\n", encoding="utf-8")
+    after = capture_repository_state(tmp_path)
+
+    assert repository_state_changes(before, after) == ("tracked.txt",)
+
+
+def test_repository_state_detects_index_only_change(tmp_path):
+    _committed_git_workspace(tmp_path)
+    target = tmp_path / "tracked.txt"
+    target.write_text("dirty\n", encoding="utf-8")
+    before = capture_repository_state(tmp_path)
+
+    _git(tmp_path, "add", "tracked.txt")
+    after = capture_repository_state(tmp_path)
+
+    assert repository_state_changes(before, after) == ("tracked.txt",)
+
+
+def test_repository_state_detects_head_change(tmp_path):
+    _committed_git_workspace(tmp_path)
+    before = capture_repository_state(tmp_path)
+
+    _git(
+        tmp_path,
+        "-c",
+        "user.name=Pico Tests",
+        "-c",
+        "user.email=pico@example.invalid",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "empty",
+    )
+    after = capture_repository_state(tmp_path)
+
+    assert repository_state_changes(before, after) == ("<HEAD>",)
+
+
+def test_repository_state_ignores_gitignored_artifacts(tmp_path):
+    _committed_git_workspace(tmp_path)
+    before = capture_repository_state(tmp_path)
+
+    cache = tmp_path / "cache" / "result.txt"
+    cache.parent.mkdir()
+    cache.write_text("generated\n", encoding="utf-8")
+    after = capture_repository_state(tmp_path)
+
+    assert repository_state_changes(before, after) == ()
+
+
+def test_repository_state_detects_existing_untracked_content_change(tmp_path):
+    _committed_git_workspace(tmp_path)
+    target = tmp_path / "notes.txt"
+    target.write_text("draft-one\n", encoding="utf-8")
+    before = capture_repository_state(tmp_path)
+
+    target.write_text("draft-two\n", encoding="utf-8")
+    after = capture_repository_state(tmp_path)
+
+    assert repository_state_changes(before, after) == ("notes.txt",)

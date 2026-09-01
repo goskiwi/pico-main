@@ -108,7 +108,6 @@ def append_synthetic_historical_transaction(agent, index):
     agent.apply_run_event(
         run_log.append_tool_started(
             call,
-            risky=False,
             effect_scope="none",
             potential_effects=[],
         )
@@ -258,8 +257,8 @@ def repo_map_experiment(root):
     assert all(event.kind != "compaction" for event in run_log.events)
     assert metadata["section_order"] == [
         "runtime_policy",
-        "untrusted_context",
         "task_request",
+        "untrusted_context",
     ]
     assert metadata["included_context_sections"] == [
         "workspace",
@@ -303,7 +302,7 @@ def build_pressure_fixture(root, run_id):
         f"call_state_{run_id}",
     )
     agent.apply_run_event(run_log.append_tool_call(state_call))
-    state_outcome = agent.tools.execute(state_call)
+    state_outcome = agent.tools.execute_pending(state_call.call_id)
     assert state_outcome.status == "success"
     assert agent.run.task.working.constraints == (WORKING_CONSTRAINT,)
     for index in range(6):
@@ -412,7 +411,7 @@ class DeterministicSummarizer:
 def semantic_compaction_experiment(root):
     agent, run_log = build_pressure_fixture(root, "run_day5_semantic")
     summarizer = DeterministicSummarizer()
-    agent.prompt._context.semantic_summarizer = summarizer
+    agent.prompt.semantic_summarizer = summarizer
     original_physical = tuple(run_log.events)
     original_ids = [event.event_id for event in original_physical]
     original_history_view_count = len(run_log.active_events())

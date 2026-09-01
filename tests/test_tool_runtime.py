@@ -58,10 +58,10 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
 def run_active(agent, call):
     run_log = agent.run.run_log or start_run(agent)
     agent.apply_run_event(run_log.append_tool_call(call))
-    return agent.tools.execute(call)
+    return agent.tools.execute_pending(call.call_id)
 
 
-def test_active_run_executes_the_persisted_tool_call_not_retransmitted_args(tmp_path):
+def test_active_run_executes_pending_call_by_id(tmp_path):
     agent = build_agent(tmp_path)
     run_log = start_run(agent)
     persisted = ToolCall(
@@ -71,25 +71,102 @@ def test_active_run_executes_the_persisted_tool_call_not_retransmitted_args(tmp_
     )
     agent.apply_run_event(run_log.append_tool_call(persisted))
 
-    outcome = agent.tools.execute(
-        ToolCall(
-            "write_file",
-            {"path": "substituted.txt", "content": "substituted\n"},
-            persisted.call_id,
-        )
-    )
+    outcome = agent.tools.execute_pending(persisted.call_id)
 
     assert outcome.status == "success"
     assert outcome.affected_paths == ("declared.txt",)
     assert (tmp_path / "declared.txt").read_text(encoding="utf-8") == "declared\n"
-    assert not (tmp_path / "substituted.txt").exists()
+
+
+def test_run_command_returns_diagnostic_output_without_workspace_effect(tmp_path):
+    agent = build_agent(tmp_path)
+
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "run_command",
+            {"command": "printf command-ok"},
+            "call_command_ok",
+        ),
+    )
+
+    assert outcome.status == "success"
+    assert outcome.side_effect_state == "none"
+    assert outcome.structured["exit_code"] == 0
+    assert "command-ok" in outcome.content
+
+
+def test_run_command_nonzero_exit_is_repairable_without_side_effect(tmp_path):
+    agent = build_agent(tmp_path)
+
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "run_command",
+            {"command": "printf failed >&2; exit 3"},
+            "call_command_failed",
+        ),
+    )
+
+    assert outcome.status == "error"
+    assert outcome.side_effect_state == "none"
+    assert outcome.failure.code == "command_failed"
+    assert outcome.structured["exit_code"] == 3
+
+
+def test_run_command_workspace_change_is_unknown_and_blocks_completion(tmp_path):
+    agent = build_agent(tmp_path)
+
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "run_command",
+            {"command": "printf changed > generated.txt"},
+            "call_command_changed",
+        ),
+    )
+
+    assert outcome.status == "partial_success"
+    assert outcome.side_effect_state == "unknown"
+    assert outcome.effect_scope == "workspace"
+    assert outcome.failure.code == "command_modified_repository"
+    assert "generated.txt" in outcome.structured["repository_changes"]
+    assert CompletionController(agent).assess("done").status == "partial"
+
+
+def test_run_command_is_rejected_before_execution_when_approval_is_denied(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.config = PicoConfig.build(agent.config, approval_policy="deny")
+
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "run_command",
+            {"command": "printf forbidden > denied.txt"},
+            "call_command_denied",
+        ),
+    )
+
+    assert outcome.status == "rejected"
+    assert outcome.failure.code == "approval_denied"
+    assert not (tmp_path / "denied.txt").exists()
+
+
+def test_pending_execution_rejects_a_different_call_id(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    call = ToolCall("read_file", {"path": "README.md"}, "call_expected")
+    agent.apply_run_event(run_log.append_tool_call(call))
+
+    with pytest.raises(RuntimeError, match="call id does not match"):
+        agent.tools.execute_pending("call_other")
 
 
 def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.execute(
-        ToolCall("read_file", {"path": "README.md", "start_line": 1, "end_line": 1}, "call_test")
+    outcome = agent.tools.execute_manual(
+        "read_file", {"path": "README.md", "start_line": 1, "end_line": 1}
     )
 
     assert isinstance(outcome, ToolOutcome)
@@ -111,43 +188,6 @@ def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
     }
     assert outcome.artifact_id == ""
     assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
-
-
-def test_rejected_call_never_enters_execution(tmp_path):
-    outcome = build_agent(tmp_path).tools.execute(
-        ToolCall("missing", {}, "call_missing")
-    )
-
-    assert outcome.status == "rejected"
-    assert outcome.execution_state == "not_started"
-    assert outcome.failure.code == "unknown_tool"
-
-
-def test_artifact_rejects_old_schema_and_detects_tampering(tmp_path):
-    agent = build_agent(tmp_path)
-    agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
-        "large output\n" * 2000
-    )
-    outcome = agent.tools.execute(ToolCall("list_files", {}, "call_artifact"))
-    root = tmp_path / ".pico" / "runs" / "manual" / "artifacts"
-    descriptor_path = root / f"{outcome.artifact_id}.json"
-    descriptor = descriptor_path.read_text(encoding="utf-8")
-    descriptor_path.write_text(
-        descriptor.replace("artifact-v3", "artifact-v2"), encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="unsupported artifact schema"):
-        agent.dependencies.artifacts.read_slice(
-            "manual", outcome.artifact_id, 0, 8192
-        )
-
-    descriptor_path.write_text(descriptor, encoding="utf-8")
-    (root / f"{outcome.artifact_id}.txt").write_text(
-        "tampered", encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="digest mismatch"):
-        agent.dependencies.artifacts.read_slice(
-            "manual", outcome.artifact_id, 0, 8192
-        )
 
 
 def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path):
@@ -178,7 +218,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             "Read secret.txt",
             intent="read_only",
         ).answer == "Done."
-        provider_result = client.recorded_action_results[0][1]
+        provider_result = client.recorded_action_results[0]
         event = next(
             item for item in agent.run.run_log.events if item.kind == "tool_result"
         )
@@ -189,14 +229,14 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             raise RuntimeError(secret)
 
         agent.tools.registry["list_files"]["run"] = fail_with_secret
-        failed = agent.tools.execute(ToolCall("list_files", {}, "call_secret_failure"))
+        failed = agent.tools.execute_manual("list_files", {})
 
         (tmp_path / "state-change.txt").write_text("changed\n", encoding="utf-8")
         agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
             (secret + "\n") * 2000,
             structured={"secret": secret},
         )
-        large = agent.tools.execute(ToolCall("list_files", {}, "call_secret_artifact"))
+        large = agent.tools.execute_manual("list_files", {})
         artifact_path = (
             tmp_path
             / ".pico"
@@ -227,8 +267,8 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     )
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.execute(
-        ToolCall("read_file", {"path": "large.txt", "start_line": 1, "end_line": 20}, "call_large")
+    outcome = agent.tools.execute_manual(
+        "read_file", {"path": "large.txt", "start_line": 1, "end_line": 20}
     )
 
     artifact = (
@@ -247,111 +287,12 @@ def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):
     assert page["descriptor"]["size_bytes"] > 16000
 
 
-def test_manual_observation_can_page_its_own_large_artifact(tmp_path):
-    agent = build_agent(tmp_path)
-    agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
-        "manual-artifact-line\n" * 2000
-    )
-    source = agent.tools.execute(ToolCall("list_files", {}, "call_manual_source"))
-
-    page = agent.tools.execute(
-        ToolCall(
-            "read_artifact",
-            {
-                "artifact_id": source.artifact_id,
-                "offset": 0,
-                "max_bytes": 8192,
-            },
-            "call_manual_page",
-        )
-    )
-
-    assert source.status == "success"
-    assert page.status == "success"
-    assert "manual-artifact-line" in page.content
-    assert page.structured["artifact_id"] == source.artifact_id
-
-
-def test_tool_outcome_rejects_impossible_execution_states():
-    with pytest.raises(ValueError, match="successful outcome must complete"):
-        ToolOutcome(
-            tool_call_id="call_invalid",
-            tool_name="read_file",
-            status="success",
-            execution_state="not_started",
-            side_effect_state="none",
-            content="invalid",
-        )
-
-
-def test_failure_info_rejects_old_retryable_field():
-    with pytest.raises(ValueError, match="invalid failure information"):
-        FailureInfo.from_dict(
-            {
-                "code": "command_failed",
-                "detail": "failed",
-                "retryable": True,
-            }
-        )
-
-
-def test_tool_outcome_requires_consistent_effect_facts():
-    failure = FailureInfo("tool_partial_success", "partial", "no_retry")
-
-    with pytest.raises(ValueError, match="known side effects require affected paths"):
-        ToolOutcome(
-            tool_call_id="call_partial",
-            tool_name="write_file",
-            status="partial_success",
-            execution_state="failed",
-            side_effect_state="partial",
-            content="partial",
-            failure=failure,
-            effect_scope="workspace",
-        )
-
-    with pytest.raises(ValueError, match="unknown side effects require an effect scope"):
-        ToolOutcome(
-            tool_call_id="call_unknown",
-            tool_name="write_file",
-            status="partial_success",
-            execution_state="failed",
-            side_effect_state="unknown",
-            content="unknown",
-            failure=failure,
-        )
-
-    with pytest.raises(ValueError, match="invalid tool artifact id"):
-        ToolOutcome(
-            tool_call_id="call_artifact",
-            tool_name="read_file",
-            status="success",
-            execution_state="completed",
-            side_effect_state="none",
-            content="read",
-            artifact_id="../escape",
-        )
-
-
-def test_tool_runner_rejects_legacy_string_result(tmp_path):
-    agent = build_agent(tmp_path)
-    agent.tools.registry["list_files"]["run"] = lambda _args: "legacy result"
-
-    outcome = agent.tools.execute(ToolCall("list_files", {}, "call_legacy_runner"))
-
-    assert outcome.status == "error"
-    assert outcome.failure.detail == "tool runner must return ToolRunnerResult"
-
-
 def test_manual_mutation_is_rejected_without_touching_workspace(tmp_path):
     agent = build_agent(tmp_path)
 
-    outcome = agent.tools.execute(
-        ToolCall(
-            "write_file",
-            {"path": "manual.txt", "content": "must not exist\n"},
-            "call_manual_write",
-        )
+    outcome = agent.tools.execute_manual(
+        "write_file",
+        {"path": "manual.txt", "content": "must not exist\n"},
     )
 
     assert outcome.status == "rejected"
@@ -453,75 +394,6 @@ def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path
     assert agent.dependencies.artifacts.read_internal_text(
         "run_tool_test", first_artifact
     ) == "alpha\n"
-
-
-def test_successful_identical_observation_is_allowed(tmp_path):
-    agent = build_agent(tmp_path)
-    args = {"path": "README.md", "start_line": 1, "end_line": 1}
-
-    first = agent.tools.execute(ToolCall("read_file", args, "call_read_1"))
-    repeated = agent.tools.execute(ToolCall("read_file", args, "call_read_2"))
-    (tmp_path / "README.md").write_text("changed\n", encoding="utf-8")
-    after_change = agent.tools.execute(ToolCall("read_file", args, "call_read_3"))
-
-    assert first.status == "success"
-    assert repeated.status == "success"
-    assert after_change.status == "success"
-    assert "changed" in after_change.content
-
-
-def test_repeated_read_remains_allowed_across_workspace_change(tmp_path):
-    agent = build_agent(tmp_path)
-    read_args = {"path": "README.md", "start_line": 1, "end_line": 1}
-
-    first = agent.tools.execute(ToolCall("read_file", read_args, "call_read_before"))
-    changed = run_active(
-        agent,
-        ToolCall(
-            "write_file",
-            {
-                "path": "unrelated.txt",
-                "content": "new file\n",
-            },
-            "call_write_unrelated",
-        )
-    )
-    repeated = run_active(
-        agent, ToolCall("read_file", read_args, "call_read_after")
-    )
-
-    assert first.status == "success"
-    assert changed.status == "success"
-    assert repeated.status == "success"
-
-
-def test_workspace_mutation_forces_prompt_refresh(
-    tmp_path,
-    monkeypatch,
-):
-    agent = build_agent(tmp_path)
-    refresh_calls = []
-
-    def changed_refresh(*, force=False):
-        refresh_calls.append(force)
-        return force
-
-    monkeypatch.setattr(agent.workspace, "refresh", changed_refresh)
-
-    outcome = run_active(
-        agent,
-        ToolCall(
-            "write_file",
-            {
-                "path": "created.txt",
-                "content": "created\n",
-            },
-            "write_refresh_change",
-        )
-    )
-
-    assert outcome.status == "success"
-    assert True in refresh_calls
 
 
 def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):

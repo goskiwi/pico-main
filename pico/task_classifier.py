@@ -86,7 +86,6 @@ class TaskIntentClassifier:
                 256,
                 instructions=CLASSIFIER_INSTRUCTIONS,
                 action_tools=[TASK_INTENT_TOOL],
-                allowed_tool_names=("classify_task_intent",),
             )
             if (
                 action.kind == "tool"

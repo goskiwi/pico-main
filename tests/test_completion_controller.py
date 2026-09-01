@@ -133,7 +133,7 @@ def test_read_only_requires_successful_observation(tmp_path):
     assert CompletionController(agent).assess("done").status == "observation_required"
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-    assert agent.tools.execute(call).status == "success"
+    assert agent.tools.execute_pending(call.call_id).status == "success"
     assert CompletionController(agent).assess("done").allowed
 
 
@@ -172,15 +172,6 @@ def test_external_change_blocks_completion_before_verification(tmp_path):
     assert assessment.allowed is False
     assert assessment.status == "workspace_drift"
     assert calls == []
-
-
-def test_runtime_has_no_language_specific_ast_gate(tmp_path):
-    agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
-    broken = tmp_path / "broken.py"
-    broken.write_text("def broken(:\n", encoding="utf-8")
-    add_change(agent, "broken.py", "sha256:prior", file_revision(broken), 1)
-    agent.run_verification = lambda sequence: verification_payload(agent, sequence)
-    assert CompletionController(agent).assess("done").allowed
 
 
 def test_failed_verification_can_retry_on_same_state(tmp_path):

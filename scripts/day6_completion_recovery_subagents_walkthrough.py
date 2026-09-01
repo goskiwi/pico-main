@@ -84,7 +84,7 @@ def apply_edit(agent, call_id, old_text, new_text):
         call_id,
     )
     agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-    return agent.tools.execute(call)
+    return agent.tools.execute_pending(call.call_id)
 
 
 def completion_experiment(root):
@@ -250,7 +250,6 @@ def recovery_experiment(root):
     original.apply_run_event(
         run_log.append_tool_started(
             call,
-            risky=True,
             effect_scope="workspace",
             potential_effects=[
                 {
@@ -480,7 +479,7 @@ def _passing_runner(_root):
 def _execute_parent_tool(parent, name, args, call_id):
     call = ToolCall(name, args, call_id)
     parent.apply_run_event(parent.run.run_log.append_tool_call(call))
-    return parent.tools.execute(call)
+    return parent.tools.execute_pending(call.call_id)
 
 
 def child_delegation_experiment(root):

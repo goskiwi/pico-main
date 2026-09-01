@@ -67,12 +67,6 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert outcome["artifact_id"] == ""
 
 
-def test_pico_ask_delegates_to_agent_loop(tmp_path):
-    agent = build_agent(tmp_path, [ModelAction.final("Facade works.")])
-
-    assert agent._ask_with_intent("Use facade", **NO_CHANGE_TASK).answer == "Facade works."
-
-
 def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     tmp_path,
 ):
@@ -321,8 +315,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert agent._ask_with_intent("Inspect hello", **READ_TASK).answer == "Done."
     assert len(agent.model_client.prompts) == 2
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
-    assert agent.model_client.recorded_action_results[0][0] == "tool"
-    result = json.loads(agent.model_client.recorded_action_results[0][1])
+    result = json.loads(agent.model_client.recorded_action_results[0])
     assert result["status"] == "success"
     assert result["correction_action"] == "continue"
     assert result["structured"]["path"] == "hello.txt"
@@ -331,15 +324,19 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
         entry for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
         if entry.kind == "turn_metrics"
     ]
-    assert [entry.payload["prompt_reused"] for entry in turns] == [False, True]
-    assert "sections" in turns[0].payload["prompt_metadata"]
-    assert "sections" not in turns[1].payload["prompt_metadata"]
-    assert len(str(turns[1].payload["prompt_metadata"])) < len(
-        str(turns[0].payload["prompt_metadata"])
+    assert [entry.payload for entry in turns] == [
+        {"input_tokens": None, "output_tokens": None},
+        {"input_tokens": None, "output_tokens": None},
+    ]
+    assert not any(
+        entry.kind == "provider_session_reset"
+        for entry in agent.dependencies.run_store.read_events(
+            agent.run.projection.run_id
+        )
     )
 
 
-def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
+def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
 
     class ThresholdClient(FakeModelClient):
@@ -388,37 +385,28 @@ def test_provider_session_resets_for_complete_next_input_estimate(tmp_path):
     assert len(resets) == 1
     reset = resets[0]
     assert reset.payload == {
-        "reason": "next_input_threshold",
+        "reason": "context_high_watermark",
         "input_tokens": 6500,
-        "output_tokens": 300,
-        "tool_result_tokens": 200,
-        "estimated_next_total": 8024,
-        "provider_context_tokens": 7000,
-        "tool_call_id": reset.payload["tool_call_id"],
+        "threshold_tokens": 6000,
     }
     turns = [
         entry for entry in entries if entry.kind == "turn_metrics"
     ]
-    assert [
-        entry.payload["prompt_reused"] for entry in turns
-    ] == [False, False, True]
-    assert len({
-        entry.payload["prompt_metadata"]["prompt_cache_key"] for entry in turns
-    }) == 1
-    first_prompt = turns[0].payload["prompt_metadata"]
-    observed_overhead = 6500 - first_prompt["prompt_tokens"]
-    assert first_prompt["observed_provider_overhead_tokens"] == observed_overhead
-    assert turns[1].payload["prompt_metadata"]["provider_overhead_tokens"] == observed_overhead
+    assert [entry.payload["input_tokens"] for entry in turns] == [
+        6500,
+        1000,
+        1000,
+    ]
 
 
-def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
+def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
 
     class CapacityClient(FakeModelClient):
         def complete_action(self, *args, **kwargs):
             action = super().complete_action(*args, **kwargs)
             self.last_completion_metadata = {
-                "input_tokens": 6000,
+                "input_tokens": 5999,
                 "output_tokens": 300,
             }
             return action
@@ -450,51 +438,6 @@ def test_provider_session_continues_when_complete_next_input_fits(tmp_path):
     assert not any(
         entry.kind == "provider_session_reset" for entry in entries
     )
-
-
-def test_provider_capacity_estimate_counts_budget_instruction(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-
-    class GuidanceClient(FakeModelClient):
-        def complete_action(self, *args, **kwargs):
-            action = super().complete_action(*args, **kwargs)
-            self.last_completion_metadata = {
-                "input_tokens": 6700,
-                "output_tokens": 0,
-            }
-            return action
-
-    client = GuidanceClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
-        ModelAction.final("Done after guided reset."),
-    ])
-    agent = Pico(
-        client,
-        WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(
-            approval_policy="auto",
-            max_tool_executions=1,
-            verification_command="",
-            provider_context_limit_tokens=8000,
-            compaction_reserve_tokens=2000,
-            compaction_keep_recent_tokens=6000,
-        ),
-    )
-    original_count = agent.prompt._context.tokenizer.count
-    agent.prompt._context.tokenizer.count = lambda text: (
-        300 if "Runtime instruction:" in str(text) else original_count(text)
-    )
-
-    assert agent._ask_with_intent("Inspect hello", **READ_TASK).answer == "Done after guided reset."
-    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
-    reset = next(
-        entry for entry in entries if entry.kind == "provider_session_reset"
-    )
-    assert reset.payload["tool_result_tokens"] == 300
-    assert reset.payload["estimated_next_total"] == 8024
-    assert reset.payload["provider_context_tokens"] == 7000
-    assert "Runtime tool budget exhausted" in client.prompts[1]
 
 
 def test_context_overflow_compacts_and_retries_once(tmp_path):
@@ -628,13 +571,6 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     assert agent.run.metrics.executed_tool_count == 1
     assert agent.run.task.lifecycle.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
-    turns = [
-        event for event in agent.run.run_log.events if event.kind == "turn_metrics"
-    ]
-    assert turns[-1].payload["prompt_reused"] is False
-    assert turns[-1].payload["prompt_metadata"]["wire_tool_names"] == [
-        "submit_final"
-    ]
     resets = [
         event
         for event in agent.run.run_log.events
@@ -645,9 +581,7 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     ]
 
 
-def test_allowed_tools_provider_keeps_wire_schema_stable_for_read_only_run(
-    tmp_path,
-):
+def test_read_only_run_sends_only_current_tool_surface(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     class SchemaCountingClient(FakeModelClient):
         @staticmethod
@@ -663,7 +597,6 @@ def test_allowed_tools_provider_keeps_wire_schema_stable_for_read_only_run(
             ModelAction.final("Done."),
         ]
     )
-    client.supports_allowed_tools = True
     agent = Pico(
         client,
         WorkspaceContext.build(tmp_path),
@@ -673,34 +606,15 @@ def test_allowed_tools_provider_keeps_wire_schema_stable_for_read_only_run(
 
     assert agent._ask_with_intent("Inspect hello.txt", **READ_TASK).answer == "Done."
 
-    declared_names = tuple(tool["name"] for tool in agent.tools.action_schemas)
-    assert client.action_tool_surfaces == [declared_names, declared_names]
-    assert client.allowed_tool_name_surfaces[0] == (
-        client.allowed_tool_name_surfaces[1]
-    )
-    assert "read_file" in client.allowed_tool_name_surfaces[0]
-    assert "submit_final" in client.allowed_tool_name_surfaces[0]
-    assert "write_file" not in client.allowed_tool_name_surfaces[0]
-    turns = [
-        event
-        for event in agent.run.run_log.events
-        if event.kind == "turn_metrics"
-    ]
-    assert all(
-        event.payload["prompt_metadata"]["tool_schema_tokens"]
-        == len(declared_names)
-        for event in turns
-    )
-    assert all(
-        tuple(event.payload["prompt_metadata"]["wire_tool_names"])
-        == declared_names
-        for event in turns
-    )
+    names = client.action_tool_surfaces[0]
+    assert client.action_tool_surfaces == [names, names]
+    assert "read_file" in names
+    assert "run_command" in names
+    assert "submit_final" in names
+    assert "write_file" not in names
 
 
-def test_allowed_tools_provider_uses_physical_final_only_wire_schema(
-    tmp_path,
-):
+def test_tool_budget_switches_to_final_only_surface(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     client = FakeModelClient(
         [
@@ -711,7 +625,6 @@ def test_allowed_tools_provider_uses_physical_final_only_wire_schema(
             ModelAction.final("Done at the boundary."),
         ]
     )
-    client.supports_allowed_tools = True
     agent = Pico(
         client,
         WorkspaceContext.build(tmp_path),
@@ -726,9 +639,9 @@ def test_allowed_tools_provider_uses_physical_final_only_wire_schema(
         "Done at the boundary."
     )
 
-    declared_names = tuple(tool["name"] for tool in agent.tools.action_schemas)
-    assert client.action_tool_surfaces == [declared_names, ("submit_final",)]
-    assert client.allowed_tool_name_surfaces[-1] == ("submit_final",)
+    assert "read_file" in client.action_tool_surfaces[0]
+    assert "write_file" not in client.action_tool_surfaces[0]
+    assert client.action_tool_surfaces[-1] == ("submit_final",)
     resets = [
         event
         for event in agent.run.run_log.events
@@ -737,67 +650,6 @@ def test_allowed_tools_provider_uses_physical_final_only_wire_schema(
     assert [event.payload["reason"] for event in resets] == [
         "tool_surface_changed"
     ]
-
-
-def test_unsupported_provider_uses_run_fixed_read_only_wire_surface(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    class SchemaCountingClient(FakeModelClient):
-        @staticmethod
-        def estimate_action_tool_tokens(action_tools, _token_counter):
-            return len(action_tools)
-
-    client = SchemaCountingClient(
-        [
-            ModelAction.tool(
-                "read_file",
-                {"path": "hello.txt", "start_line": 1, "end_line": 1},
-            ),
-            ModelAction.final("Done."),
-        ]
-    )
-    agent = Pico(
-        client,
-        WorkspaceContext.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto"),
-    )
-
-    assert agent._ask_with_intent("Inspect hello.txt", **READ_TASK).answer == "Done."
-
-    assert client.action_tool_surfaces[0] == client.action_tool_surfaces[1]
-    assert client.action_tool_surfaces == client.allowed_tool_name_surfaces
-    assert "read_file" in client.action_tool_surfaces[0]
-    assert "write_file" not in client.action_tool_surfaces[0]
-    turns = [
-        event
-        for event in agent.run.run_log.events
-        if event.kind == "turn_metrics"
-    ]
-    assert all(
-        event.payload["prompt_metadata"]["tool_schema_tokens"]
-        == len(client.action_tool_surfaces[0])
-        for event in turns
-    )
-
-
-def test_default_loop_has_no_tool_execution_limit(tmp_path):
-    (tmp_path / "many.txt").write_text(
-        "".join(f"line-{index}\n" for index in range(1, 9)),
-        encoding="utf-8",
-    )
-    outputs = [
-        ModelAction.tool("read_file", {"path": "many.txt", "start_line": index, "end_line": index})
-        for index in range(1, 8)
-    ]
-    outputs.append(ModelAction.final("Completed seven reads."))
-    agent = build_agent(tmp_path, outputs)
-
-    outcome = agent._ask_with_intent("Read seven distinct lines", **READ_TASK)
-
-    assert outcome.answer == "Completed seven reads."
-    assert agent.config.max_tool_executions is None
-    assert agent.run.metrics.executed_tool_count == 7
-
 
 def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     (tmp_path / "hello.txt").write_text("unique-tool-output\n", encoding="utf-8")
@@ -824,9 +676,9 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     assert "First run completed." not in second_run_prompt
     assert "unique-tool-output" not in second_run_prompt
     assert "Current run events" not in second_run_prompt
-    assert second_run_prompt.endswith(
+    assert second_run_prompt.index(
         'task_request:\n"Summarize the prior run"'
-    )
+    ) < second_run_prompt.index('<untrusted_context trust="untrusted_data">')
     assert agent.session.data["active_run_id"] == ""
 
 

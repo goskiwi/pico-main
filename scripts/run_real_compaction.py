@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,12 +31,13 @@ from scripts.real_case_support import git_metadata, require_clean_runtime
 EVIDENCE_COUNT = 12
 CONTROLLED_CONTEXT_LIMIT = 28_000
 TARGET_PATH = "src/normalizer.py"
+PYTHON = shlex.quote(sys.executable)
 VISIBLE_COMMAND = (
-    "PYTHONPATH=. python -c \"from src.normalizer import normalize_label; "
+    f"PYTHONPATH=. {PYTHON} -c \"from src.normalizer import normalize_label; "
     "assert normalize_label('  Priority   Queue ') == 'priority-queue'\""
 )
 HIDDEN_COMMAND = (
-    "PYTHONPATH=. python -c \"from src.normalizer import normalize_label as n; "
+    f"PYTHONPATH=. {PYTHON} -c \"from src.normalizer import normalize_label as n; "
     "assert n('\\tAlpha\\nBeta\\t') == 'alpha-beta'; "
     "assert n('single') == 'single'; assert n('  Already-Hyphenated  ') "
     "== 'already-hyphenated'\""
@@ -138,14 +140,17 @@ def analyze_run(events, task_state):
     kinds = [entry.kind for entry in events]
     turns = [entry for entry in events if entry.kind == "turn_metrics"]
     input_tokens = [
-        entry.payload.get("completion_metadata", {}).get("input_tokens")
+        entry.payload.get("input_tokens")
         for entry in turns
     ]
     input_tokens = [value for value in input_tokens if isinstance(value, int)]
-    compaction_turns = [
-        entry.payload.get("prompt_metadata", {}).get("compaction")
-        for entry in turns
-        if entry.payload.get("prompt_metadata", {}).get("compaction")
+    compactions = [
+        {
+            "covered_event_count": len(entry.covered_event_ids),
+            "summary": entry.payload.get("content", ""),
+        }
+        for entry in events
+        if entry.kind == "compaction"
     ]
     successful_mutations = [
         entry
@@ -171,7 +176,7 @@ def analyze_run(events, task_state):
         "resume_count": kinds.count("run_resumed"),
         "successful_mutation_count": len(successful_mutations),
         "evidence_read_paths": evidence_read_paths,
-        "compactions": compaction_turns,
+        "compactions": compactions,
         "working_state": state.to_dict(),
     }
 

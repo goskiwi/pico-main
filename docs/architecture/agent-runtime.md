@@ -12,7 +12,7 @@ CLI build_agent
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
   -> new: isolated TaskIntentClassifier returns read_only / modify / modify_optional
   -> new: RunLifecycle derives and appends the TaskContract before the Session pointer
-  -> resume: RunStore.load_run reads once, validates Run Log v15 / terminal Artifact,
+  -> resume: RunStore.load_run reads once, validates Run Log v16 / terminal Artifact,
      and returns that Event snapshot with its Projection
   -> resume: persisted TaskContract is reused without another classification call
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
@@ -114,6 +114,10 @@ assistant_final / run_stopped
 
 The Run Log is single-writer and fsynced after every accepted event. It has no hash chain: a hash stored beside mutable local data is not a trusted tamper boundary. Contiguous sequence and IDs plus strict User, Tool Call/Started/Result, and terminal payloads reject causal corruption; telemetry payloads remain extensible. A final incomplete JSONL tail is a crash artifact and is truncated; malformed complete events fail closed.
 
+`turn_metrics` persists only Provider-reported `input_tokens` and `output_tokens`. Detailed Prompt
+section accounting remains an in-memory build/debug value; Compaction and Provider reset have their
+own causal Events and are not duplicated into per-turn telemetry.
+
 Replaceable snapshots and Workspace mutations use same-directory temporary files plus atomic replace. `write_file` only creates an absent file; `edit_file` only changes an existing file and stages/fsyncs the complete payload before revalidating its expected revision at the `os.replace` commit point. A stale Revision preserves external content and returns expected/actual revisions plus ready-to-call `read_file` arguments. Missing text returns a bounded closest current excerpt when one is useful; ambiguous text returns bounded exact line ranges. These are facts on the existing ToolOutcome, not additional Tools or recovery state.
 
 ## Tool recovery
@@ -151,37 +155,30 @@ differing latest request only on Resume. The envelope can include minimal Worksp
 document names, `AGENTS.md` repository conventions, RepoMap, History and WorkingState. RepoMap is
 ranked from the immutable goal, latest request, current WorkingState and paths already observed or
 changed by the Run. History is rendered before WorkingState so an older summary cannot displace the
-current constraints, decisions and next steps; the original task and latest request remain last.
+current constraints, decisions and next steps. The original task precedes this recovery context;
+only differing Resume guidance is appended last.
 Empty RepoMap, WorkingState and History sections are not rendered; project-document bodies are not
 preloaded.
 Normal Tool continuation appends the native `function_call` and `function_call_output` to the same
 manual Responses replay instead of rebuilding or resending the dynamic suffix.
 
 Native Function Schemas remain in the Responses `tools` field rather than being copied into
-instructions. AgentLoop resolves three surfaces for every fresh model turn:
+instructions. For every fresh model turn, AgentLoop computes the schemas currently admitted by the
+TaskContract, Runtime policy and Tool budget, sends exactly that surface, and charges it to the
+Context budget. Response parsing and ToolRuntime both enforce the same current surface; Pico does
+not maintain a backend-host capability matrix or Prompt-cache protocol.
 
-- `declared_tools`: the complete Runtime-native action schemas;
-- `allowed_tool_names`: the subset admitted by the current TaskContract, Runtime policy and Tool
-  budget;
-- `wire_tools`: the schemas actually used for Provider Token accounting and the request.
-
-For a backend with verified `allowed_tools` support, `wire_tools` stays equal to the stable complete
-schema set while `tool_choice.allowed_tools` carries the dynamic names during normal execution. The
-final-only boundary is intentionally stricter: when only `submit_final` remains allowed, `wire_tools`
-also shrinks to that one schema. On a backend without `allowed_tools`, the request always sends the
-already-narrowed schemas. Response parsing and ToolRuntime both enforce the allowed-name subset.
-Provider capabilities are selected explicitly by backend host; Pico does not probe production
-requests or maintain a legacy Prompt/Tool protocol.
-
-The stable instructions hash is also the `prompt_cache_key` on verified cache-capable backends.
-Turn metrics distinguish `input_tokens`, `cached_tokens` and derived uncached input, so cache reuse
-is measured rather than inferred. Context budgeting charges the actual
-`wire_tools`, not an unrelated superset or subset.
-
-Ordinary Call/Output continuation reuses the Provider session. If the wire or allowed Tool surface
+Ordinary Call/Output continuation reuses the Provider session. If the Tool surface
 changes—for example, the execution budget leaves only `submit_final`—AgentLoop resets that Provider
 session and rebuilds from RunLog before the next request. Changing only the request field inside an
 existing continuation is not treated as a reliable capability boundary.
+
+After a complete Action transaction, Provider-reported `input_tokens` is compared directly with
+`provider_context_limit_tokens - compaction_reserve_tokens`. Reaching that high watermark resets the
+continuation and lets the next fresh Prompt compact/rebuild from RunLog. Missing usage causes no
+prediction; output tokens, local Tool Result size and `max_new_tokens` are not combined into a
+synthetic next-request estimate. A typed Provider context overflow still performs one reset,
+Compaction attempt and retry; a second consecutive overflow propagates.
 
 Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare
 Compaction: an isolated Provider session summarizes historical facts into exactly two semantic
@@ -230,11 +227,11 @@ Session stores only `active_run_id`. On startup `load_resumable_run` opens that 
 ## Coding application Git delivery
 
 `applications.coding.CodingWorkflow` is an opt-in delivery application, not part of Pico Core. It
-runs the normal AgentLoop through terminal Completion, replays the durable Run to obtain net changed
+runs the normal AgentLoop through terminal Completion and obtains net changed
 paths, and only then creates one Git commit restricted to those paths. It never commits a path that
 was already dirty when the application started, never includes unrelated staged changes, and never
 resets or pushes. It rechecks the existing RunChangeSet immediately before delivery. The commit
-bypasses Git hooks because Runtime owns any configured Verification and a hook must not mutate the
+bypasses Git hooks because CodingWorkflow requires Runtime Verification and a hook must not mutate the
 settled Final Diff. A stopped Run, an empty net change, a dirty-path overlap, or a Git failure
 returns an explicit skipped/failed delivery result
 while preserving the Workspace.
@@ -265,18 +262,30 @@ Read-only tasks need a successful Observation; modify tasks that require change 
 
 ### Local verification trust boundary
 
-The model has no general-purpose shell Tool. Verification is the one command-execution path: the
-user supplies a fixed command explicitly, and the Completion boundary runs it from the Workspace
-under the same operating-system account that launched Pico. The model cannot generate or alter
-that command.
+The model may request one `run_command` for user-approved diagnostics such as tests, linters, type
+checks, Git status/diff and reproductions. It is expected not to modify repository files; Runtime
+captures repository-visible state before and after, and any change becomes an unresolved `unknown`
+effect. Here `unknown` means the change lacks a trustworthy Run-start preimage, not that its paths
+are necessarily unknown. Mutating Shell is not supported by this Runtime.
+The user separately supplies a fixed Verification command, which the Completion boundary owns and
+the model cannot alter.
 
 This is host execution, not a sandbox. Workspace path checks constrain Pico's structured file
-Tools; they do not constrain the verifier's system calls, filesystem access, child processes, or
-network access. Pico is therefore suitable only for repositories the user already trusts. Unknown
+Tools; they do not constrain diagnostic or verifier system calls, filesystem access, child processes,
+or network access. Pico is therefore suitable only for repositories the user already trusts. Unknown
 repositories and pull requests require an external CI runner, VM, or container boundary.
 
-### Bounded workspace freshness design
+### Repository-visible freshness design
 
-Pico previously opened every non-ignored workspace file, computed a SHA-256 for each, and hashed the complete map before and after verification. That cost scales with total repository bytes and duplicated facts already owned by Git and the Run Log, so the full-workspace fingerprint path and API were removed. The current design reuses the existing per-path content state only for paths already established as changed by RunEvidence.
+`run_command` and final Verification share one transient Repository snapshot. In Git repositories it
+compares HEAD identity, staged and total binary diffs, and content revisions for non-ignored
+untracked paths. This detects an already-dirty file changing again, index-only changes and HEAD
+movement without requiring a clean workspace. Diff observation disables external diff and textconv
+drivers. The fingerprint is not persisted; Events keep only the result and a bounded changed-path
+preview.
 
-A Git worktree version remains a possible stronger contract if Pico later must detect IDE or other process changes anywhere in the repository at Completion. It would combine HEAD, staged index identity, porcelain-v2 status, dirty/untracked content revisions, explicit Runtime-affected ignored paths, and submodule state. It is not implemented now: it adds Git scans, non-Git fallback semantics, ignored-file and submodule edge cases beyond the concrete changed-path freshness contract. Stale writes remain protected separately by expected-revision checks at the file commit point.
+Git-ignored files, `.git` metadata other than HEAD/ref, Workspace-external files, network effects and
+background processes after command return are outside this observation contract. Non-Git
+workspaces use a bounded metadata snapshot. A missing pre-execution baseline prevents command
+execution; a missing post-execution snapshot cannot establish `none`. Stale structured writes remain
+protected separately by expected-revision checks at their file commit point.

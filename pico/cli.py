@@ -14,6 +14,7 @@ import textwrap
 from .config import load_project_env, provider_env
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
+from .working_state import WorkingState
 from .workspace import WorkspaceContext, middle
 
 DEFAULT_SECRET_ENV_NAMES = (
@@ -76,10 +77,17 @@ def _configured_secret_names(args):
 def _build_model_client(args):
     """Build the single supported Responses transport."""
     model = _effective_model(args)
-    base_url = getattr(args, "base_url", None) or provider_env(
-        "PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL
+    configured_base_url = getattr(args, "base_url", None) or provider_env(
+        "PICO_OPENAI_API_BASE"
     )
     api_key = provider_env("PICO_OPENAI_API_KEY")
+    if not api_key and not configured_base_url:
+        raise RuntimeError(
+            "PICO_OPENAI_API_KEY is not configured. Set it in the project "
+            ".env.local/.env, or pass --base-url for an intentional no-auth "
+            "OpenAI-compatible endpoint."
+        )
+    base_url = configured_base_url or DEFAULT_OPENAI_BASE_URL
     return OpenAICompatibleModelClient(
         model=model,
         base_url=base_url,
@@ -199,6 +207,13 @@ def build_agent(args):
     )
 
 
+def _working_state_text(agent):
+    task = agent.run.task
+    if task is None:
+        return WorkingState().render_panel()
+    return "Task goal:\n- " + task.contract.goal + "\n\n" + task.working.render_panel()
+
+
 def build_arg_parser():
     defaults = PicoConfig()
     parser = argparse.ArgumentParser(
@@ -303,7 +318,11 @@ def main(argv=None):
 
         return run_main(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
-    agent = build_agent(args)
+    try:
+        agent = build_agent(args)
+    except (RuntimeError, ValueError) as exc:
+        print(f"pico: {exc}", file=sys.stderr)
+        return 2
 
     model = getattr(
         agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
@@ -316,10 +335,12 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt).answer)
+                outcome = agent.ask(prompt)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
+            print(outcome.answer)
+            return 0 if outcome.status == "completed" else 1
         return 0
 
     while True:
@@ -339,7 +360,7 @@ def main(argv=None):
             print(HELP_DETAILS)
             continue
         if user_input == "/state":
-            print(agent.prompt.working_state_text())
+            print(_working_state_text(agent))
             continue
         if user_input == "/session":
             print(agent.session.path)

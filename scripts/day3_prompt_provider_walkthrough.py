@@ -114,16 +114,12 @@ def build_prompt_fixture(root):
     RunLifecycle(bootstrap).initialize(
         "Read README.md", task_intent="read_only"
     )
-    action_tools = tuple(bootstrap.tools.action_schemas)
-    allowed_tool_names = tuple(
-        tool["name"] for tool in bootstrap.tools.model_action_tools()
-    )
+    action_tools = tuple(bootstrap.tools.model_action_tools())
     prompt, metadata = bootstrap.prompt.build(
         "Read README.md",
         action_tools=action_tools,
     )
-    declared_names = {tool["name"] for tool in action_tools}
-    allowed_names = set(allowed_tool_names)
+    names = {tool["name"] for tool in action_tools}
     expected_tool_tokens = client.estimate_action_tool_tokens(
         action_tools,
         bootstrap.prompt.count_tokens,
@@ -131,24 +127,22 @@ def build_prompt_fixture(root):
 
     assert metadata["section_order"] == [
         "runtime_policy",
-        "untrusted_context",
         "task_request",
+        "untrusted_context",
     ]
     assert metadata["included_context_sections"] == ["workspace"]
     assert "latest_user_request" not in prompt.input_text
     assert prompt.input_text.count("Read README.md") == 1
     assert '"task_kind": "read_only"' in prompt.input_text
     assert metadata["tool_schema_tokens"] == expected_tool_tokens
-    assert {"write_file", "edit_file"}.issubset(declared_names)
-    assert {"write_file", "edit_file"}.isdisjoint(allowed_names)
-    return prompt, metadata, action_tools, allowed_tool_names
+    assert {"write_file", "edit_file"}.isdisjoint(names)
+    return prompt, metadata, action_tools
 
 
 def experiment_channels_and_pending(
     prompt,
     metadata,
     action_tools,
-    allowed_tool_names,
 ):
     """A + B: show the three channels and one native continuation."""
     client = new_client()
@@ -171,9 +165,6 @@ def experiment_channels_and_pending(
                     "input_tokens": 240,
                     "output_tokens": 18,
                     "total_tokens": 258,
-                    "input_tokens_details": {
-                        "cached_tokens": 0,
-                    },
                 },
             )
         return response_with_call(
@@ -184,9 +175,6 @@ def experiment_channels_and_pending(
                 "input_tokens": 280,
                 "output_tokens": 16,
                 "total_tokens": 296,
-                "input_tokens_details": {
-                    "cached_tokens": 220,
-                },
             },
         )
 
@@ -196,10 +184,7 @@ def experiment_channels_and_pending(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
-            allowed_tool_names=allowed_tool_names,
-            prompt_cache_key=metadata["prompt_cache_key"],
         )
-        first_cache_metrics = dict(client.last_completion_metadata)
         pending_timeline.append(
             {
                 "moment": "收到 read_file function_call 后",
@@ -207,7 +192,6 @@ def experiment_channels_and_pending(
             }
         )
         client.record_action_result(
-            action,
             '{"status":"success","content":"# Provider demo"}',
         )
         pending_timeline.append(
@@ -221,10 +205,7 @@ def experiment_channels_and_pending(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
-            allowed_tool_names=allowed_tool_names,
-            prompt_cache_key=metadata["prompt_cache_key"],
         )
-        continued_cache_metrics = dict(client.last_completion_metadata)
 
     first_payload = requests[0]["payload"]
     continued_payload = requests[1]["payload"]
@@ -259,24 +240,15 @@ def experiment_channels_and_pending(
     assert [tool["name"] for tool in first_payload["tools"]] == [
         tool["name"] for tool in action_tools
     ]
-    assert first_payload["prompt_cache_key"] == metadata["prompt_cache_key"]
-    assert continued_payload["prompt_cache_key"] == metadata["prompt_cache_key"]
     assert first_payload["tool_choice"] == continued_payload["tool_choice"]
-    assert first_payload["tool_choice"] == {
-        "type": "allowed_tools",
-        "mode": "required",
-        "tools": [{"type": "function", "name": name} for name in allowed_tool_names],
-    }
-    assert first_cache_metrics["cached_tokens"] == 0
-    assert continued_cache_metrics["cached_tokens"] == 220
-    assert continued_cache_metrics["uncached_input_tokens"] == 60
+    assert first_payload["tool_choice"] == "required"
 
     print_section(
         "A. instructions / input / tools 是三个独立通道",
         {
             "flow": (
                 "稳定规则 → instructions | 最小首轮上下文 → input | "
-                "稳定原生 Schema → tools | 动态准入 → allowed_tools"
+                "当前允许的原生 Schema → tools"
             ),
             "instructions": {
                 "characters": len(prompt.instructions),
@@ -296,12 +268,7 @@ def experiment_channels_and_pending(
                 "latest_user_request_present": False,
             },
             "tools": {
-                "declared_names": [tool["name"] for tool in action_tools],
-                "allowed_names": list(allowed_tool_names),
-                "declared_but_disallowed_by_read_only_contract": [
-                    "write_file",
-                    "edit_file",
-                ],
+                "current_names": [tool["name"] for tool in action_tools],
                 "wire_schema_stable_across_continuation": (
                     first_payload["tools"] == continued_payload["tools"]
                 ),
@@ -313,18 +280,6 @@ def experiment_channels_and_pending(
                 ],
                 "tool_choice": first_payload["tool_choice"],
                 "parallel_tool_calls": first_payload["parallel_tool_calls"],
-            },
-            "cache": {
-                "prompt_cache_key_stable": (
-                    first_payload["prompt_cache_key"]
-                    == continued_payload["prompt_cache_key"]
-                ),
-                "first_turn": first_cache_metrics,
-                "continued_turn": continued_cache_metrics,
-                "continued_cache_hit_ratio": (
-                    continued_cache_metrics["cached_tokens"]
-                    / continued_cache_metrics["input_tokens"]
-                ),
             },
         },
     )
@@ -346,7 +301,6 @@ def experiment_channels_and_pending(
 def experiment_multiple_calls_are_rejected(
     prompt,
     action_tools,
-    allowed_tool_names,
 ):
     """B: prove that two function calls cannot leave one orphan pending call."""
     client = new_client()
@@ -375,7 +329,6 @@ def experiment_multiple_calls_are_rejected(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
-            allowed_tool_names=allowed_tool_names,
         )
 
     retained_function_calls = [
@@ -403,7 +356,6 @@ def experiment_multiple_calls_are_rejected(
 def experiment_incomplete_is_rejected(
     prompt,
     action_tools,
-    allowed_tool_names,
 ):
     """C: an incomplete response cannot smuggle in a complete-looking final."""
     client = new_client()
@@ -437,7 +389,6 @@ def experiment_incomplete_is_rejected(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
-            allowed_tool_names=allowed_tool_names,
         )
         pending_after_incomplete = client._pending_call_id
         retained_after_incomplete = [
@@ -445,13 +396,12 @@ def experiment_incomplete_is_rejected(
             for item in client._action_input
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
-        client.record_action_result(invalid, invalid.content)
+        client.record_action_result(invalid.content)
         corrected = client.complete_action(
             "replacement prompt is ignored inside the continuation",
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
-            allowed_tool_names=allowed_tool_names,
         )
 
     correction_item = requests[1]["input"][-1]
@@ -614,28 +564,20 @@ def main():
             "# Provider demo\n\nRead this file through a native function call.\n",
             encoding="utf-8",
         )
-        (
-            prompt,
-            metadata,
-            action_tools,
-            allowed_tool_names,
-        ) = build_prompt_fixture(root)
+        prompt, metadata, action_tools = build_prompt_fixture(root)
 
         experiment_channels_and_pending(
             prompt,
             metadata,
             action_tools,
-            allowed_tool_names,
         )
         experiment_multiple_calls_are_rejected(
             prompt,
             action_tools,
-            allowed_tool_names,
         )
         experiment_incomplete_is_rejected(
             prompt,
             action_tools,
-            allowed_tool_names,
         )
         experiment_context_overflow(root)
 

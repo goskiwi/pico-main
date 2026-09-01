@@ -78,6 +78,10 @@ class CodingWorkflow:
     ):
         self.model_client = model_client
         self.config = PicoConfig.build(config)
+        if not self.config.verification_command.strip():
+            raise ValueError(
+                "CodingWorkflow automatic Git delivery requires verification_command"
+            )
         self.subagent_model_client_factory = subagent_model_client_factory
         self.command_runner = command_runner
         self.command_runner_factory = command_runner_factory
@@ -95,8 +99,7 @@ class CodingWorkflow:
             subagent_model_client_factory=self.subagent_model_client_factory,
         )
         outcome = agent._ask_with_intent(request, intent="modify")
-        projection = agent.dependencies.run_store.replay(outcome.run_id)
-        changed_paths = tuple(projection.evidence.changed_paths)
+        changed_paths = outcome.changed_paths
 
         if outcome.status != "completed":
             return CodingResult(
@@ -124,7 +127,7 @@ class CodingWorkflow:
             )
 
         try:
-            projection.evidence.change_set.require_current_workspace(root)
+            agent.run.evidence.change_set.require_current_workspace(root)
         except RuntimeError as exc:
             return CodingResult(
                 outcome,
@@ -136,7 +139,7 @@ class CodingWorkflow:
         message = str(commit_message).strip() or _default_commit_message(request)
         try:
             _git(root, "add", "--", *changed_paths)
-            projection.evidence.change_set.require_current_workspace(root)
+            agent.run.evidence.change_set.require_current_workspace(root)
             _git(
                 root,
                 "commit",
