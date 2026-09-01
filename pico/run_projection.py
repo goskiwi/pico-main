@@ -91,7 +91,7 @@ class RunProjection:
     task: TaskState | None = None
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
-    pending_call_id: str | None = None
+    pending_call_ids: tuple[str, ...] = ()
     final_diff: FinalDiffDescriptor | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
@@ -111,9 +111,15 @@ class RunProjection:
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
         if event.kind == "assistant_tool_call":
-            self.pending_call_id = event.call_id or None
+            self.pending_call_ids = (event.call_id,)
+        elif event.kind == "assistant_tool_batch":
+            self.pending_call_ids = tuple(
+                call.call_id for call in event.batch_calls
+            )
         elif event.kind == "tool_result":
-            self.pending_call_id = None
+            if not self.pending_call_ids or event.call_id != self.pending_call_ids[0]:
+                raise ValueError("tool result does not match projected pending order")
+            self.pending_call_ids = self.pending_call_ids[1:]
         if event.kind in {"assistant_final", "run_stopped"}:
             self.final_diff = FinalDiffDescriptor.from_dict(
                 event.payload["final_diff"]
@@ -138,6 +144,10 @@ class RunProjection:
             self.task
             and self.task.lifecycle.status in {"completed", "stopped"}
         )
+
+    @property
+    def pending_call_id(self):
+        return self.pending_call_ids[0] if len(self.pending_call_ids) == 1 else None
 
     @property
     def run_id(self):
@@ -183,7 +193,7 @@ class RunProjection:
             "task": self.task.to_dict(),
             "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
-            "pending_call_id": self.pending_call_id,
+            "pending_call_ids": list(self.pending_call_ids),
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "run_cursor": self.last_cursor.to_dict(),
         }

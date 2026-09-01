@@ -228,7 +228,7 @@ class _ContextAssembler:
     ):
         """Commit semantic compaction or return a bounded read-only fallback."""
         run_log = self.agent.run.run_log
-        if run_log is None or run_log.pending_call_id():
+        if run_log is None or run_log.pending_tool_calls():
             return None, None
 
         raw = self._raw_sections(user_message)

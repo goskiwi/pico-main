@@ -29,8 +29,8 @@ def build_prompt_instructions():
         (
             "Tools",
             (
-                "The Responses tools field declares schemas; the current allowed tool choice and Runtime policy define what may actually be called.",
-                "Use exactly one provided function per turn.",
+                "Only the schemas supplied in the Responses tools field for this turn may be called; ToolRuntime validates them again locally.",
+                "You may call up to four independent list_files, read_file, search, or read_artifact observations in one turn. Call every other function alone; never mix an observation batch with stateful, execution, orchestration, or completion calls.",
                 "Use run_command only for diagnostics expected not to modify repository files; mutating shell commands are not supported by this Runtime.",
             ),
         ),

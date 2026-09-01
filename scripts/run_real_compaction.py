@@ -112,7 +112,8 @@ First call update_working_state. Record these constraints: read every listed evi
 file exactly once in order, modify only {TARGET_PATH}, and preserve the public API.
 Record a next step to read all evidence before editing.
 
-Then read every file below with one read_file call per file, using start_line=1 and end_line=200.
+Then read every file below exactly once using ordered Observation Batches of four
+read_file calls per model response, with start_line=1 and end_line=200 for every call.
 Do not use Search, List, or delegation:
 {files}
 
@@ -160,12 +161,22 @@ def analyze_run(events, task_state):
         and entry.outcome_status == "success"
         and entry.side_effect_state == "changed"
     ]
+    requested_calls = []
+    for entry in events:
+        if entry.kind == "assistant_tool_call":
+            requested_calls.append(
+                {"name": entry.name, "args": entry.args}
+            )
+        elif entry.kind == "assistant_tool_batch":
+            requested_calls.extend(
+                {"name": call.name, "args": call.args}
+                for call in entry.batch_calls
+            )
     evidence_read_paths = [
-        entry.args.get("path")
-        for entry in events
-        if entry.kind == "assistant_tool_call"
-        and entry.name == "read_file"
-        and str(entry.args.get("path", "")).startswith("evidence/")
+        call["args"].get("path")
+        for call in requested_calls
+        if call["name"] == "read_file"
+        and str(call["args"].get("path", "")).startswith("evidence/")
     ]
     state = task_state.working
     return {
@@ -173,6 +184,7 @@ def analyze_run(events, task_state):
         "max_single_request_input_tokens": max(input_tokens, default=0),
         "compaction_count": kinds.count("compaction"),
         "provider_session_reset_count": kinds.count("provider_session_reset"),
+        "observation_batch_count": kinds.count("assistant_tool_batch"),
         "resume_count": kinds.count("run_resumed"),
         "successful_mutation_count": len(successful_mutations),
         "evidence_read_paths": evidence_read_paths,
@@ -262,6 +274,7 @@ def main(argv=None):
         "initial_failure_reproduced": not initial["ok"],
         "compaction_triggered": analysis["compaction_count"] >= 1,
         "provider_session_reset": analysis["provider_session_reset_count"] >= 1,
+        "observation_batch_used": analysis["observation_batch_count"] >= 1,
         "working_state_preserved": bool(
             analysis["working_state"]["constraints"]
             and analysis["working_state"]["decisions"]

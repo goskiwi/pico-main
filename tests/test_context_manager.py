@@ -594,11 +594,14 @@ def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_p
         assert history.count(call_id) == 2
 
 
-def test_pending_tool_call_skips_compaction(tmp_path):
+def test_pending_observation_batch_skips_compaction(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)
-    run_log.append_tool_call(
-        ToolCall("read_file", {"path": "pending.py"}, "call_pending")
+    run_log.append_tool_batch(
+        (
+            ToolCall("read_file", {"path": "a.py"}, "call_a"),
+            ToolCall("read_file", {"path": "b.py"}, "call_b"),
+        )
     )
     manager = _ContextAssembler(agent, total_budget=300)
 

@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from http.client import IncompleteRead, RemoteDisconnected
 
-from ..contracts import ModelAction
+from ..contracts import ModelAction, ToolCall
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
@@ -155,13 +155,16 @@ class FakeModelClient:
 
     def reset_action_session(self):
         self.recorded_action_results = []
+        self.recorded_action_result_batches = []
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
         return 0
 
-    def record_action_result(self, result):
-        self.recorded_action_results.append(str(result))
+    def record_action_results(self, results):
+        batch = tuple(str(result) for result in results)
+        self.recorded_action_result_batches.append(batch)
+        self.recorded_action_results.extend(batch)
 
     def complete(self, prompt, max_new_tokens, **kwargs):
         self.prompts.append(prompt)
@@ -269,6 +272,24 @@ def _extract_usage(data):
     }
 
 
+def _tool_call_from_response(call):
+    name = str(call.get("name", "")).strip()
+    if not name:
+        return None, "function call is missing a name"
+    arguments = call.get("arguments", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None, f"function {name} returned malformed JSON arguments"
+    if not isinstance(arguments, dict):
+        return None, f"function {name} arguments must be an object"
+    call_id = str(call.get("call_id") or "")
+    if not call_id:
+        return None, f"function {name} is missing a call id"
+    return ToolCall(name, arguments, call_id), ""
+
+
 def _action_from_response(data, action_tools):
     if data.get("status") == "incomplete":
         details = data.get("incomplete_details") or {}
@@ -276,12 +297,12 @@ def _action_from_response(data, action_tools):
         if reason == "max_output_tokens":
             return ModelAction.invalid(
                 "The model response reached max_output_tokens before "
-                "producing one complete function call. Return exactly "
-                "one concise function call."
+                "producing complete function calls. Return one concise "
+                "action or an independent observation batch."
             )
         return ModelAction.invalid(
             "The provider returned an incomplete response. Return exactly "
-            "one complete function call."
+            "one complete action or observation batch."
         )
     output = data.get("output")
     if not isinstance(output, list) or any(
@@ -294,41 +315,35 @@ def _action_from_response(data, action_tools):
     calls = [
         item for item in output if item.get("type") == "function_call"
     ]
-    if len(calls) != 1:
+    if not calls:
         return ModelAction.invalid(
-            f"expected exactly one function call, received {len(calls)}"
-        )
-    call = calls[0]
-    name = str(call.get("name", "")).strip()
-    if name not in declared:
-        return ModelAction.invalid(
-            f"unknown function call: {name or '<missing>'}"
-        )
-    arguments = call.get("arguments", {})
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError:
+            "expected at least one function call, received 0"
+    )
+    parsed = []
+    for call in calls:
+        parsed_call, error = _tool_call_from_response(call)
+        if error:
+            return ModelAction.invalid(error)
+        if parsed_call.name not in declared:
             return ModelAction.invalid(
-                f"function {name} returned malformed JSON arguments"
+                f"unknown function call: {parsed_call.name}"
             )
-    if not isinstance(arguments, dict):
-        return ModelAction.invalid(
-            f"function {name} arguments must be an object"
-        )
-    if name == "submit_final":
+        parsed.append(parsed_call)
+    if len(parsed) > 1:
+        try:
+            return ModelAction.tool_batch(parsed)
+        except ValueError as exc:
+            return ModelAction.invalid(str(exc))
+    call = parsed[0]
+    if call.name == "submit_final":
+        arguments = call.args
         answer = arguments.get("answer")
         if set(arguments) != {"answer"} or not isinstance(answer, str) or not answer.strip():
             return ModelAction.invalid(
                 "submit_final requires one non-empty string answer"
             )
         return ModelAction.final(answer)
-    call_id = str(call.get("call_id") or "")
-    if not call_id:
-        return ModelAction.invalid(
-            f"function {name} is missing a call id"
-        )
-    return ModelAction.tool(name, arguments, call_id=call_id)
+    return ModelAction("tool", tool_calls=(call,))
 
 
 class OpenAICompatibleModelClient:
@@ -345,7 +360,7 @@ class OpenAICompatibleModelClient:
 
     def reset_action_session(self):
         self._action_input = []
-        self._pending_call_id = None
+        self._pending_call_ids = ()
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
@@ -366,22 +381,27 @@ class OpenAICompatibleModelClient:
         )
         return int(token_counter(serialized))
 
-    def record_action_result(self, result):
-        result = str(result)
-        if self._pending_call_id is not None:
-            self._action_input.append(
+    def record_action_results(self, results):
+        results = tuple(str(result) for result in results)
+        if self._pending_call_ids:
+            if len(results) != len(self._pending_call_ids):
+                raise ValueError("provider continuation requires one result per call")
+            self._action_input.extend(
                 {
                     "type": "function_call_output",
-                    "call_id": self._pending_call_id,
+                    "call_id": call_id,
                     "output": result,
                 }
+                for call_id, result in zip(self._pending_call_ids, results)
             )
-            self._pending_call_id = None
+            self._pending_call_ids = ()
             return
+        if len(results) != 1:
+            raise ValueError("provider correction requires exactly one result")
         self._action_input.append(
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": result}],
+                "content": [{"type": "input_text", "text": results[0]}],
             }
         )
 
@@ -406,7 +426,7 @@ class OpenAICompatibleModelClient:
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
             "tool_choice": "required",
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
@@ -563,8 +583,8 @@ class OpenAICompatibleModelClient:
                     "content": [{"type": "input_text", "text": str(input_text)}],
                 }
             )
-        if self._pending_call_id is not None:
-            raise RuntimeError("pending Responses function call has no recorded output")
+        if self._pending_call_ids:
+            raise RuntimeError("pending Responses function calls have no recorded outputs")
         self.last_completion_metadata = {}
         payload = self._build_payload(
             max_new_tokens,
@@ -580,18 +600,19 @@ class OpenAICompatibleModelClient:
         function_calls = [
             item for item in output if item.get("type") == "function_call"
         ]
-        pending_call_id = (
-            str(function_calls[0].get("call_id") or "")
-            if len(function_calls) == 1
+        pending_call_ids = (
+            tuple(str(call.get("call_id") or "") for call in function_calls)
+            if function_calls
             and response_data.get("status") != "incomplete"
-            else ""
+            and action.kind != "invalid"
+            else ()
         )
-        if pending_call_id and action.kind != "invalid":
+        if pending_call_ids:
             self._action_input.extend(output)
-            self._pending_call_id = pending_call_id
+            self._pending_call_ids = pending_call_ids
         else:
             self._action_input.extend(
                 item for item in output if item.get("type") != "function_call"
             )
-            self._pending_call_id = None
+            self._pending_call_ids = ()
         return action

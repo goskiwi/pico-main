@@ -1,10 +1,12 @@
 import os
+import threading
 import time
 from unittest.mock import patch
 
 import pytest
 
 import pico.mutations as mutation_module
+import pico.tools as tools_module
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -626,3 +628,154 @@ def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
     assert outcome.structured["expected_revision"] == "absent"
     assert outcome.structured["actual_revision"] == file_revision(target)
     assert target.read_text(encoding="utf-8") == "external-change\n"
+
+
+def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
+    tmp_path,
+    monkeypatch,
+):
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text(name + "\n", encoding="utf-8")
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "a.txt", "start_line": 1, "end_line": 1},
+            "call_a",
+        ),
+        ToolCall(
+            "read_file",
+            {"path": "b.txt", "start_line": 1, "end_line": 1},
+            "call_b",
+        ),
+    )
+    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    barrier = threading.Barrier(2)
+    b_finished = threading.Event()
+    counter_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    call_ids_by_path = {}
+
+    def parallel_read(context, args):
+        nonlocal active, max_active
+        with counter_lock:
+            active += 1
+            max_active = max(max_active, active)
+            call_ids_by_path[args["path"]] = context.tool_call_id()
+        barrier.wait(timeout=2)
+        if args["path"] == "a.txt":
+            assert b_finished.wait(timeout=2)
+        else:
+            b_finished.set()
+        with counter_lock:
+            active -= 1
+        return ToolRunnerResult("worker result " + args["path"])
+
+    monkeypatch.setitem(
+        tools_module._TOOL_RUNNERS,
+        "read_file",
+        parallel_read,
+    )
+
+    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+
+    assert max_active == 2
+    assert [outcome.tool_call_id for outcome in outcomes] == ["call_a", "call_b"]
+    assert [outcome.content for outcome in outcomes] == [
+        "worker result a.txt",
+        "worker result b.txt",
+    ]
+    assert call_ids_by_path == {"a.txt": "call_a", "b.txt": "call_b"}
+    assert [
+        event.call_id
+        for event in run_log.events
+        if event.kind == "tool_result"
+    ] == ["call_a", "call_b"]
+
+
+def test_cancelled_observation_batch_still_closes_every_call(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    calls = (
+        ToolCall("list_files", {"path": "."}, "call_a"),
+        ToolCall("list_files", {"path": "."}, "call_b"),
+    )
+    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    agent.run.execution_context.request_stop("user_cancelled")
+
+    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+
+    assert len(outcomes) == 2
+    assert all(outcome.execution_state == "failed" for outcome in outcomes)
+    assert all(outcome.side_effect_state == "none" for outcome in outcomes)
+    assert all(
+        outcome.failure.code == "operation_interrupted" for outcome in outcomes
+    )
+    assert run_log.pending_tool_calls() == ()
+
+
+def test_observation_batch_does_not_swallow_process_interrupts(
+    tmp_path,
+    monkeypatch,
+):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    calls = (
+        ToolCall("list_files", {"path": "."}, "call_a"),
+        ToolCall("list_files", {"path": "."}, "call_b"),
+    )
+    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+
+    def interrupted(_context, _args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(tools_module._TOOL_RUNNERS, "list_files", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        agent.tools.execute_pending_batch(batch.batch_id)
+
+    assert run_log.pending_tool_calls() == calls
+
+
+def test_observation_batch_preserves_reported_side_effects(
+    tmp_path,
+    monkeypatch,
+):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    calls = (
+        ToolCall("list_files", {"path": "."}, "call_known"),
+        ToolCall("list_files", {"path": "."}, "call_unknown"),
+    )
+    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+
+    def impure_observation(context, _args):
+        if context.tool_call_id() == "call_known":
+            return ToolRunnerResult(
+                "known effect",
+                affected_paths=("changed.txt",),
+                effect_scope="workspace",
+            )
+        return ToolRunnerResult("unknown effect", effect_scope="workspace")
+
+    monkeypatch.setitem(
+        tools_module._TOOL_RUNNERS,
+        "list_files",
+        impure_observation,
+    )
+
+    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+
+    assert [outcome.side_effect_state for outcome in outcomes] == [
+        "unknown",
+        "unknown",
+    ]
+    assert outcomes[0].affected_paths == ("changed.txt",)
+    assert all(outcome.effect_scope == "workspace" for outcome in outcomes)
+    assert all(outcome.status == "partial_success" for outcome in outcomes)
+    assert all(
+        outcome.failure.code == "observation_reported_side_effect"
+        for outcome in outcomes
+    )

@@ -9,6 +9,7 @@ from pico import (
     ToolCall,
     WorkspaceContext,
 )
+from pico.contracts import ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_log import RunLog
@@ -412,3 +413,65 @@ def test_started_changed_path_recovers_as_partial_without_replay(tmp_path):
     assert result.outcome_status == "partial_success"
     assert result.side_effect_state == "partial"
     assert result.affected_paths == ("x.txt",)
+
+
+def test_unstarted_observation_batch_recovers_every_call_without_replay(tmp_path):
+    agent, store, _projection, log = build_interrupted_run(tmp_path)
+    calls = (
+        ToolCall("read_file", {"path": "README.md"}, "call_a"),
+        ToolCall("search", {"pattern": "demo", "path": "."}, "call_b"),
+    )
+    log.append_tool_batch(calls)
+
+    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
+    outcome = resumed._ask_with_intent("Continue", **NO_CHANGE_TASK)
+
+    assert outcome.answer == "Recovered."
+    results = [
+        event
+        for event in resumed.run.run_log.events
+        if event.kind == "tool_result" and event.call_id in {"call_a", "call_b"}
+    ]
+    assert [event.call_id for event in results] == ["call_a", "call_b"]
+    assert all(
+        event.payload["outcome"]["execution_state"] == "not_started"
+        for event in results
+    )
+    assert all(event.side_effect_state == "none" for event in results)
+    assert resumed.run.projection.pending_call_ids == ()
+
+
+def test_observation_batch_recovery_keeps_result_prefix_and_closes_suffix(tmp_path):
+    agent, store, _projection, log = build_interrupted_run(tmp_path)
+    calls = (
+        ToolCall("read_file", {"path": "README.md"}, "call_a"),
+        ToolCall("search", {"pattern": "demo", "path": "."}, "call_b"),
+    )
+    log.append_tool_batch(calls)
+    for call in calls:
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+    log.append_tool_result(
+        ToolOutcome(
+            "call_a",
+            "read_file",
+            "success",
+            "completed",
+            "none",
+            "already durable",
+        )
+    )
+
+    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
+    resumed._ask_with_intent("Continue", **NO_CHANGE_TASK)
+
+    results = [
+        event
+        for event in resumed.run.run_log.events
+        if event.kind == "tool_result" and event.call_id in {"call_a", "call_b"}
+    ]
+    assert [event.call_id for event in results] == ["call_a", "call_b"]
+    assert results[0].content == "already durable"
+    assert results[1].payload["outcome"]["failure"]["code"] == (
+        "operation_interrupted"
+    )
+    assert results[1].side_effect_state == "none"

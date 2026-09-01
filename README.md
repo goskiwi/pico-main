@@ -1,13 +1,14 @@
 # Pico
 
-Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型每轮只通过
-OpenAI-compatible Responses function calling 提出一个动作；Runtime 掌握工具准入、
+Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型每轮通过
+OpenAI-compatible Responses function calling 提出一个动作或独立 Observation Batch；Runtime 掌握工具准入、
 副作用、持久化、恢复、验证和最终完成权。CLI 还提供一次一个的显式 Child 委派。
 
 Pico 面向用户已经信任的本地仓库。模型可以申请一个默认需要 Approval 的诊断型
 `run_command`；最终 Verification 仍由用户通过 `--verify-command` 固定。两者都在 Workspace
 中以当前用户权限执行，不是 Sandbox，文件工具的路径约束不能限制其访问其他目录、网络或
-子进程。Pico 只检测 Git 可见的净仓库变化，不追踪 ignored 文件或外部系统副作用；未知仓库、
+子进程。Pico 检测 Repository 可见净变化：Git 仓库使用 Diff、Untracked state 与 HEAD，非 Git
+Workspace 使用有界 metadata snapshot；它不追踪 ignored 文件或外部系统副作用。未知仓库、
 未知 PR 或其他不可信代码必须放到 Pico 外部的 CI、VM 或容器中运行。
 
 ## 快速开始
@@ -46,7 +47,7 @@ User request -> hidden TaskIntentClassifier -> TaskContract
   -> AgentLoop: ModelAction(tool / invalid / final)
   -> ToolRuntime: admission -> tool_started -> Runner -> tool_result
   -> RunLog: append-only, sequenced, fsynced Facts
-  -> RunProjection: Task + Evidence + Metrics + one Pending Call
+  -> RunProjection: Task + Evidence + Metrics + one Pending Tool transaction
   -> CompletionController
   -> Runtime Verification + Final Diff + RunOutcome
 ```
@@ -54,11 +55,11 @@ User request -> hidden TaskIntentClassifier -> TaskContract
 面试主线只需要五点：
 
 1. **单一事实源**：每个 Run 只有一个 Run Log；Live 与 Replay 共用 `RunProjection.apply_event`。
-2. **可恢复工具事务**：`assistant_tool_call -> tool_started -> tool_result`；副作用前先 fsync，
-   崩溃后检查真实路径状态，不盲目重放未知操作。
-3. **Runtime 拥有执行权**：模型只提出 ToolCall；AgentLoop 先持久化 Call，再只把 call ID
-   交给 `ToolRuntime.execute_pending`。ToolRuntime 取回 name/args，完成 Schema、TaskContract、
-   写范围与 Approval 检查，并持久化执行事务的 Started/Result。
+2. **可恢复工具事务**：单调用使用 `assistant_tool_call`；多个纯 Observation 原子写成
+   `assistant_tool_batch`。每个 Call 都有 Started/Result，崩溃后逐 Call 闭合且不盲目重放。
+3. **副作用感知调度**：`list_files/read_file/search/read_artifact` 可组成最多四个调用的并行 Batch；
+   任何执行、写入、状态、编排或完成动作必须独占一轮。Runner 可并行，RunLog/Projection/Artifact
+   始终由主线程按模型原始顺序提交。
 4. **Revision-bound 原子修改**：`edit_file` 携带读取时 Revision，提交点再次复验后原子替换，
    外部修改不会被静默覆盖。
 5. **证据驱动完成**：模型调用 `submit_final` 后，Runtime 检查净变化与不确定副作用，运行用户
@@ -73,13 +74,16 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 CLI 默认注册以下十一个原生工具。每轮只把当前 TaskContract 和工具预算允许的 Schema 发送
 给 Provider；ToolRuntime 在本机再次执行准入。
 
+前四个只读工具可组成 Observation Batch；其余工具必须单独调用。Mixed Batch 在执行前整批
+拒绝，但仍为每个 Call ID 写入一个 `rejected/not_started` Result。
+
 | 工具 | modify | read_only | 作用 |
 |---|:---:|:---:|---|
 | `list_files` | ✓ | ✓ | 列出 Workspace 文件 |
 | `read_file` | ✓ | ✓ | 按行读取并返回 Revision |
 | `read_artifact` | ✓ | ✓ | 分页读取当前 Run 的大输出 |
 | `search` | ✓ | ✓ | 有界搜索 Workspace |
-| `run_command` | ✓ | ✓ | 默认审批的可信本机诊断命令；Git 可见变化会阻止完成 |
+| `run_command` | ✓ | ✓ | 默认审批的可信本机诊断命令；Repository 可见变化会阻止完成 |
 | `write_file` | ✓ | — | 只创建不存在的文件 |
 | `edit_file` | ✓ | — | 按 Revision 修改已有文件 |
 | `update_working_state` | ✓ | ✓ | 增量维护当前 Run 的约束、决定和下一步 |

@@ -63,7 +63,7 @@ class AgentLoop:
                 if loop_state.execution_stop:
                     break
                 if turn.action.kind == "tool":
-                    loop_state.execution_stop = self._handle_tool_action(
+                    loop_state.execution_stop = self._handle_tool_turn(
                         loop_state, turn
                     )
                 elif turn.action.kind == "invalid":
@@ -189,8 +189,9 @@ class AgentLoop:
             turn.provider_input_tokens >= self._provider_high_watermark()
         )
 
-    def _continue_provider(self, loop_state, turn, provider_result):
+    def _continue_provider(self, loop_state, turn, provider_results):
         agent = self.agent
+        provider_results = tuple(str(result) for result in provider_results)
         if self._should_rotate_provider(turn):
             threshold_tokens = self._provider_high_watermark()
             agent.model_client.reset_action_session()
@@ -205,7 +206,7 @@ class AgentLoop:
                 },
             )
             return
-        agent.model_client.record_action_result(provider_result)
+        agent.model_client.record_action_results(provider_results)
 
     def _recover_context_overflow(self, loop_state):
         if loop_state.overflow_recovery_attempted:
@@ -222,30 +223,40 @@ class AgentLoop:
         )
         return True
 
-    def _handle_tool_action(self, loop_state, turn):
+    def _handle_tool_turn(self, loop_state, turn):
         agent = self.agent
-        if (
+        calls = turn.action.tool_calls
+        budget_exhausted = (
             agent.config.max_tool_executions is not None
             and agent.run.metrics.executed_tool_count
             >= agent.config.max_tool_executions
-        ):
+        )
+        if budget_exhausted and len(calls) == 1:
             return "tool_execution_limit"
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
-        call = turn.action.tool_call
-        agent.apply_run_event(agent.run.run_log.append_tool_call(call))
-        outcome = agent.tools.execute_pending(call.call_id)
+        if len(calls) == 1:
+            call = calls[0]
+            agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+            outcomes = (agent.tools.execute_pending(call.call_id),)
+        else:
+            batch = agent.apply_run_event(
+                agent.run.run_log.append_tool_batch(calls)
+            )
+            outcomes = agent.tools.execute_pending_batch(batch.batch_id)
 
         model_instruction = self._append_budget_instruction(loop_state)
-        provider_result = outcome.render_for_model()
+        provider_results = [outcome.render_for_model() for outcome in outcomes]
         if model_instruction:
-            provider_result += "\n\nRuntime instruction: " + model_instruction
+            provider_results[-1] += (
+                "\n\nRuntime instruction: " + model_instruction
+            )
         self._continue_provider(
             loop_state,
             turn,
-            provider_result,
+            provider_results,
         )
-        return ""
+        return "tool_execution_limit" if budget_exhausted else ""
 
     def _append_budget_instruction(self, loop_state):
         agent = self.agent
@@ -269,7 +280,7 @@ class AgentLoop:
         self.agent.apply_run_event(
             self.agent.run.run_log.append_model_instruction(turn.action.content)
         )
-        self._continue_provider(loop_state, turn, turn.action.content)
+        self._continue_provider(loop_state, turn, (turn.action.content,))
         if loop_state.invalid_output_count >= 8:
             return "invalid_output_limit"
         return ""
@@ -304,4 +315,4 @@ class AgentLoop:
         if loop_state.completion_block_count >= 3:
             loop_state.execution_stop = "completion_block_limit"
             return
-        self._continue_provider(loop_state, turn, instruction)
+        self._continue_provider(loop_state, turn, (instruction,))

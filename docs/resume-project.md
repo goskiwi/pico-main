@@ -6,7 +6,7 @@
 
 ## 单一 Run Log
 
-将 TaskContract、恢复 `user_guidance`、Tool Call、`tool_started`、Tool Result、Verification、Compaction 和终态写入同一 strict append-only Run Log。实时执行与恢复共用一个 RunProjection，重建 Task、Evidence、Metrics、单 Pending Call 与最终 Diff receipt。
+将 TaskContract、恢复 `user_guidance`、单 Tool Call 或纯 Observation Batch、逐 Call `tool_started/tool_result`、Verification、Compaction 和终态写入同一 strict append-only Run Log。实时执行与恢复共用一个 RunProjection，重建 Task、Evidence、Metrics、Pending Call IDs 与最终 Diff receipt。
 
 ## Crash Resume
 

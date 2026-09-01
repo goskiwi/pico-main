@@ -15,7 +15,7 @@ Terminology in this document is strict:
 
 | Scope | Source of truth | Derived state |
 |---|---|---|
-| Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Call and final Diff receipt |
+| Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Tool Call IDs and final Diff receipt |
 | Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived and `reload_required` is only a process-local cache-validity bit |
 | Task contract | First `user_message.contract`, derived from a hidden structured Intent classification | Goal, task kind, write scope and completion requirements |
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
@@ -28,7 +28,7 @@ Terminology in this document is strict:
 | Path | Durable writes | Rebuildable/current state |
 |---|---|---|
 | CLI / resume | First `user_message.contract`, then Session `active_run_id`; each resumed input as `user_guidance`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
-| Normal Tool turn | `assistant_tool_call`, fsynced `tool_started`, then fsynced `tool_result` | ToolRuntime resolves the pending durable call before admission/execution; private helpers, ToolContext, Projection and Evidence remain derived |
+| Normal Tool turn | One `assistant_tool_call` or ordered `assistant_tool_batch`, per-Call fsynced `tool_started/tool_result` | ToolRuntime resolves the pending durable transaction; only pure Observation Runners may execute concurrently, while all durable state is updated in original order |
 | Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
 
 Invariants:
@@ -43,6 +43,6 @@ Invariants:
 - TaskContract, incremental WorkingState, TaskLifecycle, Evidence and Metrics can be rebuilt from the Run Log.
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
-- Tool protocol events form one strict `assistant_tool_call -> tool_started? -> tool_result` transaction.
+- Tool protocol events form one strict single-Call transaction or one ordered, indivisible pure-Observation Batch. Every Call ID receives exactly one Result.
 - Child delegation and integration are synchronous; there is no DAG/background scheduler. Completed Implement receipts and integration state replay from the Parent Run Log, but running Child execution is not resumed across processes.
 - Old persistence formats are rejected; no compatibility or migration branch exists.

@@ -1,6 +1,6 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, the single Pending Call and final Diff receipt for live execution and replay. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, one Pending Tool transaction and the final Diff receipt for live execution and replay. A transaction is either one ordinary Call or one ordered pure-Observation Batch. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
 
 ## Current execution paths
 
@@ -12,7 +12,7 @@ CLI build_agent
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
   -> new: isolated TaskIntentClassifier returns read_only / modify / modify_optional
   -> new: RunLifecycle derives and appends the TaskContract before the Session pointer
-  -> resume: RunStore.load_run reads once, validates Run Log v16 / terminal Artifact,
+  -> resume: RunStore.load_run reads once, validates Run Log v17 / terminal Artifact,
      and returns that Event snapshot with its Projection
   -> resume: persisted TaskContract is reused without another classification call
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
@@ -44,6 +44,20 @@ AgentLoop
 `ToolRuntime` is the one public boundary for model-visible tools. Stateless value helpers live in
 the private `tool_execution.py` module; transaction order and persistence stay in `ToolRuntime`.
 Concrete runners receive only a `ToolContext` rather than the whole Pico object.
+
+### Observation Batch
+
+One Provider response may contain two to four independent `list_files`, `read_file`, `search`, or
+`read_artifact` calls. AgentLoop persists the complete ordered `assistant_tool_batch` first.
+ToolRuntime performs whole-batch policy, budget, surface and argument preflight before execution.
+Any execution, mutation, state, orchestration or completion call makes the whole Batch rejected;
+every Call still receives one `rejected/not_started/none` Result.
+
+For an accepted Batch, the main thread writes all `tool_started` Facts in original order. A bounded
+worker pool runs only the raw read-only Runners with per-Call ToolContext values. The main thread
+then performs redaction, Artifact materialization, Projection updates and `tool_result` appends in
+the original Call order. All native `function_call_output` values return to the Provider in one
+continuation. A failed Observation does not cancel valid siblings.
 
 ### Final submission
 
@@ -102,6 +116,7 @@ user_guidance
 run_started / run_resumed
 model_requested / turn_metrics
 assistant_tool_call
+assistant_tool_batch
 tool_started
 tool_result
 model_instruction
@@ -137,6 +152,11 @@ After execution, `tool_result` records the canonical ToolOutcome. On resume:
 - mutating tool without enumerable paths: append unknown result;
 - never replay an unfinished non-idempotent tool automatically.
 
+For an interrupted Observation Batch, recovery preserves an existing Result prefix, marks every
+started suffix Call `operation_interrupted/none`, and marks every unstarted suffix Call
+`operation_not_started/none`. It never replays the Runner. The whole Batch, including every Result,
+is one indivisible Compaction/recent-history unit.
+
 ToolOutcome keeps three explicit state dimensions for direct inspection:
 
 - `status`: overall result (`success`, `error`, `rejected`, or `partial_success`);
@@ -159,8 +179,9 @@ current constraints, decisions and next steps. The original task precedes this r
 only differing Resume guidance is appended last.
 Empty RepoMap, WorkingState and History sections are not rendered; project-document bodies are not
 preloaded.
-Normal Tool continuation appends the native `function_call` and `function_call_output` to the same
-manual Responses replay instead of rebuilding or resending the dynamic suffix.
+Normal Tool continuation appends native `function_call` and `function_call_output` items to the same
+manual Responses replay instead of rebuilding or resending the dynamic suffix. Observation Batch
+Results are appended together in original Call order before the next Provider request.
 
 Native Function Schemas remain in the Responses `tools` field rather than being copied into
 instructions. For every fresh model turn, AgentLoop computes the schemas currently admitted by the

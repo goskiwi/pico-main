@@ -106,18 +106,21 @@ BASE_TOOL_SPECS = {
         "args_schema": ListFilesArgs,
         "risky": False,
         "manual_observation": True,
+        "batchable_observation": True,
         "description": "List files in the workspace.",
     },
     "read_file": {
         "args_schema": ReadFileArgs,
         "risky": False,
         "manual_observation": True,
+        "batchable_observation": True,
         "description": "Read a UTF-8 file by line range.",
     },
     "read_artifact": {
         "args_schema": ReadArtifactArgs,
         "risky": False,
         "manual_observation": True,
+        "batchable_observation": True,
         "description": (
             "Read up to 8 KiB from a truncated tool-output artifact in the current run."
         ),
@@ -126,6 +129,7 @@ BASE_TOOL_SPECS = {
         "args_schema": SearchArgs,
         "risky": False,
         "manual_observation": True,
+        "batchable_observation": True,
         "description": "Search the workspace with rg or a simple fallback.",
     },
     "run_command": {

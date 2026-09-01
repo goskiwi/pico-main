@@ -85,20 +85,36 @@ class ToolRunnerResult:
 @dataclass(frozen=True)
 class ModelAction:
     kind: str
-    tool_call: ToolCall | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
     content: str = ""
 
     def __post_init__(self):
         if self.kind not in ACTION_KINDS:
             raise ValueError(f"unsupported model action: {self.kind}")
-        if self.kind == "tool" and self.tool_call is None:
-            raise ValueError("tool action requires a tool call")
-        if self.kind != "tool" and self.tool_call is not None:
-            raise ValueError("only tool actions may contain a tool call")
+        if self.kind == "tool" and not self.tool_calls:
+            raise ValueError("tool action requires at least one tool call")
+        if self.kind != "tool" and self.tool_calls:
+            raise ValueError("only tool actions may contain tool calls")
+        call_ids = tuple(call.call_id for call in self.tool_calls)
+        if len(set(call_ids)) != len(call_ids):
+            raise ValueError("tool action call ids must be unique")
+
+    @property
+    def tool_call(self):
+        return self.tool_calls[0] if len(self.tool_calls) == 1 else None
 
     @classmethod
     def tool(cls, name: str, args: dict[str, Any], *, call_id: str = ""):
-        return cls("tool", tool_call=ToolCall(name, args, call_id))
+        return cls("tool", tool_calls=(ToolCall(name, args, call_id),))
+
+    @classmethod
+    def tool_batch(cls, calls):
+        normalized = tuple(calls)
+        if len(normalized) < 2:
+            raise ValueError("tool batch requires at least two calls")
+        if any(not isinstance(call, ToolCall) for call in normalized):
+            raise TypeError("tool batch entries must be ToolCall values")
+        return cls("tool", tool_calls=normalized)
 
     @classmethod
     def final(cls, content: str):

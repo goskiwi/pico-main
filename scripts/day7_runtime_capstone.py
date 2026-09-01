@@ -10,6 +10,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
+    ToolCall,
     WorkspaceContext,
 )
 from pico.command_runner import CommandResult
@@ -72,14 +73,27 @@ def main():
                     },
                     call_id="call_plan",
                 ),
-                ModelAction.tool(
-                    "read_file",
-                    {
-                        "path": "calculator.py",
-                        "start_line": 1,
-                        "end_line": 40,
-                    },
-                    call_id="call_read",
+                ModelAction.tool_batch(
+                    (
+                        ToolCall(
+                            "read_file",
+                            {
+                                "path": "calculator.py",
+                                "start_line": 1,
+                                "end_line": 40,
+                            },
+                            "call_read_code",
+                        ),
+                        ToolCall(
+                            "read_file",
+                            {
+                                "path": "test_calculator.py",
+                                "start_line": 1,
+                                "end_line": 40,
+                            },
+                            "call_read_test",
+                        ),
+                    )
                 ),
                 ModelAction.tool(
                     "edit_file",
@@ -125,11 +139,16 @@ def main():
         events = agent.dependencies.run_store.read_events(run_id)
         replayed = agent.dependencies.run_store.replay(run_id)
         evidence = replayed.evidence
-        calls = {
-            event.call_id: event
-            for event in events
-            if event.kind == "assistant_tool_call"
-        }
+        calls = {}
+        for event in events:
+            if event.kind == "assistant_tool_call":
+                calls[event.call_id] = ToolCall(
+                    event.name,
+                    event.args,
+                    event.call_id,
+                )
+            elif event.kind == "assistant_tool_batch":
+                calls.update((call.call_id, call) for call in event.batch_calls)
         results = {
             event.call_id: event
             for event in events
@@ -149,11 +168,6 @@ def main():
             event.payload
             for event in events
             if event.kind == "verification_result"
-        ]
-        provider_usage = [
-            dict(event.payload)
-            for event in events
-            if event.kind == "turn_metrics"
         ]
         persisted_files = sorted(
             path.relative_to(root).as_posix()
@@ -182,6 +196,7 @@ def main():
             verification_events[-1]["finished_changed_path_states"],
         ) is not None
         assert len(command_runner.calls) == 1
+        assert sum(event.kind == "assistant_tool_batch" for event in events) == 1
         assert "calculator.py" in model.prompts[0]
         assert diff_descriptor["size_bytes"] == outcome.final_diff.diff_bytes
         assert "-    return left - right" in final_diff_text
@@ -223,7 +238,6 @@ def main():
                     "final_diff": outcome.final_diff == replayed.final_diff,
                     "metrics": outcome.metrics == replayed.metrics.to_dict(),
                 },
-                "provider_usage_by_turn": provider_usage,
                 "repo_map_in_initial_prompt": "calculator.py"
                 in model.prompts[0],
                 "changed_paths_from_evidence": evidence.changed_paths,

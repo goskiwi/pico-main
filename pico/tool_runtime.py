@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import tools as toolkit
@@ -13,6 +15,7 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
+from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
 from .tool_context import ToolContext
 from .tool_execution import (
     _tool_preview_limit,
@@ -29,6 +32,16 @@ from .tool_execution import (
 
 if TYPE_CHECKING:
     from .runtime import Pico
+
+MAX_OBSERVATION_BATCH_CALLS = 4
+MAX_PARALLEL_OBSERVATIONS = 4
+
+
+@dataclass(frozen=True)
+class PreparedObservation:
+    call: ToolCall
+    tool: dict
+    execution_context: object | None
 
 
 def _run_id(agent):
@@ -149,22 +162,30 @@ class ToolRuntime:
             )
         ]
 
-    def context(self):
+    def context(self, *, call_id="", execution_context=None):
         runtime = self.runtime
         return ToolContext(
             workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_tool_path,
             artifact_store=runtime.dependencies.artifacts,
             run_id_provider=lambda: str(runtime.run.projection.run_id or "manual"),
-            tool_call_id_provider=lambda: (
-                runtime.run.run_log.pending_call_id()
-                if runtime.run.run_log is not None
-                else ""
+            tool_call_id_provider=(
+                (lambda: str(call_id))
+                if call_id
+                else lambda: (
+                    runtime.run.run_log.pending_call_id()
+                    if runtime.run.run_log is not None
+                    else ""
+                )
             ),
             working_state_provider=lambda: (
                 runtime.run.task.working if runtime.run.task is not None else None
             ),
-            execution_context_provider=lambda: runtime.run.execution_context,
+            execution_context_provider=(
+                (lambda: execution_context)
+                if execution_context is not None
+                else lambda: runtime.run.execution_context
+            ),
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
         )
@@ -329,6 +350,208 @@ class ToolRuntime:
 
     def execute_pending(self, call_id):
         return self._execute(self._pending_call(call_id))
+
+    def _pending_batch(self, batch_id):
+        runtime = self.runtime
+        if runtime.run.reload_required or runtime.run.resumable:
+            raise RuntimeError("a dormant Run must be resumed before batch execution")
+        if runtime.run.task is None or runtime.run.run_log is None:
+            raise RuntimeError("pending batch execution requires an active Run")
+        if runtime.run.projection.terminal:
+            raise RuntimeError("terminal Run cannot execute an observation batch")
+        if runtime.run.run_log.pending_batch_id() != str(batch_id):
+            raise RuntimeError("batch id does not match the pending Tool Batch")
+        calls = runtime.run.run_log.pending_tool_calls()
+        if len(calls) < 2:
+            raise RuntimeError("active Run has no pending observation batch")
+        return calls
+
+    def _batch_policy_error(self, calls):
+        if len(calls) > MAX_OBSERVATION_BATCH_CALLS:
+            return (
+                f"observation batch contains {len(calls)} calls; "
+                f"maximum is {MAX_OBSERVATION_BATCH_CALLS}"
+            )
+        limit = self.runtime.config.max_tool_executions
+        executed = self.runtime.run.metrics.executed_tool_count
+        if limit is not None and executed + len(calls) > limit:
+            return "observation batch exceeds the remaining Runtime tool budget"
+        invalid = []
+        for call in calls:
+            tool = self.surface.get(call.name)
+            if (
+                tool is None
+                or not tool.get("batchable_observation", False)
+                or tool.get("risky", False)
+                or tool.get("workspace_mutating", False)
+                or tool.get("state_mutating", False)
+            ):
+                invalid.append(call.name or "<missing>")
+        if invalid:
+            return (
+                "multiple calls are allowed only for independent observations; "
+                "call these tools alone: " + ", ".join(invalid)
+            )
+        return ""
+
+    def _prepare_observation_batch(self, calls):
+        detail = self._batch_policy_error(calls)
+        if detail:
+            return (), detail
+        self.runtime.workspace.refresh()
+        prepared = []
+        for call in calls:
+            execution = (
+                self.runtime.run.execution_context.child()
+                if self.runtime.run.execution_context is not None
+                else None
+            )
+            tool = toolkit.build_tool_registry(
+                self.context(
+                    call_id=call.call_id,
+                    execution_context=execution,
+                )
+            )[call.name]
+            try:
+                args = tool["args_schema"].model_validate(
+                    call.args or {}
+                ).model_dump()
+                validator = tool.get("validate")
+                if validator is not None:
+                    args = validator(args)
+            except Exception as exc:  # noqa: BLE001 - batch admission boundary
+                return (), f"invalid arguments for {call.name}: {exc}"
+            prepared.append(
+                PreparedObservation(
+                    ToolCall(call.name, args, call.call_id),
+                    tool,
+                    execution,
+                )
+            )
+        return tuple(prepared), ""
+
+    def _reject_observation_batch(self, calls, detail):
+        outcomes = []
+        for call in calls:
+            outcome = self._outcome(
+                call,
+                "rejected",
+                "not_started",
+                "none",
+                f"error: {detail} for observation batch",
+                failure=FailureInfo("invalid_tool_batch", detail, "retry_after_change"),
+            )
+            self.runtime.apply_run_event(
+                self.runtime.run.run_log.append_tool_result(outcome)
+            )
+            outcomes.append(outcome)
+        return tuple(outcomes)
+
+    @staticmethod
+    def _run_prepared_observation(prepared):
+        if prepared.execution_context is not None:
+            prepared.execution_context.check_active()
+        result = prepared.tool["run"](prepared.call.args)
+        if prepared.execution_context is not None:
+            prepared.execution_context.check_active()
+        return result
+
+    def _observation_outcome(self, prepared, result):
+        call = prepared.call
+        if isinstance(result, BaseException):
+            typed = result if isinstance(result, ToolFailureError) else None
+            interrupted = isinstance(
+                result,
+                (ExecutionCancelled, ExecutionDeadlineExceeded),
+            )
+            return self._outcome(
+                call,
+                "error",
+                "failed",
+                "none",
+                f"error: observation {call.name} failed: {result}",
+                failure=(typed.failure if typed else None)
+                or FailureInfo(
+                    "operation_interrupted" if interrupted else "observation_failed",
+                    str(result),
+                    "retry_after_wait" if interrupted else "retry_after_change",
+                ),
+                structured=typed.structured if typed else None,
+            )
+        if not isinstance(result, ToolRunnerResult):
+            return self._observation_outcome(
+                prepared,
+                TypeError("tool runner must return ToolRunnerResult"),
+            )
+        if result.effect_scope != "none" or result.affected_paths:
+            paths = tuple(result.affected_paths)
+            return self._outcome(
+                call,
+                "partial_success",
+                "completed",
+                "unknown",
+                "error: batchable observation reported a side effect\n"
+                + str(result.content),
+                failure=FailureInfo(
+                    "observation_reported_side_effect",
+                    "batchable observation reported a side effect",
+                    "user_action_required",
+                ),
+                affected_paths=paths,
+                effect_scope=result.effect_scope,
+                structured=result.structured,
+            )
+        status, side_effect, paths = classify_runner_result(
+            result.failure,
+            result.affected_paths,
+            result.effect_scope,
+        )
+        return self._outcome(
+            call,
+            status,
+            "completed",
+            side_effect,
+            result.content,
+            failure=result.failure,
+            affected_paths=paths,
+            effect_scope=result.effect_scope,
+            structured=result.structured,
+        )
+
+    def execute_pending_batch(self, batch_id):
+        calls = self._pending_batch(batch_id)
+        prepared, detail = self._prepare_observation_batch(calls)
+        if detail:
+            return self._reject_observation_batch(calls, detail)
+        run_log = self.runtime.run.run_log
+        for item in prepared:
+            self.runtime.apply_run_event(
+                run_log.append_tool_started(
+                    item.call,
+                    effect_scope="none",
+                    potential_effects=[],
+                )
+            )
+        with ThreadPoolExecutor(
+            max_workers=min(MAX_PARALLEL_OBSERVATIONS, len(prepared)),
+            thread_name_prefix="pico-observation",
+        ) as pool:
+            futures = [
+                pool.submit(self._run_prepared_observation, item)
+                for item in prepared
+            ]
+            raw_results = []
+            for future in futures:
+                try:
+                    raw_results.append(future.result())
+                except Exception as exc:  # noqa: BLE001 - tool runner boundary
+                    raw_results.append(exc)
+        outcomes = []
+        for item, raw in zip(prepared, raw_results):
+            outcome = self._observation_outcome(item, raw)
+            self.runtime.apply_run_event(run_log.append_tool_result(outcome))
+            outcomes.append(outcome)
+        return tuple(outcomes)
 
     def execute_manual(self, name, args=None):
         call = ToolCall(str(name), dict(args or {}))

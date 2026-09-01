@@ -11,13 +11,14 @@ from .delivery import FinalDiffDescriptor
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-RUN_LOG_SCHEMA_VERSION = "run-log-v16"
+RUN_LOG_SCHEMA_VERSION = "run-log-v17"
 COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
         "user_guidance",
         "assistant_tool_call",
+        "assistant_tool_batch",
         "tool_result",
         "model_instruction",
         "assistant_final",
@@ -65,6 +66,32 @@ def _validate_tool_call_payload(kind, payload):
     if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
         raise ValueError("assistant_tool_call requires a call id")
     ToolCall(str(payload["name"]), payload["args"], str(payload["call_id"]))
+
+
+def _batch_calls(payload):
+    return tuple(
+        ToolCall(str(item["name"]), item["args"], str(item["call_id"]))
+        for item in payload["calls"]
+    )
+
+
+def _validate_tool_batch_payload(kind, payload):
+    _exact_payload(kind, payload, {"batch_id", "calls"})
+    if not isinstance(payload["batch_id"], str) or not payload["batch_id"].strip():
+        raise ValueError("assistant_tool_batch requires a batch id")
+    if not isinstance(payload["calls"], list) or len(payload["calls"]) < 2:
+        raise ValueError("assistant_tool_batch requires at least two calls")
+    for item in payload["calls"]:
+        if not isinstance(item, dict) or set(item) != {"name", "args", "call_id"}:
+            raise ValueError("assistant_tool_batch has an invalid call")
+        if not isinstance(item["call_id"], str) or not item["call_id"].strip():
+            raise ValueError("assistant_tool_batch calls require call ids")
+        if not isinstance(item["name"], str) or not item["name"].strip():
+            raise ValueError("assistant_tool_batch calls require tool names")
+    calls = _batch_calls(payload)
+    call_ids = tuple(call.call_id for call in calls)
+    if len(set(call_ids)) != len(call_ids):
+        raise ValueError("assistant_tool_batch call ids must be unique")
 
 
 def _validate_tool_started_payload(kind, payload):
@@ -185,6 +212,7 @@ _PAYLOAD_VALIDATORS = {
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_text_payload,
     "assistant_tool_call": _validate_tool_call_payload,
+    "assistant_tool_batch": _validate_tool_batch_payload,
     "tool_started": _validate_tool_started_payload,
     "tool_result": _validate_tool_result_payload,
     "verification_result": _validate_verification_payload,
@@ -202,10 +230,32 @@ def _validate_event_payload(kind, payload):
 class _RunProtocol:
     def __init__(self):
         self.has_user_message = False
-        self.pending_call_id = ""
-        self.pending_tool_name = ""
-        self.started_call_id = ""
+        self.pending_calls = ()
+        self.pending_batch_id = ""
+        self.started_call_ids = set()
+        self.last_started_ordinal = -1
+        self.result_count = 0
         self.terminal = False
+
+    @property
+    def pending_call_id(self):
+        return self.pending_calls[0].call_id if len(self.pending_calls) == 1 else ""
+
+    def _pending_call(self, call_id):
+        return next(
+            (call for call in self.pending_calls if call.call_id == call_id),
+            None,
+        )
+
+    def _begin_calls(self, calls, *, batch_id=""):
+        self.pending_calls = tuple(calls)
+        self.pending_batch_id = str(batch_id)
+        self.started_call_ids = set()
+        self.last_started_ordinal = -1
+        self.result_count = 0
+
+    def _clear_calls(self):
+        self._begin_calls(())
 
     def check(self, kind, payload):  # noqa: C901 - linear protocol state machine
         if self.terminal:
@@ -214,45 +264,57 @@ class _RunProtocol:
             raise ValueError("Run Log must begin with user_message")
         if kind == "user_message" and self.has_user_message:
             raise ValueError("Run Log may contain only one user_message")
-        if kind == "assistant_tool_call":
-            if self.pending_call_id:
-                raise ValueError("Run Log already has a pending tool call")
+        if kind in {"assistant_tool_call", "assistant_tool_batch"}:
+            if self.pending_calls:
+                raise ValueError("Run Log already has pending tool calls")
         elif kind == "tool_started":
             call_id = str(payload["tool_call_id"])
-            if call_id != self.pending_call_id:
-                raise ValueError("tool_started must match the pending tool call")
-            if str(payload["tool_name"]) != self.pending_tool_name:
+            call = self._pending_call(call_id)
+            if call is None:
+                raise ValueError("tool_started must match a pending tool call")
+            if str(payload["tool_name"]) != call.name:
                 raise ValueError("tool_started tool name does not match the pending call")
-            if self.started_call_id:
+            if self.result_count:
+                raise ValueError("tool_started cannot follow a batch result")
+            if call_id in self.started_call_ids:
                 raise ValueError("pending tool call already started")
+            ordinal = self.pending_calls.index(call)
+            if ordinal <= self.last_started_ordinal:
+                raise ValueError("tool_started calls must preserve batch order")
         elif kind == "tool_result":
             outcome = ToolOutcome.from_dict(payload["outcome"])
             call_id = outcome.tool_call_id
-            if call_id != self.pending_call_id:
-                raise ValueError("tool_result must match the pending tool call")
-            if outcome.tool_name != self.pending_tool_name:
+            if not self.pending_calls or self.result_count >= len(self.pending_calls):
+                raise ValueError("tool_result requires pending tool calls")
+            call = self.pending_calls[self.result_count]
+            if call_id != call.call_id:
+                raise ValueError("tool_result calls must preserve batch order")
+            if outcome.tool_name != call.name:
                 raise ValueError("tool_result tool name does not match the pending call")
-            if outcome.execution_state == "not_started" and self.started_call_id:
+            started = call_id in self.started_call_ids
+            if outcome.execution_state == "not_started" and started:
                 raise ValueError("started tool cannot finish as not_started")
-            if outcome.execution_state != "not_started" and not self.started_call_id:
+            if outcome.execution_state != "not_started" and not started:
                 raise ValueError("executed tool_result requires tool_started")
-        elif self.pending_call_id and kind not in {"tool_started", "tool_result"}:
-            raise ValueError("pending tool call must receive a result first")
+        elif self.pending_calls and kind not in {"tool_started", "tool_result"}:
+            raise ValueError("pending tool calls must receive results first")
 
     def apply(self, entry):
         self.check(entry.kind, entry.payload)
         if entry.kind == "user_message":
             self.has_user_message = True
         elif entry.kind == "assistant_tool_call":
-            self.pending_call_id = entry.call_id
-            self.pending_tool_name = entry.name
-            self.started_call_id = ""
+            self._begin_calls((ToolCall(entry.name, entry.args, entry.call_id),))
+        elif entry.kind == "assistant_tool_batch":
+            self._begin_calls(_batch_calls(entry.payload), batch_id=entry.batch_id)
         elif entry.kind == "tool_started":
-            self.started_call_id = entry.call_id
+            call = self._pending_call(entry.call_id)
+            self.started_call_ids.add(entry.call_id)
+            self.last_started_ordinal = self.pending_calls.index(call)
         elif entry.kind == "tool_result":
-            self.pending_call_id = ""
-            self.pending_tool_name = ""
-            self.started_call_id = ""
+            self.result_count += 1
+            if self.result_count == len(self.pending_calls):
+                self._clear_calls()
         elif entry.kind in {"assistant_final", "run_stopped"}:
             self.terminal = True
 
@@ -371,6 +433,16 @@ class RunEvent:
         return ""
 
     @property
+    def batch_id(self):
+        return str(self.payload.get("batch_id", ""))
+
+    @property
+    def batch_calls(self):
+        if self.kind != "assistant_tool_batch":
+            return ()
+        return _batch_calls(self.payload)
+
+    @property
     def args(self):
         return dict(self.payload.get("args", {}) or {})
 
@@ -478,6 +550,26 @@ class RunLog:
             {"name": call.name, "args": dict(call.args), "call_id": call.call_id},
         )
 
+    def append_tool_batch(self, calls):
+        calls = tuple(calls)
+        if len(calls) < 2:
+            raise ValueError("tool batch requires at least two calls")
+        batch_id = "batch_" + calls[0].call_id
+        return self.append(
+            "assistant_tool_batch",
+            {
+                "batch_id": batch_id,
+                "calls": [
+                    {
+                        "name": call.name,
+                        "args": dict(call.args),
+                        "call_id": call.call_id,
+                    }
+                    for call in calls
+                ],
+            },
+        )
+
     def append_tool_started(
         self,
         call,
@@ -546,22 +638,19 @@ class RunLog:
     def pending_call_id(self):
         return self._protocol.pending_call_id
 
+    def pending_batch_id(self):
+        return self._protocol.pending_batch_id
+
+    def pending_tool_calls(self):
+        return tuple(self._protocol.pending_calls[self._protocol.result_count :])
+
     def pending_tool_call(self):
-        pending = self.pending_call_id()
-        if not pending:
+        pending_calls = self.pending_tool_calls()
+        if not pending_calls:
             return None
-        entry = next(
-            (
-                candidate
-                for candidate in reversed(self._events)
-                if candidate.kind == "assistant_tool_call"
-                and candidate.call_id == pending
-            ),
-            None,
-        )
-        if entry is None:
-            raise RuntimeError("pending ToolCall fact is unavailable")
-        return ToolCall(entry.name, entry.args, entry.call_id)
+        if self.pending_batch_id():
+            raise RuntimeError("pending tool transaction is an observation batch")
+        return pending_calls[0]
 
     def latest_user_guidance(self):
         entry = next(
@@ -575,97 +664,99 @@ class RunLog:
         return entry.content if entry is not None else ""
 
     def _require_no_pending(self):
-        if self.pending_call_id():
-            raise RuntimeError("pending tool call must receive a result first")
+        if self.pending_tool_calls():
+            raise RuntimeError("pending tool calls must receive results first")
 
     def reconcile_interrupted(self, runtime):
-        pending = self.pending_call_id()
-        if not pending:
+        pending_calls = self.pending_tool_calls()
+        if not pending_calls:
             return ()
-        call = next(
-            entry
-            for entry in reversed(self._events)
-            if entry.kind == "assistant_tool_call" and entry.call_id == pending
-        )
-        started = next(
-            (
-                entry
-                for entry in reversed(self._events)
-                if entry.kind == "tool_started" and entry.call_id == pending
-            ),
-            None,
-        )
-        if started is None:
-            detail = "tool call was persisted but never entered execution"
-            outcome = ToolOutcome(
-                tool_call_id=pending,
-                tool_name=call.name,
-                status="error",
-                execution_state="not_started",
-                side_effect_state="none",
-                content=detail,
-                failure=FailureInfo(
-                    "operation_not_started",
-                    detail,
-                    "retry_after_wait",
-                ),
+        started_by_id = {
+            entry.call_id: entry
+            for entry in self._events
+            if entry.kind == "tool_started"
+        }
+        for call in pending_calls:
+            started = started_by_id.get(call.call_id)
+            if started is None:
+                detail = "tool call was persisted but never entered execution"
+                outcome = ToolOutcome(
+                    tool_call_id=call.call_id,
+                    tool_name=call.name,
+                    status="error",
+                    execution_state="not_started",
+                    side_effect_state="none",
+                    content=detail,
+                    failure=FailureInfo(
+                        "operation_not_started",
+                        detail,
+                        "retry_after_wait",
+                    ),
+                )
+            else:
+                potential = list(started.payload.get("potential_effects", []))
+                changed = []
+                transitions = []
+                for effect in potential:
+                    logical = str(effect.get("path", ""))
+                    if not logical:
+                        continue
+                    path = Path(logical)
+                    if not path.is_absolute():
+                        path = runtime.workspace.resolve_path(logical)
+                    before = str(effect.get("before_state", ""))
+                    before_artifact_id = str(effect.get("before_artifact_id", ""))
+                    after = runtime.workspace.path_state(path)
+                    if before != after:
+                        changed.append(logical)
+                        transitions.append(
+                            {
+                                "path": logical,
+                                "before_state": before,
+                                "after_state": after,
+                                "before_artifact_id": before_artifact_id,
+                            }
+                        )
+                effect_scope = str(started.payload.get("effect_scope", "none"))
+                unknown = effect_scope == "workspace" and not potential
+                uncertain = bool(changed or unknown)
+                detail = "tool execution was interrupted before a durable result"
+                outcome = ToolOutcome(
+                    tool_call_id=call.call_id,
+                    tool_name=call.name,
+                    status="partial_success" if uncertain else "error",
+                    execution_state="failed",
+                    side_effect_state=(
+                        "partial" if changed else ("unknown" if unknown else "none")
+                    ),
+                    content=detail,
+                    failure=FailureInfo(
+                        "operation_interrupted",
+                        detail,
+                        "no_retry" if uncertain else "retry_after_wait",
+                    ),
+                    affected_paths=tuple(changed),
+                    effect_scope=effect_scope if changed or unknown else "none",
+                    structured={"path_transitions": transitions},
+                )
+            entry = self.append_tool_result(
+                outcome,
+                recovered_from_interruption=True,
             )
-        else:
-            potential = list(started.payload.get("potential_effects", []))
-            changed = []
-            transitions = []
-            for effect in potential:
-                logical = str(effect.get("path", ""))
-                if not logical:
-                    continue
-                path = Path(logical)
-                if not path.is_absolute():
-                    path = runtime.workspace.resolve_path(logical)
-                before = str(effect.get("before_state", ""))
-                before_artifact_id = str(effect.get("before_artifact_id", ""))
-                after = runtime.workspace.path_state(path)
-                if before != after:
-                    changed.append(logical)
-                    transitions.append(
-                        {
-                            "path": logical,
-                            "before_state": before,
-                            "after_state": after,
-                            "before_artifact_id": before_artifact_id,
-                        }
-                    )
-            effect_scope = str(started.payload.get("effect_scope", "none"))
-            unknown = effect_scope == "workspace" and not potential
-            uncertain = bool(changed or unknown)
-            detail = "tool execution was interrupted before a durable result"
-            outcome = ToolOutcome(
-                tool_call_id=pending,
-                tool_name=call.name,
-                status="partial_success" if uncertain else "error",
-                execution_state="failed",
-                side_effect_state="partial" if changed else ("unknown" if unknown else "none"),
-                content=detail,
-                failure=FailureInfo(
-                    "operation_interrupted",
-                    detail,
-                    "no_retry" if uncertain else "retry_after_wait",
-                ),
-                affected_paths=tuple(changed),
-                effect_scope=effect_scope if changed or unknown else "none",
-                structured={"path_transitions": transitions},
-            )
-        entry = self.append_tool_result(
-            outcome,
-            recovered_from_interruption=True,
-        )
-        self.reconciled_outcomes.append((outcome, entry))
+            self.reconciled_outcomes.append((outcome, entry))
         return tuple(self.reconciled_outcomes)
 
     def context_events(self):
         calls = {
-            entry.call_id
+            call_id
             for entry in self._events
-            if entry.kind == "assistant_tool_call" and entry.call_id
+            for call_id in (
+                (entry.call_id,)
+                if entry.kind == "assistant_tool_call"
+                else tuple(call.call_id for call in entry.batch_calls)
+            )
+            if entry.kind in {"assistant_tool_call", "assistant_tool_batch"}
+            and call_id
         }
         return tuple(
             entry
@@ -689,26 +780,43 @@ class RunLog:
             active = [entry, *active[len(covered) :]]
         return tuple(active)
 
+    @staticmethod
+    def _history_units(events, *, allow_incomplete=False):
+        units = []
+        index = 0
+        events = tuple(events)
+        while index < len(events):
+            entry = events[index]
+            if entry.kind == "assistant_tool_call":
+                expected_ids = (entry.call_id,)
+            elif entry.kind == "assistant_tool_batch":
+                expected_ids = tuple(call.call_id for call in entry.batch_calls)
+            else:
+                if entry.kind == "tool_result":
+                    raise RuntimeError("Run Log contains an orphan tool result")
+                units.append((entry,))
+                index += 1
+                continue
+            end = index + 1 + len(expected_ids)
+            if end > len(events):
+                if allow_incomplete:
+                    return None
+                raise RuntimeError("Run Log contains an incomplete tool transaction")
+            results = events[index + 1 : end]
+            if tuple(result.call_id for result in results) != expected_ids or any(
+                result.kind != "tool_result" for result in results
+            ):
+                raise RuntimeError("Run Log tool transaction is not contiguous")
+            units.append((entry, *results))
+            index = end
+        return units
+
     def compact(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
         latest_guidance_id = self._latest_user_guidance_id(active)
-        units = []
-        index = 0
-        while index < len(active):
-            entry = active[index]
-            if entry.kind == "assistant_tool_call":
-                if index + 1 >= len(active):
-                    return None
-                result = active[index + 1]
-                if result.kind != "tool_result" or result.call_id != entry.call_id:
-                    raise RuntimeError("Run Log tool batch is not contiguous")
-                units.append((entry, result))
-                index += 2
-                continue
-            if entry.kind == "tool_result":
-                raise RuntimeError("Run Log contains an orphan tool result")
-            units.append((entry,))
-            index += 1
+        units = self._history_units(active, allow_incomplete=True)
+        if units is None:
+            return None
 
         def render(candidate_units, *, summary=""):
             events = tuple(
@@ -807,6 +915,15 @@ class RunLog:
                 f"[assistant/tool] {entry.name} "
                 + json.dumps(entry.args or {}, ensure_ascii=False, sort_keys=True)
             )
+        if entry.kind == "assistant_tool_batch":
+            calls = [
+                {"call_id": call.call_id, "name": call.name, "args": call.args}
+                for call in entry.batch_calls
+            ]
+            return (
+                f"[assistant/tool_batch/{entry.batch_id}] "
+                + json.dumps(calls, ensure_ascii=False, sort_keys=True)
+            )
         if entry.kind == "tool_result":
             artifact = f" artifact={entry.artifact_id}" if entry.artifact_id else ""
             outcome = ToolOutcome.from_dict(entry.payload["outcome"])
@@ -888,23 +1005,7 @@ class RunLog:
         if not summaries:
             return None
         recent = tuple(entry for entry in selected if entry.kind != "compaction")
-        units = []
-        index = 0
-        while index < len(recent):
-            entry = recent[index]
-            if entry.kind == "assistant_tool_call":
-                if index + 1 >= len(recent):
-                    raise RuntimeError("Run Log contains an incomplete tool transaction")
-                result = recent[index + 1]
-                if result.kind != "tool_result" or result.call_id != entry.call_id:
-                    raise RuntimeError("Run Log tool batch is not contiguous")
-                units.append((entry, result))
-                index += 2
-                continue
-            if entry.kind == "tool_result":
-                raise RuntimeError("Run Log contains an orphan tool result")
-            units.append((entry,))
-            index += 1
+        units = self._history_units(recent)
 
         limit = max(0, int(retain_tokens))
 
@@ -926,7 +1027,7 @@ class RunLog:
             )
         for unit in reversed(units):
             candidate = [unit, *retained]
-            if token_counter(render(candidate)) > limit:
+            if retained and token_counter(render(candidate)) > limit:
                 break
             retained = candidate
         text = render(retained)
@@ -953,23 +1054,7 @@ class RunLog:
             active,
             projected_guidance_id=self._latest_user_guidance_id(active),
         )
-        units = []
-        index = 0
-        while index < len(selected):
-            entry = selected[index]
-            if entry.kind == "assistant_tool_call":
-                if index + 1 >= len(selected):
-                    break
-                result = selected[index + 1]
-                if result.kind != "tool_result" or result.call_id != entry.call_id:
-                    raise RuntimeError("Run Log tool batch is not contiguous")
-                units.append((entry, result))
-                index += 2
-                continue
-            if entry.kind == "tool_result":
-                raise RuntimeError("Run Log contains an orphan tool result")
-            units.append((entry,))
-            index += 1
+        units = self._history_units(selected, allow_incomplete=True) or []
 
         limit = max(0, int(retain_tokens))
         retained = []
@@ -985,7 +1070,7 @@ class RunLog:
 
         for unit in reversed(units):
             candidate = [unit, *retained]
-            if token_counter(render(candidate)) > limit:
+            if retained and token_counter(render(candidate)) > limit:
                 break
             retained = candidate
         text = render(retained)

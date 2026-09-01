@@ -1,9 +1,9 @@
-"""Day 2: inspect Run Log v16 facts, Projection replay, and safe resume.
+"""Day 2: inspect Run Log v17 facts, Projection replay, and safe resume.
 
 The three experiments keep separate questions separate:
 
 1. What is durably stored, and what is derived?
-2. How does one Pending Call change across a legal Tool transaction?
+2. How do one Pending Call and one Observation Batch change across legal transactions?
 3. What happens when a process stops after ``tool_started`` but before a result?
 """
 
@@ -21,6 +21,7 @@ from pico import (
     ToolCall,
     WorkspaceContext,
 )
+from pico.contracts import ToolOutcome
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RUN_LOG_SCHEMA_VERSION, replay_events
 
@@ -145,7 +146,7 @@ def fact_projection_experiment(root):
     }
 
     print_section(
-        "A1. Run Log v16 保存的是 Fact",
+        "A1. Run Log v17 保存的是 Fact",
         {
             "schema_version": RUN_LOG_SCHEMA_VERSION,
             "events_path": f".pico/runs/{run_id}/events.jsonl",
@@ -224,7 +225,7 @@ def pending_prefix_experiment(events):
     assert after_result.pending_call_id is None
 
     print_section(
-        "B. 合法 Event 前缀中的单一 Pending Call",
+        "B1. 合法 Event 前缀中的单一 Pending Call",
         [
             {
                 "last_fact": "assistant_tool_call",
@@ -239,6 +240,54 @@ def pending_prefix_experiment(events):
                 "pending_call_id": after_result.pending_call_id,
             },
         ],
+    )
+
+
+def batch_prefix_experiment(root):
+    """Show one durable batch reducing from two pending calls to none."""
+
+    (root / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (root / "b.txt").write_text("beta\n", encoding="utf-8")
+    agent = build_agent(root, FakeModelClient([]))
+    RunLifecycle(agent).initialize("Read two files", task_intent="read_only")
+    calls = (
+        ToolCall("read_file", {"path": "a.txt"}, "call_batch_a"),
+        ToolCall("read_file", {"path": "b.txt"}, "call_batch_b"),
+    )
+    agent.apply_run_event(agent.run.run_log.append_tool_batch(calls))
+    after_batch = tuple(agent.run.projection.pending_call_ids)
+    for call in calls:
+        agent.apply_run_event(
+            agent.run.run_log.append_tool_started(
+                call,
+                effect_scope="none",
+                potential_effects=[],
+            )
+        )
+    for call in calls:
+        agent.apply_run_event(
+            agent.run.run_log.append_tool_result(
+                ToolOutcome(
+                    call.call_id,
+                    call.name,
+                    "success",
+                    "completed",
+                    "none",
+                    "observed",
+                )
+            )
+        )
+    assert after_batch == ("call_batch_a", "call_batch_b")
+    assert agent.run.projection.pending_call_ids == ()
+
+    print_section(
+        "B2. Observation Batch 是一个有序 Pending 事务",
+        {
+            "batch_pending_call_ids": list(after_batch),
+            "started_order": [call.call_id for call in calls],
+            "result_order": [call.call_id for call in calls],
+            "pending_after_results": list(agent.run.projection.pending_call_ids),
+        },
     )
 
 
@@ -358,11 +407,14 @@ def main():
         root = Path(directory)
         normal_root = root / "fact-projection"
         recovery_root = root / "interrupted-read"
+        batch_root = root / "observation-batch"
         normal_root.mkdir()
         recovery_root.mkdir()
+        batch_root.mkdir()
 
         _agent, events, _outcome = fact_projection_experiment(normal_root)
         pending_prefix_experiment(events)
+        batch_prefix_experiment(batch_root)
         interrupted_read_experiment(recovery_root)
 
 

@@ -8,7 +8,7 @@
 Pico 不是聊天 UI，而是 Coding Model 外围的本地 Runtime。模型每轮只能提出一个
 `ModelAction`；Runtime 负责 Context、工具准入、副作用、持久化、崩溃恢复、验证和
 最终完成权。每个 Run 的过程事实只写入一条 append-only RunLog，实时与恢复共用一个
-RunProjection，重建 TaskContract、增量 WorkingState、Evidence、Metrics 和单 Pending Call。
+RunProjection，重建 TaskContract、增量 WorkingState、Evidence、Metrics 和一个 Pending Tool transaction。
 
 ```text
 User request
@@ -45,16 +45,24 @@ final   -> 交给 CompletionController
 打开 `pico/tool_runtime.py` 和 `pico/run_log.py`：
 
 ```text
+单 Call：
 assistant_tool_call
 -> ToolRuntime 按 call_id 取回持久化 ToolCall，再完成准入与私有 helpers
 -> fsynced tool_started + before-state paths
 -> ToolContext-bound Tool Runner
 -> tool_result + side-effect state
+
+Observation Batch：
+assistant_tool_batch
+-> 整批完成 Surface / Budget / Schema / 纯读准入
+-> 主线程按序写 tool_started
+-> 最多四个只读 Runner 并行
+-> 主线程按序写每个 tool_result，并一次性续接 Provider
 ```
 
 强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界。AgentLoop 接受并持久化
-`assistant_tool_call` 后只把 call ID 交给 `execute_pending`；ToolRuntime 取回完整调用并负责参数校验、
-Approval、preimage 以及执行事务的 `tool_started/tool_result`。纯值计算下沉到私有
+单 Call 或完整 Observation Batch 后，只把持久标识交给 ToolRuntime；ToolRuntime 取回完整调用并负责参数校验、
+Approval、preimage 以及执行事务的 `tool_started/tool_result`。Batch 不走 Approval，因为只有显式标记的纯 Observation 能通过整批准入。纯值计算下沉到私有
 `tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
 
 `write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。失败反馈不靠增加 Patch 工具：未找到时返回相近当前代码和建议读取范围，多处匹配时返回行号，Revision 冲突时返回新 Revision 和可直接调用的 `read_file` 参数。
@@ -89,6 +97,7 @@ uv run python scripts/day7_runtime_capstone.py
 - `Final Diff`：receipt 指向经过校验的真实 Diff Artifact；
 - `working_state`：当前 Run 的约束、决定和已清空 Next Steps；
 - `tool_transactions`：每个调用都有 Call/Started/Result；
+- `assistant_tool_batch`：纯 Observation 可并行，但 Result 和持久化顺序保持稳定；
 - `outcome_matches_replay`：返回值与 durable Replay 的终态一致。
 
 现场不运行完整 Evals 或 pytest；把通过结果作为预先准备的证据。只有面试官追问 Crash
@@ -199,8 +208,9 @@ MCP/Skills 都明确不在范围内。
 
 ## 证据边界
 
-- 当前确定性证据：130 项核心 pytest 与 Day 1–7 Walkthrough。
-- 当前发布的真实模型证据是受控的 `real-compaction.json/.patch`。
+- 当前确定性证据：核心 pytest 与 Day 1–7 Walkthrough。
+- 当前发布的真实模型证据是受控的 `real-compaction.json/.patch`：真实 Provider 使用三个
+  四调用 Observation Batch 完成 12 次证据读取，模型请求从旧证据的 17 次降到 9 次。
 - `run_command`、Crash Resume 与 Worktree Child 的真实回归在临时干净 Git Workspace 中运行，
   不混入 Core 持久状态。
 - 固定 Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。

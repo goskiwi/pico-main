@@ -82,7 +82,7 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
     assert result.name == "read_file"
     assert summary["metrics"]["executed_tool_count"] == 1
     assert summary["metrics"]["tool_counts"] == {"read_file": 1}
-    assert summary["pending_call_id"] is None
+    assert summary["pending_call_ids"] == []
     assert run_main(["show", "run", "--cwd", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out)["run_cursor"]["sequence"] == 4
 
@@ -123,7 +123,7 @@ def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):
     assert loaded.last_cursor.event_id == events[-1].event_id
 
 
-def test_projection_tracks_exactly_one_pending_call(tmp_path):
+def test_projection_tracks_one_pending_tool_transaction(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     append(store, "run", "user_message", {"content": "inspect"})
     append(
@@ -133,13 +133,114 @@ def test_projection_tracks_exactly_one_pending_call(tmp_path):
         {"name": "read_file", "args": {}, "call_id": "read"},
     )
     assert store.replay("run").pending_call_id == "read"
-    with pytest.raises(ValueError, match="already has a pending"):
+    with pytest.raises(ValueError, match="already has pending"):
         append(
             store,
             "run",
             "assistant_tool_call",
             {"name": "search", "args": {}, "call_id": "other"},
         )
+
+
+def test_v17_observation_batch_round_trips_in_original_order(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(TaskContract("inspect", **READ_TASK))
+    calls = (
+        ToolCall("read_file", {"path": "a.py"}, "call_a"),
+        ToolCall("search", {"pattern": "needle", "path": "."}, "call_b"),
+    )
+    batch = log.append_tool_batch(calls)
+
+    assert batch.batch_id == "batch_call_a"
+    assert tuple(call.call_id for call in batch.batch_calls) == (
+        "call_a",
+        "call_b",
+    )
+    assert store.replay("run").pending_call_ids == ("call_a", "call_b")
+    assert store.replay("run").pending_call_id is None
+
+    for call in calls:
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+    for call in calls:
+        log.append_tool_result(
+            ToolOutcome(
+                call.call_id,
+                call.name,
+                "success",
+                "completed",
+                "none",
+                f"result for {call.call_id}",
+            )
+        )
+
+    replayed = store.replay("run")
+    assert replayed.pending_call_ids == ()
+    assert [event.call_id for event in log.context_events() if event.kind == "tool_result"] == [
+        "call_a",
+        "call_b",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"batch_id": "batch", "calls": []},
+        {
+            "batch_id": "batch",
+            "calls": [
+                {"name": "read_file", "args": {}, "call_id": "same"},
+                {"name": "search", "args": {}, "call_id": "same"},
+            ],
+        },
+        {
+            "batch_id": "batch",
+            "calls": [
+                {"name": "read_file", "args": {}, "call_id": "a"},
+                {"name": "search", "args": {}, "call_id": ""},
+            ],
+        },
+    ],
+)
+def test_v17_observation_batch_payload_is_strict(payload):
+    with pytest.raises(ValueError):
+        RunEvent(
+            "event",
+            2,
+            "run",
+            "task",
+            "session",
+            "assistant_tool_batch",
+            "now",
+            payload,
+        )
+
+
+def test_v17_observation_batch_rejects_out_of_order_results(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(TaskContract("inspect", **READ_TASK))
+    calls = (
+        ToolCall("read_file", {"path": "a.py"}, "call_a"),
+        ToolCall("read_file", {"path": "b.py"}, "call_b"),
+    )
+    log.append_tool_batch(calls)
+    for call in calls:
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+
+    with pytest.raises(ValueError, match="preserve batch order"):
+        log.append_tool_result(
+            ToolOutcome(
+                "call_b",
+                "read_file",
+                "success",
+                "completed",
+                "none",
+                "b",
+            )
+        )
+    with pytest.raises(RuntimeError, match="pending tool calls"):
+        log.append_model_instruction("cannot interleave")
 
 
 def test_task_contract_is_first_event_and_goal_cannot_be_overwritten(tmp_path):
@@ -167,7 +268,7 @@ def test_run_log_repairs_only_incomplete_tail(tmp_path):
         store.read_events("tail")
 
 
-def test_v15_rejects_legacy_payload_shapes():
+def test_v17_rejects_legacy_payload_shapes():
     with pytest.raises(ValueError, match="invalid user_message payload"):
         RunEvent("e", 1, "run", "task", "session", "user_message", "now", {"content": "old"})
 
@@ -181,7 +282,7 @@ def test_v15_rejects_legacy_payload_shapes():
         "now",
         {"contract": TaskContract("inspect", **READ_TASK).to_dict()},
     ).to_dict()
-    value["schema_version"] = "run-log-v15"
+    value["schema_version"] = "run-log-v16"
     with pytest.raises(ValueError, match="invalid Run event"):
         RunEvent.from_dict(value)
 
@@ -266,7 +367,7 @@ def test_mismatched_tool_result_is_not_persisted(tmp_path):
         "no",
         failure=FailureInfo("rejected", "rejected", "no_retry"),
     )
-    with pytest.raises(ValueError, match="pending tool call"):
+    with pytest.raises(ValueError, match="preserve batch order"):
         log.append_tool_result(wrong)
     assert [event.kind for event in log.events] == [
         "user_message",
@@ -485,3 +586,41 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     assert "f0.py" not in rendered
     assert "recent events omitted by History budget" in rendered
     assert metadata["projection_mode"] == "compacted_complete_transactions"
+
+
+def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    user = log.append_user(TaskContract("inspect", **READ_TASK))
+    old = log.append_model_instruction("old")
+    calls = (
+        ToolCall("read_file", {"path": "a.py"}, "call_a"),
+        ToolCall("read_file", {"path": "b.py"}, "call_b"),
+    )
+    batch = log.append_tool_batch(calls)
+    for call in calls:
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+    for call in calls:
+        log.append_tool_result(
+            ToolOutcome(
+                call.call_id,
+                call.name,
+                "success",
+                "completed",
+                "none",
+                "result " + call.call_id,
+            )
+        )
+
+    rendered, _metadata = log.render_recent_projection(
+        retain_tokens=1,
+        token_counter=len,
+    )
+
+    assert "call_a" in rendered and "call_b" in rendered
+    assert rendered.count("[tool/read_file/success/none]") == 2
+    with pytest.raises(ValueError, match="cannot split"):
+        log._commit_compaction(
+            "invalid boundary",
+            [user.event_id, old.event_id, batch.event_id],
+        )

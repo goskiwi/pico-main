@@ -147,7 +147,7 @@ def experiment_channels_and_pending(
     """A + B: show the three channels and one native continuation."""
     client = new_client()
     requests = []
-    pending_timeline = [{"moment": "请求前", "pending_call_id": None}]
+    pending_timeline = [{"moment": "请求前", "pending_call_ids": []}]
 
     def urlopen(request, timeout):
         requests.append(
@@ -188,16 +188,16 @@ def experiment_channels_and_pending(
         pending_timeline.append(
             {
                 "moment": "收到 read_file function_call 后",
-                "pending_call_id": client._pending_call_id,
+                "pending_call_ids": list(client._pending_call_ids),
             }
         )
-        client.record_action_result(
-            '{"status":"success","content":"# Provider demo"}',
+        client.record_action_results(
+            ('{"status":"success","content":"# Provider demo"}',)
         )
         pending_timeline.append(
             {
                 "moment": "记录 function_call_output 后",
-                "pending_call_id": client._pending_call_id,
+                "pending_call_ids": list(client._pending_call_ids),
             }
         )
         final = client.complete_action(
@@ -217,12 +217,12 @@ def experiment_channels_and_pending(
     assert action.tool_call.name == "read_file"
     assert final == ModelAction.final("README was read through Responses.")
     assert pending_timeline == [
-        {"moment": "请求前", "pending_call_id": None},
+        {"moment": "请求前", "pending_call_ids": []},
         {
             "moment": "收到 read_file function_call 后",
-            "pending_call_id": "call_readme",
+            "pending_call_ids": ["call_readme"],
         },
-        {"moment": "记录 function_call_output 后", "pending_call_id": None},
+        {"moment": "记录 function_call_output 后", "pending_call_ids": []},
     ]
     assert read_schema["strict"] is True
     assert read_schema["parameters"]["additionalProperties"] is False
@@ -235,7 +235,7 @@ def experiment_channels_and_pending(
         "function_call_output",
     ]
     assert "替换 Prompt" not in json.dumps(continued_input, ensure_ascii=False)
-    assert first_payload["parallel_tool_calls"] is False
+    assert first_payload["parallel_tool_calls"] is True
     assert first_payload["tools"] == continued_payload["tools"]
     assert [tool["name"] for tool in first_payload["tools"]] == [
         tool["name"] for tool in action_tools
@@ -286,7 +286,7 @@ def experiment_channels_and_pending(
     print_section(
         "B1. 一个 pending call 如何完成续接",
         {
-            "flow": "function_call → pending=call_readme → function_call_output → pending=None",
+            "flow": "function_call → pending=[call_readme] → function_call_output → pending=[]",
             "pending_timeline": pending_timeline,
             "second_request_input_types": input_item_types(continued_input),
             "replacement_prompt_was_ignored": True,
@@ -298,28 +298,25 @@ def experiment_channels_and_pending(
     client.reset_action_session()
 
 
-def experiment_multiple_calls_are_rejected(
+def experiment_observation_batch(
     prompt,
     action_tools,
 ):
-    """B: prove that two function calls cannot leave one orphan pending call."""
+    """B: accept two ordered observations and aggregate their results."""
     client = new_client()
     payload = {
         "output": [
             {"type": "reasoning", "encrypted_content": "opaque"},
             function_call(
                 "read_file",
-                "call_valid",
+                "call_readme",
                 {"path": "README.md", "start_line": 1, "end_line": 20},
             ),
-            {
-                "type": "function_call",
-                "name": "read_file",
-                # Deliberately missing call_id.
-                "arguments": json.dumps(
-                    {"path": "README.md", "start_line": 1, "end_line": 20}
-                ),
-            },
+            function_call(
+                "search",
+                "call_search",
+                {"pattern": "Provider", "path": "."},
+            ),
         ]
     }
 
@@ -330,25 +327,39 @@ def experiment_multiple_calls_are_rejected(
             instructions=prompt.instructions,
             action_tools=action_tools,
         )
+        pending_before = list(client._pending_call_ids)
+        client.record_action_results(("README result", "search result"))
 
-    retained_function_calls = [
+    retained_items = [
         item
         for item in client._action_input
-        if isinstance(item, dict) and item.get("type") == "function_call"
+        if isinstance(item, dict)
     ]
-    assert action.kind == "invalid"
-    assert "exactly one function call" in action.content
-    assert client._pending_call_id is None
-    assert retained_function_calls == []
+    assert action.kind == "tool"
+    assert [call.call_id for call in action.tool_calls] == [
+        "call_readme",
+        "call_search",
+    ]
+    assert pending_before == ["call_readme", "call_search"]
+    assert client._pending_call_ids == ()
+    assert input_item_types(retained_items) == [
+        "user",
+        "reasoning",
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+    ]
 
     print_section(
-        "B2. 多 Function Call 不会留下 orphan",
+        "B2. Observation Batch 一次回写全部 Result",
         {
             "provider_returned_function_calls": 2,
             "parsed_action": action.kind,
-            "correction": action.content,
-            "pending_call_id": client._pending_call_id,
-            "retained_function_calls": len(retained_function_calls),
+            "call_ids": [call.call_id for call in action.tool_calls],
+            "pending_before_results": pending_before,
+            "pending_after_results": list(client._pending_call_ids),
+            "continuation_item_types": input_item_types(retained_items),
         },
     )
 
@@ -390,13 +401,13 @@ def experiment_incomplete_is_rejected(
             instructions=prompt.instructions,
             action_tools=action_tools,
         )
-        pending_after_incomplete = client._pending_call_id
+        pending_after_incomplete = client._pending_call_ids
         retained_after_incomplete = [
             item
             for item in client._action_input
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
-        client.record_action_result(invalid.content)
+        client.record_action_results((invalid.content,))
         corrected = client.complete_action(
             "replacement prompt is ignored inside the continuation",
             96,
@@ -407,8 +418,8 @@ def experiment_incomplete_is_rejected(
     correction_item = requests[1]["input"][-1]
     correction_text = correction_item["content"][0]["text"]
     assert invalid.kind == "invalid"
-    assert "one concise function call" in invalid.content
-    assert pending_after_incomplete is None
+    assert "one concise action" in invalid.content
+    assert pending_after_incomplete == ()
     assert retained_after_incomplete == []
     assert correction_item["role"] == "user"
     assert correction_text == invalid.content
@@ -555,7 +566,7 @@ def experiment_context_overflow(root):
 def main():
     print(
         "Day 3 总流程：\n"
-        "Prompt 三通道 → 单 Pending 续接 → 非法响应纠正 → "
+        "Prompt 三通道 → 单 Call/Observation Batch 续接 → 非法响应纠正 → "
         "Context Overflow 恢复"
     )
     with tempfile.TemporaryDirectory(prefix="pico-day3-") as directory:
@@ -571,7 +582,7 @@ def main():
             metadata,
             action_tools,
         )
-        experiment_multiple_calls_are_rejected(
+        experiment_observation_batch(
             prompt,
             action_tools,
         )

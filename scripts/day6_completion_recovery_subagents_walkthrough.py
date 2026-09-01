@@ -309,7 +309,7 @@ def recovery_experiment(root):
     startup_state = {
         "resumable": resumed.run.resumable,
         "reload_required": resumed.run.reload_required,
-        "pending_call_id": resumed.run.projection.pending_call_id,
+        "pending_call_ids": list(resumed.run.projection.pending_call_ids),
     }
 
     run_outcome = resumed._ask_with_intent(

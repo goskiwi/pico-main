@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import pico.tools as tools_module
 from pico import (
     FakeModelClient,
     ModelAction,
@@ -12,7 +13,7 @@ from pico import (
 )
 from pico.agent_loop import AgentLoop
 from pico.command_runner import CommandResult
-from pico.contracts import ToolOutcome
+from pico.contracts import ToolCall, ToolOutcome, ToolRunnerResult
 from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
 from pico.providers import ProviderContextOverflow
@@ -338,6 +339,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
 
 def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("beta\n", encoding="utf-8")
 
     class ThresholdClient(FakeModelClient):
         request_count = 0
@@ -353,7 +355,20 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
             return action
 
     client = ThresholdClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
+        ModelAction.tool_batch(
+            (
+                ToolCall(
+                    "read_file",
+                    {"path": "hello.txt", "start_line": 1, "end_line": 1},
+                    "call_hello",
+                ),
+                ToolCall(
+                    "read_file",
+                    {"path": "other.txt", "start_line": 1, "end_line": 1},
+                    "call_other",
+                ),
+            )
+        ),
         ModelAction.tool("list_files", {"path": "."}),
         ModelAction.final("Done after reset."),
     ])
@@ -378,6 +393,7 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     assert client.prompts[0] != client.prompts[1]
     assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
+    assert "beta" in client.prompts[1]
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     resets = [
         entry for entry in entries if entry.kind == "provider_session_reset"
@@ -389,6 +405,14 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
         "input_tokens": 6500,
         "threshold_tokens": 6000,
     }
+    result_sequences = [
+        entry.sequence
+        for entry in entries
+        if entry.kind == "tool_result"
+        and entry.call_id in {"call_hello", "call_other"}
+    ]
+    assert len(result_sequences) == 2
+    assert max(result_sequences) < reset.sequence
     turns = [
         entry for entry in entries if entry.kind == "turn_metrics"
     ]
@@ -708,6 +732,40 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     assert finished_tools == ["read_file"]
 
 
+def test_final_only_multi_call_is_closed_before_tool_limit_stop(tmp_path):
+    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+    calls = (
+        ToolCall("submit_final", {"answer": "first"}, "call_final_a"),
+        ToolCall("submit_final", {"answer": "second"}, "call_final_b"),
+    )
+    agent = build_agent(
+        tmp_path,
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "hello.txt", "start_line": 1, "end_line": 1},
+            ),
+            ModelAction.tool_batch(calls),
+        ],
+    )
+    agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
+
+    outcome = agent._ask_with_intent("Inspect hello.txt", **READ_TASK)
+
+    assert outcome.stop_reason == "tool_execution_limit"
+    assert agent.run.run_log.pending_tool_calls() == ()
+    batch_results = [
+        event
+        for event in agent.read_run_events(outcome.run_id)
+        if event.call_id in {"call_final_a", "call_final_b"}
+    ]
+    assert [event.call_id for event in batch_results] == [
+        "call_final_a",
+        "call_final_b",
+    ]
+    assert all(event.outcome_status == "rejected" for event in batch_results)
+
+
 def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
@@ -732,3 +790,207 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     ]
     assert sum(entry.payload["outcome"]["status"] == "rejected" for entry in results) == 1
     assert sum(entry.payload["outcome"]["execution_state"] == "completed" for entry in results) == 1
+
+
+def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "a.txt", "start_line": 1, "end_line": 1},
+            "call_a",
+        ),
+        ToolCall(
+            "read_file",
+            {"path": "b.txt", "start_line": 1, "end_line": 1},
+            "call_b",
+        ),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Read both files.")],
+    )
+
+    outcome = agent._ask_with_intent("Read a.txt and b.txt", **READ_TASK)
+
+    assert outcome.answer == "Read both files."
+    assert agent.run.metrics.executed_tool_count == 2
+    assert len(agent.model_client.recorded_action_result_batches) == 1
+    returned = agent.model_client.recorded_action_result_batches[0]
+    assert len(returned) == 2
+    assert "alpha" in returned[0]
+    assert "beta" in returned[1]
+    events = agent.read_run_events(outcome.run_id)
+    transactions = [
+        (event.kind, event.call_id)
+        for event in events
+        if event.kind in {"assistant_tool_batch", "tool_started", "tool_result"}
+    ]
+    assert transactions == [
+        ("assistant_tool_batch", ""),
+        ("tool_started", "call_a"),
+        ("tool_started", "call_b"),
+        ("tool_result", "call_a"),
+        ("tool_result", "call_b"),
+    ]
+
+
+def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "README.md", "start_line": 1, "end_line": 1},
+            "call_read",
+        ),
+        ToolCall(
+            "write_file",
+            {"path": "forbidden.txt", "content": "forbidden\n"},
+            "call_write",
+        ),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Batch rejected.")],
+    )
+
+    def approval_must_not_run(*_args, **_kwargs):
+        raise AssertionError("mixed batch must be rejected before Approval")
+
+    agent.tools.approve = approval_must_not_run
+
+    outcome = agent._ask_with_intent("Try one mixed batch", **NO_CHANGE_TASK)
+
+    assert outcome.answer == "Batch rejected."
+    assert agent.run.metrics.executed_tool_count == 0
+    assert not (tmp_path / "forbidden.txt").exists()
+    events = agent.read_run_events(outcome.run_id)
+    assert not any(event.kind == "tool_started" for event in events)
+    results = [event for event in events if event.kind == "tool_result"]
+    assert [event.call_id for event in results] == ["call_read", "call_write"]
+    assert all(event.outcome_status == "rejected" for event in results)
+    assert all(
+        event.payload["outcome"]["failure"]["code"] == "invalid_tool_batch"
+        for event in results
+    )
+    assert len(agent.model_client.recorded_action_result_batches[0]) == 2
+
+
+def test_observation_batch_reserves_tool_budget_before_execution(tmp_path):
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "README.md", "start_line": 1, "end_line": 1},
+            "call_a",
+        ),
+        ToolCall("list_files", {"path": "."}, "call_b"),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Budget rejected.")],
+    )
+    agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
+
+    outcome = agent._ask_with_intent("Try an oversized batch", **NO_CHANGE_TASK)
+
+    assert outcome.answer == "Budget rejected."
+    assert agent.run.metrics.executed_tool_count == 0
+    results = [
+        event
+        for event in agent.read_run_events(outcome.run_id)
+        if event.kind == "tool_result"
+    ]
+    assert len(results) == 2
+    assert all(event.outcome_status == "rejected" for event in results)
+
+
+def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "README.md", "start_line": 1, "end_line": 1},
+            "call_read",
+        ),
+        ToolCall("submit_final", {"answer": "too early"}, "call_final"),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Retried alone.")],
+    )
+
+    outcome = agent._ask_with_intent("Inspect and finish", **NO_CHANGE_TASK)
+
+    assert outcome.answer == "Retried alone."
+    results = [
+        event
+        for event in agent.read_run_events(outcome.run_id)
+        if event.kind == "tool_result"
+    ]
+    assert [event.call_id for event in results] == ["call_read", "call_final"]
+    assert all(event.outcome_status == "rejected" for event in results)
+
+
+def test_one_observation_failure_does_not_cancel_batch_siblings(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "a.txt", "start_line": 1, "end_line": 1},
+            "call_a",
+        ),
+        ToolCall(
+            "read_file",
+            {"path": "b.txt", "start_line": 1, "end_line": 1},
+            "call_b",
+        ),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Observed one file.")],
+    )
+
+    def one_failure(_context, args):
+        if args["path"] == "a.txt":
+            raise OSError("controlled read failure")
+        return ToolRunnerResult("beta")
+
+    monkeypatch.setitem(tools_module._TOOL_RUNNERS, "read_file", one_failure)
+
+    outcome = agent._ask_with_intent("Read both paths", **READ_TASK)
+
+    assert outcome.answer == "Observed one file."
+    results = [
+        event
+        for event in agent.read_run_events(outcome.run_id)
+        if event.kind == "tool_result"
+    ]
+    assert [event.outcome_status for event in results] == ["error", "success"]
+    assert "beta" in results[1].content
+
+
+def test_observation_batch_preflight_is_all_before_execution(tmp_path):
+    calls = (
+        ToolCall(
+            "read_file",
+            {"path": "README.md", "start_line": 1, "end_line": 0},
+            "call_invalid",
+        ),
+        ToolCall("list_files", {"path": "."}, "call_valid"),
+    )
+    agent = build_agent(
+        tmp_path,
+        [ModelAction.tool_batch(calls), ModelAction.final("Preflight rejected.")],
+    )
+
+    outcome = agent._ask_with_intent("Try invalid observation args", **NO_CHANGE_TASK)
+
+    assert outcome.answer == "Preflight rejected."
+    events = agent.read_run_events(outcome.run_id)
+    assert not any(event.kind == "tool_started" for event in events)
+    results = [event for event in events if event.kind == "tool_result"]
+    assert len(results) == 2
+    assert all(event.outcome_status == "rejected" for event in results)
