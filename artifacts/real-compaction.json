@@ -1,14 +1,10 @@
 {
   "analysis": {
-    "compaction_count": 2,
+    "compaction_count": 1,
     "compactions": [
       {
-        "covered_event_count": 11,
-        "summary": "## Progress\n### Done\n- Read evidence/segment_01.md successfully.\n- Read evidence/segment_02.md successfully.\n- Read evidence/segment_03.md successfully.\n- Read evidence/segment_04.md successfully.\n### In Progress\n- none\n### Blocked\n- none\n\n## Critical Context\n- Successful read_file calls completed with no affected paths or side effects for evidence/segment_01.md, evidence/segment_02.md, evidence/segment_03.md, and evidence/segment_04.md.\n- evidence/segment_01.md: revision sha256:03a97a93f915df3b3e8bd30ec7db35c3c8717d744513905e0dae6c9edbdd0cb4; lines 1–79 of 79 were read. Line 3: \"Critical fact: The only permitted production change is src/normalizer.py.\"\n- evidence/segment_02.md: revision sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884; lines 1–79 of 79 were read. Line 3: \"Critical fact: Leading and trailing whitespace must be discarded.\"\n- evidence/segment_03.md: revision sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8; lines 1–79 of 79 were read. Line 3: \"Critical fact: Every run of internal whitespace must become one ASCII hyphen.\"\n- evidence/segment_04.md: revision sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5; lines 1–79 of 79 were read. Line 3: \"Critical fact: Alphabetic characters must be normalized to lowercase.\"\n- Tool call identifiers: call_Guy5CXK88L4nMcyG0lzRMTps (segment_01), call_sbe1EEIzBuOGuOcTwzu37EQs (segment_02), call_jqgQ8C8BJF17CBJvqIUNOARy (segment_03), call_VkAVgZWM7u6uBil3PDQUy3OF (segment_04)."
-      },
-      {
-        "covered_event_count": 9,
-        "summary": "## Progress\n### Done\n- Read evidence/segment_01.md successfully; call_Guy5CXK88L4nMcyG0lzRMTps.\n- Read evidence/segment_02.md successfully; call_sbe1EEIzBuOGuOcTwzu37EQs.\n- Read evidence/segment_03.md successfully; call_jqgQ8C8BJF17CBJvqIUNOARy.\n- Read evidence/segment_04.md successfully; call_VkAVgZWM7u6uBil3PDQUy3OF.\n- Read evidence/segment_05.md successfully; call_CWnzGeAaadBrMcsUgyWwGhRA.\n- Read evidence/segment_06.md successfully; call_DGeFg16rAEFuCW4LLOtRo2Ti.\n- Read evidence/segment_07.md successfully; call_TEjbKTtYRY18dB1TqT7UEjTH.\n- Read evidence/segment_08.md successfully; call_JCI4dFQQIaHkteskIBt6vtah.\n### In Progress\n- none\n### Blocked\n- none\n\n## Critical Context\n- Successful read_file calls had status success, execution_state completed, failure null, affected_paths [], effect_scope none, and side_effect_state none for evidence/segment_01.md, evidence/segment_02.md, evidence/segment_03.md, evidence/segment_04.md, evidence/segment_05.md, evidence/segment_06.md, evidence/segment_07.md, and evidence/segment_08.md.\n- evidence/segment_01.md revision sha256:03a97a93f915df3b3e8bd30ec7db35c3c8717d744513905e0dae6c9edbdd0cb4; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: The only permitted production change is src/normalizer.py.\"\n- evidence/segment_02.md revision sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: Leading and trailing whitespace must be discarded.\"\n- evidence/segment_03.md revision sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: Every run of internal whitespace must become one ASCII hyphen.\"\n- evidence/segment_04.md revision sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: Alphabetic characters must be normalized to lowercase.\"\n- evidence/segment_05.md revision sha256:946dcdb34ed2eade09e788f9f5b5cf8f2057b1b5008c51514f1db91650fe8e09; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: Existing non-whitespace punctuation, including hyphens, must be preserved.\"\n- evidence/segment_06.md revision sha256:4a28a0af75315c2c19a600ed8e667a8606b7eb20444bae56427108152d90fc0d; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: The public function name and one-argument signature must not change.\"\n- evidence/segment_07.md revision sha256:bb9cab15f49d8e753f0e134e34ae640a50d7dff8de26a18ad3cd55c558de4e19; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: A label containing one word must remain that word after lowercasing.\"\n- evidence/segment_08.md revision sha256:a49f9f9b267d3aa6985a730300e487026950d07f4c9b249d198b8bb33ae9f5d0; lines 1–79 of 79 were read. Line 3 literal: \"Critical fact: The implementation must not introduce a dependency or regular expression.\"\n- Earlier successful read_file call identifiers: call_Guy5CXK88L4nMcyG0lzRMTps (segment_01), call_sbe1EEIzBuOGuOcTwzu37EQs (segment_02), call_jqgQ8C8BJF17CBJvqIUNOARy (segment_03), call_VkAVgZWM7u6uBil3PDQUy3OF (segment_04). Later successful read_file call identifiers: call_CWnzGeAaadBrMcsUgyWwGhRA (segment_05), call_DGeFg16rAEFuCW4LLOtRo2Ti (segment_06), call_TEjbKTtYRY18dB1TqT7UEjTH (segment_07), call_JCI4dFQQIaHkteskIBt6vtah (segment_08)."
+        "covered_event_count": 18,
+        "summary": "## Progress\n### Done\n- Read evidence/segment_01.md through evidence/segment_12.md successfully; each requested range was lines 1-200 and each file returned exactly 79 lines with no additional content.\n### In Progress\n- none\n### Blocked\n- none\n\n## Critical Context\n- Completed read_file call call_SB4sq5jgOUHChG4EQPe0GAaN for evidence/segment_01.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:03a97a93f915df3b3e8bd30ec7db35c3c8717d744513905e0dae6c9edbdd0cb4; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_LuLLrIIuOcTGGS2D8V53vcWQ for evidence/segment_02.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_3v8hLwm8MGdpKXAdzsCOEqsL for evidence/segment_03.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_wYRlSly8pKFazDNXyaOtfuNU for evidence/segment_04.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_FmcWrqnW5uQ9CpWdFZIfsk23 for evidence/segment_05.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:946dcdb34ed2eade09e788f9f5b5cf8f2057b1b5008c51514f1db91650fe8e09; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_3mCmxuSysN6zgXH4JbTLgKPG for evidence/segment_06.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:4a28a0af75315c2c19a600ed8e667a8606b7eb20444bae56427108152d90fc0d; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_khJsQWPCduFlWMqG3FseGSBx for evidence/segment_07.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:bb9cab15f49d8e753f0e134e34ae640a50d7dff8de26a18ad3cd55c558de4e19; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_3uCSVWyY6GfrcU5abCbrDRhZ for evidence/segment_08.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:a49f9f9b267d3aa6985a730300e487026950d07f4c9b249d198b8bb33ae9f5d0; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_kYbauoPjU3KtZobJUsWZr5YJ for evidence/segment_09.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:7a9d9f2b6332f6b8b6f9ed570fdbdc69f9c945c12268a8f7c0e96bd572787ac8; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_c9DP9oe1wE4CfltFb6MHKwrn for evidence/segment_10.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:031fb2cf692b496df5cb6e3f3347e23d4e73c067cc2f6a6ce8fa58b4b23a513f; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_s7RlxKNZm8hQbK4XgnMVFN5m for evidence/segment_11.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:45749b5c1f5a3e1fdc5a385d623acde32f5906ccd0886a53610720cb74fe3356; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Completed read_file call call_VyGl0zaL08mPk4NEidMHPlyM for evidence/segment_12.md, lines 1-200 requested; returned lines 1-79, total_lines 79, has_more false, revision sha256:5a826380b54b9a08978dbfa4e1c883150012a1c835bed7ade3ad5fe42a9b97dd; status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope none, side_effect_state none.\n- Read operations were issued in three completed parallel batches with identifiers batch_call_SB4sq5jgOUHChG4EQPe0GAaN, batch_call_FmcWrqnW5uQ9CpWdFZIfsk23, and batch_call_kYbauoPjU3KtZobJUsWZr5YJ. No historical write, edit, test, or other execution result is present."
       }
     ],
     "evidence_read_paths": [
@@ -25,28 +21,31 @@
       "evidence/segment_11.md",
       "evidence/segment_12.md"
     ],
-    "max_single_request_input_tokens": 21744,
-    "model_request_count": 17,
-    "provider_session_reset_count": 2,
+    "max_single_request_input_tokens": 26703,
+    "model_request_count": 9,
+    "observation_batch_count": 3,
+    "provider_session_reset_count": 1,
     "resume_count": 0,
     "successful_mutation_count": 1,
     "working_state": {
       "constraints": [
-        "Read every listed evidence file exactly once in the specified order.",
+        "Read every listed evidence file exactly once in order.",
         "Modify only src/normalizer.py.",
-        "Preserve the public API."
+        "Preserve the public API.",
+        "Normalization must discard leading and trailing whitespace, collapse internal whitespace to one ASCII hyphen, lowercase alphabetic characters, preserve existing non-whitespace punctuation, avoid dependencies and regular expressions, and handle tabs and newlines deterministically."
       ],
       "decisions": [
-        "Normalize labels by stripping outer whitespace, lowercasing, splitting all whitespace, and joining tokens with ASCII hyphens; this preserves non-whitespace punctuation and handles tabs/newlines without dependencies or regular expressions."
+        "Use the existing string API operations strip, lower, split, and join to normalize labels while preserving punctuation.",
+        "Evidence requires trimming leading/trailing whitespace, collapsing all internal whitespace to one ASCII hyphen, lowercasing alphabetic characters, preserving non-whitespace punctuation, and using no dependencies or regular expressions; src/normalizer.py currently only strips and lowercases."
       ],
       "next_steps": [
-        "Read src/normalizer.py, then replace its implementation body with the strip/lower/split/join normalization expression while retaining normalize_label(value: str) -> str."
+        "Replace the existing return expression with strip().lower().split() joined by an ASCII hyphen, preserving the public normalize_label signature."
       ],
       "schema_version": "run-working-state-v2"
     }
   },
   "artifact_type": "pico-real-compaction",
-  "captured_at": "2026-09-01T04:06:42.796387+00:00",
+  "captured_at": "2026-09-01T09:35:35.344069+00:00",
   "changed_paths": [
     "src/normalizer.py"
   ],
@@ -55,6 +54,7 @@
     "evidence_read_once_in_order": true,
     "hidden_verifier_passed": true,
     "initial_failure_reproduced": true,
+    "observation_batch_used": true,
     "patch_recorded": true,
     "provider_session_reset": true,
     "scope_valid": true,
@@ -62,7 +62,7 @@
     "visible_verifier_passed": true,
     "working_state_preserved": true
   },
-  "final_answer": "Updated `src/normalizer.py` so `normalize_label` preserves its public API while stripping outer whitespace, lowercasing text, and converting every internal whitespace run (including tabs/newlines) to a single ASCII hyphen. The Runtime will run verification.",
+  "final_answer": "Updated `src/normalizer.py` so `normalize_label` trims outer whitespace, lowercases input, and collapses internal whitespace (including tabs/newlines) into ASCII hyphens while preserving punctuation and the public API. Verification is deferred to the Runtime.",
   "model": "gpt-5.6-luna",
   "passed": true,
   "policy": {
@@ -72,10 +72,10 @@
     "provider_context_limit_tokens": 28000,
     "run_timeout_seconds": 900
   },
-  "run_id": "run_20260901-040437-10a6fd",
+  "run_id": "run_20260901-093313-d0950c",
   "runtime": {
-    "branch": "master",
-    "commit_sha": "0efea5fcacf19d7800bf26aa924e1e881dafd7dc",
+    "branch": "codex/pico-observation-batch",
+    "commit_sha": "c6edcb61e4d360fd0b8b8682ce232d03fdb4ca36",
     "working_tree_dirty": false
   },
   "verification": {
