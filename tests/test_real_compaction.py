@@ -24,6 +24,8 @@ def test_real_compaction_prompt_requires_ordered_reads_and_one_write_scope():
     assert prompt.count("- evidence/segment_") == EVIDENCE_COUNT
     assert "read every listed evidence" in prompt
     assert "Observation Batches of four" in prompt
+    assert "treat every path listed as Done there as already read" in prompt
+    assert "remove the completed evidence-read" in prompt
     assert f"modify only {TARGET_PATH}" in prompt
     assert "The Runtime owns verification" in prompt
 

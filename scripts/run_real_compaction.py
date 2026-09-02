@@ -114,11 +114,14 @@ Record a next step to read all evidence before editing.
 
 Then read every file below exactly once using ordered Observation Batches of four
 read_file calls per model response, with start_line=1 and end_line=200 for every call.
+After context compaction or Provider session rebuilding, History may summarize completed
+reads: treat every path listed as Done there as already read and never read it again.
 Do not use Search, List, or delegation:
 {files}
 
-After all evidence is read, call update_working_state again to record the evidence-backed
-normalization decision and the concrete edit as the next step. Read {TARGET_PATH}, apply
+After all evidence is read, call update_working_state again: remove the completed evidence-read
+next step, record the evidence-backed normalization decision, and add only the concrete edit as
+the next step. Read {TARGET_PATH}, apply
 the smallest exact patch, and call submit_final. The Runtime owns verification.
 """
 
