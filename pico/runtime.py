@@ -20,7 +20,6 @@ from .runtime_dependencies import RuntimeDependencies
 from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
 from .session_store import SessionStore
-from .task_classifier import TaskIntentClassifier, normalize_task_intent
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
 from .workspace_tracker import WorkspaceTracker
@@ -42,9 +41,8 @@ class Pico:
         run_store=None,
         command_runner=None,
         command_runner_factory=None,
-        task_classifier=None,
         subagent_model_client_factory=None,
-        parent_cancellation_token=None,
+        parent_execution_context=None,
     ):
         self.model_client = model_client
         self.config = PicoConfig.build(config)
@@ -74,10 +72,7 @@ class Pico:
             command_runner=effective_command_runner,
             command_runner_factory=command_runner_factory,
             repo_map=RepoMap(self.workspace.root),
-            task_classifier=(
-                task_classifier or TaskIntentClassifier(self.model_client)
-            ),
-            parent_cancellation_token=parent_cancellation_token,
+            parent_execution_context=parent_execution_context,
         )
         if subagent_model_client_factory is not None:
             from .subagents import SubagentRunner
@@ -132,15 +127,6 @@ class Pico:
         from .agent_loop import AgentLoop
 
         return AgentLoop(self).run(user_message)
-
-    def _ask_with_intent(self, user_message, *, intent) -> RunOutcome:
-        """Internal deterministic entry for Child runtimes, applications, and tests."""
-        from .agent_loop import AgentLoop
-
-        return AgentLoop(self).run(
-            user_message,
-            task_intent=normalize_task_intent(intent),
-        )
 
     @staticmethod
     def new_task_id():

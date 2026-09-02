@@ -32,7 +32,7 @@ def build_agent(tmp_path):
         model_client=FakeModelClient([]),
         workspace=WorkspaceContext.build(tmp_path),
         session_store=SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto"),
+        config=PicoConfig(mode="auto"),
     )
 
 
@@ -46,9 +46,8 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
     first = run_log.append_user(
         TaskContract(
             goal=goal,
-            task_kind="modify",
-            requires_workspace_change=False,
-            requires_verification=False,
+            allows_workspace_mutation=True,
+            verify_changes=False,
         )
     )
     agent.run.projection = RunProjection().apply_event(first)
@@ -63,8 +62,15 @@ def run_active(agent, call):
     return agent.tools.execute_pending(call.call_id)
 
 
-def test_active_run_executes_pending_call_by_id(tmp_path):
+def code_command_agent(tmp_path, *, approved=True):
     agent = build_agent(tmp_path)
+    agent.config = PicoConfig.build(agent.config, mode="code")
+    agent.tools.approve = lambda *_args, **_kwargs: approved
+    return agent
+
+
+def test_active_run_executes_pending_call_by_id(tmp_path):
+    agent = code_command_agent(tmp_path)
     run_log = start_run(agent)
     persisted = ToolCall(
         "write_file",
@@ -81,7 +87,7 @@ def test_active_run_executes_pending_call_by_id(tmp_path):
 
 
 def test_run_command_returns_diagnostic_output_without_workspace_effect(tmp_path):
-    agent = build_agent(tmp_path)
+    agent = code_command_agent(tmp_path)
 
     outcome = run_active(
         agent,
@@ -99,7 +105,7 @@ def test_run_command_returns_diagnostic_output_without_workspace_effect(tmp_path
 
 
 def test_run_command_nonzero_exit_is_repairable_without_side_effect(tmp_path):
-    agent = build_agent(tmp_path)
+    agent = code_command_agent(tmp_path)
 
     outcome = run_active(
         agent,
@@ -117,7 +123,7 @@ def test_run_command_nonzero_exit_is_repairable_without_side_effect(tmp_path):
 
 
 def test_run_command_workspace_change_is_unknown_and_blocks_completion(tmp_path):
-    agent = build_agent(tmp_path)
+    agent = code_command_agent(tmp_path)
 
     outcome = run_active(
         agent,
@@ -137,8 +143,7 @@ def test_run_command_workspace_change_is_unknown_and_blocks_completion(tmp_path)
 
 
 def test_run_command_is_rejected_before_execution_when_approval_is_denied(tmp_path):
-    agent = build_agent(tmp_path)
-    agent.config = PicoConfig.build(agent.config, approval_policy="deny")
+    agent = code_command_agent(tmp_path, approved=False)
 
     outcome = run_active(
         agent,
@@ -151,6 +156,23 @@ def test_run_command_is_rejected_before_execution_when_approval_is_denied(tmp_pa
 
     assert outcome.status == "rejected"
     assert outcome.failure.code == "approval_denied"
+    assert not (tmp_path / "denied.txt").exists()
+
+
+def test_auto_mode_rejects_hallucinated_run_command(tmp_path):
+    agent = build_agent(tmp_path)
+
+    outcome = run_active(
+        agent,
+        ToolCall(
+            "run_command",
+            {"command": "printf forbidden > denied.txt"},
+            "call_auto_command",
+        ),
+    )
+
+    assert outcome.status == "rejected"
+    assert outcome.failure.code == "tool_not_allowed"
     assert not (tmp_path / "denied.txt").exists()
 
 
@@ -211,14 +233,13 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
             WorkspaceContext.build(tmp_path),
             SessionStore(tmp_path / ".pico" / "sessions"),
             config=PicoConfig(
-                approval_policy="auto",
+                mode="auto",
                 verification_command="",
                 secret_env_names=frozenset({"CUSTOM_SECRET_NAME"}),
             ),
         )
-        assert agent._ask_with_intent(
+        assert agent.ask(
             "Read secret.txt",
-            intent="read_only",
         ).answer == "Done."
         provider_result = client.recorded_action_results[0]
         event = next(

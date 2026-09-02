@@ -14,7 +14,6 @@ from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineEx
 from .run_log import RunLog
 from .run_projection import RunOutcome, RunProjection
 from .runtime_state import ActiveRunState
-from .task_classifier import normalize_task_intent
 from .task_state import TaskContract
 
 if TYPE_CHECKING:
@@ -31,6 +30,7 @@ class AgentLoopState:
     invalid_output_count: int = 0
     completion_block_count: int = 0
     execution_stop: str = ""
+    starting_model_request_count: int = 0
 
 
 def _state_from_snapshot(runtime: Pico, run_id, events, projection):
@@ -140,14 +140,11 @@ class RunLifecycle:
     def initialize(
         self,
         user_message,
-        *,
-        task_intent=None,
     ):
         runtime = self.runtime
         run_started_at = time.monotonic()
         resumed = self._resume_or_create_run(
             user_message,
-            task_intent=task_intent,
         )
         run_log = runtime.run.run_log
         if run_log is None:
@@ -178,13 +175,12 @@ class RunLifecycle:
         return AgentLoopState(
             user_message=user_message,
             run_started_at=run_started_at,
+            starting_model_request_count=runtime.run.metrics.model_request_count,
         )
 
     def _resume_or_create_run(
         self,
         user_message,
-        *,
-        task_intent=None,
     ):
         runtime = self.runtime
         _reload_if_snapshot_is_stale(runtime)
@@ -203,14 +199,8 @@ class RunLifecycle:
 
         run_id = runtime.new_run_id()
         task_id = runtime.new_task_id()
-        intent = (
-            runtime.dependencies.task_classifier.classify(user_message)
-            if task_intent is None
-            else normalize_task_intent(task_intent)
-        )
         contract = self._task_contract(
             user_message,
-            intent=intent,
         )
         run_log = RunLog(
             run_id,
@@ -232,43 +222,33 @@ class RunLifecycle:
     def _task_contract(
         self,
         goal,
-        *,
-        intent,
     ):
-        intent = normalize_task_intent(intent)
-        task_kind = "read_only" if intent == "read_only" else "modify"
+        allows_workspace_mutation = self.runtime.config.mode != "ask"
         return TaskContract(
             goal=goal,
-            task_kind=task_kind,
-            requires_workspace_change=intent == "modify",
-            requires_verification=(
-                task_kind == "modify"
-                and bool(self.runtime.config.verification_command)
-            ),
+            allows_workspace_mutation=allows_workspace_mutation,
+            verify_changes=bool(self.runtime.config.verification_command),
             allowed_write_paths=(
-                None
-                if task_kind == "read_only"
+                ()
+                if not allows_workspace_mutation
                 else self.runtime.config.allowed_write_paths
             ),
         )
 
     def _root_execution(self):
         runtime = self.runtime
-        token = (
-            runtime.dependencies.parent_cancellation_token.child()
-            if runtime.dependencies.parent_cancellation_token is not None
-            else None
-        )
+        parent = runtime.dependencies.parent_execution_context
+        if parent is not None:
+            return parent.child()
         return ExecutionContext.root(
-            max_seconds=runtime.config.run_timeout_seconds,
-            token=token,
+            max_seconds=runtime.config.turn_timeout_seconds,
         )
 
     def execution_stop(self):
         try:
             self.runtime.run.execution_context.check_active()
         except ExecutionDeadlineExceeded:
-            return "deadline_exceeded"
+            return "turn_timeout"
         except ExecutionCancelled as exc:
             return str(exc) or "user_cancelled"
         return ""
@@ -280,7 +260,7 @@ class RunLifecycle:
             runtime.run.run_log.append_final(
                 final,
                 final_diff,
-                run_duration_ms=int(
+                turn_duration_ms=int(
                     (time.monotonic() - loop_state.run_started_at) * 1000
                 ),
             )
@@ -302,7 +282,7 @@ class RunLifecycle:
                 final,
                 stop_reason,
                 final_diff,
-                run_duration_ms=int(
+                turn_duration_ms=int(
                     (time.monotonic() - loop_state.run_started_at) * 1000
                 ),
             )
@@ -332,6 +312,12 @@ class RunLifecycle:
         elif stop == "completion_block_limit":
             final = "Stopped after repeated rejected completion attempts."
             stop_reason = "completion_block_limit"
+        elif stop == "agent_turn_limit":
+            final = "Stopped after reaching the Agent turn limit."
+            stop_reason = "agent_turn_limit"
+        elif stop == "turn_timeout":
+            final = "Stopped after reaching the active Turn timeout."
+            stop_reason = "turn_timeout"
         elif stop:
             final = f"Stopped because execution was interrupted: {stop}."
             stop_reason = stop

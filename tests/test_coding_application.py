@@ -58,7 +58,7 @@ def workflow(client):
     return CodingWorkflow(
         client,
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="grep -q '^agent$' subject.txt",
         ),
     )
@@ -70,7 +70,13 @@ def test_coding_workflow_requires_runtime_verification():
     with pytest.raises(ValueError, match="requires verification_command"):
         CodingWorkflow(
             client,
-            config=PicoConfig(approval_policy="auto", verification_command=""),
+            config=PicoConfig(mode="auto", verification_command=""),
+        )
+
+    with pytest.raises(ValueError, match="requires Auto mode"):
+        CodingWorkflow(
+            client,
+            config=PicoConfig(mode="code", verification_command="verify"),
         )
 
 

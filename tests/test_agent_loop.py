@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 
@@ -18,19 +19,6 @@ from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
 from pico.providers import ProviderContextOverflow
 
-READ_TASK = {
-    "intent": "read_only",
-}
-NO_CHANGE_TASK = {
-    "intent": "modify_optional",
-}
-MODIFY_TASK = {
-    "intent": "modify",
-}
-VERIFIED_MODIFY_TASK = {
-    "intent": "modify",
-}
-
 
 def build_agent(tmp_path, outputs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
@@ -40,7 +28,7 @@ def build_agent(tmp_path, outputs):
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
-        config=PicoConfig(approval_policy="auto"),
+        config=PicoConfig(mode="auto"),
     )
 
 
@@ -55,7 +43,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     )
 
     outcome = AgentLoop(agent).run(
-        "Inspect hello.txt", task_intent="read_only"
+        "Inspect hello.txt"
     )
 
     assert outcome.answer == "Done."
@@ -133,14 +121,14 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
         ),
         command_runner=RecordingVerificationCommandRunner(),
     )
 
-    outcome = agent._ask_with_intent(
-        "Replace alpha without losing concurrent edits", **VERIFIED_MODIFY_TASK
+    outcome = agent.ask(
+        "Replace alpha without losing concurrent edits"
     )
 
     assert outcome.answer == "Recovered safely."
@@ -203,7 +191,7 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
         [ModelAction.invalid("Return one valid action.") for _ in range(8)],
     )
 
-    outcome = agent._ask_with_intent("Inspect the repository", **READ_TASK)
+    outcome = agent.ask("Inspect the repository")
 
     assert outcome.answer == (
         "Stopped after too many invalid model outputs without a valid tool call "
@@ -244,13 +232,13 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
         ),
         command_runner=FailingCommandRunner(),
     )
 
-    outcome = agent._ask_with_intent("Create subject.txt", **VERIFIED_MODIFY_TASK)
+    outcome = agent.ask("Create subject.txt")
 
     assert outcome.answer == "Stopped after repeated rejected completion attempts."
     assert agent.run.task.lifecycle.stop_reason == "completion_block_limit"
@@ -281,14 +269,14 @@ def test_verifier_created_file_prevents_successful_completion(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
         ),
         command_runner=MutatingVerificationRunner(),
     )
 
     with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
-        agent._ask_with_intent("Create subject.txt", **VERIFIED_MODIFY_TASK)
+        agent.ask("Create subject.txt")
 
     events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     verification = next(
@@ -313,7 +301,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
         ],
     )
 
-    assert agent._ask_with_intent("Inspect hello", **READ_TASK).answer == "Done."
+    assert agent.ask("Inspect hello").answer == "Done."
     assert len(agent.model_client.prompts) == 2
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     result = json.loads(agent.model_client.recorded_action_results[0])
@@ -377,7 +365,7 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="",
             provider_context_limit_tokens=8000,
             compaction_reserve_tokens=2000,
@@ -389,7 +377,7 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent._ask_with_intent("Inspect hello", **READ_TASK).answer == "Done after reset."
+    assert agent.ask("Inspect hello").answer == "Done after reset."
     assert client.prompts[0] != client.prompts[1]
     assert client.prompts[1] == client.prompts[2]
     assert "alpha" in client.prompts[1]
@@ -444,7 +432,7 @@ def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="",
             provider_context_limit_tokens=8000,
             compaction_reserve_tokens=2000,
@@ -456,7 +444,7 @@ def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
         200 if "alpha" in str(text) else original_count(text)
     )
 
-    assert agent._ask_with_intent("Inspect hello", **READ_TASK).answer == "Done without reset."
+    assert agent.ask("Inspect hello").answer == "Done without reset."
     assert client.prompts[0] == client.prompts[1]
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert not any(
@@ -498,7 +486,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="",
             max_new_tokens=64,
             provider_context_limit_tokens=3_000,
@@ -508,7 +496,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
     )
 
     assert (
-        agent._ask_with_intent("Read both files and finish", **READ_TASK).answer
+        agent.ask("Read both files and finish").answer
         == "Recovered after compaction."
     )
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
@@ -533,11 +521,11 @@ def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
         client,
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto"),
+        config=PicoConfig(mode="auto"),
     )
 
     with pytest.raises(ProviderContextOverflow):
-        agent._ask_with_intent("Inspect the workspace", **READ_TASK)
+        agent.ask("Inspect the workspace")
 
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
@@ -567,11 +555,11 @@ def test_untyped_runtime_error_is_not_recovered(tmp_path, message):
         client,
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto"),
+        config=PicoConfig(mode="auto"),
     )
 
     with pytest.raises(RuntimeError, match=message):
-        agent._ask_with_intent("Inspect the workspace", **READ_TASK)
+        agent.ask("Inspect the workspace")
 
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert not any(entry.kind == "provider_session_reset" for entry in entries)
@@ -589,7 +577,7 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    outcome = agent._ask_with_intent("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt")
 
     assert outcome.answer == "Done at the tool boundary."
     assert agent.run.metrics.executed_tool_count == 1
@@ -605,7 +593,7 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
     ]
 
 
-def test_read_only_run_sends_only_current_tool_surface(tmp_path):
+def test_ask_mode_sends_only_observation_surface(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     class SchemaCountingClient(FakeModelClient):
         @staticmethod
@@ -625,15 +613,15 @@ def test_read_only_run_sends_only_current_tool_surface(tmp_path):
         client,
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto"),
+        config=PicoConfig(mode="ask"),
     )
 
-    assert agent._ask_with_intent("Inspect hello.txt", **READ_TASK).answer == "Done."
+    assert agent.ask("Inspect hello.txt").answer == "Done."
 
     names = client.action_tool_surfaces[0]
     assert client.action_tool_surfaces == [names, names]
     assert "read_file" in names
-    assert "run_command" in names
+    assert "run_command" not in names
     assert "submit_final" in names
     assert "write_file" not in names
 
@@ -654,12 +642,12 @@ def test_tool_budget_switches_to_final_only_surface(tmp_path):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="ask",
             max_tool_executions=1,
         ),
     )
 
-    assert agent._ask_with_intent("Inspect hello.txt", **READ_TASK).answer == (
+    assert agent.ask("Inspect hello.txt").answer == (
         "Done at the boundary."
     )
 
@@ -682,16 +670,17 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
         [
             ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
             ModelAction.final("First run completed."),
+            ModelAction.tool("list_files", {"path": "."}),
             ModelAction.final("Second run completed."),
         ],
     )
 
     assert (
-        agent._ask_with_intent("Inspect hello.txt", **READ_TASK).answer
+        agent.ask("Inspect hello.txt").answer
         == "First run completed."
     )
     assert (
-        agent._ask_with_intent("Summarize the prior run", **NO_CHANGE_TASK).answer
+        agent.ask("Summarize the prior run").answer
         == "Second run completed."
     )
 
@@ -717,7 +706,7 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    outcome = agent._ask_with_intent("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt")
 
     assert outcome.answer == (
         "Stopped after reaching the tool execution limit without a final answer."
@@ -750,7 +739,7 @@ def test_final_only_multi_call_is_closed_before_tool_limit_stop(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    outcome = agent._ask_with_intent("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt")
 
     assert outcome.stop_reason == "tool_execution_limit"
     assert agent.run.run_log.pending_tool_calls() == ()
@@ -778,7 +767,7 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    outcome = agent._ask_with_intent("Inspect hello.txt", **READ_TASK)
+    outcome = agent.ask("Inspect hello.txt")
 
     assert outcome.answer == "Recovered after correcting the call."
     assert agent.run.metrics.executed_tool_count == 1
@@ -812,7 +801,7 @@ def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path
         [ModelAction.tool_batch(calls), ModelAction.final("Read both files.")],
     )
 
-    outcome = agent._ask_with_intent("Read a.txt and b.txt", **READ_TASK)
+    outcome = agent.ask("Read a.txt and b.txt")
 
     assert outcome.answer == "Read both files."
     assert agent.run.metrics.executed_tool_count == 2
@@ -851,7 +840,11 @@ def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Batch rejected.")],
+        [
+            ModelAction.tool_batch(calls),
+            ModelAction.tool("list_files", {"path": "."}),
+            ModelAction.final("Batch rejected."),
+        ],
     )
 
     def approval_must_not_run(*_args, **_kwargs):
@@ -859,14 +852,23 @@ def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
 
     agent.tools.approve = approval_must_not_run
 
-    outcome = agent._ask_with_intent("Try one mixed batch", **NO_CHANGE_TASK)
+    outcome = agent.ask("Try one mixed batch")
 
     assert outcome.answer == "Batch rejected."
-    assert agent.run.metrics.executed_tool_count == 0
+    assert agent.run.metrics.executed_tool_count == 1
     assert not (tmp_path / "forbidden.txt").exists()
     events = agent.read_run_events(outcome.run_id)
-    assert not any(event.kind == "tool_started" for event in events)
-    results = [event for event in events if event.kind == "tool_result"]
+    assert not any(
+        event.kind == "tool_started"
+        and event.call_id in {"call_read", "call_write"}
+        for event in events
+    )
+    results = [
+        event
+        for event in events
+        if event.kind == "tool_result"
+        and event.call_id in {"call_read", "call_write"}
+    ]
     assert [event.call_id for event in results] == ["call_read", "call_write"]
     assert all(event.outcome_status == "rejected" for event in results)
     assert all(
@@ -887,18 +889,22 @@ def test_observation_batch_reserves_tool_budget_before_execution(tmp_path):
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Budget rejected.")],
+        [
+            ModelAction.tool_batch(calls),
+            ModelAction.tool("list_files", {"path": "."}),
+            ModelAction.final("Budget rejected."),
+        ],
     )
     agent.config = PicoConfig.build(agent.config, max_tool_executions=1)
 
-    outcome = agent._ask_with_intent("Try an oversized batch", **NO_CHANGE_TASK)
+    outcome = agent.ask("Try an oversized batch")
 
     assert outcome.answer == "Budget rejected."
-    assert agent.run.metrics.executed_tool_count == 0
+    assert agent.run.metrics.executed_tool_count == 1
     results = [
         event
         for event in agent.read_run_events(outcome.run_id)
-        if event.kind == "tool_result"
+        if event.kind == "tool_result" and event.call_id in {"call_a", "call_b"}
     ]
     assert len(results) == 2
     assert all(event.outcome_status == "rejected" for event in results)
@@ -915,16 +921,21 @@ def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Retried alone.")],
+        [
+            ModelAction.tool_batch(calls),
+            ModelAction.tool("list_files", {"path": "."}),
+            ModelAction.final("Retried alone."),
+        ],
     )
 
-    outcome = agent._ask_with_intent("Inspect and finish", **NO_CHANGE_TASK)
+    outcome = agent.ask("Inspect and finish")
 
     assert outcome.answer == "Retried alone."
     results = [
         event
         for event in agent.read_run_events(outcome.run_id)
         if event.kind == "tool_result"
+        and event.call_id in {"call_read", "call_final"}
     ]
     assert [event.call_id for event in results] == ["call_read", "call_final"]
     assert all(event.outcome_status == "rejected" for event in results)
@@ -960,7 +971,7 @@ def test_one_observation_failure_does_not_cancel_batch_siblings(
 
     monkeypatch.setitem(tools_module._TOOL_RUNNERS, "read_file", one_failure)
 
-    outcome = agent._ask_with_intent("Read both paths", **READ_TASK)
+    outcome = agent.ask("Read both paths")
 
     assert outcome.answer == "Observed one file."
     results = [
@@ -983,14 +994,90 @@ def test_observation_batch_preflight_is_all_before_execution(tmp_path):
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Preflight rejected.")],
+        [
+            ModelAction.tool_batch(calls),
+            ModelAction.tool("list_files", {"path": "."}),
+            ModelAction.final("Preflight rejected."),
+        ],
     )
 
-    outcome = agent._ask_with_intent("Try invalid observation args", **NO_CHANGE_TASK)
+    outcome = agent.ask("Try invalid observation args")
 
     assert outcome.answer == "Preflight rejected."
     events = agent.read_run_events(outcome.run_id)
-    assert not any(event.kind == "tool_started" for event in events)
-    results = [event for event in events if event.kind == "tool_result"]
+    assert not any(
+        event.kind == "tool_started"
+        and event.call_id in {"call_invalid", "call_valid"}
+        for event in events
+    )
+    results = [
+        event
+        for event in events
+        if event.kind == "tool_result"
+        and event.call_id in {"call_invalid", "call_valid"}
+    ]
     assert len(results) == 2
     assert all(event.outcome_status == "rejected" for event in results)
+
+
+def test_auto_mode_allows_bounded_file_edits_but_hides_run_command(tmp_path):
+    client = FakeModelClient(
+        [
+            ModelAction.tool(
+                "write_file",
+                {"path": "created.txt", "content": "created\n"},
+            ),
+            ModelAction.final("Created the file."),
+        ]
+    )
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(mode="auto"),
+    )
+
+    outcome = agent.ask("Create created.txt")
+
+    assert outcome.answer == "Created the file."
+    assert (tmp_path / "created.txt").read_text() == "created\n"
+    assert "write_file" in client.action_tool_surfaces[0]
+    assert "run_command" not in client.action_tool_surfaces[0]
+
+
+def test_agent_turn_limit_stops_repeated_rejected_calls(tmp_path):
+    calls = [
+        ModelAction.tool("read_file", {"path": "missing.txt"})
+        for _index in range(5)
+    ]
+    agent = build_agent(tmp_path, calls)
+    agent.config = PicoConfig.build(agent.config, max_agent_turns=3)
+
+    outcome = agent.ask("Keep reading a missing file")
+
+    assert outcome.stop_reason == "agent_turn_limit"
+    assert outcome.metrics["model_request_count"] == 3
+    assert outcome.metrics["executed_tool_count"] == 0
+
+
+def test_provider_failure_at_deadline_settles_as_turn_timeout(tmp_path):
+    class DeadlineClient(FakeModelClient):
+        agent = None
+
+        def complete_action(self, *args, **kwargs):
+            self.agent.run.execution_context.deadline = time.monotonic() - 1
+            raise RuntimeError("request timed out")
+
+    client = DeadlineClient([])
+    agent = Pico(
+        client,
+        WorkspaceContext.build(tmp_path),
+        SessionStore(tmp_path / ".pico/sessions"),
+        config=PicoConfig(mode="ask", turn_timeout_seconds=30),
+    )
+    client.agent = agent
+
+    outcome = agent.ask("Inspect the repository")
+
+    assert outcome.stop_reason == "turn_timeout"
+    assert outcome.status == "stopped"

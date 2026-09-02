@@ -125,15 +125,14 @@ def main():
             workspace=WorkspaceContext.build(root),
             session_store=SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(
-                approval_policy="auto",
+                mode="auto",
                 verification_command=verify_command,
             ),
             command_runner=command_runner,
         )
 
-        outcome = agent._ask_with_intent(
+        outcome = agent.ask(
             "Fix calculator.add so the existing addition test passes",
-            intent="modify",
         )
         run_id = outcome.run_id
         events = agent.dependencies.run_store.read_events(run_id)

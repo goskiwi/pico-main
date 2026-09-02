@@ -10,16 +10,20 @@ Pico uses `events.jsonl` as the durable source for each Run's process Facts. One
 CLI build_agent
   -> Pico composition root
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
-  -> new: isolated TaskIntentClassifier returns read_only / modify / modify_optional
-  -> new: RunLifecycle derives and appends the TaskContract before the Session pointer
+  -> new: explicit Ask/Code/Auto Mode deterministically creates and appends TaskContract
   -> resume: RunStore.load_run reads once, validates the Run Log / terminal Artifact,
      and returns that Event snapshot with its Projection
-  -> resume: persisted TaskContract is reused without another classification call
+  -> resume: persisted TaskContract keeps the maximum capability; current Mode may narrow it
   -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> resumed input is appended as user_guidance before run_resumed; new Runs append run_started
   -> Provider action session reset
   -> AgentLoop
 ```
+
+Ask exposes observations only. Code exposes the full configured surface and asks before risky
+actions. Auto approves bounded file/Worktree mutations but omits `run_command` because Pico has no
+Shell sandbox or secondary safety classifier. One active ask/resume is bounded by an Agent Turn
+ceiling and one monotonic Turn deadline.
 
 ### Normal Tool turn
 
@@ -99,7 +103,7 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 |---|---|---|
 | Current Run facts | `runs/<run_id>/events.jsonl` | One RunProjection containing identity, Task, Evidence, Metrics, Pending and final Diff receipt |
 | Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
-| Task contract | First `user_message.contract` | Goal, task kind, write scope and completion requirements |
+| Task contract | First `user_message.contract` | Goal, maximum write capability, write scope and change-verification requirement |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
 | Large redacted output | Artifact files | Run Log artifact reference |
 | Child receipts | Child Run Logs and Patch files | One explicit Child receipt and integration state |
@@ -127,7 +131,12 @@ completion_blocked
 assistant_final / run_stopped
 ```
 
-The Run Log is single-writer and fsynced after every accepted event. It has no hash chain: a hash stored beside mutable local data is not a trusted tamper boundary. Contiguous sequence and IDs plus strict User, Tool Call/Started/Result, and terminal payloads reject causal corruption; telemetry payloads remain extensible. A final incomplete JSONL tail is a crash artifact and is truncated; malformed complete events fail closed.
+The Run Log is single-writer and fsynced after every accepted event. One main Pico process owns one
+Workspace; independent concurrent modification tasks require separate Worktrees rather than shared
+JSONL writers. It has no hash chain: a hash stored beside mutable local data is not a trusted tamper
+boundary. Contiguous sequence and IDs plus strict User, Tool Call/Started/Result, and terminal
+payloads reject causal corruption; telemetry payloads remain extensible. A final incomplete JSONL
+tail is a crash artifact and is truncated; malformed complete events fail closed.
 
 `turn_metrics` persists only Provider-reported `input_tokens` and `output_tokens`. Detailed Prompt
 section accounting remains an in-memory build/debug value; Compaction and Provider reset have their
@@ -163,7 +172,7 @@ ToolOutcome keeps three explicit state dimensions for direct inspection:
 - `execution_state`: whether the Tool Runner was not started, returned normally, or failed/interrupted;
 - `side_effect_state`: whether effects are absent, changed, partial, or unknown.
 
-Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. The repeat cache is only a process-local aid against immediately replaying a matching `partial/unknown` call; durable mutation safety remains owned by create-only writes, revisions, atomic stores and Patch state. Manual mode only permits observation tools; mutations require an active Run and exact persisted Pending Call. The effective parent write scope is the intersection of the persisted TaskContract and current Runtime policy: Implement delegation declarations and planned Patch integration paths are both checked against it before Approval or execution.
+Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. The repeat cache is only a process-local aid against immediately replaying a matching `partial/unknown` call; durable mutation safety remains owned by create-only writes, revisions, atomic stores and Patch state. Ask mode only permits observation tools; mutations require an active Run and exact persisted Pending Call. The effective parent write scope is the intersection of the persisted TaskContract and current Runtime policy: Implement delegation declarations and planned Patch integration paths are both checked against it before Approval or execution.
 
 ## Context and compaction
 
@@ -243,7 +252,7 @@ Session stores only `active_run_id`. On startup `load_resumable_run` opens that 
 
 ## Completion
 
-`CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; the persisted TaskContract; unrepaired `unknown/partial` effects; external Workspace drift; required/current verification; and effects that remain unresolved after verification. This ordering prevents meaningless verifier runs for unrepaired uncertainty, while a repaired Workspace partial must receive a passing verifier for the current mutation/path state. `RunEvidence` only answers factual relationship queries such as repair and unresolved-effect lookup; it does not return a completion decision.
+`CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; unrepaired `unknown/partial` effects; the persisted maximum capability and no-change Observation requirement; external Workspace drift; change-triggered/current verification; and effects that remain unresolved after verification. A zero-change completion needs at least one successful Observation. A repaired Workspace partial must receive a passing verifier for the current mutation/path state. Completion establishes evidence sufficiency and freshness, not arbitrary business-semantic correctness. `RunEvidence` only answers factual relationship queries; it does not return a completion decision.
 
 ## Coding application Git delivery
 
@@ -263,7 +272,7 @@ The Parent exposes two synchronous Tools. `delegate` creates exactly one Child w
 or `implement`; `integrate_child` accepts exactly one completed implementation receipt by child ID.
 There is no batch request, dependency graph, background queue, or worker-pool scheduler.
 
-An explore Child uses read-only Tools against the Parent Workspace and does not create a Worktree.
+An explore Child uses Ask-mode Tools against the Parent Workspace and does not create a Worktree.
 An implement Child must declare non-empty allowed write paths and always runs in a dedicated Git
 Worktree rooted at the delegation base. Child Tool surfaces exclude `delegate`, so delegation cannot
 recurse. The Parent receives a compact result plus a receipt; Child Tool history remains in the
@@ -279,17 +288,17 @@ Completed implementation receipts and their integration state are projected from
 Log, so a restarted Parent can continue `integrate_child`. A Child that was still running at process
 exit is not resumed or automatically dispatched again.
 
-Read-only tasks need a successful Observation; modify tasks that require change need a non-empty final RunChangeSet. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but its receipt explicitly records `unavailable_reason=workspace_drift` instead of claiming a trustworthy Diff. Verification freshness is derived from its mutation sequence and path states rather than stored as a mutable label. There is no implicit language-specific AST gate.
+Child Agent turns and Integration verification inherit the Parent ExecutionContext's absolute Turn deadline; they never receive a fresh full timeout. Explore and Implement Children also have smaller Agent/Tool ceilings. A zero-change result needs a successful Observation. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but its receipt explicitly records `unavailable_reason=workspace_drift` instead of claiming a trustworthy Diff. Verification freshness is derived from its mutation sequence and path states rather than stored as a mutable label.
 
 ### Local verification trust boundary
 
-The model may request one `run_command` for user-approved diagnostics such as tests, linters, type
+In Code mode the model may request `run_command` for user-approved diagnostics such as tests, linters, type
 checks, Git status/diff and reproductions. It is expected not to modify repository files; Runtime
 captures repository-visible state before and after, and any change becomes an unresolved `unknown`
 effect. Here `unknown` means the change lacks a trustworthy Run-start preimage, not that its paths
 are necessarily unknown. Mutating Shell is not supported by this Runtime.
-The user separately supplies a fixed Verification command, which the Completion boundary owns and
-the model cannot alter.
+Ask and Auto do not expose `run_command`. The user separately supplies a fixed Verification command,
+which the Completion boundary owns and the model cannot alter.
 
 This is host execution, not a sandbox. Workspace path checks constrain Pico's structured file
 Tools; they do not constrain diagnostic or verifier system calls, filesystem access, child processes,

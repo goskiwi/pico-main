@@ -38,7 +38,7 @@ def build_agent(root, model, *, session=None):
         workspace=WorkspaceContext.build(root),
         session_store=store,
         session=session,
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="ask", verification_command=""),
     )
 
 
@@ -81,9 +81,8 @@ def fact_projection_experiment(root):
         ]
     )
     agent = build_agent(root, model)
-    outcome = agent._ask_with_intent(
+    outcome = agent.ask(
         "Inspect README without changing the workspace",
-        intent="read_only",
     )
     run_id = outcome.run_id
     store = agent.dependencies.run_store
@@ -245,7 +244,7 @@ def batch_prefix_experiment(root):
     (root / "a.txt").write_text("alpha\n", encoding="utf-8")
     (root / "b.txt").write_text("beta\n", encoding="utf-8")
     agent = build_agent(root, FakeModelClient([]))
-    RunLifecycle(agent).initialize("Read two files", task_intent="read_only")
+    RunLifecycle(agent).initialize("Read two files")
     calls = (
         ToolCall("read_file", {"path": "a.txt"}, "call_batch_a"),
         ToolCall("read_file", {"path": "b.txt"}, "call_batch_b"),
@@ -294,7 +293,6 @@ def interrupted_read_experiment(root):
     original = build_agent(root, FakeModelClient([]))
     RunLifecycle(original).initialize(
         "Read README.md after restart",
-        task_intent="read_only",
     )
     run_id = original.run.projection.run_id
     call = ToolCall(
@@ -340,8 +338,8 @@ def interrupted_read_experiment(root):
         "pending_call_id": call.call_id,
     }
 
-    outcome = resumed._ask_with_intent(
-        "Continue the same Run", intent="read_only"
+    outcome = resumed.ask(
+        "Continue the same Run"
     )
     assert isinstance(outcome, RunOutcome)
     assert outcome.run_id == run_id

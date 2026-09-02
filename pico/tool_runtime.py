@@ -35,6 +35,16 @@ if TYPE_CHECKING:
 
 MAX_OBSERVATION_BATCH_CALLS = 4
 MAX_PARALLEL_OBSERVATIONS = 4
+ASK_TOOL_NAMES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "read_artifact",
+        "search",
+        "update_working_state",
+        "submit_final",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -78,37 +88,13 @@ class ToolRuntime:
 
     def validate(self, name, args):
         runtime = self.runtime
-        task = runtime.run.task
         tool = self.registry.get(name)
-        contract = getattr(task, "contract", None)
-        if (
-            contract is not None
-            and contract.task_kind == "read_only"
-            and tool is not None
-            and tool.get("state_mutating", False)
-        ):
-            raise ToolFailureError(
-                "read_only_task",
-                f"task requirements do not allow state-mutating tool: {name}",
-                "no_retry",
-            )
         if tool is None:
             raise ValueError(f"unknown tool: {name}")
         validated = tool["args_schema"].model_validate(args or {}).model_dump()
         validator = tool.get("validate")
         if validator is not None:
             validated = validator(validated)
-        if (
-            contract is not None
-            and contract.task_kind == "read_only"
-            and name == "delegate"
-            and validated.get("role") == "implement"
-        ):
-            raise ToolFailureError(
-                "read_only_task",
-                "read-only task may delegate explore tasks only",
-                "no_retry",
-            )
         allowed_paths = self._effective_write_scope()
         if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
@@ -148,18 +134,28 @@ class ToolRuntime:
                 "write path outside allowed scope: " + ", ".join(outside)
             )
 
-    def model_action_tools(self):
+    def _effective_mode(self):
         task = self.runtime.run.task
         contract = getattr(task, "contract", None)
-        if contract is None or contract.task_kind != "read_only":
-            return list(self.action_schemas)
+        if (
+            self.runtime.config.mode == "ask"
+            or contract is not None
+            and not contract.allows_workspace_mutation
+        ):
+            return "ask"
+        return self.runtime.config.mode
+
+    def _tool_allowed_by_mode(self, name):
+        mode = self._effective_mode()
+        if mode == "ask":
+            return name in ASK_TOOL_NAMES
+        return not (mode == "auto" and name == "run_command")
+
+    def model_action_tools(self):
         return [
             schema
             for schema in self.action_schemas
-            if schema["name"] == "submit_final"
-            or not self.registry.get(schema["name"], {}).get(
-                "state_mutating", False
-            )
+            if self._tool_allowed_by_mode(schema["name"])
         ]
 
     def context(self, *, call_id="", execution_context=None):
@@ -191,11 +187,8 @@ class ToolRuntime:
         )
 
     def approve(self, name, args):
-        config = self.runtime.config
-        if config.approval_policy == "auto":
+        if self._effective_mode() == "auto" and name != "run_command":
             return True
-        if config.approval_policy == "deny":
-            return False
         try:
             answer = input(
                 f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
@@ -224,6 +217,13 @@ class ToolRuntime:
         if tool is None:
             return None, self._rejected(
                 call, "unknown_tool", "unknown tool", "retry_after_change"
+            )
+        if not self._tool_allowed_by_mode(call.name):
+            return None, self._rejected(
+                call,
+                "tool_not_allowed",
+                f"tool is unavailable in {self._effective_mode()} mode",
+                "no_retry",
             )
         allowed = self.runtime.config.allowed_tools
         if allowed is not None and call.name not in allowed:

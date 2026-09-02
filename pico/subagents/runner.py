@@ -50,6 +50,7 @@ IMPLEMENT_TOOLS = (
     "update_working_state",
 )
 CHILD_MAX_TOOL_EXECUTIONS = 12
+CHILD_MAX_AGENT_TURNS = 16
 
 
 class SubagentRunner:
@@ -243,7 +244,8 @@ class SubagentRunner:
         )
         workspace = WorkspaceContext.build(workspace_root)
         config = PicoConfig(
-            approval_policy="auto",
+            mode=("ask" if record.spec.role == "explore" else "auto"),
+            max_agent_turns=CHILD_MAX_AGENT_TURNS,
             max_tool_executions=CHILD_MAX_TOOL_EXECUTIONS,
             max_new_tokens=self.parent.config.max_new_tokens,
             secret_env_names=self.parent.config.secret_env_names,
@@ -253,7 +255,7 @@ class SubagentRunner:
                 else IMPLEMENT_TOOLS
             ),
             allowed_write_paths=record.spec.allowed_write_paths,
-            run_timeout_seconds=self.parent.config.run_timeout_seconds,
+            turn_timeout_seconds=self.parent.config.turn_timeout_seconds,
             provider_context_limit_tokens=(
                 self.parent.config.provider_context_limit_tokens
             ),
@@ -278,11 +280,7 @@ class SubagentRunner:
             command_runner=(
                 self.parent.dependencies.command_runner_factory(workspace_root)
             ),
-            parent_cancellation_token=(
-                self.parent.run.execution_context.token
-                if self.parent.run.execution_context is not None
-                else None
-            ),
+            parent_execution_context=self.parent.run.execution_context,
         )
 
     def _run_child(self, run_id, record):
@@ -299,12 +297,7 @@ class SubagentRunner:
         child_error = None
         child_outcome = None
         try:
-            child_outcome = child._ask_with_intent(
-                prompt,
-                intent=(
-                    "read_only" if record.spec.role == "explore" else "modify"
-                ),
-            )
+            child_outcome = child.ask(prompt)
         except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
             child_error = exc
 

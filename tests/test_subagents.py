@@ -107,8 +107,7 @@ class MutatingRunnerFactory:
 def activate_parent(
     parent,
     *,
-    task_kind="modify",
-    requires_workspace_change=False,
+    allows_workspace_mutation=True,
     allowed_write_paths=None,
 ):
     run_log = RunLog(
@@ -120,9 +119,8 @@ def activate_parent(
     first = run_log.append_user(
         TaskContract(
             goal="Parent task",
-            task_kind=task_kind,
-            requires_workspace_change=requires_workspace_change,
-            requires_verification=False,
+            allows_workspace_mutation=allows_workspace_mutation,
+            verify_changes=False,
             allowed_write_paths=allowed_write_paths,
         )
     )
@@ -137,8 +135,7 @@ def build_parent(
     *,
     verification_command="verify",
     allowed_write_paths=None,
-    requires_workspace_change=False,
-    task_kind="modify",
+    allows_workspace_mutation=True,
     runner_factory=None,
 ):
     runner_factory = runner_factory or RunnerFactory()
@@ -147,7 +144,7 @@ def build_parent(
         WorkspaceContext.build(root),
         SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command=verification_command,
             allowed_write_paths=allowed_write_paths,
         ),
@@ -156,8 +153,7 @@ def build_parent(
     )
     activate_parent(
         parent,
-        task_kind=task_kind,
-        requires_workspace_change=requires_workspace_change,
+        allows_workspace_mutation=allows_workspace_mutation,
         allowed_write_paths=allowed_write_paths,
     )
     return parent, runner_factory
@@ -168,8 +164,22 @@ def run_active(parent, call):
     return parent.tools.execute_pending(call.call_id)
 
 
-def explore_client(answer="Findings: README.md contains demo."):
-    return FakeModelClient(
+class DeadlineRecordingClient(FakeModelClient):
+    def __init__(self, outputs):
+        super().__init__(outputs)
+        self.request_timeouts = []
+
+    def complete_action(self, *args, **kwargs):
+        self.request_timeouts.append(kwargs.get("request_timeout"))
+        return super().complete_action(*args, **kwargs)
+
+
+def explore_client(
+    answer="Findings: README.md contains demo.",
+    *,
+    client_type=FakeModelClient,
+):
+    return client_type(
         [
             ModelAction.tool(
                 "read_file",
@@ -200,19 +210,21 @@ def delegate_implementation(parent, path="feature.py"):
     )
 
 
-def test_explore_creates_distinct_read_only_non_recursive_children(tmp_path):
+def test_explore_creates_distinct_ask_mode_non_recursive_children(tmp_path):
     clients = []
 
     def child_factory(spec):
         assert spec.role == "explore"
-        client = explore_client(f"handoff {len(clients) + 1}")
+        client = explore_client(
+            f"handoff {len(clients) + 1}",
+            client_type=DeadlineRecordingClient,
+        )
         clients.append(client)
         return client
 
     parent, _ = build_parent(
         repository(tmp_path),
         child_factory,
-        task_kind="read_only",
     )
     outcomes = [
         run_active(
@@ -242,10 +254,11 @@ def test_explore_creates_distinct_read_only_non_recursive_children(tmp_path):
         record = manager._record(parent.run.projection.run_id, receipt["child_id"])
         projection = manager._child_projection(parent.run.projection.run_id, record)
         child_tools = set(client.action_tool_surfaces[0])
-        assert projection.task.contract.task_kind == "read_only"
+        assert projection.task.contract.allows_workspace_mutation is False
         assert {"delegate", "integrate_child", "write_file", "edit_file"}.isdisjoint(
             child_tools
         )
+        assert all(0 < timeout <= 60 for timeout in client.request_timeouts)
 
 
 def test_implement_requires_verifier_and_clean_git(tmp_path):
@@ -376,7 +389,6 @@ def test_successful_integration_records_parent_workspace_evidence(tmp_path):
         root,
         lambda _spec: implement_client(),
         allowed_write_paths=("feature.py",),
-        requires_workspace_change=True,
     )
     delegated = run_active(
         parent,
@@ -408,6 +420,13 @@ def test_successful_integration_records_parent_workspace_evidence(tmp_path):
     assert parent.run.evidence.changed_paths == ["feature.py"]
     assert (root / "feature.py").read_text() == "feature\n"
     assert CompletionController(parent).assess("done").allowed
+    integration_runner = next(
+        runner
+        for runner in parent.dependencies.command_runner_factory.runners
+        if runner.root.name.startswith("integration-")
+    )
+    execution = integration_runner.calls[0][1]["execution_context"]
+    assert execution.deadline == parent.run.execution_context.deadline
 
 
 def test_completion_blocks_unintegrated_implementation(tmp_path):
@@ -416,7 +435,6 @@ def test_completion_blocks_unintegrated_implementation(tmp_path):
         root,
         lambda _spec: implement_client(),
         allowed_write_paths=("feature.py",),
-        requires_workspace_change=True,
     )
     receipt = delegate_implementation(parent)
     assessment = CompletionController(parent).assess("done")

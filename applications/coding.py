@@ -82,6 +82,8 @@ class CodingWorkflow:
             raise ValueError(
                 "CodingWorkflow automatic Git delivery requires verification_command"
             )
+        if self.config.mode != "auto":
+            raise ValueError("CodingWorkflow requires Auto mode")
         self.subagent_model_client_factory = subagent_model_client_factory
         self.command_runner = command_runner
         self.command_runner_factory = command_runner_factory
@@ -98,7 +100,7 @@ class CodingWorkflow:
             command_runner_factory=self.command_runner_factory,
             subagent_model_client_factory=self.subagent_model_client_factory,
         )
-        outcome = agent._ask_with_intent(request, intent="modify")
+        outcome = agent.ask(request)
         changed_paths = outcome.changed_paths
 
         if outcome.status != "completed":

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from ..execution import ExecutionContext
 from ..verification import verify_workspace
 from ..workspace import clip
 from .worktree import (
@@ -38,16 +37,17 @@ class PatchIntegrator:
         command = str(self.parent.config.verification_command or "").strip()
         if not command:
             raise ValueError("Child integration requires a verification command")
-        execution = ExecutionContext.standalone(
-            max_seconds=self.parent.config.run_timeout_seconds,
-        )
+        parent_execution = self.parent.run.execution_context
+        if parent_execution is None:
+            raise RuntimeError("Child integration requires an active Parent turn")
+        execution = parent_execution.child()
         verification = verify_workspace(
             root=worktree.path,
             command=command,
             command_runner=(
                 self.parent.dependencies.command_runner_factory(worktree.path)
             ),
-            timeout_seconds=self.parent.config.run_timeout_seconds,
+            timeout_seconds=self.parent.config.turn_timeout_seconds,
             redact_text=self.parent.redact_text,
             mutation_sequence_provider=lambda: 0,
             started_workspace_mutation_sequence=0,

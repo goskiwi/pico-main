@@ -16,22 +16,19 @@ from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
-READ_TASK = {
-    "intent": "read_only",
-}
-NO_CHANGE_TASK = {
-    "intent": "modify_optional",
-}
-MODIFY_TASK = {
-    "intent": "modify",
-}
+
+def observed_final(answer):
+    return [
+        ModelAction.tool("list_files", {"path": "."}),
+        ModelAction.final(answer),
+    ]
 
 
 def build_interrupted_run(tmp_path, config=None):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     store = SessionStore(tmp_path / ".pico/sessions")
     effective_config = config or PicoConfig(
-        approval_policy="auto", verification_command=""
+        mode="auto", verification_command=""
     )
     agent = Pico(
         FakeModelClient([]),
@@ -41,10 +38,13 @@ def build_interrupted_run(tmp_path, config=None):
     )
     contract = TaskContract(
         "Inspect",
-        task_kind="modify",
-        requires_workspace_change=False,
-        requires_verification=False,
-        allowed_write_paths=effective_config.allowed_write_paths,
+        allows_workspace_mutation=effective_config.mode != "ask",
+        verify_changes=False,
+        allowed_write_paths=(
+            ()
+            if effective_config.mode == "ask"
+            else effective_config.allowed_write_paths
+        ),
     )
     log = RunLog(
         "run_interrupted",
@@ -67,7 +67,7 @@ def resumed_agent(agent, store, outputs, config=None):
         store,
         session=store.load(agent.session.data["id"]),
         run_store=agent.dependencies.run_store,
-        config=config or PicoConfig(approval_policy="auto", verification_command=""),
+        config=config or PicoConfig(mode="auto", verification_command=""),
     )
 
 
@@ -95,7 +95,7 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     assert resumed.run.run_log.events == snapshots[0][0]
     assert resumed.run.projection.last_cursor.event_id == snapshots[0][0][-1].event_id
     assert resumed.run.resumable is True
-    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed.ask("Continue").answer == "Recovered."
     assert resumed.run.projection.run_id == projection.run_id
     assert resumed.run.task.contract.goal == "Inspect"
     assert resumed.run.projection.pending_call_id is None
@@ -115,16 +115,9 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     )
 
 
-def test_resume_reuses_persisted_contract_without_reclassification(tmp_path):
+def test_resume_reuses_persisted_contract(tmp_path):
     agent, store, projection, _log = build_interrupted_run(tmp_path)
-    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-
-    class ExplodingClassifier:
-        @staticmethod
-        def classify(_message):
-            raise AssertionError("resume must not classify the task again")
-
-    resumed.dependencies.task_classifier = ExplodingClassifier()
+    resumed = resumed_agent(agent, store, observed_final("Recovered."))
     outcome = resumed.ask("Continue")
 
     assert outcome.answer == "Recovered."
@@ -133,7 +126,7 @@ def test_resume_reuses_persisted_contract_without_reclassification(tmp_path):
 
 def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_path):
     first_config = PicoConfig(
-        approval_policy="auto",
+        mode="auto",
         verification_command="",
         allowed_write_paths=("README.md",),
     )
@@ -141,7 +134,7 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
         tmp_path, config=first_config
     )
     narrower_config = PicoConfig(
-        approval_policy="auto",
+        mode="auto",
         verification_command="",
         allowed_write_paths=(),
     )
@@ -158,12 +151,13 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
                     "expected_revision": file_revision(tmp_path / "README.md"),
                 },
             ),
+            ModelAction.tool("list_files", {"path": "."}),
             ModelAction.final("Recovered."),
         ],
         config=narrower_config,
     )
 
-    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert resumed.ask("Continue").answer == "Recovered."
     assert resumed.run.task.contract.allowed_write_paths == ("README.md",)
     tool_result = next(
         event for event in resumed.run.run_log.events if event.kind == "tool_result"
@@ -172,13 +166,43 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "demo\n"
 
 
+def test_resume_cannot_widen_original_ask_contract(tmp_path):
+    agent, store, _projection, _log = build_interrupted_run(
+        tmp_path,
+        config=PicoConfig(mode="ask"),
+    )
+    resumed = resumed_agent(
+        agent,
+        store,
+        [
+            ModelAction.tool(
+                "write_file",
+                {"path": "forbidden.txt", "content": "forbidden\n"},
+            ),
+            *observed_final("Stayed read-only."),
+        ],
+        config=PicoConfig(mode="auto"),
+    )
+
+    outcome = resumed.ask("Continue in auto mode")
+
+    assert outcome.answer == "Stayed read-only."
+    assert not (tmp_path / "forbidden.txt").exists()
+    result = next(
+        event
+        for event in resumed.run.run_log.events
+        if event.kind == "tool_result" and event.name == "write_file"
+    )
+    assert result.payload["outcome"]["failure"]["code"] == "tool_not_allowed"
+
+
 def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / ".pico/sessions")
     agent = Pico(
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         store,
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
     original = agent.session.set_active_run
     captured = ""
@@ -193,9 +217,9 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent.session, "set_active_run", fail_pointer)
     with pytest.raises(OSError, match="pointer failed"):
-        agent._ask_with_intent("Persist", **NO_CHANGE_TASK)
+        agent.ask("Persist")
     monkeypatch.setattr(agent.session, "set_active_run", original)
-    agent.model_client.outputs.append(ModelAction.final("Recovered."))
+    agent.model_client.outputs.extend(observed_final("Recovered."))
     original_complete = agent.model_client.complete_action
 
     def complete_with_durable_pointer(*args, **kwargs):
@@ -207,7 +231,7 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
         "complete_action",
         complete_with_durable_pointer,
     )
-    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent.ask("Continue").answer == "Recovered."
     assert agent.run.projection.run_id == captured
 
 
@@ -218,10 +242,10 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
     ambiguous_kind,
 ):
     agent = Pico(
-        FakeModelClient([ModelAction.final("Recovered.")]),
+        FakeModelClient(observed_final("Recovered.")),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
     original_append = agent.dependencies.run_store.append_event
     failed = False
@@ -241,7 +265,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
         commit_then_raise,
     )
     with pytest.raises(OSError, match="ambiguous append"):
-        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
+        agent.ask("Inspect")
 
     run_id = agent.run.projection.run_id
     assert run_id
@@ -251,7 +275,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
         range(1, len(agent.run.run_log.events) + 1)
     )
 
-    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent.ask("Continue").answer == "Recovered."
     replayed = agent.dependencies.run_store.replay(run_id)
     assert agent.run.projection.summary() == replayed.summary()
 
@@ -264,7 +288,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
     store = agent.dependencies.run_store
     original_append = store.append_event
@@ -280,7 +304,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
 
     monkeypatch.setattr(store, "append_event", fail_before_commit)
     with pytest.raises(OSError, match="precommit failure"):
-        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
+        agent.ask("Inspect")
 
     assert agent.run.task is None
     assert agent.run.run_log is None
@@ -288,8 +312,8 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
     assert agent.session.data["active_run_id"] == ""
     agent.reset()
 
-    agent.model_client.outputs.append(ModelAction.final("Retried."))
-    assert agent._ask_with_intent("Inspect", **NO_CHANGE_TASK).answer == "Retried."
+    agent.model_client.outputs.extend(observed_final("Retried."))
+    assert agent.ask("Inspect").answer == "Retried."
 
 
 def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path):
@@ -297,17 +321,17 @@ def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
 
     with pytest.raises(RuntimeError, match="ran out of outputs"):
-        agent._ask_with_intent("Inspect", **NO_CHANGE_TASK)
+        agent.ask("Inspect")
 
     run_id = agent.run.projection.run_id
     assert agent.run.resumable is True
-    agent.model_client.outputs.append(ModelAction.final("Recovered."))
+    agent.model_client.outputs.extend(observed_final("Recovered."))
 
-    assert agent._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    assert agent.ask("Continue").answer == "Recovered."
     assert agent.run.projection.run_id == run_id
 
 
@@ -323,12 +347,12 @@ def test_manual_tool_is_rejected_while_resumable_run_is_dormant(tmp_path):
 
 def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
     agent = Pico(
-        FakeModelClient([ModelAction.final("Done.")]),
+        FakeModelClient(observed_final("Done.")),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
-    assert agent._ask_with_intent("Finish", **NO_CHANGE_TASK).answer == "Done."
+    assert agent.ask("Finish").answer == "Done."
     terminal_run_id = agent.run.projection.run_id
     agent.session.set_active_run(terminal_run_id)
 
@@ -346,7 +370,7 @@ def test_corrupt_session_pointer_fails_closed(tmp_path, corruption):
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         store,
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
     run_id = "run_corrupt_pointer"
     agent.session.set_active_run(run_id)
@@ -363,8 +387,8 @@ def test_persisted_call_without_start_is_not_replayed(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
     log.append_tool_call(call)
-    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    resumed = resumed_agent(agent, store, observed_final("Recovered."))
+    assert resumed.ask("Continue").answer == "Recovered."
     result = next(
         event
         for event in resumed.run.run_log.events
@@ -385,8 +409,8 @@ def test_started_unchanged_path_recovers_as_no_effect_error(tmp_path):
             {"path": "x.txt", "before_state": "absent", "before_artifact_id": ""}
         ],
     )
-    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    assert resumed._ask_with_intent("Continue", **NO_CHANGE_TASK).answer == "Recovered."
+    resumed = resumed_agent(agent, store, observed_final("Recovered."))
+    assert resumed.ask("Continue").answer == "Recovered."
     result = next(event for event in resumed.run.run_log.events if event.call_id == "write" and event.kind == "tool_result")
     assert result.outcome_status == "error"
     assert result.side_effect_state == "none"
@@ -423,8 +447,8 @@ def test_unstarted_observation_batch_recovers_every_call_without_replay(tmp_path
     )
     log.append_tool_batch(calls)
 
-    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    outcome = resumed._ask_with_intent("Continue", **NO_CHANGE_TASK)
+    resumed = resumed_agent(agent, store, observed_final("Recovered."))
+    outcome = resumed.ask("Continue")
 
     assert outcome.answer == "Recovered."
     results = [
@@ -461,8 +485,8 @@ def test_observation_batch_recovery_keeps_result_prefix_and_closes_suffix(tmp_pa
         )
     )
 
-    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
-    resumed._ask_with_intent("Continue", **NO_CHANGE_TASK)
+    resumed = resumed_agent(agent, store, observed_final("Recovered."))
+    resumed.ask("Continue")
 
     results = [
         event

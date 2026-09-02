@@ -40,17 +40,21 @@ class AgentLoop:
     def run(
         self,
         user_message,
-        *,
-        task_intent=None,
     ) -> RunOutcome:
         loop_state = self.lifecycle.initialize(
             user_message,
-            task_intent=task_intent,
         )
         try:
             while True:
                 loop_state.execution_stop = self.lifecycle.execution_stop()
                 if loop_state.execution_stop:
+                    break
+                if (
+                    self.agent.run.metrics.model_request_count
+                    - loop_state.starting_model_request_count
+                    >= self.agent.config.max_agent_turns
+                ):
+                    loop_state.execution_stop = "agent_turn_limit"
                     break
 
                 try:
@@ -58,6 +62,11 @@ class AgentLoop:
                 except ProviderContextOverflow:
                     if self._recover_context_overflow(loop_state):
                         continue
+                    raise
+                except BaseException:
+                    loop_state.execution_stop = self.lifecycle.execution_stop()
+                    if loop_state.execution_stop:
+                        break
                     raise
                 loop_state.execution_stop = self.lifecycle.execution_stop()
                 if loop_state.execution_stop:

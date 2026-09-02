@@ -13,24 +13,20 @@ from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
 
 READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "allows_workspace_mutation": False,
+    "verify_changes": False,
 }
 NO_CHANGE_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "allows_workspace_mutation": True,
+    "verify_changes": False,
 }
 MODIFY_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": True,
-    "requires_verification": False,
+    "allows_workspace_mutation": True,
+    "verify_changes": False,
 }
 VERIFIED_TASK = {
-    "task_kind": "modify",
-    "requires_workspace_change": False,
-    "requires_verification": True,
+    "allows_workspace_mutation": True,
+    "verify_changes": True,
 }
 
 
@@ -41,7 +37,7 @@ def active_agent(tmp_path, requirements, verification_command=""):
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command=verification_command,
         ),
     )
@@ -128,7 +124,7 @@ def verification_payload(agent, sequence, status="passed", output=""):
     }
 
 
-def test_read_only_requires_successful_observation(tmp_path):
+def test_ask_mode_requires_successful_observation(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
     assert CompletionController(agent).assess("done").status == "observation_required"
     call = ToolCall("read_file", {"path": "README.md"}, "read")
@@ -137,18 +133,23 @@ def test_read_only_requires_successful_observation(tmp_path):
     assert CompletionController(agent).assess("done").allowed
 
 
-def test_required_change_uses_final_net_state(tmp_path):
+def test_no_change_requires_successful_observation(tmp_path):
     agent = active_agent(tmp_path, MODIFY_TASK)
     add_change(agent, "README.md", "a", "b", 1)
     add_change(agent, "README.md", "b", "a", 2)
     assessment = CompletionController(agent).assess("done")
-    assert assessment.status == "workspace_change_required"
+    assert assessment.status == "observation_required"
     assert agent.run.evidence.touched_paths == ["README.md"]
     assert agent.run.evidence.changed_paths == []
+    call = ToolCall("read_file", {"path": "README.md"}, "read_after_revert")
+    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+    assert agent.tools.execute_pending(call.call_id).status == "success"
+    assert CompletionController(agent).assess("done").allowed
 
 
 def test_required_verification_fails_closed_without_command(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK)
+    add_change(agent, "README.md", "a", "b", 1)
     assessment = CompletionController(agent).assess("done")
     assert assessment.status == "verification_failed"
     assert "no verification command" in assessment.instruction
@@ -176,6 +177,7 @@ def test_external_change_blocks_completion_before_verification(tmp_path):
 
 def test_failed_verification_can_retry_on_same_state(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    add_change(agent, "README.md", "a", "b", 1)
     results = ["failed", "passed"]
     calls = []
 
@@ -186,11 +188,12 @@ def test_failed_verification_can_retry_on_same_state(tmp_path):
     agent.run_verification = verify
     assert not CompletionController(agent).assess("done").allowed
     assert CompletionController(agent).assess("done").allowed
-    assert calls == [0, 0]
+    assert calls == [1, 1]
 
 
 def test_infrastructure_error_can_retry_after_environment_recovers(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
+    add_change(agent, "README.md", "a", "b", 1)
     statuses = ["infrastructure_error", "passed"]
     calls = []
 
@@ -202,7 +205,7 @@ def test_infrastructure_error_can_retry_after_environment_recovers(tmp_path):
     with pytest.raises(RuntimeError, match="offline"):
         CompletionController(agent).assess("done")
     assert CompletionController(agent).assess("done").allowed
-    assert calls == [0, 0]
+    assert calls == [1, 1]
 
 
 @pytest.mark.parametrize("side", ["unknown", "partial"])
@@ -248,23 +251,3 @@ def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
 
     assert assessment.status == "subtasks_incomplete"
     assert "child task is still running" in assessment.instruction
-
-
-def test_task_contract_blocker_precedes_uncertain_effects(tmp_path):
-    agent = active_agent(tmp_path, MODIFY_TASK, "verify")
-    add_change(
-        agent,
-        "README.md",
-        "a",
-        "b",
-        1,
-        status="error",
-        side="unknown",
-    )
-    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
-        AssertionError("TaskContract must block before verification")
-    )
-
-    assessment = CompletionController(agent).assess("done")
-
-    assert assessment.status == "workspace_change_required"

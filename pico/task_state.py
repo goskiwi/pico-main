@@ -11,7 +11,6 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_STOPPED = "stopped"
 TASK_STATUSES = frozenset({STATUS_RUNNING, STATUS_COMPLETED, STATUS_STOPPED})
-TASK_KINDS = frozenset({"read_only", "modify"})
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 
 
@@ -20,16 +19,17 @@ class TaskContract:
     """Immutable goal, write scope, and completion requirements for one Run."""
 
     goal: str
-    task_kind: str
-    requires_workspace_change: bool
-    requires_verification: bool
+    allows_workspace_mutation: bool = True
+    verify_changes: bool = False
     allowed_write_paths: tuple[str, ...] | None = None
 
     def __post_init__(self):
         if not isinstance(self.goal, str):
             raise TypeError("task contract goal must be a string")
-        if not isinstance(self.task_kind, str):
-            raise TypeError("task contract task_kind must be a string")
+        if not isinstance(self.allows_workspace_mutation, bool):
+            raise TypeError("allows_workspace_mutation must be a boolean")
+        if not isinstance(self.verify_changes, bool):
+            raise TypeError("verify_changes must be a boolean")
         if self.allowed_write_paths is not None:
             if not isinstance(self.allowed_write_paths, (list, tuple)):
                 raise TypeError("allowed_write_paths must be a sequence or null")
@@ -49,16 +49,8 @@ class TaskContract:
     def validate(self):
         if not self.goal.strip():
             raise ValueError("task contract requires a goal")
-        if self.task_kind not in TASK_KINDS:
-            raise ValueError(f"invalid task kind: {self.task_kind}")
-        if not isinstance(self.requires_workspace_change, bool):
-            raise TypeError("requires_workspace_change must be a boolean")
-        if not isinstance(self.requires_verification, bool):
-            raise TypeError("requires_verification must be a boolean")
-        if self.task_kind == "read_only" and self.requires_workspace_change:
-            raise ValueError("read-only task cannot require workspace changes")
-        if self.task_kind == "read_only" and self.allowed_write_paths:
-            raise ValueError("read-only task cannot allow write paths")
+        if not self.allows_workspace_mutation and self.allowed_write_paths:
+            raise ValueError("non-mutating contract cannot allow write paths")
         if self.allowed_write_paths is not None and len(
             set(self.allowed_write_paths)
         ) != len(self.allowed_write_paths):
@@ -69,9 +61,8 @@ class TaskContract:
     def from_dict(cls, value):
         expected = {
             "goal",
-            "task_kind",
-            "requires_workspace_change",
-            "requires_verification",
+            "allows_workspace_mutation",
+            "verify_changes",
             "allowed_write_paths",
         }
         if not isinstance(value, dict) or set(value) != expected:
@@ -81,9 +72,8 @@ class TaskContract:
             raise TypeError("allowed_write_paths must be a list or null")
         return cls(
             goal=value["goal"],
-            task_kind=value["task_kind"],
-            requires_workspace_change=value["requires_workspace_change"],
-            requires_verification=value["requires_verification"],
+            allows_workspace_mutation=value["allows_workspace_mutation"],
+            verify_changes=value["verify_changes"],
             allowed_write_paths=None if paths is None else tuple(paths),
         )
 
@@ -91,9 +81,8 @@ class TaskContract:
         self.validate()
         return {
             "goal": self.goal,
-            "task_kind": self.task_kind,
-            "requires_workspace_change": self.requires_workspace_change,
-            "requires_verification": self.requires_verification,
+            "allows_workspace_mutation": self.allows_workspace_mutation,
+            "verify_changes": self.verify_changes,
             "allowed_write_paths": (
                 None
                 if self.allowed_write_paths is None

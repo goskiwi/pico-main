@@ -12,7 +12,7 @@ RunProjection，重建 TaskContract、增量 WorkingState、Evidence、Metrics �
 
 ```text
 User request
-  -> hidden TaskIntentClassifier -> TaskContract
+  -> explicit Ask/Code/Auto -> TaskContract
   -> ModelAction(tool / invalid / final)
   -> Tool transaction or Completion Gate
   -> RunLog
@@ -39,6 +39,9 @@ tool    -> 执行工具并继续 Provider
 invalid -> 反馈协议错误并重试
 final   -> 交给 CompletionController
 ```
+
+一次活跃 ask/resume 最多 32 个主 Agent Turn 和 600 秒。Provider、Tool、Verification、Child
+与 Integration 共享同一个绝对 Deadline；Resume 开始新的活跃 Turn。
 
 ### 1:00～1:45：工具事务
 
@@ -179,20 +182,20 @@ CompletionController。
 
 ### 为什么模型没有最终完成权？
 
-模型可能在没有真实修改、验证失败或副作用未知时声称完成。Completion Gate 使用
-TaskContract 和 Runtime 观察到的当前 Workspace 证据决定是否接受 `final`。
+模型可能在没有观察、验证失败或副作用未知时声称完成。Completion Gate 使用 Runtime
+观察到的当前 Workspace 证据决定是否接受 `final`；它证明证据充分和新鲜，不证明任意业务语义。
 
 ### Verification 是否被 Workspace 路径约束保护？
 
-不是。模型可以申请默认审批的诊断型 `run_command`，用户固定 Verification 也会在 Workspace
+不是。Code 模式中模型可以申请用户审批的诊断型 `run_command`；Ask/Auto 不暴露它。用户固定 Verification 仍会在 Workspace
 中以当前用户权限本机运行。文件工具的路径检查不能限制这些进程访问其他目录、网络或子进程。
 Pico 只观察 Git 可见的净仓库变化；`none` 不代表整台机器没有副作用。因此 Pico 只运行可信
 仓库；未知仓库或 PR 应交给外部 CI、VM 或容器。
 
 ### WorkingState 能授予权限吗？
 
-不能。WorkingState 是当前 Run 的计划白板；TaskContract 和 Runtime policy 才拥有任务类型、
-写入范围与验证要求，Workspace 当前事实仍必须通过工具观察。
+不能。WorkingState 是当前 Run 的计划白板；TaskContract 和 Runtime policy 才拥有最大写能力、
+写入范围与变更验证要求，Workspace 当前事实仍必须通过工具观察。
 
 ### 多 Agent 为什么需要 Worktree？
 
@@ -202,7 +205,8 @@ Patch receipt；`integrate_child` 再在临时 Worktree 复验 base、应用 Pat
 
 ### 这是生产系统吗？
 
-不是。它是本地、单用户、单 Responses 协议的 Runtime。已完成 Implement receipt 可以恢复并
+不是。它是本地、单用户、单主 Writer、单 Responses 协议的 Runtime。并行修改任务需要独立
+Worktree，不能共享一个 Checkout/RunLog。已完成 Implement receipt 可以恢复并
 继续显式集成，但运行中的 Child 不会跨进程恢复。多租户、远程 Worker、后台 Mailbox 和通用
 MCP/Skills 都明确不在范围内。
 

@@ -127,13 +127,12 @@ def main():
             workspace=WorkspaceContext.build(root),
             session_store=SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(
-                approval_policy="auto",
+                mode="auto",
                 verification_command="",
             ),
         )
-        run_outcome = repaired._ask_with_intent(
+        run_outcome = repaired.ask(
             "Replace alpha without losing concurrent edits",
-            intent="modify",
         )
         repair_outcomes = outcomes(repaired)
 
@@ -150,6 +149,7 @@ def main():
                         },
                         call_id="call_denied_write",
                     ),
+                    ModelAction.tool("list_files", {"path": "."}),
                     ModelAction.final(
                         "The policy denied the conditional write, so no file was created."
                     ),
@@ -158,19 +158,20 @@ def main():
             workspace=WorkspaceContext.build(denied_root),
             session_store=SessionStore(denied_root / ".pico" / "sessions"),
             config=PicoConfig(
-                approval_policy="deny",
+                mode="code",
                 verification_command="",
             ),
         )
-        denied_run_outcome = denied._ask_with_intent(
+        denied.tools.approve = lambda *_args, **_kwargs: False
+        denied_run_outcome = denied.ask(
             "Attempt to create created.txt only if policy permits it; otherwise report the denial.",
-            intent="modify_optional",
         )
         denied_outcomes = outcomes(denied)
         denied_started = [
             event.call_id
             for event in denied.run.run_log.events
             if event.kind == "tool_started"
+            and event.call_id == "call_denied_write"
         ]
 
         stale_result_event = result_event(repaired, "call_edit_stale")

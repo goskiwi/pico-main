@@ -42,8 +42,8 @@ def main():
             encoding="utf-8",
         )
         argv = [
-            "--approval",
-            "auto",
+            "--mode",
+            "ask",
             "--cwd",
             str(root),
             "请读取 README.md，然后告诉我是否读取成功。",
@@ -59,15 +59,6 @@ def main():
                     call_id="call_readme",
                 ),
                 ModelAction.final("README 已读取，文件工具工作正常。"),
-            ]
-        )
-        fake_model.new_isolated_client = lambda: FakeModelClient(
-            [
-                ModelAction.tool(
-                    "classify_task_intent",
-                    {"intent": "read_only"},
-                    call_id="call_classify",
-                )
             ]
         )
         with patch("pico.cli._build_model_client", return_value=fake_model):
@@ -102,7 +93,7 @@ def main():
         assert outcome.status == "completed"
         assert outcome.answer == "README 已读取，文件工具工作正常。"
         assert agent.session.data["active_run_id"] == ""
-        assert agent.run.task.contract.task_kind == "read_only"
+        assert agent.run.task.contract.allows_workspace_mutation is False
 
         events = agent.run.run_log.events
         event_rows = [

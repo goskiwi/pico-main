@@ -55,7 +55,7 @@ def create_repository(root):
 
 def build_agent(root, *, pressure_window=False):
     config = {
-        "approval_policy": "auto",
+        "mode": "auto",
         "verification_command": "",
         "max_new_tokens": 64,
     }
@@ -79,9 +79,8 @@ def build_agent(root, *, pressure_window=False):
 def activate(agent, run_id, goal):
     contract = TaskContract(
         goal=goal,
-        task_kind="read_only",
-        requires_workspace_change=False,
-        requires_verification=False,
+        allows_workspace_mutation=False,
+        verify_changes=False,
     )
     run_log = RunLog(
         run_id,

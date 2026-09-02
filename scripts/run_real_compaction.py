@@ -199,7 +199,7 @@ def main(argv=None):
     parser.add_argument("--base-url")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--run-timeout-seconds", type=int, default=900)
+    parser.add_argument("--turn-timeout-seconds", type=int, default=900)
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -245,12 +245,13 @@ def main(argv=None):
         workspace=WorkspaceContext.build(workspace),
         session_store=SessionStore(workspace / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             allowed_tools=("read_file", "edit_file", "update_working_state"),
             allowed_write_paths=(TARGET_PATH,),
             max_tool_executions=18,
+            max_agent_turns=32,
             max_new_tokens=1024,
-            run_timeout_seconds=args.run_timeout_seconds,
+            turn_timeout_seconds=args.turn_timeout_seconds,
             provider_context_limit_tokens=CONTROLLED_CONTEXT_LIMIT,
             compaction_reserve_tokens=8192,
             compaction_keep_recent_tokens=8000,
@@ -258,9 +259,8 @@ def main(argv=None):
         ),
         command_runner=CommandRunner(workspace),
     )
-    outcome = agent._ask_with_intent(
+    outcome = agent.ask(
         build_prompt(),
-        intent="modify",
     )
     run_id = outcome.run_id
     events = agent.dependencies.run_store.read_events(run_id)
@@ -302,7 +302,8 @@ def main(argv=None):
             "provider_context_limit_tokens": CONTROLLED_CONTEXT_LIMIT,
             "compaction_reserve_tokens": 8192,
             "compaction_keep_recent_tokens": 8000,
-            "run_timeout_seconds": args.run_timeout_seconds,
+            "max_agent_turns": 32,
+            "turn_timeout_seconds": args.turn_timeout_seconds,
         },
         "run_id": run_id,
         "final_answer": outcome.answer,

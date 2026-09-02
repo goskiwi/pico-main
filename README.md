@@ -4,8 +4,8 @@ Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型每轮
 OpenAI-compatible Responses function calling 提出一个动作或独立 Observation Batch；Runtime 掌握工具准入、
 副作用、持久化、恢复、验证和最终完成权。CLI 还提供一次一个的显式 Child 委派。
 
-Pico 面向用户已经信任的本地仓库。模型可以申请一个默认需要 Approval 的诊断型
-`run_command`；最终 Verification 仍由用户通过 `--verify-command` 固定。两者都在 Workspace
+Pico 面向用户已经信任的本地仓库。Code 模式允许模型申请一个需要 Approval 的诊断型
+`run_command`；Ask/Auto 不暴露通用 Shell。最终 Verification 仍由用户通过 `--verify-command` 固定。它们在 Workspace
 中以当前用户权限执行，不是 Sandbox，文件工具的路径约束不能限制其访问其他目录、网络或
 子进程。Pico 检测 Repository 可见净变化：Git 仓库使用 Diff、Untracked state 与 HEAD，非 Git
 Workspace 使用有界 metadata snapshot；它不追踪 ignored 文件或外部系统副作用。未知仓库、
@@ -19,6 +19,7 @@ Workspace 使用有界 metadata snapshot；它不追踪 ignored 文件或外部�
 uv sync
 
 uv run pico \
+  --mode code \
   --verify-command "python -m pytest -q" \
   --cwd /path/to/trusted/repo \
   "Fix calculator.add so the existing test passes"
@@ -35,15 +36,15 @@ PICO_OPENAI_MODEL="gpt-5.4"
 默认后端要求 `PICO_OPENAI_API_KEY`；有意连接无认证的本机兼容端点时，显式传入
 `--base-url http://127.0.0.1:PORT/v1`。
 
-用户只提交自然语言目标。新 Run 创建前，Runtime 使用隔离的结构化分类调用生成
-`read_only / modify / modify_optional` Intent，并据此持久化 TaskContract；分类不授予工具权限。
-Resume 直接复用原 Contract，不重新分类。`ask()` 返回结构化 `RunOutcome`，持久事实仍以
+用户提交自然语言目标，并显式选择 `ask / code / auto` 模式；默认是 `code`。Runtime 不调用
+隐藏分类模型。TaskContract 只保存原始目标、创建时的最大写能力、验证要求和写路径范围；
+Resume 可以收窄但不能扩大原 Contract。`ask()` 返回结构化 `RunOutcome`，持久事实仍以
 `RunStore.replay(run_id)` 为准。
 
 ## 核心运行链
 
 ```text
-User request -> hidden TaskIntentClassifier -> TaskContract
+User request + Ask/Code/Auto -> TaskContract
   -> AgentLoop: ModelAction(tool / invalid / final)
   -> ToolRuntime: admission -> tool_started -> Runner -> tool_result
   -> RunLog: append-only, sequenced, fsynced Facts
@@ -64,6 +65,8 @@ User request -> hidden TaskIntentClassifier -> TaskContract
    外部修改不会被静默覆盖。
 5. **证据驱动完成**：模型调用 `submit_final` 后，Runtime 检查净变化与不确定副作用，运行用户
    固定 Verification，并生成真实 Final Diff；模型不自行运行 verifier 或生成 Final Diff。
+6. **有界循环**：一次活跃 ask/resume 最多 32 个主 Agent Turn 和 600 秒；Child 与 Integration
+   继承 Parent Deadline，不重新获得预算。
 
 关键因果 payload（Task、Tool Call/Started/Result、Verification 与终态）使用严格 Schema；
 Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、sequence 和 event ID 仍会
@@ -71,25 +74,25 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 
 ## 真实 CLI 工具面
 
-CLI 默认注册以下十一个原生工具。每轮只把当前 TaskContract 和工具预算允许的 Schema 发送
+CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskContract 和工具预算允许的 Schema 发送
 给 Provider；ToolRuntime 在本机再次执行准入。
 
 前四个只读工具可组成 Observation Batch；其余工具必须单独调用。Mixed Batch 在执行前整批
 拒绝，但仍为每个 Call ID 写入一个 `rejected/not_started` Result。
 
-| 工具 | modify | read_only | 作用 |
-|---|:---:|:---:|---|
-| `list_files` | ✓ | ✓ | 列出 Workspace 文件 |
-| `read_file` | ✓ | ✓ | 按行读取并返回 Revision |
-| `read_artifact` | ✓ | ✓ | 分页读取当前 Run 的大输出 |
-| `search` | ✓ | ✓ | 有界搜索 Workspace |
-| `run_command` | ✓ | ✓ | 默认审批的可信本机诊断命令；Repository 可见变化会阻止完成 |
-| `write_file` | ✓ | — | 只创建不存在的文件 |
-| `edit_file` | ✓ | — | 按 Revision 修改已有文件 |
-| `update_working_state` | ✓ | ✓ | 增量维护当前 Run 的约束、决定和下一步 |
-| `delegate` | ✓ | ✓ | 同步运行一个 Child；read-only Parent 只能使用 `explore` |
-| `integrate_child` | ✓ | — | 显式验证并集成一个 Implement Child Patch |
-| `submit_final` | ✓ | ✓ | 请求 Runtime 进行最终完成检查 |
+| 工具 | Ask | Code | Auto | 作用 |
+|---|:---:|:---:|:---:|---|
+| `list_files` | ✓ | ✓ | ✓ | 列出 Workspace 文件 |
+| `read_file` | ✓ | ✓ | ✓ | 按行读取并返回 Revision |
+| `read_artifact` | ✓ | ✓ | ✓ | 分页读取当前 Run 的大输出 |
+| `search` | ✓ | ✓ | ✓ | 有界搜索 Workspace |
+| `run_command` | — | 询问 | — | 可信本机诊断；Auto 不暴露通用 Shell |
+| `write_file` | — | 询问 | 自动 | 只创建不存在的文件 |
+| `edit_file` | — | 询问 | 自动 | 按 Revision 修改已有文件 |
+| `update_working_state` | ✓ | ✓ | ✓ | 增量维护当前 Run 的约束、决定和下一步 |
+| `delegate` | — | ✓ | ✓ | 同步运行一个受限 Child |
+| `integrate_child` | — | 询问 | 自动 | 显式验证并集成 Implement Child Patch |
+| `submit_final` | ✓ | ✓ | ✓ | 请求 Runtime 进行最终完成检查 |
 
 CLI 的 `build_agent()` 默认安装 Child runner，因此真实 CLI 请求会携带 `delegate` 与
 `integrate_child`。程序化 `Pico(...)` 默认是单 Agent；只有显式传入

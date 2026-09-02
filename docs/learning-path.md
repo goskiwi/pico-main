@@ -13,8 +13,8 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 
 先运行 `scripts/day7_runtime_capstone.py`，然后只读一个 owner、一个 caller 和一个结果：
 
-1. `TaskIntentClassifier.classify()`：自然语言只生成内部 Intent，不授予工具权限；Resume 跳过分类。
-2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支。
+1. `PicoConfig.mode` → `RunLifecycle._task_contract()`：显式 Ask/Code/Auto 决定最大能力，不调用隐藏分类模型。
+2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支以及 Agent Turn/Deadline 停止条件。
 3. `AgentLoop._handle_tool_turn()` → `ToolRuntime.execute_pending*()`：单 Call 或 Observation Batch
    由 Loop 接受并持久化，Started/Result 由 ToolRuntime 持久化。
 4. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
@@ -50,12 +50,14 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 ```bash
 uv run pico \
+  --mode code \
   --verify-command "python -m pytest -q" \
   --cwd /path/to/repo \
   "Fix calculator.add so the existing addition test passes"
 ```
 
-真实 Provider 需要模型配置。模型可以申请默认审批的诊断型 `run_command`；固定 Verification
+真实 Provider 需要模型配置。Code 模式可以申请用户审批的诊断型 `run_command`；Ask/Auto
+不暴露通用 Shell。固定 Verification
 仍由 CompletionController 拥有。两者都以当前用户权限在本机运行，因此只应对可信仓库使用。
 未知代码应先放进外部 CI、VM 或容器。
 只想看确定性本地演示时，运行：
@@ -74,7 +76,7 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 |---:|---|---|
 | 1 | `pico/cli.py: main -> build_agent` | CLI 只提交自然语言与 Runtime 配置，不要求用户填写 TaskContract |
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
-| 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 先用隔离结构化分类生成 TaskContract；恢复 Run 复用原 Contract，并在 Provider 前持久化 `user_guidance` |
+| 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 由显式 Mode 确定性生成 TaskContract；恢复 Run 不能扩大原能力，并在 Provider 前持久化 `user_guidance` |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction；一个 Tool Action 可带单 Call 或纯 Observation Batch |
 | 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；动态 `input` 按 Runtime policy、Task Request、非空有界 Context 组装，仅恢复时追加不同的 latest request；当前允许的原生 Schema 直接进入 `tools` |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 一个带 `call_id` 的 Function Call 形成单 Call Action；多个 Call 保持原顺序进入 Observation Batch 准入 |
@@ -156,7 +158,7 @@ Subagent 实现。
 ### Day 3：Prompt 与 Provider
 
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
-- 每轮只向 Provider 发送当前 TaskContract 与工具预算允许的 native schemas；final-only 边界
+- 每轮只向 Provider 发送当前 Mode、TaskContract 与工具预算允许的 native schemas；final-only 边界
   缩成 `submit_final` 并重建 Session。Prompt Token 预算按这个真实表面计算。
 - 首轮动态 Input 按 Runtime policy、Task Request、非空的有界 Context 排列；普通 Tool 续接
   只追加 Call/Output，不重发另一份 Workspace/History。

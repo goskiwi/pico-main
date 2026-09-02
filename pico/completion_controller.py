@@ -29,8 +29,8 @@ class CompletionController:
     def assess(self, final: str) -> CompletionResult:
         blocker = (
             self._static_blocker()
-            or self._task_requirement_blocker()
             or self._unrepaired_effect_blocker()
+            or self._task_requirement_blocker()
             or self._workspace_drift_blocker()
         )
         if blocker:
@@ -95,24 +95,17 @@ class CompletionController:
             )
         evidence = self.runtime.run.evidence
         contract = task.contract
-        if contract.task_kind == "read_only":
-            if evidence.touched_paths:
-                return "read_only_violation", (
-                    "Runtime completion gate: read-only task produced workspace changes."
-                )
-            if evidence.successful_observation_count < 1:
-                return "observation_required", (
-                    "Runtime completion gate: read-only task requires at least one "
-                    "successful observation tool result."
-                )
+        if not contract.allows_workspace_mutation and evidence.touched_paths:
+            return "ask_mode_violation", (
+                "Runtime completion gate: Ask mode produced workspace changes."
+            )
         if (
-            contract.task_kind == "modify"
-            and contract.requires_workspace_change
-            and not evidence.has_net_workspace_change
+            not evidence.has_net_workspace_change
+            and evidence.successful_observation_count < 1
         ):
-            return "workspace_change_required", (
-                "Runtime completion gate: this task requires an actual net workspace "
-                "change."
+            return "observation_required", (
+                "Runtime completion gate: a no-change result requires at least one "
+                "successful observation tool result."
             )
         return None
 
@@ -126,7 +119,11 @@ class CompletionController:
     def _ensure_verification(self):
         runtime = self.runtime
         task = runtime.run.task
-        required = bool(task and task.contract.requires_verification)
+        required = bool(
+            task
+            and task.contract.verify_changes
+            and runtime.run.evidence.has_net_workspace_change
+        )
         partial_repair_requires_verification = bool(
             runtime.run.evidence.repaired_partials_requiring_verification()
         )

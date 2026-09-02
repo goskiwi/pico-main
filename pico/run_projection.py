@@ -43,7 +43,7 @@ class RunIdentity:
 
 @dataclass
 class RunMetrics:
-    run_duration_ms: int = 0
+    turn_duration_ms: int = 0
     model_request_count: int = 0
     executed_tool_count: int = 0
     kind_counts: dict[str, int] = field(default_factory=dict)
@@ -71,11 +71,11 @@ class RunMetrics:
                 self.verification_counts.get(status, 0) + 1
             )
         elif kind in {"assistant_final", "run_stopped"}:
-            self.run_duration_ms = int(payload.get("run_duration_ms", 0))
+            self.turn_duration_ms = int(payload.get("turn_duration_ms", 0))
 
     def to_dict(self):
         return {
-            "run_duration_ms": self.run_duration_ms,
+            "turn_duration_ms": self.turn_duration_ms,
             "model_request_count": self.model_request_count,
             "executed_tool_count": self.executed_tool_count,
             "kind_counts": dict(sorted(self.kind_counts.items())),
@@ -182,8 +182,8 @@ class RunProjection:
         return self.metrics.executed_tool_count
 
     @property
-    def run_duration_ms(self):
-        return self.metrics.run_duration_ms
+    def turn_duration_ms(self):
+        return self.metrics.turn_duration_ms
 
     def summary(self):
         if self.task is None:

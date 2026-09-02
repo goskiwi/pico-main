@@ -30,12 +30,13 @@ def _allowed_write_paths(value):
 class PicoConfig:
     """Runtime policy, resource limits, and bounded tool surface."""
 
-    approval_policy: str = "ask"
+    mode: str = "code"
+    max_agent_turns: int = 32
     max_tool_executions: int | None = None
     max_new_tokens: int = 1024
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
     allowed_tools: tuple[str, ...] | None = None
-    run_timeout_seconds: int = 600
+    turn_timeout_seconds: int = 600
     provider_context_limit_tokens: int = 272000
     compaction_reserve_tokens: int = 16384
     compaction_keep_recent_tokens: int = 20000
@@ -52,13 +53,16 @@ class PicoConfig:
         return candidate.normalized()
 
     def normalized(self) -> PicoConfig:
-        if self.approval_policy not in {"ask", "auto", "deny"}:
-            raise ValueError("approval_policy must be ask, auto, or deny")
+        if self.mode not in {"ask", "code", "auto"}:
+            raise ValueError("mode must be ask, code, or auto")
         if not isinstance(self.verification_command, str):
             raise TypeError("verification_command must be a string")
         max_new_tokens = int(self.max_new_tokens)
         if max_new_tokens < 1:
             raise ValueError("max_new_tokens must be positive")
+        max_agent_turns = int(self.max_agent_turns)
+        if max_agent_turns < 1:
+            raise ValueError("max_agent_turns must be positive")
         max_tool_executions = (
             None
             if self.max_tool_executions is None
@@ -66,9 +70,9 @@ class PicoConfig:
         )
         if max_tool_executions is not None and max_tool_executions < 1:
             raise ValueError("max_tool_executions must be positive when configured")
-        run_timeout_seconds = int(self.run_timeout_seconds)
-        if run_timeout_seconds < 1:
-            raise ValueError("run_timeout_seconds must be positive")
+        turn_timeout_seconds = int(self.turn_timeout_seconds)
+        if turn_timeout_seconds < 1:
+            raise ValueError("turn_timeout_seconds must be positive")
         provider_context_limit_tokens = int(self.provider_context_limit_tokens)
         compaction_reserve_tokens = int(self.compaction_reserve_tokens)
         compaction_keep_recent_tokens = int(self.compaction_keep_recent_tokens)
@@ -93,14 +97,15 @@ class PicoConfig:
             )
         return replace(
             self,
-            approval_policy=str(self.approval_policy),
+            mode=str(self.mode),
+            max_agent_turns=max_agent_turns,
             max_tool_executions=max_tool_executions,
             max_new_tokens=max_new_tokens,
             secret_env_names=frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
             ),
             allowed_tools=_allowed_tools(self.allowed_tools),
-            run_timeout_seconds=run_timeout_seconds,
+            turn_timeout_seconds=turn_timeout_seconds,
             provider_context_limit_tokens=provider_context_limit_tokens,
             compaction_reserve_tokens=compaction_reserve_tokens,
             compaction_keep_recent_tokens=compaction_keep_recent_tokens,

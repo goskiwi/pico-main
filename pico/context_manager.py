@@ -611,14 +611,19 @@ class _ContextAssembler:
         state = self.agent.run.task
         if state is None:
             policy = {
-                "requires_verification": False,
-                "requires_workspace_change": False,
-                "task_kind": "unavailable",
+                "mode": "unavailable",
+                "verify_changes": False,
                 "write_scope": {"mode": "unavailable"},
             }
         else:
             contract = state.contract
-            if contract.task_kind == "read_only":
+            mode = (
+                "ask"
+                if self.agent.config.mode == "ask"
+                or not contract.allows_workspace_mutation
+                else self.agent.config.mode
+            )
+            if mode == "ask":
                 write_scope = {"mode": "none"}
             elif contract.allowed_write_paths is None:
                 write_scope = {"mode": "workspace"}
@@ -628,9 +633,8 @@ class _ContextAssembler:
                     "paths": list(contract.allowed_write_paths),
                 }
             policy = {
-                "requires_verification": contract.requires_verification,
-                "requires_workspace_change": contract.requires_workspace_change,
-                "task_kind": contract.task_kind,
+                "mode": mode,
+                "verify_changes": contract.verify_changes,
                 "write_scope": write_scope,
             }
         return "runtime_policy:\n" + json.dumps(

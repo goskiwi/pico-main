@@ -14,9 +14,8 @@ from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 READ_TASK = {
-    "task_kind": "read_only",
-    "requires_workspace_change": False,
-    "requires_verification": False,
+    "allows_workspace_mutation": False,
+    "verify_changes": False,
 }
 
 
@@ -26,12 +25,12 @@ def build_agent(tmp_path, max_new_tokens=64):
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", max_new_tokens=max_new_tokens),
+        config=PicoConfig(mode="auto", max_new_tokens=max_new_tokens),
     )
 
 
 def activate(agent, goal="Inspect"):
-    contract = TaskContract(goal=goal, **READ_TASK)
+    contract = TaskContract(goal=goal)
     run_log = RunLog(
         "run_context",
         "task_context",
@@ -88,7 +87,7 @@ def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
         FakeModelClient([]),
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", max_new_tokens=64),
+        config=PicoConfig(mode="ask", max_new_tokens=64),
     )
     activate(agent, "Inspect README")
 
@@ -100,9 +99,8 @@ def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
         '<untrusted_context trust="untrusted_data">'
     )
     assert named_json(input_text, "runtime_policy") == {
-        "requires_verification": False,
-        "requires_workspace_change": False,
-        "task_kind": "read_only",
+        "mode": "ask",
+        "verify_changes": False,
         "write_scope": {"mode": "none"},
     }
     assert named_json(input_text, "task_request") == "Inspect README"
@@ -289,7 +287,7 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
         client,
         WorkspaceContext.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", max_new_tokens=64),
+        config=PicoConfig(mode="ask", max_new_tokens=64),
     )
     activate(agent, "Inspect")
     manager = _ContextAssembler(agent, total_budget=1800)

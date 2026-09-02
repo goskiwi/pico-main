@@ -106,13 +106,13 @@ def build_prompt_fixture(root):
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "prompt-session"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="ask",
             verification_command="",
             max_new_tokens=96,
         ),
     )
     RunLifecycle(bootstrap).initialize(
-        "Read README.md", task_intent="read_only"
+        "Read README.md"
     )
     action_tools = tuple(bootstrap.tools.model_action_tools())
     prompt, metadata = bootstrap.prompt.build(
@@ -133,7 +133,7 @@ def build_prompt_fixture(root):
     assert metadata["included_context_sections"] == ["workspace"]
     assert "latest_user_request" not in prompt.input_text
     assert prompt.input_text.count("Read README.md") == 1
-    assert '"task_kind": "read_only"' in prompt.input_text
+    assert '"mode": "ask"' in prompt.input_text
     assert metadata["tool_schema_tokens"] == expected_tool_tokens
     assert {"write_file", "edit_file"}.isdisjoint(names)
     return prompt, metadata, action_tools
@@ -449,7 +449,7 @@ def overflow_agent(root, client, session_name):
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / session_name),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="",
             max_new_tokens=96,
         ),
@@ -473,6 +473,12 @@ def experiment_context_overflow(root):
         success_requests.append(json.loads(request.data.decode("utf-8")))
         if len(success_requests) == 1:
             raise context_overflow_http_error()
+        if len(success_requests) == 2:
+            return response_with_call(
+                "list_files",
+                "call_observe_after_overflow",
+                {"path": "."},
+            )
         return response_with_call(
             "submit_final",
             "call_after_overflow",
@@ -485,15 +491,14 @@ def experiment_context_overflow(root):
         "success-sessions",
     )
     with patch("urllib.request.urlopen", overflow_once):
-        outcome = success_agent._ask_with_intent(
+        outcome = success_agent.ask(
             "Return a short provider recovery confirmation",
-            intent="modify_optional",
         )
 
     success_resets = reset_events(success_agent)
     assert outcome.status == "completed"
     assert outcome.answer == "Recovered after one typed context overflow."
-    assert len(success_requests) == 2
+    assert len(success_requests) == 3
     assert [event.payload["reason"] for event in success_resets] == [
         "context_overflow_retry"
     ]
@@ -505,9 +510,7 @@ def experiment_context_overflow(root):
                 "HTTP 400 structured error → ProviderContextOverflow → "
                 "AgentLoop reset Provider session/Prompt → retry → completed"
             ),
-            "task_contract": (
-                "modify + no required workspace change; isolate the Provider retry"
-            ),
+            "task_contract": "Auto mode with observed no-change completion",
             "http_request_count": len(success_requests),
             "provider_session_reset_count": len(success_resets),
             "reset_reason": success_resets[0].payload["reason"],
@@ -534,9 +537,8 @@ def experiment_context_overflow(root):
     caught = None
     with patch("urllib.request.urlopen", always_overflow):
         try:
-            failure_agent._ask_with_intent(
+            failure_agent.ask(
                 "Return a short provider recovery confirmation",
-                intent="modify_optional",
             )
         except ProviderContextOverflow as exc:
             caught = exc

@@ -369,7 +369,7 @@ def run_verification(agent, started_workspace_mutation_sequence):
         root=agent.workspace.root,
         command=agent.config.verification_command,
         command_runner=agent.dependencies.command_runner,
-        timeout_seconds=agent.config.run_timeout_seconds,
+        timeout_seconds=agent.config.turn_timeout_seconds,
         redact_text=agent.redact_text,
         mutation_sequence_provider=lambda: (
             agent.run.evidence.last_workspace_mutation_sequence

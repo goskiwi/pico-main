@@ -10,7 +10,7 @@ def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
     return Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
                 SessionStore(tmp_path / ".pico/sessions"),
-                config=PicoConfig(approval_policy="auto", verification_command=""),
+                config=PicoConfig(mode="auto", verification_command=""),
                 **kwargs)
 
 
@@ -26,9 +26,8 @@ def run_active(agent, call):
         first = run_log.append_user(
             TaskContract(
                 goal="Exercise path safety",
-                task_kind="modify",
-                requires_workspace_change=False,
-                requires_verification=False,
+                allows_workspace_mutation=True,
+                verify_changes=False,
             )
         )
         agent.run.projection = RunProjection().apply_event(first)

@@ -139,8 +139,8 @@ def build_welcome(agent, model):
             ),
             pair("MODEL", model, "BRANCH", agent.workspace.context.branch),
             pair(
-                "APPROVAL",
-                agent.config.approval_policy,
+                "MODE",
+                agent.config.mode,
                 "SESSION",
                 agent.session.data["id"],
             ),
@@ -172,11 +172,12 @@ def build_agent(args):
     store = SessionStore(workspace.repo_root + "/.pico/sessions")
     model = _build_model_client(args)
     config = PicoConfig(
-        approval_policy=args.approval,
+        mode=args.mode,
+        max_agent_turns=args.max_agent_turns,
         max_tool_executions=args.max_tool_executions,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=set(configured_secret_names),
-        run_timeout_seconds=args.run_timeout,
+        turn_timeout_seconds=args.turn_timeout,
         provider_context_limit_tokens=args.provider_context_limit,
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
@@ -243,10 +244,13 @@ def build_arg_parser():
         "--resume", default=None, help="Session id to resume or 'latest'."
     )
     parser.add_argument(
-        "--approval",
-        choices=("ask", "auto", "deny"),
-        default=defaults.approval_policy,
-        help="Approval policy for risky tools; deny rejects them before execution.",
+        "--mode",
+        choices=("ask", "code", "auto"),
+        default=defaults.mode,
+        help=(
+            "Ask is observation-only; Code asks before risky actions; Auto "
+            "automates bounded file changes but never exposes run_command."
+        ),
     )
     parser.add_argument(
         "--secret-env-name",
@@ -257,6 +261,12 @@ def build_arg_parser():
             "Extra environment variable names to treat as secrets for "
             "event/artifact redaction."
         ),
+    )
+    parser.add_argument(
+        "--max-agent-turns",
+        type=int,
+        default=defaults.max_agent_turns,
+        help="Maximum main Agent model turns in one active ask/resume call.",
     )
     parser.add_argument(
         "--max-tool-executions",
@@ -274,10 +284,10 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
-        "--run-timeout",
+        "--turn-timeout",
         type=int,
-        default=defaults.run_timeout_seconds,
-        help="Whole-run deadline in seconds.",
+        default=defaults.turn_timeout_seconds,
+        help="Active ask/resume deadline in seconds.",
     )
     parser.add_argument(
         "--provider-context-limit",

@@ -47,15 +47,13 @@ def activate(
     run_id,
     goal,
     *,
-    requires_workspace_change=False,
-    requires_verification=False,
+    verify_changes=False,
     allowed_write_paths=None,
 ):
     contract = TaskContract(
         goal=goal,
-        task_kind="modify",
-        requires_workspace_change=requires_workspace_change,
-        requires_verification=requires_verification,
+        allows_workspace_mutation=True,
+        verify_changes=verify_changes,
         allowed_write_paths=allowed_write_paths,
     )
     run_log = RunLog(
@@ -102,7 +100,7 @@ def completion_experiment(root):
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
         ),
         command_runner=command_runner,
@@ -112,8 +110,7 @@ def completion_experiment(root):
         "task_day6_completion",
         "run_day6_completion",
         "Change value and verify it",
-        requires_workspace_change=True,
-        requires_verification=True,
+        verify_changes=True,
     )
 
     # Evidence first records facts for A -> B and a passing verification.
@@ -172,7 +169,7 @@ def completion_experiment(root):
     assert net_change_after_revert is False
     assert current_after_revert is None
     assert revert_assessment.allowed is False
-    assert revert_assessment.status == "workspace_change_required"
+    assert revert_assessment.status == "observation_required"
     assert final_edit.status == "success"
     assert final_cursor > revert_cursor
     assert old_verification_for_final_state is None
@@ -230,11 +227,10 @@ def recovery_experiment(root):
         model_client=FakeModelClient([]),
         workspace=WorkspaceContext.build(root),
         session_store=store,
-        config=PicoConfig(approval_policy="auto", verification_command="verify"),
+        config=PicoConfig(mode="auto", verification_command="verify"),
     )
     RunLifecycle(original).initialize(
         "Create interrupted.txt",
-        task_intent="modify",
     )
     run_log = original.run.run_log
     assert run_log is not None
@@ -300,7 +296,7 @@ def recovery_experiment(root):
         session_store=store,
         session=loaded_session,
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
         ),
         command_runner=command_runner,
@@ -312,9 +308,8 @@ def recovery_experiment(root):
         "pending_call_ids": list(resumed.run.projection.pending_call_ids),
     }
 
-    run_outcome = resumed._ask_with_intent(
+    run_outcome = resumed.ask(
         "Continue after the crash",
-        intent="modify",
     )
     events = resumed.dependencies.run_store.read_events(run_outcome.run_id)
     recovered_results = [
@@ -395,7 +390,7 @@ def active_reset_experiment(root):
         ),
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
-        config=PicoConfig(approval_policy="auto", verification_command=""),
+        config=PicoConfig(mode="auto", verification_command=""),
     )
     original_runner = agent.tools.registry["write_file"]["run"]
 
@@ -410,9 +405,8 @@ def active_reset_experiment(root):
 
     def ask_in_thread():
         try:
-            result["outcome"] = agent._ask_with_intent(
+            result["outcome"] = agent.ask(
                 "Create late.txt",
-                intent="modify",
             )
         except BaseException as exc:  # noqa: BLE001 - thread handoff
             result["error"] = exc
@@ -533,7 +527,7 @@ def child_delegation_experiment(root):
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
-            approval_policy="auto",
+            mode="auto",
             verification_command="verify",
             allowed_write_paths=("subject.py",),
         ),
@@ -545,8 +539,7 @@ def child_delegation_experiment(root):
         "task_day6_children",
         "run_day6_children",
         "Inspect, implement, and explicitly integrate subject.py",
-        requires_workspace_change=True,
-        requires_verification=True,
+        verify_changes=True,
         allowed_write_paths=("subject.py",),
     )
 
@@ -609,7 +602,7 @@ def child_delegation_experiment(root):
         "explore": {
             "child_id": explore.structured["child_id"],
             "status": explore.structured["status"],
-            "read_only": explore.structured["changed_paths"] == [],
+            "ask_mode": explore.structured["changed_paths"] == [],
         },
         "implement": {
             "child_id": child_id,

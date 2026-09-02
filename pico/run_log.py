@@ -137,13 +137,13 @@ def _validate_final_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"content", "stop_reason", "run_duration_ms", "final_diff"},
+        {"content", "stop_reason", "turn_duration_ms", "final_diff"},
     )
     if not str(payload["content"]).strip():
         raise ValueError("assistant_final requires content")
     if payload["stop_reason"] != STOP_REASON_FINAL_ANSWER_RETURNED:
         raise ValueError("assistant_final has invalid stop reason")
-    if int(payload["run_duration_ms"]) < 0:
+    if int(payload["turn_duration_ms"]) < 0:
         raise ValueError("assistant_final duration cannot be negative")
     final_diff = FinalDiffDescriptor.from_dict(payload["final_diff"])
     if final_diff.unavailable_reason:
@@ -154,11 +154,11 @@ def _validate_stopped_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"content", "stop_reason", "run_duration_ms", "final_diff"},
+        {"content", "stop_reason", "turn_duration_ms", "final_diff"},
     )
     if not str(payload["stop_reason"]):
         raise ValueError("run_stopped requires stop_reason")
-    if int(payload["run_duration_ms"]) < 0:
+    if int(payload["turn_duration_ms"]) < 0:
         raise ValueError("run_stopped duration cannot be negative")
     FinalDiffDescriptor.from_dict(payload["final_diff"])
 
@@ -600,7 +600,7 @@ class RunLog:
         self._require_no_pending()
         return self.append("model_instruction", {"content": str(content)})
 
-    def append_final(self, content, final_diff, *, run_duration_ms=0):
+    def append_final(self, content, final_diff, *, turn_duration_ms=0):
         self._require_no_pending()
         if not isinstance(final_diff, FinalDiffDescriptor):
             raise TypeError("assistant_final requires a FinalDiffDescriptor")
@@ -609,12 +609,12 @@ class RunLog:
             {
                 "content": str(content),
                 "stop_reason": STOP_REASON_FINAL_ANSWER_RETURNED,
-                "run_duration_ms": int(run_duration_ms),
+                "turn_duration_ms": int(turn_duration_ms),
                 "final_diff": final_diff.to_dict(),
             },
         )
 
-    def append_stopped(self, content, stop_reason, final_diff, *, run_duration_ms=0):
+    def append_stopped(self, content, stop_reason, final_diff, *, turn_duration_ms=0):
         self._require_no_pending()
         if not isinstance(final_diff, FinalDiffDescriptor):
             raise TypeError("run_stopped requires a FinalDiffDescriptor")
@@ -623,7 +623,7 @@ class RunLog:
             {
                 "content": str(content),
                 "stop_reason": str(stop_reason),
-                "run_duration_ms": int(run_duration_ms),
+                "turn_duration_ms": int(turn_duration_ms),
                 "final_diff": final_diff.to_dict(),
             },
         )
