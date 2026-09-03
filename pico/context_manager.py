@@ -742,14 +742,4 @@ class _ContextAssembler:
         fixed_context = self._fixed_context(raw)
         minimum = self._assemble_input(empty_history, fixed_context)
         remaining = available - self.tokenizer.count(minimum)
-        if raw["history"]:
-            before = self._assemble_input(empty_history, fixed_context)
-            after = self._assemble_input(
-                empty_history,
-                {**fixed_context, "history": ""},
-            )
-            remaining -= max(
-                0,
-                self.tokenizer.count(after) - self.tokenizer.count(before),
-            )
         return max(0, remaining)

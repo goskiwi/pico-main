@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from html import unescape
 from types import SimpleNamespace
 
@@ -321,15 +322,36 @@ def test_repository_instruction_loading_has_one_total_byte_limit(tmp_path):
     )
 
 
-def test_workspace_contains_only_workspace_facts(tmp_path):
+def test_workspace_queries_git_facts_when_rendered(tmp_path):
     (tmp_path / "AGENTS.md").write_text("rule\n")
     (tmp_path / "README.md").write_text("docs\n")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Pico Tests",
+            "-c",
+            "user.email=pico@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "baseline",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
 
-    context = Workspace.build(tmp_path)
+    workspace = Workspace.build(tmp_path)
+    before = workspace.text()
+    (tmp_path / "README.md").write_text("changed\n")
+    after = workspace.text()
 
-    assert set(context.state()) == {"cwd", "root", "branch", "git_status"}
-    assert "AGENTS.md" not in context.text()
-    assert "README.md" not in context.text()
+    assert "README.md" not in before
+    assert "README.md" in after
+    assert not hasattr(workspace, "git_status")
+    assert not hasattr(workspace, "refresh")
 
 
 def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):

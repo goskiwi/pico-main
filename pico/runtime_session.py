@@ -17,18 +17,22 @@ class RuntimeSession:
         session: dict | None = None,
     ):
         self.store = store
-        self.workspace_root = workspace_root
-        self.data = dict(session) if session is not None else self._new_session()
+        self.data = (
+            dict(session)
+            if session is not None
+            else self._new_session(workspace_root)
+        )
         self.store.validate(self.data)
         self.path = None
 
-    def _new_session(self):
+    @staticmethod
+    def _new_session(workspace_root):
         return {
             "schema_version": SESSION_SCHEMA_VERSION,
             "id": datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             + "-"
             + uuid.uuid4().hex[:6],
-            "workspace_root": str(self.workspace_root),
+            "workspace_root": str(workspace_root),
             "active_run_id": "",
         }
 

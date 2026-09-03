@@ -1,7 +1,6 @@
-"""工作区快照工具。
+"""工作区路径边界与按需 Git 视图。
 
-这个模块负责在 agent 按需读文件之前，先给它一份便宜的“仓库第一印象”。
-这份快照刻意保持小而稳定：只包含调用路径和 Git 事实。
+Workspace 只保存稳定路径；branch/status 在新 Provider Prompt 构建时现场读取。
 """
 
 import os
@@ -42,61 +41,41 @@ def middle(text, limit):
     return text[:left] + "..." + text[-right:]
 
 
+def _git(cwd, args, fallback=""):
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        return result.stdout.strip() or fallback
+    except (OSError, subprocess.SubprocessError):
+        return fallback
+
+
 class Workspace:
-    def __init__(
-        self,
-        cwd,
-        repo_root,
-        branch,
-        git_status,
-    ):
+    def __init__(self, cwd, root):
         self.cwd = Path(cwd).resolve()
-        self.root = Path(repo_root).resolve()
-        self.branch = branch
-        self.git_status = git_status
+        self.root = Path(root).resolve()
 
     @classmethod
     def build(cls, cwd, repo_root_override=None):
         cwd = Path(cwd).resolve()
-
-        def git(args, fallback=""):
-            try:
-                result = subprocess.run(
-                    ["git", *args],
-                    cwd=cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=5,
-                )
-                return result.stdout.strip() or fallback
-            except (OSError, subprocess.SubprocessError):
-                return fallback
-
         repo_root = (
             Path(repo_root_override).resolve()
             if repo_root_override is not None
-            else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
+            else Path(
+                _git(cwd, ["rev-parse", "--show-toplevel"], str(cwd))
+            ).resolve()
         )
-        return cls(
-            cwd=cwd,
-            repo_root=repo_root,
-            branch=git(["branch", "--show-current"], "-") or "-",
-            git_status=clip(
-                git(
-                    [
-                        "status",
-                        "--short",
-                        "--",
-                        ":(exclude,top).pico",
-                        ":(exclude,top).pico/**",
-                    ],
-                    "clean",
-                )
-                or "clean",
-                1500,
-            ),
-        )
+        return cls(cwd, repo_root)
+
+    @property
+    def branch(self):
+        return _git(self.cwd, ["branch", "--show-current"], "-") or "-"
 
     def text(self):
         try:
@@ -104,7 +83,21 @@ class Workspace:
         except ValueError:
             logical_cwd = "."
         logical_cwd = logical_cwd or "."
-        status = str(self.git_status or "clean").splitlines() or ["clean"]
+        status = clip(
+            _git(
+                self.cwd,
+                [
+                    "status",
+                    "--short",
+                    "--",
+                    ":(exclude,top).pico",
+                    ":(exclude,top).pico/**",
+                ],
+                "clean",
+            )
+            or "clean",
+            1500,
+        ).splitlines()
         lines = [
             "Workspace:",
             f"- cwd: {logical_cwd}",
@@ -113,14 +106,6 @@ class Workspace:
             *(f"  {line}" for line in status),
         ]
         return "\n".join(lines)
-
-    def state(self):
-        return {
-            "cwd": str(self.cwd),
-            "root": str(self.root),
-            "branch": self.branch,
-            "git_status": self.git_status,
-        }
 
     @staticmethod
     def path_state(path) -> str:
@@ -134,14 +119,6 @@ class Workspace:
         except OSError:
             return "unavailable"
         return "absent"
-
-    def refresh(self, *, force=False):
-        refreshed = type(self).build(self.cwd, repo_root_override=self.root)
-        changed = refreshed.state() != self.state()
-        if force or changed:
-            self.branch = refreshed.branch
-            self.git_status = refreshed.git_status
-        return force or changed
 
     def resolve_path(self, raw_path):
         path = Path(raw_path)

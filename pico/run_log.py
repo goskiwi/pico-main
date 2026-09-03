@@ -495,7 +495,6 @@ class RunLog:
         self._protocol = validate_run_events(self._events)
         compactions = [entry for entry in self._events if entry.kind == "compaction"]
         self.generation = len(compactions) + 1
-        self.reconciled_outcomes = []
 
     @classmethod
     def restore(cls, run_id, store):
@@ -669,6 +668,7 @@ class RunLog:
             for entry in self._events
             if entry.kind == "tool_started"
         }
+        reconciled = []
         for call in pending_calls:
             started = started_by_id.get(call.call_id)
             if started is None:
@@ -736,8 +736,8 @@ class RunLog:
                 outcome,
                 recovered_from_interruption=True,
             )
-            self.reconciled_outcomes.append((outcome, entry))
-        return tuple(self.reconciled_outcomes)
+            reconciled.append((outcome, entry))
+        return tuple(reconciled)
 
     def context_events(self):
         calls = {

@@ -398,7 +398,6 @@ class ToolRuntime:
         detail = self._batch_policy_error(calls)
         if detail:
             return (), detail
-        self.runtime.workspace.refresh()
         prepared = []
         for call in calls:
             execution = (
@@ -591,7 +590,6 @@ class ToolRuntime:
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
-        agent.workspace.refresh()
         normalized_repeat_key = repeat_key(run_id, name, args)
         repeated = self._reject_repeated_call(call, normalized_repeat_key)
         if repeated is not None:
@@ -642,7 +640,6 @@ class ToolRuntime:
             ],
         )
 
-        observed_workspace_drift = False
         try:
             execution = tool["run"](args)
             if not isinstance(execution, ToolRunnerResult):
@@ -670,11 +667,6 @@ class ToolRuntime:
             effects_after = self._effect_snapshot(agent, potential_paths)
             detected_paths = effect_diff(effects_before, effects_after)
             typed_error = exc if isinstance(exc, ToolFailureError) else None
-            observed_workspace_drift = bool(
-                typed_error
-                and detected_paths
-                and potential_scope == "workspace"
-            )
             paths = [] if typed_error else detected_paths
             unknown = bool(not typed_error and workspace_mutating and not potential_paths)
             uncertain = bool(paths or unknown)
@@ -707,11 +699,6 @@ class ToolRuntime:
                 ),
             )
 
-        if (
-            outcome.side_effect_state != "none"
-            and outcome.effect_scope == "workspace"
-        ) or observed_workspace_drift:
-            agent.workspace.refresh(force=True)
         self._record_tool_result(agent, outcome)
         if normalized_repeat_key is not None and outcome.side_effect_state in {
             "partial",

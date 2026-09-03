@@ -8,7 +8,7 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.working_state`: RunLog-projected constraints, decisions and next steps. Goal belongs to TaskContract.
 - `pico.tool_runtime` / `pico.mutations`: staged admission, revision-bound atomic edits, and one approval-bound diagnostic command.
 - `pico.run_lifecycle` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts without a second recovery-state object.
-- `pico.command_runner` / `pico.verification`: trusted host execution for the one user-fixed Verification command, not a sandbox.
+- `pico.command_runner` / `pico.verification`: trusted host execution for the Runtime-configured Verification command, not a sandbox.
 - `pico.evidence` / `pico.completion_controller`: evidence-bound completion.
 - `pico.subagents`: one synchronous Child delegation at a time, read-only explore, Worktree-isolated implement, and explicit receipt-bound integration.
 - `applications.coding`: opt-in post-Verification Git commit restricted to clean Run-changed paths.

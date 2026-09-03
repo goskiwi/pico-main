@@ -283,7 +283,7 @@ recurse. The Parent receives a compact result plus a receipt; Child Tool history
 Child Run Log.
 
 Implementation completion never mutates the Parent automatically. `integrate_child` revalidates the
-recorded base, applies the Patch in a temporary integration Worktree, runs the user-fixed
+recorded base, applies the Patch in a temporary integration Worktree, runs the Runtime-configured
 Verification there, and only then writes the verified result into the Parent Workspace. A base
 change, path-scope mismatch, Patch failure, or failed Verification rejects integration without
 claiming success.

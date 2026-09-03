@@ -18,7 +18,7 @@ COMMAND_TERMINATE_SECONDS = 1.0
 
 
 def shell_argv(command):
-    """Build the POSIX shell invocation used for a user-fixed command."""
+    """Build the POSIX shell invocation used for a configured command."""
 
     command = str(command or "").strip()
     if not command:
