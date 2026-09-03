@@ -9,10 +9,10 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceConte
 from pico.compaction_summary import SemanticCompactionError
 from pico.context_manager import ContextBudgetExceeded, _ContextAssembler
 from pico.contracts import ToolCall, ToolOutcome
+from pico.prompt_builder import AGENTS_MD_MAX_BYTES, load_repository_instructions
 from pico.run_log import COMPACTED_HISTORY_OMITTED, RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
-from pico.workspace import AGENTS_MD_MAX_BYTES
 
 READ_TASK = {
     "allows_workspace_mutation": False,
@@ -298,9 +298,9 @@ def test_repository_instructions_follow_root_to_cwd_order(tmp_path):
     (middle / "AGENTS.md").write_text("package rule\n")
     (cwd / "AGENTS.md").write_text("service rule\n")
 
-    context = WorkspaceContext.build(cwd, repo_root_override=tmp_path)
+    instructions = load_repository_instructions(tmp_path, cwd)
 
-    assert list(context.repository_instructions) == [
+    assert list(instructions) == [
         "AGENTS.md",
         "packages/AGENTS.md",
         "packages/service/AGENTS.md",
@@ -313,12 +313,23 @@ def test_repository_instruction_loading_has_one_total_byte_limit(tmp_path):
     (tmp_path / "AGENTS.md").write_bytes(b"a" * (AGENTS_MD_MAX_BYTES + 20))
     (nested / "AGENTS.md").write_text("nested rule\n")
 
-    context = WorkspaceContext.build(nested, repo_root_override=tmp_path)
+    instructions = load_repository_instructions(tmp_path, nested)
 
-    assert list(context.repository_instructions) == ["AGENTS.md"]
-    assert context.repository_instructions["AGENTS.md"].endswith(
+    assert list(instructions) == ["AGENTS.md"]
+    assert instructions["AGENTS.md"].endswith(
         "...[repository instructions truncated]"
     )
+
+
+def test_workspace_context_contains_only_workspace_facts(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("rule\n")
+    (tmp_path / "README.md").write_text("docs\n")
+
+    context = WorkspaceContext.build(tmp_path)
+
+    assert set(context.state()) == {"cwd", "repo_root", "branch", "git_status"}
+    assert "AGENTS.md" not in context.text()
+    assert "README.md" not in context.text()
 
 
 def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):

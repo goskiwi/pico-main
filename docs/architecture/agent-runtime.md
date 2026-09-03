@@ -184,7 +184,7 @@ dedicated `repository_instructions` block. They are project instructions rather 
 or ordinary repository data: the current user request wins on conflict, and ToolRuntime remains the
 permission boundary. An untrusted-context envelope is added only when at least one bounded
 projection is non-empty, and a differing latest request is added only on Resume. The envelope can
-include minimal Workspace facts and document names, RepoMap, History and WorkingState. RepoMap is
+include minimal Workspace facts, RepoMap, History and WorkingState. RepoMap is
 ranked from the immutable goal, latest request, current WorkingState and paths already observed or
 changed by the Run. History is rendered before WorkingState so an older summary cannot displace the
 current constraints, decisions and next steps. The original task precedes this recovery context;

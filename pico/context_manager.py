@@ -658,7 +658,7 @@ class _ContextAssembler:
         return self.agent.workspace.context.text()
 
     def _repository_instructions_text(self):
-        instructions = self.agent.workspace.context.repository_instructions
+        instructions = self.agent.prompt.repository_instructions
         if not instructions:
             return ""
         lines = ["<repository_instructions>"]

@@ -1,31 +1,13 @@
 """工作区快照工具。
 
 这个模块负责在 agent 按需读文件之前，先给它一份便宜的“仓库第一印象”。
-这份快照刻意保持小而稳定：主要包含 Git 事实和少量白名单项目文档。
+这份快照刻意保持小而稳定：只包含调用路径和 Git 事实。
 """
 
 import subprocess
 from pathlib import Path, PurePosixPath
 
-# 普通项目文件只暴露名称；AGENTS.md 正文单独作为 repository instructions。
-DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-AGENTS_MD_MAX_BYTES = 32 * 1024
 IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
-
-
-def _scope_directories(repo_root, cwd):
-    repo_root = Path(repo_root).resolve()
-    cwd = Path(cwd).resolve()
-    try:
-        relative = cwd.relative_to(repo_root)
-    except ValueError:
-        return (repo_root,)
-    directories = [repo_root]
-    current = repo_root
-    for part in relative.parts:
-        current /= part
-        directories.append(current)
-    return tuple(directories)
 
 
 def normalize_relative_file(value: str) -> str:
@@ -63,15 +45,11 @@ class WorkspaceContext:
         repo_root,
         branch,
         git_status,
-        document_names,
-        repository_instructions,
     ):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
         self.git_status = git_status
-        self.document_names = tuple(document_names)
-        self.repository_instructions = dict(repository_instructions)
 
     @classmethod
     def build(cls, cwd, repo_root_override=None):
@@ -96,33 +74,6 @@ class WorkspaceContext:
             if repo_root_override is not None
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
-        document_names = []
-        repository_instructions = {}
-        remaining_instruction_bytes = AGENTS_MD_MAX_BYTES
-        # 从仓库根目录走到当前目录，越具体的 AGENTS.md 越靠后。
-        for base in _scope_directories(repo_root, cwd):
-            for name in DOC_NAMES:
-                path = base / name
-                if not path.is_file() or path.is_symlink():
-                    continue
-                resolved = path.resolve()
-                try:
-                    key = resolved.relative_to(repo_root).as_posix()
-                except ValueError:
-                    continue
-                if key in document_names:
-                    continue
-                document_names.append(key)
-                if name != "AGENTS.md" or remaining_instruction_bytes <= 0:
-                    continue
-                raw = resolved.read_bytes()
-                selected = raw[:remaining_instruction_bytes]
-                content = selected.decode("utf-8", errors="replace")
-                if len(selected) < len(raw):
-                    content += "\n...[repository instructions truncated]"
-                repository_instructions[key] = content
-                remaining_instruction_bytes -= len(selected)
-
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
@@ -141,8 +92,6 @@ class WorkspaceContext:
                 or "clean",
                 1500,
             ),
-            document_names=document_names,
-            repository_instructions=repository_instructions,
         )
 
     def text(self):
@@ -152,15 +101,12 @@ class WorkspaceContext:
             logical_cwd = "."
         logical_cwd = logical_cwd or "."
         status = str(self.git_status or "clean").splitlines() or ["clean"]
-        documents = list(self.document_names) or ["none"]
         lines = [
             "Workspace:",
             f"- cwd: {logical_cwd}",
             f"- branch: {self.branch}",
             "- status:",
             *(f"  {line}" for line in status),
-            "- document_names:",
-            *(f"  - {name}" for name in documents),
         ]
         return "\n".join(lines)
 
@@ -170,6 +116,4 @@ class WorkspaceContext:
             "repo_root": self.repo_root,
             "branch": self.branch,
             "git_status": self.git_status,
-            "document_names": list(self.document_names),
-            "repository_instructions": dict(self.repository_instructions),
         }
