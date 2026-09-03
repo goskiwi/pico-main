@@ -62,9 +62,16 @@ class SessionStore:
         self.validate(session)
         return session
 
-    def latest(self):
+    def latest_active(self):
+        """Return the newest Session that still points at an unfinished Run."""
+
         files = [path for path in self.root.glob("*.json") if not path.is_symlink()]
-        # Some mounted/container filesystems expose identical timestamps for
-        # adjacent atomic writes. The session id is the deterministic tie-breaker.
-        files.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
-        return files[-1].stem if files else None
+        files.sort(
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+        for path in files:
+            session = self.load(path.stem)
+            if session["active_run_id"]:
+                return path.stem
+        return None

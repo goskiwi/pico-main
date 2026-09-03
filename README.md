@@ -5,7 +5,8 @@ OpenAI-compatible Responses function calling 提出一个动作或独立 Observa
 副作用、持久化、恢复、验证和最终完成权。CLI 还提供一次一个的显式 Child 委派。
 
 Pico 面向用户已经信任的本地仓库。Code 模式允许模型申请一个需要 Approval 的诊断型
-`run_command`；Ask/Auto 不暴露通用 Shell。最终 Verification 仍由用户通过 `--verify-command` 固定。它们在 Workspace
+`run_command`；Ask/Auto 不暴露通用 Shell。CLI 自动发现 `tests/test_*.py` 并使用当前 Python
+解释器运行 Pytest；特殊项目可用 `--verify-command` 覆盖。命令在 Workspace
 中以当前用户权限执行，不是 Sandbox，文件工具的路径约束不能限制其访问其他目录、网络或
 子进程。Pico 检测 Repository 可见净变化：Git 仓库使用 Diff、Untracked state 与 HEAD，非 Git
 Workspace 使用有界 metadata snapshot；它不追踪 ignored 文件或外部系统副作用。未知仓库、
@@ -20,7 +21,6 @@ uv sync
 
 uv run pico \
   --mode code \
-  --verify-command "python -m pytest -q" \
   --cwd /path/to/trusted/repo \
   "Fix calculator.add so the existing test passes"
 ```

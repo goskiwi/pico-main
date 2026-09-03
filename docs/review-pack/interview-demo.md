@@ -187,7 +187,7 @@ CompletionController。
 
 ### Verification 是否被 Workspace 路径约束保护？
 
-不是。Code 模式中模型可以申请用户审批的诊断型 `run_command`；Ask/Auto 不暴露它。用户固定 Verification 仍会在 Workspace
+不是。Code 模式中模型可以申请用户审批的诊断型 `run_command`；Ask/Auto 不暴露它。CLI 自动发现或由用户覆盖的 Verification 仍会在 Workspace
 中以当前用户权限本机运行。文件工具的路径检查不能限制这些进程访问其他目录、网络或子进程。
 Pico 只观察 Git 可见的净仓库变化；`none` 不代表整台机器没有副作用。因此 Pico 只运行可信
 仓库；未知仓库或 PR 应交给外部 CI、VM 或容器。
@@ -217,5 +217,5 @@ MCP/Skills 都明确不在范围内。
   四调用 Observation Batch 完成 12 次证据读取，模型请求从旧证据的 17 次降到 9 次。
 - `run_command`、Crash Resume 与 Worktree Child 的真实回归在临时干净 Git Workspace 中运行，
   不混入 Core 持久状态。
-- 固定 Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
+- Runtime Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
 - 模型后端仍是外部信任边界。

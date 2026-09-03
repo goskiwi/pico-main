@@ -46,19 +46,18 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 ## 从一个真实 CLI 请求开始
 
-下面的参数都由当前 CLI 提供。它表示“必须产生修改，并且必须通过显式验证”这一种任务：
+下面的参数都由当前 CLI 提供。CLI 会识别仓库中的 Python 测试并自动配置验证：
 
 ```bash
 uv run pico \
   --mode code \
-  --verify-command "python -m pytest -q" \
   --cwd /path/to/repo \
   "Fix calculator.add so the existing addition test passes"
 ```
 
 真实 Provider 需要模型配置。Code 模式可以申请用户审批的诊断型 `run_command`；Ask/Auto
-不暴露通用 Shell。固定 Verification
-仍由 CompletionController 拥有。两者都以当前用户权限在本机运行，因此只应对可信仓库使用。
+不暴露通用 Shell。自动发现或由 `--verify-command` 覆盖的 Verification
+仍由 CompletionController 拥有。它们都以当前用户权限在本机运行，因此只应对可信仓库使用。
 未知代码应先放进外部 CI、VM 或容器。
 只想看确定性本地演示时，运行：
 

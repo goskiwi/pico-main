@@ -7,9 +7,11 @@
 
 import argparse
 import os
+import shlex
 import shutil
 import sys
 import textwrap
+from pathlib import Path
 
 from .config import load_project_env, provider_env
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
@@ -50,6 +52,23 @@ HELP_DETAILS = textwrap.dedent(
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
 SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
+
+
+def detect_verification_command(repo_root):
+    """Choose the one conservative verifier Pico currently understands."""
+
+    tests = Path(repo_root).resolve() / "tests"
+    if tests.is_dir() and not tests.is_symlink() and any(
+        path.is_file() and not path.is_symlink()
+        for path in tests.rglob("test_*.py")
+    ):
+        return f"{shlex.quote(sys.executable)} -m pytest -q"
+    return ""
+
+
+def resolve_verification_command(repo_root, explicit_command):
+    explicit = str(explicit_command or "").strip()
+    return explicit or detect_verification_command(repo_root)
 
 
 def _effective_model(args):
@@ -144,6 +163,10 @@ def build_welcome(agent, model):
                 "SESSION",
                 agent.session.data["id"],
             ),
+            row(
+                "VERIFY     "
+                + (agent.config.verification_command or "unavailable")
+            ),
             row(""),
         ]
     )
@@ -181,7 +204,10 @@ def build_agent(args):
         provider_context_limit_tokens=args.provider_context_limit,
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
-        verification_command=args.verify_command,
+        verification_command=resolve_verification_command(
+            workspace.repo_root,
+            args.verify_command,
+        ),
     )
 
     def child_model_client_factory(_spec):
@@ -189,7 +215,9 @@ def build_agent(args):
 
     session_id = args.resume
     if session_id == "latest":
-        session_id = store.latest()
+        session_id = store.latest_active()
+        if not session_id:
+            raise ValueError("no unfinished Session is available to resume")
     if session_id:
         return Pico(
             model_client=model,
@@ -213,6 +241,65 @@ def _working_state_text(agent):
     if task is None:
         return WorkingState().render_panel()
     return "Task goal:\n- " + task.contract.goal + "\n\n" + task.working.render_panel()
+
+
+def _outcome_summary(agent, outcome):
+    changed = ", ".join(outcome.changed_paths) or "none"
+    if not outcome.changed_paths:
+        verification = "not required"
+    elif not agent.config.verification_command:
+        verification = "unavailable"
+    else:
+        records = agent.run.evidence.verifications
+        verification = (
+            str(records[-1].get("status", "not run"))
+            if records
+            else "not run"
+        )
+    lines = [
+        f"Status: {outcome.status}",
+        f"Changed: {changed}",
+        f"Verification: {verification}",
+        f"Run: {outcome.run_id}",
+    ]
+    if outcome.status != "completed" and outcome.stop_reason:
+        lines.insert(1, f"Stop reason: {outcome.stop_reason}")
+    return "\n".join(lines)
+
+
+def _unfinished_session(cwd):
+    workspace = WorkspaceContext.build(cwd)
+    store = SessionStore(Path(workspace.repo_root) / ".pico" / "sessions")
+    session_id = store.latest_active()
+    if not session_id:
+        return None
+    session = store.load(session_id)
+    return {
+        "session_id": session_id,
+        "run_id": session["active_run_id"],
+    }
+
+
+def _print_outcome(agent, outcome):
+    print(_outcome_summary(agent, outcome))
+    print()
+    print(outcome.answer)
+
+
+def _build_startup(args):
+    unfinished = None if args.resume else _unfinished_session(args.cwd)
+    return build_agent(args), unfinished
+
+
+def _print_unfinished(unfinished):
+    if not unfinished:
+        return
+    print(
+        "\nUnfinished Run found: "
+        + unfinished["run_id"]
+        + "\nResume with: pico --resume "
+        + unfinished["session_id"]
+    )
 
 
 def build_arg_parser():
@@ -311,8 +398,8 @@ def build_arg_parser():
         "--verify-command",
         default=defaults.verification_command,
         help=(
-            "Trusted local verification command owned by the Runtime; "
-            "empty means unavailable."
+            "Override the Runtime verifier. When omitted, CLI detects Python "
+            "tests/test_*.py; otherwise verification is unavailable."
         ),
     )
     parser.add_argument(
@@ -329,7 +416,7 @@ def main(argv=None):
         return run_main(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     try:
-        agent = build_agent(args)
+        agent, unfinished = _build_startup(args)
     except (RuntimeError, ValueError) as exc:
         print(f"pico: {exc}", file=sys.stderr)
         return 2
@@ -338,6 +425,7 @@ def main(argv=None):
         agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
     )
     print(build_welcome(agent, model=model))
+    _print_unfinished(unfinished)
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
@@ -349,7 +437,7 @@ def main(argv=None):
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-            print(outcome.answer)
+            _print_outcome(agent, outcome)
             return 0 if outcome.status == "completed" else 1
         return 0
 
@@ -382,6 +470,7 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input).answer)
+            outcome = agent.ask(user_input)
+            _print_outcome(agent, outcome)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

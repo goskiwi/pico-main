@@ -216,8 +216,6 @@ def main(argv=None):
         "16",
         "--max-tool-executions",
         "20",
-        "--verify-command",
-        VISIBLE_COMMAND,
         build_prompt(),
     ]
     environment = dict(os.environ)
@@ -266,6 +264,8 @@ def main(argv=None):
             and event.payload.get("status") == "passed"
             for event in events
         ),
+        "auto_verifier_selected": "VERIFY" in cli.stdout
+        and "pytest -q" in cli.stdout,
         "visible_verifier_passed": visible["ok"],
         "hidden_verifier_passed": hidden["ok"],
         "scope_valid": changed_paths == [TARGET_PATH]
