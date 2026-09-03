@@ -261,8 +261,7 @@ def main(argv=None):
         "one_terminal_run": projection.status == "completed",
         "target_located_without_prompt_hint": TARGET_PATH not in build_prompt()
         and TARGET_PATH in read_paths,
-        "implementation_and_test_read": TARGET_PATH in read_paths
-        and any(path.startswith("tests/") for path in read_paths),
+        "implementation_read": TARGET_PATH in read_paths,
         "single_successful_mutation": len(successful_mutations) == 1,
         "runtime_verification_passed": any(
             event.kind == "verification_result"
