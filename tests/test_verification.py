@@ -73,6 +73,7 @@ def test_runtime_verification_records_changed_path_drift(
         result,
         7,
         {"subject.txt": file_revision(target)},
+        "python -m pytest -q",
     )
 
 

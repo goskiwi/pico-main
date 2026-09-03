@@ -30,7 +30,7 @@ def build_agent(tmp_path, max_new_tokens=64):
 
 
 def activate(agent, goal="Inspect"):
-    contract = TaskContract(goal=goal)
+    contract = TaskContract(goal=goal, allows_workspace_mutation=True, verify_changes=False)
     run_log = RunLog(
         "run_context",
         "task_context",

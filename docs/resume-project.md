@@ -32,4 +32,4 @@ Parent 使用单个 `delegate` 创建一个 Explore 或 Implement Child，再用
 
 ## 评测与审计
 
-结构化 verifier 绑定最后一次 workspace mutation sequence 与 changed-path states；freshness 使用时派生，不持久化可变标签。Completion Gate 在无净变化时要求成功 Observation；有净变化且 Contract 要求时运行 Verification。`A -> B -> A` 不算净变化。失败验证、未知副作用或尚未显式集成的 Implement Child 不能被报告为成功。Completion 证明证据充分且新鲜，不声称证明任意业务语义。
+结构化 verifier 绑定 command identity、最后一次 workspace mutation sequence 与 changed-path states；freshness 使用时派生，不持久化可变标签。相同代码状态换了验证命令也必须重新执行。Completion Gate 在无净变化时要求成功 Observation；有净变化且 Contract 要求时运行 Verification。`A -> B -> A` 不算净变化。失败验证、未知副作用或尚未显式集成的 Implement Child 不能被报告为成功。Completion 证明证据充分且新鲜，不声称证明任意业务语义。

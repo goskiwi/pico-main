@@ -23,11 +23,19 @@ MODIFY_TASK = {
 }
 
 
+def task_contract(goal="inspect"):
+    return TaskContract(
+        goal,
+        allows_workspace_mutation=True,
+        verify_changes=False,
+    )
+
+
 def append(store, run_id, kind, payload=None):
     payload = dict(payload or {})
     if kind == "user_message":
         payload = {
-            "contract": TaskContract(payload.pop("content")).to_dict()
+            "contract": task_contract(payload.pop("content")).to_dict()
         }
     return store.append_event(run_id, "task", "session", kind, payload)
 
@@ -101,7 +109,7 @@ def test_replay_snapshots_one_iterable_and_validates_event_identity(tmp_path):
         session_id="session",
         kind="user_message",
         timestamp="now",
-        payload={"contract": TaskContract("inspect").to_dict()},
+        payload={"contract": task_contract().to_dict()},
     )
     with pytest.raises(ValueError, match="sequence is not contiguous"):
         replay_events([malformed])
@@ -142,7 +150,7 @@ def test_projection_tracks_one_pending_tool_transaction(tmp_path):
 def test_observation_batch_round_trips_in_original_order(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     calls = (
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("search", {"pattern": "needle", "path": "."}, "call_b"),
@@ -216,7 +224,7 @@ def test_observation_batch_payload_is_strict(payload):
 def test_observation_batch_rejects_out_of_order_results(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     calls = (
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("read_file", {"path": "b.py"}, "call_b"),
@@ -307,7 +315,7 @@ def test_rejects_legacy_payload_shapes():
             "read",
         )
 
-    malformed = TaskContract("inspect").to_dict()
+    malformed = task_contract().to_dict()
     malformed["goal"] = 123
     with pytest.raises(TypeError, match="goal must be a string"):
         RunEvent(
@@ -325,7 +333,7 @@ def test_rejects_legacy_payload_shapes():
 def test_tool_result_rejects_workspace_revision_and_correction_fields(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     log.append_model_instruction("historical fact that must be summarized")
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     log.append_tool_call(call)
@@ -339,7 +347,7 @@ def test_tool_result_rejects_workspace_revision_and_correction_fields(tmp_path):
 def test_mismatched_tool_result_is_not_persisted(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     log.append_tool_call(ToolCall("read_file", {}, "expected"))
     wrong = ToolOutcome(
         "wrong",
@@ -361,7 +369,7 @@ def test_mismatched_tool_result_is_not_persisted(tmp_path):
 def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     terminal = log.append_final("done", FinalDiffDescriptor())
     assert terminal.payload["final_diff"] == FinalDiffDescriptor().to_dict()
     assert set(terminal.payload) == {
@@ -390,13 +398,13 @@ def test_unavailable_final_diff_is_valid_only_for_stopped_runs(tmp_path):
 
     store = RunStore(tmp_path / ".pico/runs")
     completed = RunLog("completed", "task", "session", store)
-    completed.append_user(TaskContract("inspect"))
+    completed.append_user(task_contract())
     with pytest.raises(ValueError, match="requires an available final Diff"):
         completed.append_final("done", unavailable)
     assert [event.kind for event in completed.events] == ["user_message"]
 
     stopped = RunLog("stopped", "task", "session", store)
-    stopped.append_user(TaskContract("inspect"))
+    stopped.append_user(task_contract())
     stopped.append_stopped("stopped", "user_reset", unavailable)
     assert store.replay("stopped").final_diff == unavailable
 
@@ -404,7 +412,7 @@ def test_unavailable_final_diff_is_valid_only_for_stopped_runs(tmp_path):
 def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     log.append_final(
         "done",
         FinalDiffDescriptor("diff_0000000000000000_0000000000", 1),
@@ -433,7 +441,7 @@ def test_find_active_run_uses_last_event_time(tmp_path):
 def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     log.append_model_instruction("historical fact that must be summarized")
     call = ToolCall(
         "update_working_state",
@@ -474,7 +482,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
 def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    log.append_user(TaskContract("inspect"))
+    log.append_user(task_contract())
     log.append_model_instruction("historical " * 30)
     recent_one = log.append_model_instruction("recent one")
     recent_two = log.append_model_instruction("recent two")
@@ -504,7 +512,7 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
 def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    user = log.append_user(TaskContract("inspect"))
+    user = log.append_user(task_contract())
     old = log.append_model_instruction("old")
     recent = log.append_model_instruction("recent")
 
@@ -533,7 +541,7 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
 def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    user = log.append_user(TaskContract("inspect"))
+    user = log.append_user(task_contract())
     old = log.append_model_instruction("old")
     calls = []
     for index in range(2):
@@ -574,7 +582,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
 def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
-    user = log.append_user(TaskContract("inspect"))
+    user = log.append_user(task_contract())
     old = log.append_model_instruction("old")
     calls = (
         ToolCall("read_file", {"path": "a.py"}, "call_a"),

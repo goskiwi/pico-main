@@ -126,6 +126,7 @@ def completion_experiment(root):
     first_current = agent.run.evidence.latest_verification_for_state(
         first_cursor,
         first_states,
+        agent.config.verification_command,
     )
     net_change_after_first_edit = agent.run.evidence.has_net_workspace_change
 
@@ -140,6 +141,7 @@ def completion_experiment(root):
     current_after_revert = agent.run.evidence.latest_verification_for_state(
         revert_cursor,
         revert_states,
+        agent.config.verification_command,
     )
     net_change_after_revert = agent.run.evidence.has_net_workspace_change
     revert_assessment = CompletionController(agent).assess("final after revert")
@@ -156,6 +158,7 @@ def completion_experiment(root):
         agent.run.evidence.latest_verification_for_state(
             final_cursor,
             final_states,
+            agent.config.verification_command,
         )
     )
     failed_assessment = CompletionController(agent).assess("final after C")

@@ -216,7 +216,12 @@ def _effect_from_event(event, outcome):
     }
 
 
-def verification_is_current(record, mutation_sequence, changed_path_states):
+def verification_is_current(
+    record,
+    mutation_sequence,
+    changed_path_states,
+    command,
+):
     expected_sequence = int(mutation_sequence)
     expected_states = dict(changed_path_states)
     return bool(
@@ -226,6 +231,7 @@ def verification_is_current(record, mutation_sequence, changed_path_states):
         and dict(record.get("started_changed_path_states", {}))
         == dict(record.get("finished_changed_path_states", {}))
         == expected_states
+        and str(record.get("command", "")) == str(command)
     )
 
 
@@ -281,7 +287,12 @@ class RunEvidence:
             default=0,
         )
 
-    def latest_verification_for_state(self, mutation_sequence, changed_path_states):
+    def latest_verification_for_state(
+        self,
+        mutation_sequence,
+        changed_path_states,
+        command,
+    ):
         return next(
             (
                 record
@@ -290,6 +301,7 @@ class RunEvidence:
                     record,
                     mutation_sequence,
                     changed_path_states,
+                    command,
                 )
             ),
             None,

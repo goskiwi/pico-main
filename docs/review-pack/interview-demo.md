@@ -85,7 +85,7 @@ Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 
 
 打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 依次检查尚未集成的
 Implement Child、TaskContract、未修复 partial/unknown、副作用后的 Workspace drift、当前
-Verification，以及验证后仍未解决的 Effect。这个顺序避免在副作用仍不确定时运行无意义的
+Verification command + mutation sequence + changed-path states，以及验证后仍未解决的 Effect。这个顺序避免在副作用仍不确定时运行无意义的
 verifier。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
 
 ## 5 分钟现场 Demo `[Core]`

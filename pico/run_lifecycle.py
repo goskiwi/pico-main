@@ -227,7 +227,10 @@ class RunLifecycle:
         return TaskContract(
             goal=goal,
             allows_workspace_mutation=allows_workspace_mutation,
-            verify_changes=bool(self.runtime.config.verification_command),
+            verify_changes=(
+                allows_workspace_mutation
+                and bool(self.runtime.config.verification_command)
+            ),
             allowed_write_paths=(
                 ()
                 if not allows_workspace_mutation

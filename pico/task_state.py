@@ -19,8 +19,8 @@ class TaskContract:
     """Immutable goal, write scope, and completion requirements for one Run."""
 
     goal: str
-    allows_workspace_mutation: bool = True
-    verify_changes: bool = False
+    allows_workspace_mutation: bool
+    verify_changes: bool
     allowed_write_paths: tuple[str, ...] | None = None
 
     def __post_init__(self):

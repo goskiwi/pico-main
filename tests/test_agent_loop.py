@@ -182,6 +182,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         verification.payload,
         agent.run.evidence.last_workspace_mutation_sequence,
         agent.run.evidence.change_set.current_net_path_states,
+        agent.config.verification_command,
     )
 
 

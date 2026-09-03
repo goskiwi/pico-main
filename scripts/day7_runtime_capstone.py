@@ -193,6 +193,7 @@ def main():
         assert evidence.latest_verification_for_state(
             evidence.last_workspace_mutation_sequence,
             verification_events[-1]["finished_changed_path_states"],
+            verification_events[-1]["command"],
         ) is not None
         assert len(command_runner.calls) == 1
         assert sum(event.kind == "assistant_tool_batch" for event in events) == 1

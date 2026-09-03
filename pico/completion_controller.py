@@ -143,6 +143,7 @@ class CompletionController:
         current = runtime.run.evidence.latest_verification_for_state(
             sequence,
             states,
+            runtime.config.verification_command,
         )
         # Only a passing result is reusable. A failed or infrastructure result
         # must be retryable on the same code state after repairs to the environment.
@@ -158,6 +159,7 @@ class CompletionController:
         current = runtime.run.evidence.latest_verification_for_state(
             sequence,
             states,
+            runtime.config.verification_command,
         )
         if current and current.get("status") == "infrastructure_error":
             raise RuntimeError(

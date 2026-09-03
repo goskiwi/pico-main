@@ -115,6 +115,7 @@ def verification_payload(agent, sequence, status="passed", output=""):
         agent.run.evidence.changed_paths,
     )
     return {
+        "command": agent.config.verification_command,
         "status": status,
         "started_workspace_mutation_sequence": sequence,
         "finished_workspace_mutation_sequence": sequence,
@@ -189,6 +190,30 @@ def test_failed_verification_can_retry_on_same_state(tmp_path):
     assert not CompletionController(agent).assess("done").allowed
     assert CompletionController(agent).assess("done").allowed
     assert calls == [1, 1]
+
+
+def test_verification_command_change_invalidates_passing_result(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify-a")
+    add_change(agent, "README.md", "a", "b", 1)
+    agent.run.evidence.verifications.append(verification_payload(agent, 1))
+    agent.config = PicoConfig.build(
+        agent.config,
+        verification_command="verify-b",
+    )
+    calls = []
+
+    def verify(sequence):
+        calls.append(sequence)
+        return verification_payload(agent, sequence)
+
+    agent.run_verification = verify
+
+    assert CompletionController(agent).assess("done").allowed
+    assert calls == [1]
+    assert [record["command"] for record in agent.run.evidence.verifications] == [
+        "verify-a",
+        "verify-b",
+    ]
 
 
 def test_infrastructure_error_can_retry_after_environment_recovers(tmp_path):
