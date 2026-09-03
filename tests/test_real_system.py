@@ -35,5 +35,9 @@ def test_published_real_cli_system_artifact_passes_every_boundary():
     assert artifact["verification"]["initial"]["ok"] is False
     assert artifact["verification"]["visible"]["ok"] is True
     assert artifact["verification"]["hidden"]["ok"] is True
+    assert artifact["checks"]["auto_verifier_selected"] is True
+    assert artifact["checks"]["target_located_without_prompt_hint"] is True
+    assert "Status: completed" in artifact["cli"]["stdout"]
+    assert "Verification: passed" in artifact["cli"]["stdout"]
     assert artifact["passed"] is True
     assert all(artifact["checks"].values())

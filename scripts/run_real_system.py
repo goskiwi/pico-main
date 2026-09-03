@@ -253,9 +253,8 @@ def main(argv=None):
         "baseline_failure_reproduced": not initial["ok"],
         "cli_completed": cli.returncode == 0,
         "one_terminal_run": projection.status == "completed",
-        "repository_discovery_used": any(
-            call["name"] in {"list_files", "search"} for call in calls
-        ),
+        "target_located_without_prompt_hint": TARGET_PATH not in build_prompt()
+        and TARGET_PATH in read_paths,
         "implementation_and_test_read": TARGET_PATH in read_paths
         and any(path.startswith("tests/") for path in read_paths),
         "single_successful_mutation": len(successful_mutations) == 1,
