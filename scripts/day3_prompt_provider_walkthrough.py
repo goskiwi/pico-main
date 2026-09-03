@@ -19,7 +19,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
@@ -103,7 +103,7 @@ def build_prompt_fixture(root):
     client = new_client()
     bootstrap = Pico(
         model_client=client,
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / "prompt-session"),
         config=PicoConfig(
             mode="ask",
@@ -446,7 +446,7 @@ def experiment_incomplete_is_rejected(
 def overflow_agent(root, client, session_name):
     return Pico(
         model_client=client,
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / session_name),
         config=PicoConfig(
             mode="auto",

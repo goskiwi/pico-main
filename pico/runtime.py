@@ -22,7 +22,6 @@ from .runtime_state import ActiveRunState
 from .session_store import SessionStore
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
-from .workspace_tracker import WorkspaceTracker
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
@@ -46,7 +45,7 @@ class Pico:
     ):
         self.model_client = model_client
         self.config = PicoConfig.build(config)
-        self.workspace = WorkspaceTracker(workspace)
+        self.workspace = workspace
         self.run = ActiveRunState()
         self.session = RuntimeSession(
             session_store,

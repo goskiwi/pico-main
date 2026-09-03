@@ -13,7 +13,7 @@ from pico import (
     PicoConfig,
     SessionStore,
     ToolCall,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.command_runner import CommandResult
 from pico.completion_controller import CompletionController
@@ -97,7 +97,7 @@ def completion_experiment(root):
     )
     agent = Pico(
         model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",
@@ -228,7 +228,7 @@ def recovery_experiment(root):
     store = SessionStore(root / ".pico" / "sessions")
     original = Pico(
         model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=store,
         config=PicoConfig(mode="auto", verification_command="verify"),
     )
@@ -295,7 +295,7 @@ def recovery_experiment(root):
                 ModelAction.final("Recovered, inspected, repaired, and verified."),
             ]
         ),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=store,
         session=loaded_session,
         config=PicoConfig(
@@ -391,7 +391,7 @@ def active_reset_experiment(root):
                 ModelAction.final("This final action must not run."),
             ]
         ),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(mode="auto", verification_command=""),
     )
@@ -527,7 +527,7 @@ def child_delegation_experiment(root):
 
     parent = Pico(
         model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",

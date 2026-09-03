@@ -19,7 +19,7 @@ from pico import (
     RunOutcome,
     SessionStore,
     ToolCall,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.contracts import ToolOutcome
 from pico.run_lifecycle import RunLifecycle
@@ -35,7 +35,7 @@ def build_agent(root, model, *, session=None):
     store = SessionStore(root / ".pico" / "sessions")
     return Pico(
         model_client=model,
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=store,
         session=session,
         config=PicoConfig(mode="ask", verification_command=""),

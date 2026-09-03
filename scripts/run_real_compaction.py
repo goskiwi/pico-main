@@ -21,7 +21,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.command_runner import CommandRunner, shell_argv
 from pico.config import load_project_env, provider_env
@@ -245,7 +245,7 @@ def main(argv=None):
     )
     agent = Pico(
         model_client=client,
-        workspace=WorkspaceContext.build(workspace),
+        workspace=Workspace.build(workspace),
         session_store=SessionStore(workspace / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",

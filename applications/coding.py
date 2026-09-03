@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from pico import Pico, PicoConfig, RunOutcome, SessionStore, WorkspaceContext
+from pico import Pico, PicoConfig, RunOutcome, SessionStore, Workspace
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +93,7 @@ class CodingWorkflow:
         dirty_before = _dirty_paths(root)
         agent = Pico(
             model_client=self.model_client,
-            workspace=WorkspaceContext.build(root, repo_root_override=root),
+            workspace=Workspace.build(root, repo_root_override=root),
             session_store=SessionStore(root / ".pico" / "sessions"),
             config=self.config,
             command_runner=self.command_runner,

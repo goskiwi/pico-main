@@ -4,10 +4,14 @@
 这份快照刻意保持小而稳定：只包含调用路径和 Git 事实。
 """
 
+import os
 import subprocess
 from pathlib import Path, PurePosixPath
 
+from .mutations import file_revision
+
 IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+TOOL_INTERNAL_PATH_NAMES = frozenset({".git", ".pico"})
 
 
 def normalize_relative_file(value: str) -> str:
@@ -38,7 +42,7 @@ def middle(text, limit):
     return text[:left] + "..." + text[-right:]
 
 
-class WorkspaceContext:
+class Workspace:
     def __init__(
         self,
         cwd,
@@ -46,8 +50,8 @@ class WorkspaceContext:
         branch,
         git_status,
     ):
-        self.cwd = cwd
-        self.repo_root = repo_root
+        self.cwd = Path(cwd).resolve()
+        self.root = Path(repo_root).resolve()
         self.branch = branch
         self.git_status = git_status
 
@@ -75,8 +79,8 @@ class WorkspaceContext:
             else Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
         )
         return cls(
-            cwd=str(cwd),
-            repo_root=str(repo_root),
+            cwd=cwd,
+            repo_root=repo_root,
             branch=git(["branch", "--show-current"], "-") or "-",
             git_status=clip(
                 git(
@@ -96,7 +100,7 @@ class WorkspaceContext:
 
     def text(self):
         try:
-            logical_cwd = Path(self.cwd).relative_to(Path(self.repo_root)).as_posix()
+            logical_cwd = self.cwd.relative_to(self.root).as_posix()
         except ValueError:
             logical_cwd = "."
         logical_cwd = logical_cwd or "."
@@ -112,8 +116,44 @@ class WorkspaceContext:
 
     def state(self):
         return {
-            "cwd": self.cwd,
-            "repo_root": self.repo_root,
+            "cwd": str(self.cwd),
+            "root": str(self.root),
             "branch": self.branch,
             "git_status": self.git_status,
         }
+
+    @staticmethod
+    def path_state(path) -> str:
+        path = Path(path)
+        try:
+            if path.is_file():
+                return file_revision(path)
+            if path.is_dir():
+                metadata = path.stat()
+                return f"dir:{metadata.st_mtime_ns}:{metadata.st_ctime_ns}"
+        except OSError:
+            return "unavailable"
+        return "absent"
+
+    def refresh(self, *, force=False):
+        refreshed = type(self).build(self.cwd, repo_root_override=self.root)
+        changed = refreshed.state() != self.state()
+        if force or changed:
+            self.branch = refreshed.branch
+            self.git_status = refreshed.git_status
+        return force or changed
+
+    def resolve_path(self, raw_path):
+        path = Path(raw_path)
+        path = path if path.is_absolute() else self.root / path
+        resolved = path.resolve()
+        if os.path.commonpath([str(self.root), str(resolved)]) != str(self.root):
+            raise ValueError(f"path escapes workspace: {raw_path}")
+        return resolved
+
+    def resolve_tool_path(self, raw_path):
+        resolved = self.resolve_path(raw_path)
+        relative = resolved.relative_to(self.root)
+        if any(part in TOOL_INTERNAL_PATH_NAMES for part in relative.parts):
+            raise ValueError(f"tool path targets internal workspace state: {raw_path}")
+        return resolved

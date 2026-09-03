@@ -5,7 +5,7 @@ from .runtime import Pico, PicoConfig, SessionStore
 from .task_state import TaskContract
 from .tool_runtime import ToolRuntime
 from .working_state import WorkingState
-from .workspace import WorkspaceContext
+from .workspace import Workspace
 
 __all__ = [
     "FakeModelClient",
@@ -20,5 +20,5 @@ __all__ = [
     "ToolOutcome",
     "ToolRuntime",
     "WorkingState",
-    "WorkspaceContext",
+    "Workspace",
 ]

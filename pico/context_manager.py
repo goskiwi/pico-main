@@ -655,7 +655,7 @@ class _ContextAssembler:
         )
 
     def _workspace_text(self):
-        return self.agent.workspace.context.text()
+        return self.agent.workspace.text()
 
     def _repository_instructions_text(self):
         instructions = self.agent.prompt.repository_instructions

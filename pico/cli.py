@@ -17,7 +17,7 @@ from .config import load_project_env, provider_env
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
 from .working_state import WorkingState
-from .workspace import WorkspaceContext, middle
+from .workspace import Workspace, middle
 
 DEFAULT_SECRET_ENV_NAMES = (
     "PICO_OPENAI_API_KEY",
@@ -154,9 +154,9 @@ def build_welcome(agent, model):
             row(""),
             row(
                 "WORKSPACE  "
-                + middle(agent.workspace.context.cwd, inner - 11)
+                + middle(agent.workspace.cwd, inner - 11)
             ),
-            pair("MODEL", model, "BRANCH", agent.workspace.context.branch),
+            pair("MODEL", model, "BRANCH", agent.workspace.branch),
             pair(
                 "MODE",
                 agent.config.mode,
@@ -189,10 +189,10 @@ def build_agent(args):
     """
     # 这里是 CLI 到 runtime 的装配点：
     # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型和 session。
-    workspace = WorkspaceContext.build(args.cwd)
-    load_project_env(workspace.repo_root, boundary=workspace.repo_root)
+    workspace = Workspace.build(args.cwd)
+    load_project_env(workspace.root, boundary=workspace.root)
     configured_secret_names = _configured_secret_names(args)
-    store = SessionStore(workspace.repo_root + "/.pico/sessions")
+    store = SessionStore(workspace.root / ".pico" / "sessions")
     model = _build_model_client(args)
     config = PicoConfig(
         mode=args.mode,
@@ -205,7 +205,7 @@ def build_agent(args):
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
         verification_command=resolve_verification_command(
-            workspace.repo_root,
+            workspace.root,
             args.verify_command,
         ),
     )
@@ -268,8 +268,8 @@ def _outcome_summary(agent, outcome):
 
 
 def _unfinished_session(cwd):
-    workspace = WorkspaceContext.build(cwd)
-    store = SessionStore(Path(workspace.repo_root) / ".pico" / "sessions")
+    workspace = Workspace.build(cwd)
+    store = SessionStore(workspace.root / ".pico" / "sessions")
     session_id = store.latest_active()
     if not session_id:
         return None

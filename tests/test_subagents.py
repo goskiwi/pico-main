@@ -9,7 +9,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.command_runner import CommandResult
 from pico.completion_controller import CompletionController
@@ -141,7 +141,7 @@ def build_parent(
     runner_factory = runner_factory or RunnerFactory()
     parent = Pico(
         FakeModelClient([]),
-        WorkspaceContext.build(root),
+        Workspace.build(root),
         SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",

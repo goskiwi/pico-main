@@ -10,7 +10,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.contracts import ToolOutcome
 from pico.mutations import content_revision, file_revision
@@ -124,7 +124,7 @@ def main():
         )
         repaired = Pico(
             model_client=repair_model,
-            workspace=WorkspaceContext.build(root),
+            workspace=Workspace.build(root),
             session_store=SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(
                 mode="auto",
@@ -155,7 +155,7 @@ def main():
                     ),
                 ]
             ),
-            workspace=WorkspaceContext.build(denied_root),
+            workspace=Workspace.build(denied_root),
             session_store=SessionStore(denied_root / ".pico" / "sessions"),
             config=PicoConfig(
                 mode="code",

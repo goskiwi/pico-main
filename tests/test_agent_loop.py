@@ -10,7 +10,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.agent_loop import AgentLoop
 from pico.command_runner import CommandResult
@@ -22,7 +22,7 @@ from pico.providers import ProviderContextOverflow
 
 def build_agent(tmp_path, outputs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
-    workspace = WorkspaceContext.build(tmp_path)
+    workspace = Workspace.build(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
     return Pico(
         model_client=FakeModelClient(outputs),
@@ -118,7 +118,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",
@@ -230,7 +230,7 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="auto",
@@ -267,7 +267,7 @@ def test_verifier_created_file_prevents_successful_completion(tmp_path):
                 ModelAction.final("done"),
             ]
         ),
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(
             mode="auto",
@@ -363,7 +363,7 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     ])
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="auto",
@@ -430,7 +430,7 @@ def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
     ])
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="auto",
@@ -484,7 +484,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="auto",
@@ -520,7 +520,7 @@ def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
     client = OverflowClient([])
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(mode="auto"),
     )
@@ -554,7 +554,7 @@ def test_untyped_runtime_error_is_not_recovered(tmp_path, message):
     client = OrdinaryFailureClient([])
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(mode="auto"),
     )
@@ -612,7 +612,7 @@ def test_ask_mode_sends_only_observation_surface(tmp_path):
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(mode="ask"),
     )
@@ -640,7 +640,7 @@ def test_tool_budget_switches_to_final_only_surface(tmp_path):
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="ask",
@@ -1033,7 +1033,7 @@ def test_auto_mode_allows_bounded_file_edits_but_hides_run_command(tmp_path):
     )
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(mode="auto"),
     )
@@ -1072,7 +1072,7 @@ def test_provider_failure_at_deadline_settles_as_turn_timeout(tmp_path):
     client = DeadlineClient([])
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(mode="ask", turn_timeout_seconds=30),
     )

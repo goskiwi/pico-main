@@ -13,7 +13,7 @@ from pico import (
     SessionStore,
     ToolCall,
     ToolOutcome,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
@@ -70,7 +70,7 @@ def build_agent(root, *, pressure_window=False):
         )
     return Pico(
         model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(root),
+        workspace=Workspace.build(root),
         session_store=SessionStore(root / ".pico" / "sessions"),
         config=PicoConfig(**config),
     )

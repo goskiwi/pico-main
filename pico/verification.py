@@ -9,8 +9,7 @@ from collections import deque
 from pathlib import Path
 
 from .command_runner import shell_argv
-from .workspace import IGNORED_PATH_NAMES, normalize_relative_file
-from .workspace_tracker import WorkspaceTracker
+from .workspace import IGNORED_PATH_NAMES, Workspace, normalize_relative_file
 
 VERIFICATION_SNAPSHOT_MAX_ENTRIES = 20_000
 GIT_SNAPSHOT_TIMEOUT_SECONDS = 10
@@ -23,7 +22,7 @@ class RepositorySnapshotError(RuntimeError):
 def capture_changed_path_states(root, changed_paths):
     root = Path(root).resolve()
     return {
-        relative: WorkspaceTracker.path_state(root / relative)
+        relative: Workspace.path_state(root / relative)
         for relative in sorted(
             {normalize_relative_file(path) for path in changed_paths}
         )
@@ -70,7 +69,7 @@ def _untracked_path_state(path):
             return (
                 "file",
                 metadata.st_mode & 0o7777,
-                WorkspaceTracker.path_state(path),
+                Workspace.path_state(path),
             )
         return (
             "other",

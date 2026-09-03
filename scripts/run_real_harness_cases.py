@@ -24,7 +24,7 @@ from pico import (
     SessionStore,
     ToolCall,
     ToolOutcome,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.command_runner import CommandRunner, shell_argv
 from pico.config import load_project_env, provider_env
@@ -191,7 +191,7 @@ def _client(args):
 def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier="", session=None, run_store=None):
     return Pico(
         model_client=client,
-        workspace=WorkspaceContext.build(workspace),
+        workspace=Workspace.build(workspace),
         session_store=SessionStore(workspace / ".pico" / "sessions"),
         session=session,
         run_store=run_store,

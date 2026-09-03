@@ -13,7 +13,7 @@ from pico import (
     Pico,
     PicoConfig,
     SessionStore,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
@@ -30,7 +30,7 @@ def build_agent(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     return Pico(
         model_client=FakeModelClient([]),
-        workspace=WorkspaceContext.build(tmp_path),
+        workspace=Workspace.build(tmp_path),
         session_store=SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(mode="auto"),
     )
@@ -230,7 +230,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
     with patch.dict(os.environ, {"CUSTOM_SECRET_NAME": secret}):
         agent = Pico(
             client,
-            WorkspaceContext.build(tmp_path),
+            Workspace.build(tmp_path),
             SessionStore(tmp_path / ".pico" / "sessions"),
             config=PicoConfig(
                 mode="auto",

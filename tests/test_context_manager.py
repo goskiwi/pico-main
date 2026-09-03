@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.compaction_summary import SemanticCompactionError
 from pico.context_manager import ContextBudgetExceeded, _ContextAssembler
 from pico.contracts import ToolCall, ToolOutcome
@@ -24,7 +24,7 @@ def build_agent(tmp_path, max_new_tokens=64):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     return Pico(
         FakeModelClient([]),
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(mode="auto", max_new_tokens=max_new_tokens),
     )
@@ -101,7 +101,7 @@ def named_json(input_text, name):
 def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
     agent = Pico(
         FakeModelClient([]),
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(mode="ask", max_new_tokens=64),
     )
@@ -321,13 +321,13 @@ def test_repository_instruction_loading_has_one_total_byte_limit(tmp_path):
     )
 
 
-def test_workspace_context_contains_only_workspace_facts(tmp_path):
+def test_workspace_contains_only_workspace_facts(tmp_path):
     (tmp_path / "AGENTS.md").write_text("rule\n")
     (tmp_path / "README.md").write_text("docs\n")
 
-    context = WorkspaceContext.build(tmp_path)
+    context = Workspace.build(tmp_path)
 
-    assert set(context.state()) == {"cwd", "repo_root", "branch", "git_status"}
+    assert set(context.state()) == {"cwd", "root", "branch", "git_status"}
     assert "AGENTS.md" not in context.text()
     assert "README.md" not in context.text()
 
@@ -365,7 +365,7 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = Pico(
         client,
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico" / "sessions"),
         config=PicoConfig(mode="ask", max_new_tokens=64),
     )

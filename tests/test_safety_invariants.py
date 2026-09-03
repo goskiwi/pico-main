@@ -1,4 +1,4 @@
-from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
@@ -8,7 +8,7 @@ from pico.task_state import TaskContract
 
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
-    return Pico(FakeModelClient([]), WorkspaceContext.build(tmp_path),
+    return Pico(FakeModelClient([]), Workspace.build(tmp_path),
                 SessionStore(tmp_path / ".pico/sessions"),
                 config=PicoConfig(mode="auto", verification_command=""),
                 **kwargs)

@@ -8,7 +8,7 @@ import uuid
 from ..contracts import ToolOutcome
 from ..run_store import RunStore
 from ..session_store import SessionStore
-from ..workspace import WorkspaceContext, normalize_relative_file
+from ..workspace import Workspace, normalize_relative_file
 from .contracts import ChildRecord, ChildSpec
 from .integration import PatchIntegrator
 from .worktree import GitWorktree, require_clean_repository
@@ -242,7 +242,7 @@ class SubagentRunner:
             if record.spec.role == "implement"
             else self.parent.workspace.root
         )
-        workspace = WorkspaceContext.build(workspace_root)
+        workspace = Workspace.build(workspace_root)
         config = PicoConfig(
             mode=("ask" if record.spec.role == "explore" else "auto"),
             max_agent_turns=CHILD_MAX_AGENT_TURNS,

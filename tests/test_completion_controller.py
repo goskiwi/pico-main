@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pico import FakeModelClient, Pico, PicoConfig, SessionStore, WorkspaceContext
+from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.execution import ExecutionContext
@@ -34,7 +34,7 @@ def active_agent(tmp_path, requirements, verification_command=""):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     agent = Pico(
         FakeModelClient([]),
-        WorkspaceContext.build(tmp_path),
+        Workspace.build(tmp_path),
         SessionStore(tmp_path / ".pico/sessions"),
         config=PicoConfig(
             mode="auto",

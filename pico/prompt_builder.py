@@ -54,7 +54,7 @@ class PromptBuilder:
         self._instructions = build_prompt_instructions()
         self._repository_instructions = load_repository_instructions(
             runtime.workspace.root,
-            runtime.workspace.invocation_cwd,
+            runtime.workspace.cwd,
         )
         self._context = _ContextAssembler(runtime)
 

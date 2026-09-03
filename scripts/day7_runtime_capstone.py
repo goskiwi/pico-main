@@ -11,7 +11,7 @@ from pico import (
     PicoConfig,
     SessionStore,
     ToolCall,
-    WorkspaceContext,
+    Workspace,
 )
 from pico.command_runner import CommandResult
 from pico.mutations import file_revision
@@ -122,7 +122,7 @@ def main():
         )
         agent = Pico(
             model_client=model,
-            workspace=WorkspaceContext.build(root),
+            workspace=Workspace.build(root),
             session_store=SessionStore(root / ".pico" / "sessions"),
             config=PicoConfig(
                 mode="auto",
