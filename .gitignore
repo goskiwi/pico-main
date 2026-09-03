@@ -34,6 +34,12 @@ tmp/
 artifacts/*
 !artifacts/real-compaction.json
 !artifacts/real-compaction.patch
+!artifacts/real-ask.json
+!artifacts/real-code-approval.json
+!artifacts/real-revision-repair.json
+!artifacts/real-revision-repair.patch
+!artifacts/real-resume.json
+!artifacts/real-resume.patch
 release/
 readme_intro_locked/
 output/
