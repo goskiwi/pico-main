@@ -51,7 +51,7 @@ def _git(cwd, args, fallback=""):
             check=True,
             timeout=5,
         )
-        return result.stdout.strip() or fallback
+        return result.stdout.rstrip() or fallback
     except (OSError, subprocess.SubprocessError):
         return fallback
 

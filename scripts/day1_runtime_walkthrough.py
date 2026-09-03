@@ -84,7 +84,6 @@ def main():
                 "active_run_id": agent.session.data["active_run_id"],
                 "projection_run_id": agent.run.projection.run_id,
                 "resumable": agent.run.resumable,
-                "reload_required": agent.run.reload_required,
             },
         )
 

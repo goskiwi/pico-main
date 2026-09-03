@@ -35,7 +35,6 @@ class RecordingVerificationCommandRunner:
         return CommandResult(
             returncode=0 if passed else 1,
             stdout="1 passed\n" if passed else "1 failed\n",
-            cleanup_state="completed",
         )
 
 

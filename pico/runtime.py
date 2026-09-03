@@ -146,8 +146,6 @@ class Pico:
         )
 
     def reset(self):
-        if self.run.reload_required:
-            reload_current_run(self)
         execution = self.run.execution_context
         if execution is not None:
             execution.request_stop("user_reset")
@@ -165,7 +163,6 @@ class Pico:
                     )
                 )
         except BaseException:
-            self.run.reload_required = True
             reload_current_run(self)
             raise
         self.session.reset()

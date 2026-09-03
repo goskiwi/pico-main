@@ -5,10 +5,6 @@ import json
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
 
 
-def _tool_preview_limit(tool_name):
-    return DEFAULT_TOOL_PREVIEW_BYTES
-
-
 def _complete_lines_within_budget(lines, budget):
     selected = []
     used = 0
@@ -21,10 +17,10 @@ def _complete_lines_within_budget(lines, budget):
     return selected
 
 
-def model_tool_output(content, tool_name, descriptor):
+def model_tool_output(content, descriptor):
     content = str(content)
     total_bytes = len(content.encode("utf-8"))
-    limit = _tool_preview_limit(tool_name)
+    limit = DEFAULT_TOOL_PREVIEW_BYTES
     if total_bytes <= limit:
         return content
     if not descriptor.get("artifact_id"):

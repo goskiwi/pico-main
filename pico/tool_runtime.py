@@ -18,7 +18,7 @@ from .contracts import (
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
 from .tool_context import ToolContext
 from .tool_execution import (
-    _tool_preview_limit,
+    DEFAULT_TOOL_PREVIEW_BYTES,
     attach_preimage_artifacts,
     classify_runner_result,
     effect_diff,
@@ -199,7 +199,7 @@ class ToolRuntime:
 
     def _pending_call(self, call_id):
         runtime = self.runtime
-        if runtime.run.reload_required or runtime.run.resumable:
+        if runtime.run.resumable:
             raise RuntimeError("a dormant Run must be resumed before tool execution")
         if runtime.run.task is None or runtime.run.run_log is None:
             raise RuntimeError("pending tool execution requires an active Run")
@@ -353,7 +353,7 @@ class ToolRuntime:
 
     def _pending_batch(self, batch_id):
         runtime = self.runtime
-        if runtime.run.reload_required or runtime.run.resumable:
+        if runtime.run.resumable:
             raise RuntimeError("a dormant Run must be resumed before batch execution")
         if runtime.run.task is None or runtime.run.run_log is None:
             raise RuntimeError("pending batch execution requires an active Run")
@@ -555,7 +555,7 @@ class ToolRuntime:
     def execute_manual(self, name, args=None):
         call = ToolCall(str(name), dict(args or {}))
         agent = self.runtime
-        if agent.run.reload_required or agent.run.resumable:
+        if agent.run.resumable:
             return self._rejected(
                 call,
                 "run_protocol_violation",
@@ -754,7 +754,7 @@ class ToolRuntime:
                 failure.recovery,
             )
         descriptor = {}
-        if len(safe_content.encode("utf-8")) > _tool_preview_limit(call.name):
+        if len(safe_content.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
             descriptor = self.runtime.dependencies.artifacts.write_tool_output(
                 _run_id(self.runtime), call.call_id, safe_content
             )
@@ -764,7 +764,7 @@ class ToolRuntime:
             status=status,
             execution_state=execution_state,
             side_effect_state=side_effect_state,
-            content=model_tool_output(safe_content, call.name, descriptor),
+            content=model_tool_output(safe_content, descriptor),
             structured=safe_structured,
             failure=failure,
             affected_paths=tuple(affected_paths),

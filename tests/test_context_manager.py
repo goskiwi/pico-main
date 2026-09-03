@@ -353,7 +353,7 @@ def test_workspace_queries_git_facts_when_rendered(tmp_path):
     assert "README.md" not in before
     assert "README.md" in after
     assert "cwd: src" in after
-    assert workspace.current_status().startswith("M README.md")
+    assert workspace.current_status().startswith(" M README.md")
     assert not hasattr(workspace, "git_status")
     assert not hasattr(workspace, "refresh")
     assert not hasattr(workspace, "branch")

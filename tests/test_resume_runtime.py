@@ -308,7 +308,6 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
 
     assert agent.run.task is None
     assert agent.run.run_log is None
-    assert agent.run.reload_required is False
     assert agent.session.data["active_run_id"] == ""
     agent.reset()
 

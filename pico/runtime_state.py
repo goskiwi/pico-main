@@ -14,7 +14,6 @@ class ActiveRunState:
     projection: RunProjection = field(default_factory=RunProjection)
     execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
-    reload_required: bool = False
 
     @property
     def task(self):

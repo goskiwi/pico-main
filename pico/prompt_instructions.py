@@ -1,12 +1,5 @@
 """Stable Responses instructions construction."""
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class PromptInstructions:
-    text: str
-
 
 def build_prompt_instructions():
     sections = (
@@ -57,4 +50,4 @@ def build_prompt_instructions():
         f"{title}:\n" + "\n".join(f"- {rule}" for rule in rules)
         for title, rules in sections
     )
-    return PromptInstructions(text=text)
+    return text

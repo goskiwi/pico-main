@@ -31,10 +31,6 @@ class CommandResult:
     returncode: int | None
     stdout: str = ""
     stderr: str = ""
-    timed_out: bool = False
-    cancelled: bool = False
-    killed: bool = False
-    cleanup_state: str = "not_required"
     stop_reason: str = ""
     output_limited: bool = False
     infrastructure_error: bool = False
@@ -96,24 +92,20 @@ class CommandRunner:
             return CommandResult(
                 returncode=None,
                 stderr=f"{type(exc).__name__}: {exc}",
-                cleanup_state="not_started",
                 infrastructure_error=True,
             )
 
-        stopped = None
+        stop_reason = ""
         stdout = b""
         stderr = b""
         try:
             while True:
                 if context.token.requested:
-                    stopped = (
-                        "cancelled",
-                        context.token.reason or "user_cancelled",
-                    )
+                    stop_reason = context.token.reason or "user_cancelled"
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    stopped = ("timed_out", "deadline_exceeded")
+                    stop_reason = "deadline_exceeded"
                     break
                 try:
                     stdout, stderr = process.communicate(
@@ -126,32 +118,24 @@ class CommandRunner:
             self._terminate_process_group(process)
             raise
 
-        cleanup_state = "not_required"
-        killed = False
-        if stopped is not None:
-            stdout, stderr, cleanup_state = self._terminate_process_group(process)
-            killed = True
+        if stop_reason:
+            stdout, stderr = self._terminate_process_group(process)
         rendered_stdout, rendered_stderr, limited = self._truncate_output(
             stdout,
             stderr,
         )
-        if stopped is None:
+        if not stop_reason:
             return CommandResult(
                 returncode=int(process.returncode or 0),
                 stdout=rendered_stdout,
                 stderr=rendered_stderr,
                 output_limited=limited,
             )
-        state, reason = stopped
         return CommandResult(
             returncode=None,
             stdout=rendered_stdout,
             stderr=rendered_stderr,
-            timed_out=state == "timed_out",
-            cancelled=state == "cancelled",
-            killed=killed,
-            cleanup_state=cleanup_state,
-            stop_reason=reason,
+            stop_reason=stop_reason,
             output_limited=limited,
         )
 
@@ -198,13 +182,12 @@ class CommandRunner:
 
     @staticmethod
     def _terminate_process_group(process):
-        cleanup_state = "completed"
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         except OSError:
-            cleanup_state = "failed"
+            pass
         try:
             stdout, stderr = process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
         except subprocess.TimeoutExpired:
@@ -213,9 +196,9 @@ class CommandRunner:
             except ProcessLookupError:
                 pass
             except OSError:
-                cleanup_state = "failed"
+                pass
             stdout, stderr = process.communicate()
-        return stdout, stderr, cleanup_state
+        return stdout, stderr
 
     def _truncate_output(self, stdout, stderr):
         stdout = bytes(stdout or b"")

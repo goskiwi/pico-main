@@ -60,7 +60,7 @@ class PromptBuilder:
 
     @property
     def instructions(self):
-        return self._instructions.text
+        return self._instructions
 
     @property
     def repository_instructions(self):

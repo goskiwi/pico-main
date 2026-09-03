@@ -70,19 +70,6 @@ def load_resumable_run(runtime: Pico):
         run_id, events, projection = runtime.dependencies.run_store.find_active_run(
             session_id
         )
-    if (
-        not run_id
-        and runtime.run.reload_required
-        and runtime.run.run_log is not None
-    ):
-        candidate_run_id = runtime.run.run_log.run_id
-        events, projection = runtime.dependencies.run_store.load_run(
-            candidate_run_id
-        )
-        if events:
-            run_id = candidate_run_id
-        else:
-            runtime.run = ActiveRunState()
     if not run_id:
         return runtime.run
 
@@ -117,8 +104,6 @@ def reload_current_run(runtime: Pico):
 def _reload_if_snapshot_is_stale(runtime: Pico):
     run = runtime.run
     run_id = str(run.projection.run_id)
-    if run.reload_required:
-        return reload_current_run(runtime)
     if not run_id or run.run_log is None or not run.run_log.events:
         return run
     last_event = run.run_log.events[-1]
@@ -168,7 +153,6 @@ class RunLifecycle:
             )
             runtime.model_client.reset_action_session()
         except BaseException:
-            runtime.run.reload_required = True
             runtime.run.execution_context = None
             reload_current_run(runtime)
             raise
@@ -212,7 +196,7 @@ class RunLifecycle:
             first = run_log.append_user(contract)
             projection = RunProjection().apply_event(first)
         except BaseException:
-            runtime.run = ActiveRunState(run_log=run_log, reload_required=True)
+            runtime.run = ActiveRunState()
             load_resumable_run(runtime)
             raise
         runtime.run = ActiveRunState(projection=projection, run_log=run_log)

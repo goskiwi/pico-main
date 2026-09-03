@@ -87,7 +87,6 @@ class AgentLoop:
                     break
             return self.lifecycle.finish_stopped(loop_state)
         except BaseException:
-            self.agent.run.reload_required = True
             self.agent.run.execution_context = None
             reload_current_run(self.agent)
             raise

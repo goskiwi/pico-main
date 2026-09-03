@@ -307,7 +307,6 @@ def recovery_experiment(root):
     assert resumed.run.resumable is True
     startup_state = {
         "resumable": resumed.run.resumable,
-        "reload_required": resumed.run.reload_required,
         "pending_call_ids": list(resumed.run.projection.pending_call_ids),
     }
 
