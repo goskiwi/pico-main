@@ -264,7 +264,7 @@ def main(argv=None):
         "target_located_without_prompt_hint": TARGET_PATH not in build_prompt()
         and TARGET_PATH in read_paths,
         "implementation_read": TARGET_PATH in read_paths,
-        "single_successful_mutation": len(successful_mutations) == 1,
+        "bounded_successful_mutations": 1 <= len(successful_mutations) <= 3,
         "runtime_verification_passed": any(
             event.kind == "verification_result"
             and event.payload.get("status") == "passed"

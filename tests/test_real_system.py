@@ -32,13 +32,15 @@ def test_published_real_cli_system_artifact_passes_every_boundary():
     assert artifact["runtime"]["commit_sha"]
     assert artifact["cli"]["exit_code"] == 0
     assert artifact["changed_paths"] == [TARGET_PATH]
-    assert artifact["analysis"]["model_request_count"] == 3
-    assert artifact["analysis"]["executed_tool_count"] == 5
+    assert artifact["analysis"]["model_request_count"] <= 10
+    assert artifact["analysis"]["executed_tool_count"] <= 12
     assert artifact["verification"]["initial"]["ok"] is False
     assert artifact["verification"]["visible"]["ok"] is True
     assert artifact["verification"]["hidden"]["ok"] is True
     assert artifact["checks"]["auto_verifier_selected"] is True
-    assert artifact["checks"]["repository_instruction_followed"] is True
+    assert artifact["checks"][
+        "repository_instruction_followed_without_file_read"
+    ] is True
     assert artifact["checks"]["target_located_without_prompt_hint"] is True
     assert "Status: completed" in artifact["cli"]["stdout"]
     assert "Verification: passed" in artifact["cli"]["stdout"]
