@@ -92,7 +92,9 @@ def build_prompt():
         "Customers report that order totals are too low whenever a line item has a "
         "quantity greater than one. Diagnose and fix the root cause. Preserve the public "
         "API, do not modify tests, and solve this small task directly without delegation. "
-        "Use repository tools to locate the implementation; the Runtime owns verification."
+        "Repository instructions are already supplied by the Runtime, so do not open "
+        "AGENTS.md. Use repository tools to locate the implementation; the Runtime owns "
+        "verification."
     )
 
 
@@ -268,8 +270,10 @@ def main(argv=None):
             and event.payload.get("status") == "passed"
             for event in events
         ),
-        "repository_instruction_followed": "AGENTS-FOLLOWED"
-        in projection.final_answer,
+        "repository_instruction_followed_without_file_read": (
+            "AGENTS-FOLLOWED" in projection.final_answer
+            and "AGENTS.md" not in read_paths
+        ),
         "auto_verifier_selected": "VERIFY" in cli.stdout
         and "pytest -q" in cli.stdout,
         "visible_verifier_passed": visible["ok"],

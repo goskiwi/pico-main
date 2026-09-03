@@ -22,6 +22,7 @@ def test_real_system_prompt_describes_symptom_without_revealing_target_path():
     assert "Use repository tools to locate" in prompt
     assert TARGET_PATH not in prompt
     assert "do not modify tests" in prompt
+    assert "do not open AGENTS.md" in prompt
 
 
 def test_published_real_cli_system_artifact_passes_every_boundary():
