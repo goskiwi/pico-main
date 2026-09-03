@@ -1,0 +1,178 @@
+{
+  "analysis": {
+    "event_kinds": [
+      "user_message",
+      "run_started",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "user_guidance",
+      "run_resumed",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "verification_result",
+      "assistant_final"
+    ],
+    "executed_tool_count": 3,
+    "model_request_count": 3,
+    "requested_calls": [
+      {
+        "args": {
+          "expected_revision": "sha256:4b654bd1437066b13498661f3ca14774daf1066d072036beffaf06f0c014250e",
+          "new_text": "partial\n",
+          "old_text": "baseline\n",
+          "path": "recovery.txt"
+        },
+        "call_id": "call_interrupted_edit",
+        "name": "edit_file"
+      },
+      {
+        "args": {
+          "end_line": 200,
+          "path": "recovery.txt",
+          "start_line": 1
+        },
+        "call_id": "call_o6QlldGwPOlw9NkBDzRi90w6",
+        "name": "read_file"
+      },
+      {
+        "args": {
+          "expected_revision": "sha256:95aebb28195b8d737effe0df18d71d39c8d8ba6569286fd3930fbc9f9767181e",
+          "new_text": "recovered\n",
+          "old_text": "partial\n",
+          "path": "recovery.txt"
+        },
+        "call_id": "call_nPbN1m48fCZBq34E4DoZtX5j",
+        "name": "edit_file"
+      }
+    ],
+    "tool_results": [
+      {
+        "affected_paths": [
+          "recovery.txt"
+        ],
+        "call_id": "call_interrupted_edit",
+        "execution_state": "failed",
+        "failure": "operation_interrupted",
+        "name": "edit_file",
+        "recovered_from_interruption": true,
+        "side_effect_state": "partial",
+        "status": "partial_success"
+      },
+      {
+        "affected_paths": [],
+        "call_id": "call_o6QlldGwPOlw9NkBDzRi90w6",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "read_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "none",
+        "status": "success"
+      },
+      {
+        "affected_paths": [
+          "recovery.txt"
+        ],
+        "call_id": "call_nPbN1m48fCZBq34E4DoZtX5j",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "edit_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "changed",
+        "status": "success"
+      }
+    ]
+  },
+  "artifact_type": "pico-real-resume",
+  "captured_at": "2026-09-03T07:46:32.159366+00:00",
+  "changed_paths": [
+    "recovery.txt"
+  ],
+  "checks": {
+    "bounded_turns": true,
+    "dormant_run_restored": true,
+    "final_content_recovered": true,
+    "independent_verifier_passed": true,
+    "interrupted_call_not_replayed": true,
+    "interruption_classified_partial": true,
+    "one_successful_repair": true,
+    "runtime_verifier_passed": true,
+    "same_run_completed": true,
+    "scope_valid": true,
+    "state_observed_before_repair": true
+  },
+  "dormant_snapshot": {
+    "pending_call_id": "call_interrupted_edit",
+    "resumable": true,
+    "same_run_id": true
+  },
+  "model": "gpt-5.6-luna",
+  "outcome": {
+    "answer": "Replaced `partial` with `recovered` in `recovery.txt`, preserving the file’s other content. The edit completed successfully with one replacement.",
+    "changed_paths": [
+      "recovery.txt"
+    ],
+    "final_diff": {
+      "diff_artifact_id": "diff_0920050ee3f4f13d_9f3533860a",
+      "diff_bytes": 71,
+      "unavailable_reason": ""
+    },
+    "metrics": {
+      "executed_tool_count": 3,
+      "kind_counts": {
+        "assistant_final": 1,
+        "assistant_tool_call": 3,
+        "model_requested": 3,
+        "run_resumed": 1,
+        "run_started": 1,
+        "tool_result": 3,
+        "tool_started": 3,
+        "turn_metrics": 3,
+        "user_guidance": 1,
+        "user_message": 1,
+        "verification_result": 1
+      },
+      "model_request_count": 3,
+      "outcome_counts": {
+        "partial_success": 1,
+        "success": 2
+      },
+      "tool_counts": {
+        "edit_file": 2,
+        "read_file": 1
+      },
+      "turn_duration_ms": 13520,
+      "verification_counts": {
+        "passed": 1
+      }
+    },
+    "run_id": "run_20260903-074618-a9103a",
+    "status": "completed",
+    "stop_reason": "final_answer_returned"
+  },
+  "passed": true,
+  "run_id": "run_20260903-074618-a9103a",
+  "runtime": {
+    "branch": "codex/pico-explicit-modes",
+    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "working_tree_dirty": false
+  },
+  "verification": {
+    "exit_code": 0,
+    "infrastructure_error": false,
+    "ok": true,
+    "stderr": "",
+    "stdout": "",
+    "stop_reason": ""
+  }
+}

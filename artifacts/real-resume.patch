@@ -1,0 +1,7 @@
+diff --git a/recovery.txt b/recovery.txt
+index 180b47c..df881dd 100644
+--- a/recovery.txt
++++ b/recovery.txt
+@@ -1 +1 @@
+-baseline
++recovered

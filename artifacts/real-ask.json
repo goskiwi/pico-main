@@ -1,0 +1,102 @@
+{
+  "analysis": {
+    "event_kinds": [
+      "user_message",
+      "run_started",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "assistant_final"
+    ],
+    "executed_tool_count": 1,
+    "model_request_count": 2,
+    "requested_calls": [
+      {
+        "args": {
+          "end_line": 200,
+          "path": "README.md",
+          "start_line": 1
+        },
+        "call_id": "call_i8LfjiW0FNfoj6icNSvWp85v",
+        "name": "read_file"
+      }
+    ],
+    "tool_results": [
+      {
+        "affected_paths": [],
+        "call_id": "call_i8LfjiW0FNfoj6icNSvWp85v",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "read_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "none",
+        "status": "success"
+      }
+    ]
+  },
+  "artifact_type": "pico-real-ask",
+  "captured_at": "2026-09-03T07:42:01.268831+00:00",
+  "changed_paths": [],
+  "checks": {
+    "ask_surface_exact": true,
+    "bounded_turns": true,
+    "completed": true,
+    "no_workspace_change": true,
+    "observation_used": true,
+    "readme_read": true
+  },
+  "model": "gpt-5.6-luna",
+  "outcome": {
+    "answer": "ORBIT-7",
+    "changed_paths": [],
+    "final_diff": {
+      "diff_artifact_id": "",
+      "diff_bytes": 0,
+      "unavailable_reason": ""
+    },
+    "metrics": {
+      "executed_tool_count": 1,
+      "kind_counts": {
+        "assistant_final": 1,
+        "assistant_tool_call": 1,
+        "model_requested": 2,
+        "run_started": 1,
+        "tool_result": 1,
+        "tool_started": 1,
+        "turn_metrics": 2,
+        "user_message": 1
+      },
+      "model_request_count": 2,
+      "outcome_counts": {
+        "success": 1
+      },
+      "tool_counts": {
+        "read_file": 1
+      },
+      "turn_duration_ms": 19777,
+      "verification_counts": {}
+    },
+    "run_id": "run_20260903-074141-a00c1c",
+    "status": "completed",
+    "stop_reason": "final_answer_returned"
+  },
+  "passed": true,
+  "run_id": "run_20260903-074141-a00c1c",
+  "runtime": {
+    "branch": "codex/pico-explicit-modes",
+    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "working_tree_dirty": false
+  },
+  "tool_surface": [
+    "list_files",
+    "read_artifact",
+    "read_file",
+    "search",
+    "submit_final",
+    "update_working_state"
+  ]
+}

@@ -1,0 +1,192 @@
+{
+  "analysis": {
+    "event_kinds": [
+      "user_message",
+      "run_started",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "assistant_tool_call",
+      "tool_started",
+      "tool_result",
+      "model_requested",
+      "turn_metrics",
+      "verification_result",
+      "assistant_final"
+    ],
+    "executed_tool_count": 4,
+    "model_request_count": 5,
+    "requested_calls": [
+      {
+        "args": {
+          "end_line": 200,
+          "path": "subject.txt",
+          "start_line": 1
+        },
+        "call_id": "call_7Ld9LZK9yDJ353eIlB4MQnDh",
+        "name": "read_file"
+      },
+      {
+        "args": {
+          "expected_revision": "sha256:b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+          "new_text": "agent",
+          "old_text": "alpha",
+          "path": "subject.txt"
+        },
+        "call_id": "call_Y88dJetyGkpr6ml9G98Ep7gN",
+        "name": "edit_file"
+      },
+      {
+        "args": {
+          "end_line": 200,
+          "path": "subject.txt",
+          "start_line": 1
+        },
+        "call_id": "call_rjZ2XEzBXhcshR0KtSjqyTtf",
+        "name": "read_file"
+      },
+      {
+        "args": {
+          "expected_revision": "sha256:890e3396298ef8b97657e367a34c4560a2ee77e6f39748814609a0f4227bf4ea",
+          "new_text": "agent",
+          "old_text": "alpha",
+          "path": "subject.txt"
+        },
+        "call_id": "call_YJgwc4iWnVZ0odMEq9tVzKUL",
+        "name": "edit_file"
+      }
+    ],
+    "tool_results": [
+      {
+        "affected_paths": [],
+        "call_id": "call_7Ld9LZK9yDJ353eIlB4MQnDh",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "read_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "none",
+        "status": "success"
+      },
+      {
+        "affected_paths": [],
+        "call_id": "call_Y88dJetyGkpr6ml9G98Ep7gN",
+        "execution_state": "failed",
+        "failure": "revision_conflict",
+        "name": "edit_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "none",
+        "status": "error"
+      },
+      {
+        "affected_paths": [],
+        "call_id": "call_rjZ2XEzBXhcshR0KtSjqyTtf",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "read_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "none",
+        "status": "success"
+      },
+      {
+        "affected_paths": [
+          "subject.txt"
+        ],
+        "call_id": "call_YJgwc4iWnVZ0odMEq9tVzKUL",
+        "execution_state": "completed",
+        "failure": "",
+        "name": "edit_file",
+        "recovered_from_interruption": false,
+        "side_effect_state": "changed",
+        "status": "success"
+      }
+    ]
+  },
+  "artifact_type": "pico-real-revision-repair",
+  "captured_at": "2026-09-03T07:46:18.545771+00:00",
+  "changed_paths": [
+    "subject.txt"
+  ],
+  "checks": {
+    "bounded_turns": true,
+    "completed": true,
+    "concurrent_content_preserved": true,
+    "conflict_observed": true,
+    "drift_injected": true,
+    "independent_verifier_passed": true,
+    "one_successful_repair": true,
+    "reread_after_conflict": true,
+    "runtime_verifier_passed": true,
+    "scope_valid": true
+  },
+  "model": "gpt-5.6-luna",
+  "outcome": {
+    "answer": "Updated `subject.txt`: replaced `alpha` with `agent` and preserved the concurrent `external` line. The edit succeeded after retrying with the current revision.",
+    "changed_paths": [
+      "subject.txt"
+    ],
+    "final_diff": {
+      "diff_artifact_id": "diff_f71cd4e7f452c7ed_440505e8af",
+      "diff_bytes": 76,
+      "unavailable_reason": ""
+    },
+    "metrics": {
+      "executed_tool_count": 4,
+      "kind_counts": {
+        "assistant_final": 1,
+        "assistant_tool_call": 4,
+        "model_requested": 5,
+        "run_started": 1,
+        "tool_result": 4,
+        "tool_started": 4,
+        "turn_metrics": 5,
+        "user_message": 1,
+        "verification_result": 1
+      },
+      "model_request_count": 5,
+      "outcome_counts": {
+        "error": 1,
+        "success": 3
+      },
+      "tool_counts": {
+        "edit_file": 2,
+        "read_file": 2
+      },
+      "turn_duration_ms": 92790,
+      "verification_counts": {
+        "passed": 1
+      }
+    },
+    "run_id": "run_20260903-074445-d2b0dc",
+    "status": "completed",
+    "stop_reason": "final_answer_returned"
+  },
+  "passed": true,
+  "run_id": "run_20260903-074445-d2b0dc",
+  "runtime": {
+    "branch": "codex/pico-explicit-modes",
+    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "working_tree_dirty": false
+  },
+  "verification": {
+    "exit_code": 0,
+    "infrastructure_error": false,
+    "ok": true,
+    "stderr": "",
+    "stdout": "",
+    "stop_reason": ""
+  }
+}
