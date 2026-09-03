@@ -40,6 +40,8 @@ artifacts/*
 !artifacts/real-revision-repair.patch
 !artifacts/real-resume.json
 !artifacts/real-resume.patch
+!artifacts/real-system.json
+!artifacts/real-system.patch
 release/
 readme_intro_locked/
 output/
