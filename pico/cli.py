@@ -156,7 +156,7 @@ def build_welcome(agent, model):
                 "WORKSPACE  "
                 + middle(agent.workspace.cwd, inner - 11)
             ),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
+            pair("MODEL", model, "BRANCH", agent.workspace.current_branch()),
             pair(
                 "MODE",
                 agent.config.mode,

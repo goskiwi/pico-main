@@ -323,6 +323,8 @@ def test_repository_instruction_loading_has_one_total_byte_limit(tmp_path):
 
 
 def test_workspace_queries_git_facts_when_rendered(tmp_path):
+    cwd = tmp_path / "src"
+    cwd.mkdir()
     (tmp_path / "AGENTS.md").write_text("rule\n")
     (tmp_path / "README.md").write_text("docs\n")
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
@@ -343,15 +345,18 @@ def test_workspace_queries_git_facts_when_rendered(tmp_path):
         check=True,
     )
 
-    workspace = Workspace.build(tmp_path)
+    workspace = Workspace.build(cwd)
     before = workspace.text()
     (tmp_path / "README.md").write_text("changed\n")
     after = workspace.text()
 
     assert "README.md" not in before
     assert "README.md" in after
+    assert "cwd: src" in after
+    assert workspace.current_status().startswith("M README.md")
     assert not hasattr(workspace, "git_status")
     assert not hasattr(workspace, "refresh")
+    assert not hasattr(workspace, "branch")
 
 
 def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):

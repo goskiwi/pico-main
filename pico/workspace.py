@@ -73,19 +73,13 @@ class Workspace:
         )
         return cls(cwd, repo_root)
 
-    @property
-    def branch(self):
-        return _git(self.cwd, ["branch", "--show-current"], "-") or "-"
+    def current_branch(self):
+        return _git(self.root, ["branch", "--show-current"], "-") or "-"
 
-    def text(self):
-        try:
-            logical_cwd = self.cwd.relative_to(self.root).as_posix()
-        except ValueError:
-            logical_cwd = "."
-        logical_cwd = logical_cwd or "."
-        status = clip(
+    def current_status(self):
+        return clip(
             _git(
-                self.cwd,
+                self.root,
                 [
                     "status",
                     "--short",
@@ -97,11 +91,19 @@ class Workspace:
             )
             or "clean",
             1500,
-        ).splitlines()
+        )
+
+    def text(self):
+        try:
+            logical_cwd = self.cwd.relative_to(self.root).as_posix()
+        except ValueError:
+            logical_cwd = "."
+        logical_cwd = logical_cwd or "."
+        status = self.current_status().splitlines()
         lines = [
             "Workspace:",
             f"- cwd: {logical_cwd}",
-            f"- branch: {self.branch}",
+            f"- branch: {self.current_branch()}",
             "- status:",
             *(f"  {line}" for line in status),
         ]
