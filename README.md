@@ -41,6 +41,10 @@ PICO_OPENAI_MODEL="gpt-5.4"
 Resume 可以收窄但不能扩大原 Contract。`ask()` 返回结构化 `RunOutcome`，持久事实仍以
 `RunStore.replay(run_id)` 为准。
 
+CLI 从仓库根目录到启动目录依次加载适用的 `AGENTS.md`，以 32 KiB 总上限放入首个 user
+input 的独立 `repository_instructions`，不把它提升为 system policy，也不混入普通不可信
+仓库 Context。当前用户任务冲突时优先；Mode、工具权限、路径和完成规则仍由 Runtime 代码决定。
+
 ## 核心运行链
 
 ```text

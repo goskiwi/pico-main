@@ -77,7 +77,7 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
 | 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 由显式 Mode 确定性生成 TaskContract；恢复 Run 不能扩大原能力，并在 Provider 前持久化 `user_guidance` |
 | 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction；一个 Tool Action 可带单 Call 或纯 Observation Batch |
-| 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；动态 `input` 按 Runtime policy、Task Request、非空有界 Context 组装，仅恢复时追加不同的 latest request；当前允许的原生 Schema 直接进入 `tools` |
+| 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；root→CWD 的 `AGENTS.md` 作为独立 repository instructions 放在 Runtime policy 与 Task Request 之间，普通仓库事实进入非空有界 Context，仅恢复时追加不同的 latest request；当前允许的原生 Schema 直接进入 `tools` |
 | 6 | `providers/clients.py: _action_from_response -> complete_action` | 一个带 `call_id` 的 Function Call 形成单 Call Action；多个 Call 保持原顺序进入 Observation Batch 准入 |
 | 7 | `AgentLoop._handle_tool_turn` | 执行前先原子持久化一个 `assistant_tool_call` 或完整 `assistant_tool_batch` Fact |
 | 8 | `ToolRuntime.execute_pending / execute_pending_batch` | 单 Call 走完整准入、Approval、影响路径与 Preimage；Batch 先整体验证，只让纯 Observation Runner 并行，Result 仍按原顺序落盘；无 Run 的人工观察走 `execute_manual` |

@@ -117,7 +117,7 @@ Session 指针、Workspace 内容和 Artifact 各有独立且明确的所有权�
 ### 2. Context 治理 `[Context Pressure]`
 
 固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
-按 Runtime task policy、Task Request、非空有界 Context 排列；仅 Resume 且请求改变时
+按 Runtime task policy、root→CWD 的独立 repository instructions、Task Request、非空有界 Context 排列；仅 Resume 且请求改变时
 才在最后追加 latest request。RepoMap 用 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径排序；
 History 位于当前 WorkingState 之前，避免旧摘要覆盖当前状态。空 RepoMap/WorkingState/History
 不渲染，普通 Function Call 续接只追加 Call/Output。原生 Function Schema 只在 `tools`；每轮

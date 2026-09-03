@@ -178,16 +178,20 @@ Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunne
 
 Stable role, execution, Tool protocol, WorkingState and completion rules are sent through
 Responses `instructions`. The first request of a Provider action session sends a small dynamic
-`input` with two always-present parts, Runtime task policy and the original task request. It adds an
-untrusted-context envelope only when at least one bounded projection is non-empty, and adds a
-differing latest request only on Resume. The envelope can include minimal Workspace facts and
-document names, `AGENTS.md` repository conventions, RepoMap, History and WorkingState. RepoMap is
+`input` with two always-present parts, Runtime task policy and the original task request. Applicable
+`AGENTS.md` files from repository root through the invocation CWD are inserted between them as a
+dedicated `repository_instructions` block. They are project instructions rather than system policy
+or ordinary repository data: the current user request wins on conflict, and ToolRuntime remains the
+permission boundary. An untrusted-context envelope is added only when at least one bounded
+projection is non-empty, and a differing latest request is added only on Resume. The envelope can
+include minimal Workspace facts and document names, RepoMap, History and WorkingState. RepoMap is
 ranked from the immutable goal, latest request, current WorkingState and paths already observed or
 changed by the Run. History is rendered before WorkingState so an older summary cannot displace the
 current constraints, decisions and next steps. The original task precedes this recovery context;
 only differing Resume guidance is appended last.
-Empty RepoMap, WorkingState and History sections are not rendered; project-document bodies are not
-preloaded.
+Empty repository instructions, RepoMap, WorkingState and History sections are not rendered;
+ordinary project-document bodies are not preloaded. Repository instructions have one 32 KiB total
+byte limit and stay outside History compaction.
 Normal Tool continuation appends native `function_call` and `function_call_output` items to the same
 manual Responses replay instead of rebuilding or resending the dynamic suffix. Observation Batch
 Results are appended together in original Call order before the next Provider request.

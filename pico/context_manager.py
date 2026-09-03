@@ -13,13 +13,11 @@ from .working_state import WorkingState
 
 DEFAULT_SECTION_CAPS = {
     "workspace": 600,
-    "repository_conventions": 800,
     "repo_map": 1200,
     "working_state": 300,
 }
 FIXED_SECTION_ALLOCATION_ORDER = (
     "workspace",
-    "repository_conventions",
     "repo_map",
     "working_state",
 )
@@ -29,7 +27,6 @@ CONTEXT_ALLOCATION_ORDER = (
 )
 CONTEXT_WIRE_ORDER = (
     "workspace",
-    "repository_conventions",
     "repo_map",
     "history",
     "working_state",
@@ -115,7 +112,8 @@ class _ContextAssembler:
         minimum_input = self._assemble_input(raw, {})
         if self.tokenizer.count(minimum_input) > available:
             raise ContextBudgetExceeded(
-                "runtime policy and task request exceed the model budget"
+                "runtime policy, repository instructions, and task request "
+                "exceed the model budget"
             )
 
         if history_override is None and self.agent.run.run_log is not None:
@@ -149,7 +147,12 @@ class _ContextAssembler:
             )
 
         sections = {}
-        for key in ("runtime_policy", "task_request", "latest_user_request"):
+        for key in (
+            "runtime_policy",
+            "repository_instructions",
+            "task_request",
+            "latest_user_request",
+        ):
             value = raw[key]
             if not value:
                 continue
@@ -195,6 +198,11 @@ class _ContextAssembler:
             "tokenizer": self.tokenizer.encoding.name,
             "section_order": [
                 "runtime_policy",
+                *(
+                    ["repository_instructions"]
+                    if raw["repository_instructions"]
+                    else []
+                ),
                 "task_request",
                 *(["untrusted_context"] if rendered_context else []),
                 *(
@@ -373,8 +381,8 @@ class _ContextAssembler:
         latest = run_log.latest_user_guidance() if run_log is not None else ""
         return {
             "runtime_policy": self._runtime_policy_text(),
+            "repository_instructions": self._repository_instructions_text(),
             "workspace": self._workspace_text(),
-            "repository_conventions": self._repository_conventions_text(),
             "repo_map": self._repo_map_text(user_message),
             "working_state": self._working_state_text(),
             "history": (
@@ -600,7 +608,10 @@ class _ContextAssembler:
         )
 
     def _assemble_input(self, raw, context):
-        parts = [raw["runtime_policy"], raw["task_request"]]
+        parts = [raw["runtime_policy"]]
+        if raw["repository_instructions"]:
+            parts.append(raw["repository_instructions"])
+        parts.append(raw["task_request"])
         if context:
             parts.append(self._untrusted_envelope(context))
         if raw["latest_user_request"]:
@@ -646,11 +657,21 @@ class _ContextAssembler:
     def _workspace_text(self):
         return self.agent.workspace.context.text()
 
-    def _repository_conventions_text(self):
-        conventions = self.agent.workspace.context.repository_conventions
-        return "\n\n".join(
-            f"{path}:\n{content}" for path, content in conventions.items()
-        )
+    def _repository_instructions_text(self):
+        instructions = self.agent.workspace.context.repository_instructions
+        if not instructions:
+            return ""
+        lines = ["<repository_instructions>"]
+        for path, content in instructions.items():
+            lines.extend(
+                (
+                    f'<instructions path="{escape(path, quote=True)}">',
+                    escape(content, quote=False),
+                    "</instructions>",
+                )
+            )
+        lines.append("</repository_instructions>")
+        return "\n".join(lines)
 
     def _working_state_text(self):
         task_state = self.agent.run.task

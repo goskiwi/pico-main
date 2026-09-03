@@ -7,7 +7,8 @@ from scripts.run_real_system import TARGET_PATH, build_prompt, system_files
 def test_real_system_fixture_is_multi_file_and_starts_with_the_pricing_bug():
     files = system_files()
 
-    assert len(files) == 7
+    assert len(files) == 8
+    assert "AGENTS-FOLLOWED" in files["AGENTS.md"]
     assert TARGET_PATH in files
     assert "item.unit_price for item in items" in files[TARGET_PATH]
     assert "item.quantity" not in files[TARGET_PATH]

@@ -16,7 +16,7 @@ Session 只保存 `active_run_id`。恢复输入先作为 `user_guidance` Fact �
 
 ## 长上下文治理
 
-稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、Task Request 和非空的有界不可信 Context。恢复输入从持久 `user_guidance` Fact 投影为最后的 latest request；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前，因此重建 Session 时当前进度不会被原始任务中的步骤重新覆盖。空 RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
+稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、root→CWD 的独立 `repository_instructions`、Task Request 和非空的有界不可信 Context。AGENTS.md 属于可覆盖的项目指令，不是 system policy，也不参加 History Compaction；当前用户请求冲突时优先。恢复输入从持久 `user_guidance` Fact 投影为最后的 latest request；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前，因此重建 Session 时当前进度不会被原始任务中的步骤重新覆盖。空 Repository Instructions、RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
 
 ## 工具安全
 
