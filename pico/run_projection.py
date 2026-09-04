@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from .delivery import FinalDiffDescriptor
+from .delivery import FinalDiff
 from .evidence import RunEvidence
 from .task_state import TaskContract, TaskState
 
@@ -92,7 +92,7 @@ class RunProjection:
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
     pending_call_ids: tuple[str, ...] = ()
-    final_diff: FinalDiffDescriptor | None = None
+    final_diff: FinalDiff | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
     def apply_event(self, event):
@@ -121,19 +121,17 @@ class RunProjection:
                 raise ValueError("tool result does not match projected pending order")
             self.pending_call_ids = self.pending_call_ids[1:]
         if event.kind in {"assistant_final", "run_stopped"}:
-            self.final_diff = FinalDiffDescriptor.from_dict(
-                event.payload["final_diff"]
+            raw_final_diff = event.payload.get("final_diff")
+            self.final_diff = (
+                FinalDiff.from_dict(raw_final_diff)
+                if raw_final_diff is not None
+                else None
             )
-            if (
-                event.kind == "assistant_final"
-                and self.final_diff.unavailable_reason
-            ):
-                raise ValueError("completed Run requires an available final Diff")
-            if (
-                not self.final_diff.unavailable_reason
-                and bool(self.evidence.changed_paths)
-                != bool(self.final_diff.diff_artifact_id)
-            ):
+            if event.kind == "assistant_final" and self.final_diff is None:
+                raise ValueError("completed Run requires a final Diff")
+            if self.final_diff is not None and bool(
+                self.evidence.changed_paths
+            ) != bool(self.final_diff.artifact_id):
                 raise ValueError("terminal final Diff does not match net changes")
         self.last_cursor = RunCursor(event.sequence, event.event_id)
         return self
@@ -212,7 +210,7 @@ class RunOutcome:
     status: str
     answer: str
     stop_reason: str
-    final_diff: FinalDiffDescriptor
+    final_diff: FinalDiff | None
     changed_paths: tuple[str, ...]
     metrics: dict[str, Any]
 
@@ -221,8 +219,8 @@ class RunOutcome:
             raise TypeError("RunOutcome requires a RunProjection")
         if not projection.terminal:
             raise ValueError("RunOutcome requires a terminal Run projection")
-        if projection.final_diff is None:
-            raise ValueError("terminal Run projection requires a final Diff")
+        if projection.status == "completed" and projection.final_diff is None:
+            raise ValueError("completed Run projection requires a final Diff")
         object.__setattr__(self, "run_id", projection.run_id)
         object.__setattr__(self, "status", projection.status)
         object.__setattr__(self, "answer", projection.final_answer)
@@ -243,7 +241,7 @@ class RunOutcome:
             "status": self.status,
             "answer": self.answer,
             "stop_reason": self.stop_reason,
-            "final_diff": self.final_diff.to_dict(),
+            "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "changed_paths": list(self.changed_paths),
             "metrics": deepcopy(self.metrics),
         }

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
-from pico.completion_controller import CompletionController
+from pico.completion_controller import CompletionController, CompletionDecision
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import content_revision, file_revision
@@ -28,6 +28,13 @@ VERIFIED_TASK = {
     "allows_workspace_mutation": True,
     "verify_changes": True,
 }
+
+
+def test_completion_decision_has_an_explicit_status():
+    assert CompletionDecision("allowed", "done").allowed
+    assert not CompletionDecision("workspace_drift", "inspect files").allowed
+    with pytest.raises(ValueError):
+        CompletionDecision("", "")
 
 
 def active_agent(tmp_path, requirements, verification_command=""):
@@ -153,7 +160,7 @@ def test_required_verification_fails_closed_without_command(tmp_path):
     add_change(agent, "README.md", "a", "b", 1)
     assessment = CompletionController(agent).assess("done")
     assert assessment.status == "verification_failed"
-    assert "no verification command" in assessment.instruction
+    assert "no verification command" in assessment.content
 
 
 def test_external_change_blocks_completion_before_verification(tmp_path):
@@ -275,4 +282,4 @@ def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
     assessment = CompletionController(agent).assess("done")
 
     assert assessment.status == "subtasks_incomplete"
-    assert "child task is still running" in assessment.instruction
+    assert "child task is still running" in assessment.content

@@ -24,12 +24,15 @@ class PatchIntegrator:
         projection = self.manager._child_projection(run_id, record)
         if projection.status != "completed":
             raise ValueError(f"Child Run did not complete: {record.child_id}")
-        path = Path(record.patch_path)
+        patch_receipt = record.completed().patch
+        if patch_receipt is None:
+            raise ValueError(f"Child patch is missing: {record.child_id}")
+        path = Path(patch_receipt.path)
         if not path.is_file():
             raise ValueError(f"Child patch is missing: {record.child_id}")
         patch = path.read_bytes()
         digest = hashlib.sha256(patch).hexdigest()
-        if digest != record.patch_sha256:
+        if digest != patch_receipt.sha256:
             raise ValueError(f"Child patch digest is invalid: {record.child_id}")
         return patch
 
@@ -75,9 +78,10 @@ class PatchIntegrator:
         record = self.manager._record(run_id, child_id)
         if record.spec.role != "implement":
             raise ValueError(f"Child is not an implementation: {child_id}")
-        if record.status != "completed":
-            raise ValueError(f"Child is not completed: {child_id}")
-        if record.integrated:
+        patch_receipt = record.completed().patch
+        if patch_receipt is None:
+            raise ValueError(f"Child has no patch: {child_id}")
+        if patch_receipt.integrated:
             raise ValueError(f"Child patch is already integrated: {child_id}")
         patch = self._verified_patch(run_id, record)
         self._require_parent_base(record.base_sha, "after Child delegation")
@@ -91,21 +95,21 @@ class PatchIntegrator:
             integration.create()
             integration.apply_patch(patch)
             changed_paths = integration.changed_paths()
-            if changed_paths != record.changed_paths:
+            if changed_paths != patch_receipt.changed_paths:
                 raise ValueError("integrated paths do not match the Child receipt")
             verification = self._verify_integration(integration)
             verified_paths = integration.changed_paths()
             verified_patch = integration.patch()
-            if verified_paths != record.changed_paths:
+            if verified_paths != patch_receipt.changed_paths:
                 raise ValueError("verification changed paths outside the Child receipt")
-            if hashlib.sha256(verified_patch).hexdigest() != record.patch_sha256:
+            if hashlib.sha256(verified_patch).hexdigest() != patch_receipt.sha256:
                 raise ValueError("verification changed the immutable Child patch")
             self._require_parent_base(record.base_sha, "during patch verification")
             apply_patch(self.parent.workspace.root, patch)
         finally:
             integration.cleanup()
 
-        record.integrated = True
+        record.mark_integrated()
         handle = self.manager._release_worktree(run_id, record.child_id)
         if handle is not None:
             handle.cleanup()
@@ -113,6 +117,6 @@ class PatchIntegrator:
             "status": "integrated",
             "child_id": record.child_id,
             "base_sha": record.base_sha,
-            "changed_paths": list(record.changed_paths),
+            "changed_paths": list(patch_receipt.changed_paths),
             "verification": verification,
         }

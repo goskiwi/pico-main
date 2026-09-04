@@ -139,13 +139,13 @@ class RunStore:
         events = tuple(self.read_events(run_id))
         projection = replay_events(events)
         final_diff = projection.final_diff
-        if final_diff is not None and final_diff.diff_artifact_id:
+        if final_diff is not None and final_diff.artifact_id:
             descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
                 run_id,
-                final_diff.diff_artifact_id,
+                final_diff.artifact_id,
                 expected_kind="final_workspace_diff",
             )
-            if int(descriptor["size_bytes"]) != final_diff.diff_bytes:
+            if int(descriptor["size_bytes"]) != final_diff.size_bytes:
                 raise ValueError("terminal final Diff descriptor size mismatch")
         return events, projection
 

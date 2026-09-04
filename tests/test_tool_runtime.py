@@ -17,7 +17,7 @@ from pico import (
 )
 from pico.completion_controller import CompletionController
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
-from pico.delivery import build_final_diff_descriptor
+from pico.delivery import build_final_diff
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_lifecycle import AgentLoopState, RunLifecycle
@@ -344,11 +344,11 @@ def test_runtime_mutation_records_diff_transition_and_final_diff(tmp_path):
         "after_state": outcome.structured["after_revision"],
         "before_artifact_id": "",
     }
-    final_diff = build_final_diff_descriptor(agent)
-    assert final_diff.diff_artifact_id.startswith("diff_")
-    assert final_diff.diff_bytes > 0
+    final_diff = build_final_diff(agent)
+    assert final_diff.artifact_id.startswith("diff_")
+    assert final_diff.size_bytes > 0
     assert "+alpha" in agent.dependencies.artifacts.read_internal_text(
-        "run_tool_test", final_diff.diff_artifact_id
+        "run_tool_test", final_diff.artifact_id
     )
     agent.apply_run_event(
         agent.run.run_log.append_final("created", final_diff)
@@ -367,10 +367,10 @@ def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
             "call_missing_final_diff",
         ),
     )
-    final_diff = build_final_diff_descriptor(agent)
+    final_diff = build_final_diff(agent)
     agent.apply_run_event(agent.run.run_log.append_final("created", final_diff))
     artifact_root = agent.dependencies.run_store.artifact_dir("run_tool_test")
-    (artifact_root / f"{final_diff.diff_artifact_id}.txt").unlink()
+    (artifact_root / f"{final_diff.artifact_id}.txt").unlink()
 
     with pytest.raises(ValueError, match="internal artifact is missing"):
         agent.dependencies.run_store.load_run("run_tool_test")
@@ -589,9 +589,7 @@ def test_controlled_stop_survives_external_workspace_drift(tmp_path, stop_mode):
 
     replayed = agent.dependencies.run_store.replay("run_tool_test")
     assert replayed.terminal
-    assert replayed.final_diff.unavailable_reason == "workspace_drift"
-    assert replayed.final_diff.diff_artifact_id == ""
-    assert replayed.final_diff.diff_bytes == 0
+    assert replayed.final_diff is None
     assert agent.session.data["active_run_id"] == ""
     assert agent.run.execution_context is None
     if stop_mode == "reset":

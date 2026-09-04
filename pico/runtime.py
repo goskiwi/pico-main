@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
-from .delivery import build_stopped_final_diff_descriptor
+from .delivery import build_stopped_final_diff
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
@@ -159,7 +159,7 @@ class Pico:
                     run_log.append_stopped(
                         "Session reset by user.",
                         "user_reset",
-                        build_stopped_final_diff_descriptor(self),
+                        build_stopped_final_diff(self),
                     )
                 )
         except BaseException:

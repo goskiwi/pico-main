@@ -20,7 +20,7 @@ Session 只保存 `active_run_id`。恢复输入先作为 `user_guidance` Fact �
 
 ## 工具安全
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每个结构化修改路径只保存第一次修改前的 preimage，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置以明确的 unavailable receipt 受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每个结构化修改路径只保存第一次修改前的 preimage，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置可以省略无法可信生成的 final_diff 后受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
 
 ## 应用层 Git 交付
 

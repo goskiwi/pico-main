@@ -17,19 +17,21 @@ from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
+from pico.subagents.contracts import (
+    ChildFailure,
+    ChildPatch,
+    ChildRecord,
+    ChildSpec,
+    ChildSuccess,
+)
 from pico.task_state import TaskContract
 
-CHILD_RECEIPT_FIELDS = {
+CHILD_SUCCESS_FIELDS = {
     "child_id",
     "role",
     "status",
     "child_run_id",
     "result",
-    "base_sha",
-    "changed_paths",
-    "patch_sha256",
-    "error",
-    "integrated",
 }
 
 
@@ -244,7 +246,7 @@ def test_explore_creates_distinct_ask_mode_non_recursive_children(tmp_path):
     receipts = [outcome.structured for outcome in outcomes]
 
     assert all(outcome.status == "success" for outcome in outcomes)
-    assert all(set(receipt) == CHILD_RECEIPT_FIELDS for receipt in receipts)
+    assert all(set(receipt) == CHILD_SUCCESS_FIELDS for receipt in receipts)
     assert all(receipt["status"] == "completed" for receipt in receipts)
     assert receipts[0]["child_id"] != receipts[1]["child_id"]
     assert receipts[0]["child_run_id"] != receipts[1]["child_run_id"]
@@ -259,6 +261,27 @@ def test_explore_creates_distinct_ask_mode_non_recursive_children(tmp_path):
             child_tools
         )
         assert all(0 < timeout <= 60 for timeout in client.request_timeouts)
+
+
+def test_failed_child_keeps_run_id_without_empty_success_fields(tmp_path):
+    parent, _ = build_parent(repository(tmp_path), lambda _spec: FakeModelClient([]))
+
+    receipt = parent.dependencies.subagents.delegate("explore", "Inspect README")
+
+    assert receipt["status"] == "failed"
+    assert receipt["child_run_id"]
+    assert receipt["error"]
+    assert "result" not in receipt
+    assert "patch" not in receipt
+
+
+def test_child_result_types_reject_contradictory_success_shapes():
+    spec = ChildSpec(role="explore", task="Inspect")
+    patch = ChildPatch(("file.py",), "/tmp/patch.diff", "digest")
+    with pytest.raises(ValueError, match="Explore Child"):
+        ChildRecord("child_example", spec, result=ChildSuccess("run_child", patch))
+    with pytest.raises(ValueError, match="requires an error"):
+        ChildFailure("")
 
 
 def test_implement_requires_verifier_and_clean_git(tmp_path):
@@ -284,8 +307,8 @@ def test_implement_requires_verifier_and_clean_git(tmp_path):
 
     assert receipt["status"] == "failed"
     assert "clean working tree" in receipt["error"]
-    assert receipt["changed_paths"] == []
-    assert receipt["patch_sha256"] == ""
+    assert "patch" not in receipt
+    assert "result" not in receipt
     assert calls == []
 
 
@@ -303,12 +326,13 @@ def test_implement_returns_patch_without_touching_parent(tmp_path):
         (parent.run.projection.run_id, receipt["child_id"])
     ]
 
-    assert set(receipt) == CHILD_RECEIPT_FIELDS
+    assert set(receipt) == CHILD_SUCCESS_FIELDS | {"patch"}
     assert receipt["status"] == "completed"
-    assert receipt["changed_paths"] == ["feature.py"]
-    assert receipt["patch_sha256"] and receipt["integrated"] is False
+    assert receipt["patch"]["changed_paths"] == ["feature.py"]
+    assert receipt["patch"]["sha256"]
+    assert receipt["patch"]["integrated"] is False
     assert not (root / "feature.py").exists()
-    assert Path(record.patch_path).is_file()
+    assert Path(record.completed().patch.path).is_file()
     assert worktree.path != root
     assert (worktree.path / "feature.py").read_text() == "feature\n"
     assert any(runner.calls for runner in runners.runners if runner.root == worktree.path)
@@ -357,7 +381,7 @@ def test_integrate_child_rejects_parent_base_drift(tmp_path):
     record = parent.dependencies.subagents._record(
         parent.run.projection.run_id, receipt["child_id"]
     )
-    assert record.integrated is False
+    assert record.completed().patch.integrated is False
     assert not (root / "feature.py").exists()
 
 
@@ -378,7 +402,7 @@ def test_failed_integration_verification_does_not_modify_parent(tmp_path):
     record = parent.dependencies.subagents._record(
         parent.run.projection.run_id, receipt["child_id"]
     )
-    assert record.integrated is False
+    assert record.completed().patch.integrated is False
     assert not (root / "feature.py").exists()
     assert any(runner.fail and runner.calls for runner in runners.runners)
 
@@ -440,5 +464,5 @@ def test_completion_blocks_unintegrated_implementation(tmp_path):
     assessment = CompletionController(parent).assess("done")
 
     assert assessment.status == "subtasks_incomplete"
-    assert receipt["child_id"] in assessment.instruction
+    assert receipt["child_id"] in assessment.content
     assert not (root / "feature.py").exists()

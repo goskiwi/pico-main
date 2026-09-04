@@ -12,21 +12,24 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class CompletionResult:
-    final_answer: str | None = None
-    status: str = ""
-    instruction: str = ""
+class CompletionDecision:
+    status: str
+    content: str
+
+    def __post_init__(self):
+        if not self.status.strip() or not self.content.strip():
+            raise ValueError("completion decision requires status and content")
 
     @property
     def allowed(self):
-        return self.final_answer is not None
+        return self.status == "allowed"
 
 
 class CompletionController:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def assess(self, final: str) -> CompletionResult:
+    def assess(self, final: str) -> CompletionDecision:
         blocker = (
             self._static_blocker()
             or self._unrepaired_effect_blocker()
@@ -35,21 +38,18 @@ class CompletionController:
         )
         if blocker:
             status, instruction = blocker
-            return CompletionResult(status=status, instruction=instruction)
+            return CompletionDecision(status, instruction)
 
         verification, guidance = self._ensure_verification()
         if guidance:
-            return CompletionResult(
-                status="verification_failed",
-                instruction=guidance,
-            )
+            return CompletionDecision("verification_failed", guidance)
         blocker = self._effect_blocker(
             self.runtime.run.evidence.unresolved_effects(verification)
         )
         if blocker:
             status, instruction = blocker
-            return CompletionResult(status=status, instruction=instruction)
-        return CompletionResult(final_answer=final)
+            return CompletionDecision(status, instruction)
+        return CompletionDecision("allowed", final)
 
     def _unrepaired_effect_blocker(self):
         return self._effect_blocker(

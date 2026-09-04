@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .delivery import (
-    build_final_diff_descriptor,
-    build_stopped_final_diff_descriptor,
+    build_final_diff,
+    build_stopped_final_diff,
 )
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
@@ -242,7 +242,7 @@ class RunLifecycle:
 
     def finish_success(self, loop_state, final) -> RunOutcome:
         runtime = self.runtime
-        final_diff = build_final_diff_descriptor(runtime)
+        final_diff = build_final_diff(runtime)
         runtime.apply_run_event(
             runtime.run.run_log.append_final(
                 final,
@@ -263,7 +263,7 @@ class RunLifecycle:
 
     def finish_stopped(self, loop_state) -> RunOutcome:
         final, stop_reason = self._stopped_result(loop_state.execution_stop)
-        final_diff = build_stopped_final_diff_descriptor(self.runtime)
+        final_diff = build_stopped_final_diff(self.runtime)
         self.runtime.apply_run_event(
             self.runtime.run.run_log.append_stopped(
                 final,

@@ -76,7 +76,7 @@ ModelAction.final
 
 controlled stop
   -> RunLifecycle appends run_stopped + final_diff receipt
-  -> workspace drift is reported as unavailable_reason, never as a trustworthy Diff
+  -> workspace drift leaves stopped final_diff absent, never fabricates a trustworthy Diff
 ```
 
 An active `reset()` first requests `user_reset` on the existing ExecutionContext and returns without replacing Run state. The running AgentLoop records the current Tool Result, observes cancellation, appends `run_stopped`, clears the Session pointer, and only then clears ActiveRunState. A dormant reset performs the same reconciliation and terminal settlement synchronously.
@@ -258,6 +258,12 @@ Session stores only `active_run_id`. On startup `load_resumable_run` opens that 
 
 `CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; unrepaired `unknown/partial` effects; the persisted maximum capability and no-change Observation requirement; external Workspace drift; change-triggered/current verification; and effects that remain unresolved after verification. A zero-change completion needs at least one successful Observation. A repaired Workspace partial must receive a passing verifier for the current mutation/path state. Completion establishes evidence sufficiency and freshness, not arbitrary business-semantic correctness. `RunEvidence` only answers factual relationship queries; it does not return a completion decision.
 
+Completion returns one tagged `CompletionDecision(status, content)`: `allowed` carries the final
+answer; a blocker status carries repair guidance. A successful terminal event requires
+`FinalDiff(artifact_id, size_bytes)`, including an empty receipt for a confirmed zero-change result.
+A stopped event may omit `final_diff`; its RunOutcome then exposes `None` rather than an error
+string embedded inside an artifact descriptor.
+
 ## Coding application Git delivery
 
 `applications.coding.CodingWorkflow` is an opt-in delivery application, not part of Pico Core. It
@@ -282,6 +288,10 @@ Worktree rooted at the delegation base. Child Tool surfaces exclude `delegate`, 
 recurse. The Parent receives a compact result plus a receipt; Child Tool history remains in the
 Child Run Log.
 
+`ChildRecord.result` is `None` while running, `ChildSuccess` on completion, or `ChildFailure` on
+failure. Only a successful implementation carries a `ChildPatch`; Explore and failure receipts do
+not emit empty Patch fields. Failed receipts retain a Child Run ID when execution started.
+
 Implementation completion never mutates the Parent automatically. `integrate_child` revalidates the
 recorded base, applies the Patch in a temporary integration Worktree, runs the Runtime-configured
 Verification there, and only then writes the verified result into the Parent Workspace. A base
@@ -292,7 +302,7 @@ Completed implementation receipts and their integration state are projected from
 Log, so a restarted Parent can continue `integrate_child`. A Child that was still running at process
 exit is not resumed or automatically dispatched again.
 
-Child Agent turns and Integration verification inherit the Parent ExecutionContext's absolute Turn deadline; they never receive a fresh full timeout. Explore and Implement Children also have smaller Agent/Tool ceilings. A zero-change result needs a successful Observation. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but its receipt explicitly records `unavailable_reason=workspace_drift` instead of claiming a trustworthy Diff. Verification freshness is derived from command identity, mutation sequence and changed-path states rather than stored as a mutable label.
+Child Agent turns and Integration verification inherit the Parent ExecutionContext's absolute Turn deadline; they never receive a fresh full timeout. Explore and Implement Children also have smaller Agent/Tool ceilings. A zero-change result needs a successful Observation. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but a stopped receipt omits `final_diff` when no trustworthy Diff can be produced. Verification freshness is derived from command identity, mutation sequence and changed-path states rather than stored as a mutable label.
 
 ### Local verification trust boundary
 

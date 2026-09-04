@@ -174,7 +174,7 @@ def main():
         )
         diff_descriptor, diff_bytes = agent.dependencies.artifacts.read_internal(
             run_id,
-            outcome.final_diff.diff_artifact_id,
+            outcome.final_diff.artifact_id,
             expected_kind="final_workspace_diff",
         )
         final_diff_text = diff_bytes.decode("utf-8")
@@ -197,7 +197,7 @@ def main():
         assert len(command_runner.calls) == 1
         assert sum(event.kind == "assistant_tool_batch" for event in events) == 1
         assert "calculator.py" in model.prompts[0]
-        assert diff_descriptor["size_bytes"] == outcome.final_diff.diff_bytes
+        assert diff_descriptor["size_bytes"] == outcome.final_diff.size_bytes
         assert "-    return left - right" in final_diff_text
         assert "+    return left + right" in final_diff_text
 

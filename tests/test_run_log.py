@@ -3,9 +3,10 @@ import json
 import pytest
 
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
-from pico.delivery import FinalDiffDescriptor
+from pico.delivery import FinalDiff
 from pico.run_cli import run_main
 from pico.run_log import RunEvent, RunLog, replay_events
+from pico.run_projection import RunOutcome
 from pico.run_store import RunStore
 from pico.task_state import TaskContract
 
@@ -370,8 +371,8 @@ def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    terminal = log.append_final("done", FinalDiffDescriptor())
-    assert terminal.payload["final_diff"] == FinalDiffDescriptor().to_dict()
+    terminal = log.append_final("done", FinalDiff())
+    assert terminal.payload["final_diff"] == FinalDiff().to_dict()
     assert set(terminal.payload) == {
         "content",
         "stop_reason",
@@ -382,31 +383,20 @@ def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
         log.append_model_instruction("late")
 
 
-def test_unavailable_final_diff_is_valid_only_for_stopped_runs(tmp_path):
-    unavailable = FinalDiffDescriptor.unavailable("workspace_drift")
-    assert unavailable.to_dict() == {
-        "diff_artifact_id": "",
-        "diff_bytes": 0,
-        "unavailable_reason": "workspace_drift",
-    }
-    with pytest.raises(ValueError, match="cannot contain an artifact"):
-        FinalDiffDescriptor(
-            "diff_0000000000000000_0000000000",
-            1,
-            "workspace_drift",
-        )
-
+def test_stopped_run_may_omit_an_unavailable_final_diff(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
-    completed = RunLog("completed", "task", "session", store)
-    completed.append_user(task_contract())
-    with pytest.raises(ValueError, match="requires an available final Diff"):
-        completed.append_final("done", unavailable)
-    assert [event.kind for event in completed.events] == ["user_message"]
-
     stopped = RunLog("stopped", "task", "session", store)
     stopped.append_user(task_contract())
-    stopped.append_stopped("stopped", "user_reset", unavailable)
-    assert store.replay("stopped").final_diff == unavailable
+    event = stopped.append_stopped("stopped", "user_reset")
+    assert "final_diff" not in event.payload
+    projection = store.replay("stopped")
+    assert projection.final_diff is None
+    assert RunOutcome(projection).to_dict()["final_diff"] is None
+
+    completed = RunLog("completed", "task", "session", store)
+    completed.append_user(task_contract())
+    with pytest.raises(TypeError, match="requires a FinalDiff"):
+        completed.append_final("done", None)
 
 
 def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
@@ -415,7 +405,7 @@ def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
     log.append_user(task_contract())
     log.append_final(
         "done",
-        FinalDiffDescriptor("diff_0000000000000000_0000000000", 1),
+        FinalDiff("diff_0000000000000000_0000000000", 1),
     )
     with pytest.raises(ValueError, match="does not match net changes"):
         store.replay("run")

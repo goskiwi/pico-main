@@ -580,11 +580,11 @@ def child_delegation_experiment(root):
 
     assert explore.status == "success"
     assert explore.structured["role"] == "explore"
-    assert explore.structured["changed_paths"] == []
+    assert "patch" not in explore.structured
     assert implement.status == "success"
     assert implement.structured["role"] == "implement"
-    assert implement.structured["changed_paths"] == ["subject.py"]
-    assert implement.structured["integrated"] is False
+    assert implement.structured["patch"]["changed_paths"] == ["subject.py"]
+    assert implement.structured["patch"]["integrated"] is False
     assert parent_before_integration == "def value():\n    return 1\n"
     assert blocked.status == "subtasks_incomplete"
     assert integrated.status == "success"
@@ -604,14 +604,14 @@ def child_delegation_experiment(root):
         "explore": {
             "child_id": explore.structured["child_id"],
             "status": explore.structured["status"],
-            "ask_mode": explore.structured["changed_paths"] == [],
+            "ask_mode": "patch" not in explore.structured,
         },
         "implement": {
             "child_id": child_id,
             "status": implement.structured["status"],
-            "base_sha": implement.structured["base_sha"],
-            "changed_paths": implement.structured["changed_paths"],
-            "patch_sha256": implement.structured["patch_sha256"],
+            "base_sha": implement.structured["patch"]["base_sha"],
+            "changed_paths": implement.structured["patch"]["changed_paths"],
+            "patch_sha256": implement.structured["patch"]["sha256"],
             "parent_unchanged_before_integration": (
                 "return 1" in parent_before_integration
             ),
@@ -620,7 +620,7 @@ def child_delegation_experiment(root):
         "integration": {
             "status": integrated.structured["status"],
             "base_revalidated": integrated.structured["base_sha"]
-            == implement.structured["base_sha"],
+            == implement.structured["patch"]["base_sha"],
             "verification": integrated.structured["verification"]["status"],
             "parent_changed_after_explicit_action": (
                 "return 2" in parent_after_integration

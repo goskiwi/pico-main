@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
-from .delivery import FinalDiffDescriptor
+from .delivery import FinalDiff
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
@@ -145,22 +145,22 @@ def _validate_final_payload(kind, payload):
         raise ValueError("assistant_final has invalid stop reason")
     if int(payload["turn_duration_ms"]) < 0:
         raise ValueError("assistant_final duration cannot be negative")
-    final_diff = FinalDiffDescriptor.from_dict(payload["final_diff"])
-    if final_diff.unavailable_reason:
-        raise ValueError("assistant_final requires an available final Diff")
+    FinalDiff.from_dict(payload["final_diff"])
 
 
 def _validate_stopped_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"content", "stop_reason", "turn_duration_ms", "final_diff"},
+        {"content", "stop_reason", "turn_duration_ms"},
+        {"final_diff"},
     )
     if not str(payload["stop_reason"]):
         raise ValueError("run_stopped requires stop_reason")
     if int(payload["turn_duration_ms"]) < 0:
         raise ValueError("run_stopped duration cannot be negative")
-    FinalDiffDescriptor.from_dict(payload["final_diff"])
+    if "final_diff" in payload:
+        FinalDiff.from_dict(payload["final_diff"])
 
 
 def _validate_verification_payload(kind, payload):
@@ -601,8 +601,8 @@ class RunLog:
 
     def append_final(self, content, final_diff, *, turn_duration_ms=0):
         self._require_no_pending()
-        if not isinstance(final_diff, FinalDiffDescriptor):
-            raise TypeError("assistant_final requires a FinalDiffDescriptor")
+        if not isinstance(final_diff, FinalDiff):
+            raise TypeError("assistant_final requires a FinalDiff")
         return self.append(
             "assistant_final",
             {
@@ -613,19 +613,18 @@ class RunLog:
             },
         )
 
-    def append_stopped(self, content, stop_reason, final_diff, *, turn_duration_ms=0):
+    def append_stopped(self, content, stop_reason, final_diff=None, *, turn_duration_ms=0):
         self._require_no_pending()
-        if not isinstance(final_diff, FinalDiffDescriptor):
-            raise TypeError("run_stopped requires a FinalDiffDescriptor")
-        return self.append(
-            "run_stopped",
-            {
-                "content": str(content),
-                "stop_reason": str(stop_reason),
-                "turn_duration_ms": int(turn_duration_ms),
-                "final_diff": final_diff.to_dict(),
-            },
-        )
+        if final_diff is not None and not isinstance(final_diff, FinalDiff):
+            raise TypeError("run_stopped final Diff must be FinalDiff or None")
+        payload = {
+            "content": str(content),
+            "stop_reason": str(stop_reason),
+            "turn_duration_ms": int(turn_duration_ms),
+        }
+        if final_diff is not None:
+            payload["final_diff"] = final_diff.to_dict()
+        return self.append("run_stopped", payload)
 
     def pending_call_id(self):
         return self._protocol.pending_call_id

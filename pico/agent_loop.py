@@ -296,12 +296,12 @@ class AgentLoop:
     def _handle_final_action(self, loop_state, turn):
         assessment = self.completion.assess(turn.action.content.strip())
         if assessment.allowed:
-            return assessment.final_answer
+            return assessment.content
         self._block_completion(
             loop_state,
             turn,
             assessment.status,
-            assessment.instruction,
+            assessment.content,
         )
         return None
 

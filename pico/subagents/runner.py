@@ -9,7 +9,7 @@ from ..contracts import ToolOutcome
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import Workspace, normalize_relative_file
-from .contracts import ChildRecord, ChildSpec
+from .contracts import ChildFailure, ChildPatch, ChildRecord, ChildSpec, ChildSuccess
 from .integration import PatchIntegrator
 from .worktree import GitWorktree, require_clean_repository
 
@@ -88,9 +88,10 @@ class SubagentRunner:
             role = receipt["role"]
             status = receipt["status"]
             child_run_id = receipt["child_run_id"]
-            base_sha = receipt["base_sha"]
-            raw_paths = receipt["changed_paths"]
-            patch_sha256 = receipt["patch_sha256"]
+            patch_receipt = receipt["patch"]
+            base_sha = patch_receipt["base_sha"]
+            raw_paths = patch_receipt["changed_paths"]
+            patch_sha256 = patch_receipt["sha256"]
         except (KeyError, TypeError) as exc:
             raise ValueError("invalid persisted delegate receipt") from exc
         if not all(
@@ -116,12 +117,15 @@ class SubagentRunner:
         records[child_id] = ChildRecord(
             child_id=child_id,
             spec=spec,
-            status="completed",
-            child_run_id=child_run_id,
             base_sha=base_sha,
-            changed_paths=changed_paths,
-            patch_path=str(patch_path),
-            patch_sha256=patch_sha256,
+            result=ChildSuccess(
+                child_run_id,
+                ChildPatch(
+                    changed_paths,
+                    str(patch_path),
+                    patch_sha256,
+                ),
+            ),
         )
 
     def _recover_integration(self, call, outcome, records):
@@ -139,7 +143,7 @@ class SubagentRunner:
         record = records.get(child_id)
         if record is None:
             raise ValueError("persisted integration references an unknown Child")
-        record.integrated = True
+        record.mark_integrated()
 
     def _recover_records(self, run_id, records):
         calls = {}
@@ -190,38 +194,42 @@ class SubagentRunner:
         return RunStore(self._task_root(run_id, record.child_id) / "runs")
 
     def _child_projection(self, run_id, record):
-        if not record.child_run_id:
+        result = record.result
+        child_run_id = result.child_run_id if result is not None else ""
+        if not child_run_id:
             raise ValueError(f"child has no Run receipt: {record.child_id}")
         entries, projection = self._child_run_store(run_id, record).load_run(
-            record.child_run_id
+            child_run_id
         )
         if not entries:
             raise ValueError(f"child Run Log is missing: {record.child_id}")
         return projection
 
     def _receipt(self, run_id, record):
-        projection = (
-            self._child_projection(run_id, record)
-            if record.child_run_id
-            else None
-        )
-        error = record.error
-        if not error and projection is not None and projection.status != "completed":
-            error = projection.stop_reason or projection.status
-        return {
+        result = record.result
+        receipt = {
             "child_id": record.child_id,
             "role": record.spec.role,
             "status": record.status,
-            "child_run_id": record.child_run_id,
-            "result": self.parent.redact_text(
-                projection.final_answer if projection is not None else ""
-            ),
-            "base_sha": record.base_sha,
-            "changed_paths": list(record.changed_paths),
-            "patch_sha256": record.patch_sha256,
-            "error": error,
-            "integrated": record.integrated,
         }
+        if result is None:
+            return receipt
+        if result.child_run_id:
+            receipt["child_run_id"] = result.child_run_id
+        if isinstance(result, ChildFailure):
+            receipt["error"] = result.error
+            return receipt
+        record.completed()
+        projection = self._child_projection(run_id, record)
+        receipt["result"] = self.parent.redact_text(projection.final_answer)
+        if result.patch is not None:
+            receipt["patch"] = {
+                "base_sha": record.base_sha,
+                "changed_paths": list(result.patch.changed_paths),
+                "sha256": result.patch.sha256,
+                "integrated": result.patch.integrated,
+            }
+        return receipt
 
     def _prepare_implement_worktree(self, run_id, record):
         handle = GitWorktree(
@@ -284,7 +292,8 @@ class SubagentRunner:
         )
 
     def _run_child(self, run_id, record):
-        child = self._build_child(run_id, record)
+        child = None
+        child_run_id = ""
         prompt = record.spec.task
         if record.spec.role == "explore":
             prompt += EXPLORE_HANDOFF
@@ -294,46 +303,39 @@ class SubagentRunner:
                 + "\nConfigured verification command:\n"
                 + str(self.parent.config.verification_command).strip()
             )
-        child_error = None
-        child_outcome = None
         try:
+            child = self._build_child(run_id, record)
             child_outcome = child.ask(prompt)
-        except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
-            child_error = exc
-
-        projection = None
-        if child_outcome is not None:
-            record.child_run_id = child_outcome.run_id
-            projection = child.dependencies.run_store.replay(record.child_run_id)
-        elif child.run.task is not None:
-            record.child_run_id = child.run.projection.run_id
-            projection = child.dependencies.run_store.replay(record.child_run_id)
-
-        if record.spec.role == "implement":
-            handle = self._worktrees[(run_id, record.child_id)]
-            record.changed_paths = handle.changed_paths()
-            unexpected = sorted(
-                set(record.changed_paths) - set(record.spec.allowed_write_paths)
-            )
-            if unexpected:
-                raise ValueError(
-                    "write scope violation after execution: "
-                    + ", ".join(unexpected)
+            child_run_id = child_outcome.run_id
+            projection = child.dependencies.run_store.replay(child_run_id)
+            if projection.status != "completed":
+                raise RuntimeError(projection.stop_reason or projection.status)
+            patch = None
+            if record.spec.role == "implement":
+                handle = self._worktrees[(run_id, record.child_id)]
+                changed_paths = handle.changed_paths()
+                unexpected = sorted(
+                    set(changed_paths) - set(record.spec.allowed_write_paths)
                 )
-        if child_error is not None:
-            raise child_error
-        if projection is None:
-            raise RuntimeError("child Run did not produce a replayable result")
-        if projection.status != "completed":
-            raise RuntimeError(projection.stop_reason or projection.status)
-
-        if record.spec.role == "implement":
-            handle = self._worktrees[(run_id, record.child_id)]
-            patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
-            record.patch_sha256 = handle.write_patch(patch_path)
-            record.patch_path = str(patch_path.resolve())
-        record.status = "completed"
-        record.error = ""
+                if unexpected:
+                    raise ValueError(
+                        "write scope violation after execution: "
+                        + ", ".join(unexpected)
+                    )
+                patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
+                patch = ChildPatch(
+                    changed_paths,
+                    str(patch_path.resolve()),
+                    handle.write_patch(patch_path),
+                )
+            record.result = ChildSuccess(child_run_id, patch)
+        except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
+            if child is not None and child.run.task is not None:
+                child_run_id = child.run.projection.run_id
+            record.result = ChildFailure(
+                self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
+                child_run_id,
+            )
 
     def delegate(self, role, task, allowed_write_paths=()):
         spec = ChildSpec(
@@ -357,10 +359,16 @@ class SubagentRunner:
                 self._prepare_implement_worktree(run_id, record)
             self._run_child(run_id, record)
         except Exception as exc:  # noqa: BLE001 - Child failure is receipt state
-            record.status = "failed"
-            record.error = self.parent.redact_text(
-                f"{type(exc).__name__}: {exc}"
+            child_run_id = (
+                record.result.child_run_id
+                if record.result is not None
+                else ""
             )
+            record.result = ChildFailure(
+                self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
+                child_run_id,
+            )
+        if isinstance(record.result, ChildFailure):
             self._discard_worktree(run_id, child_id)
         return self._receipt(run_id, record)
 
@@ -372,7 +380,7 @@ class SubagentRunner:
         running = sorted(
             child_id
             for child_id, record in records.items()
-            if record.status == "running"
+            if record.result is None
         )
         if running:
             return "children are still running: " + ", ".join(running)
@@ -380,8 +388,9 @@ class SubagentRunner:
             child_id
             for child_id, record in records.items()
             if record.spec.role == "implement"
-            and record.status == "completed"
-            and not record.integrated
+            and isinstance(record.result, ChildSuccess)
+            and record.result.patch is not None
+            and not record.result.patch.integrated
         )
         if unapplied:
             return "completed implementation patches are not integrated: " + ", ".join(

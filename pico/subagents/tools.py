@@ -39,7 +39,8 @@ def _delegate(manager, args):
 
 def _integration_paths(manager, child_id):
     record = manager._record(manager._parent_run_id(), child_id)
-    return tuple(record.changed_paths)
+    patch = record.completed().patch
+    return tuple(patch.changed_paths) if patch else ()
 
 
 def _integration_effects(manager, args):
