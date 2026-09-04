@@ -2,6 +2,9 @@
 
 import json
 import re
+import uuid
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .persistence import atomic_write_json
@@ -9,6 +12,24 @@ from .run_store import RUN_ID
 
 SESSION_SCHEMA_VERSION = "session-v11"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+
+
+@dataclass
+class Session:
+    store: "SessionStore"
+    id: str
+    workspace_root: Path
+    active_run_id: str = ""
+
+    @property
+    def path(self):
+        return self.store.path(self.id)
+
+    def set_active_run(self, run_id):
+        candidate = replace(self, active_run_id=str(run_id))
+        path = self.store.save(candidate)
+        self.active_run_id = candidate.active_run_id
+        return path
 
 
 class SessionStore:
@@ -51,16 +72,34 @@ class SessionStore:
             raise ValueError("invalid session active_run_id")
 
     def save(self, session):
-        self.validate(session)
-        path = self.path(session["id"])
-        atomic_write_json(path, session)
+        payload = {
+            "schema_version": SESSION_SCHEMA_VERSION,
+            "id": session.id,
+            "workspace_root": str(session.workspace_root),
+            "active_run_id": session.active_run_id,
+        }
+        self.validate(payload)
+        path = self.path(session.id)
+        atomic_write_json(path, payload)
         return path
+
+    def create(self, workspace_root):
+        session = Session(
+            self,
+            datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            + "-" + uuid.uuid4().hex[:6],
+            Path(workspace_root).resolve(),
+        )
+        self.save(session)
+        return session
 
     def load(self, session_id):
         path = self.path(session_id)
         session = json.loads(path.read_text(encoding="utf-8"))
         self.validate(session)
-        return session
+        return Session(
+            self, session["id"], Path(session["workspace_root"]), session["active_run_id"]
+        )
 
     def latest_active(self):
         """Return the newest Session that still points at an unfinished Run."""
@@ -72,6 +111,6 @@ class SessionStore:
         )
         for path in files:
             session = self.load(path.stem)
-            if session["active_run_id"]:
+            if session.active_run_id:
                 return path.stem
         return None

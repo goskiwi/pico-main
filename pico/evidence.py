@@ -174,7 +174,7 @@ class RunChangeSet:
             else:
                 before = ""
             after_exists = current_state != ABSENT_REVISION
-            after = target.read_text(encoding="utf-8") if after_exists else ""
+            after = target.read_bytes().decode("utf-8") if after_exists else ""
             rendered.append(
                 unified_text_diff(
                     relative,
@@ -245,6 +245,17 @@ class RunEvidence:
     def apply_event(self, event):
         if event.kind == "verification_result":
             self.verifications.append(dict(event.payload))
+            changes = event.payload["workspace_changes"]
+            if changes is None or changes:
+                self.effects.append(_effect_from_event(event, {
+                    "tool_call_id": event.event_id,
+                    "tool_name": "verification",
+                    "status": "error",
+                    "execution_state": "completed",
+                    "side_effect_state": "unknown",
+                    "affected_paths": changes or (),
+                    "effect_scope": "workspace",
+                }))
             return self
         if event.kind != "tool_result":
             return self

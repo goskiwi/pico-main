@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -39,17 +40,20 @@ def test_completion_decision_has_an_explicit_status():
 
 def active_agent(tmp_path, requirements, verification_command=""):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
+        runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command=verification_command,
         ),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
     )
     contract = TaskContract("task", **requirements)
-    log = RunLog("run", "task", agent.session.data["id"], agent.dependencies.run_store)
+    log = RunLog("run", "task", agent.session.id, agent.dependencies.run_store)
     first = log.append_user(contract)
     agent.run.projection = RunProjection().apply_event(first)
     agent.run.run_log = log
@@ -106,7 +110,7 @@ def add_change(agent, path, before, after, sequence=1, status="success", side="c
         sequence,
         "run",
         "task",
-        agent.session.data["id"],
+        agent.session.id,
         "tool_result",
         "now",
         {
@@ -122,6 +126,7 @@ def verification_payload(agent, sequence, status="passed", output=""):
         agent.run.evidence.changed_paths,
     )
     return {
+        "workspace_changes": [],
         "command": agent.config.verification_command,
         "status": status,
         "started_workspace_mutation_sequence": sequence,
@@ -203,7 +208,7 @@ def test_verification_command_change_invalidates_passing_result(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK, "verify-a")
     add_change(agent, "README.md", "a", "b", 1)
     agent.run.evidence.verifications.append(verification_payload(agent, 1))
-    agent.config = PicoConfig.build(
+    agent.config = replace(
         agent.config,
         verification_command="verify-b",
     )

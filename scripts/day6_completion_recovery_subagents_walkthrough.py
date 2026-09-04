@@ -59,7 +59,7 @@ def activate(
     run_log = RunLog(
         run_id,
         task_id,
-        agent.session.data["id"],
+        agent.session.id,
         agent.dependencies.run_store,
     )
     agent.run.run_log = run_log
@@ -95,15 +95,18 @@ def completion_experiment(root):
             CommandResult(returncode=0, stdout="1 passed\n"),
         ]
     )
+    runtime_workspace = Workspace.build(root)
     agent = Pico(
         model_client=FakeModelClient([]),
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command="verify",
         ),
         command_runner=command_runner,
+        session=SessionStore(root / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     activate(
         agent,
@@ -226,11 +229,12 @@ def completion_experiment(root):
 
 def recovery_experiment(root):
     store = SessionStore(root / ".pico" / "sessions")
+    runtime_workspace = Workspace.build(root)
     original = Pico(
         model_client=FakeModelClient([]),
-        workspace=Workspace.build(root),
-        session_store=store,
+        workspace=runtime_workspace,
         config=PicoConfig(mode="auto", verification_command="verify"),
+        session=store.create(runtime_workspace.root),
     )
     RunLifecycle(original).initialize(
         "Create interrupted.txt",
@@ -264,12 +268,13 @@ def recovery_experiment(root):
         encoding="utf-8",
     )
 
-    loaded_session = store.load(original.session.data["id"])
+    loaded_session = store.load(original.session.id)
     target = root / "interrupted.txt"
     repair_revision = file_revision(target)
     command_runner = SequenceCommandRunner(
         [CommandResult(returncode=0, stdout="1 passed\n")]
     )
+    runtime_workspace = Workspace.build(root)
     resumed = Pico(
         model_client=FakeModelClient(
             [
@@ -295,14 +300,13 @@ def recovery_experiment(root):
                 ModelAction.final("Recovered, inspected, repaired, and verified."),
             ]
         ),
-        workspace=Workspace.build(root),
-        session_store=store,
-        session=loaded_session,
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command="verify",
         ),
         command_runner=command_runner,
+        session=loaded_session,
     )
     assert resumed.run.resumable is True
     startup_state = {
@@ -379,6 +383,7 @@ def recovery_experiment(root):
 def active_reset_experiment(root):
     started = threading.Event()
     release = threading.Event()
+    runtime_workspace = Workspace.build(root)
     agent = Pico(
         model_client=FakeModelClient(
             [
@@ -390,17 +395,19 @@ def active_reset_experiment(root):
                 ModelAction.final("This final action must not run."),
             ]
         ),
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=SessionStore(root / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     original_runner = agent.tools.registry["write_file"]["run"]
 
-    def blocked_runner(args):
+    def blocked_runner(context, args):
         started.set()
         if not release.wait(timeout=3):
             raise TimeoutError("reset walkthrough runner was not released")
-        return original_runner(args)
+        return original_runner(context, args)
 
     agent.tools.registry["write_file"]["run"] = blocked_runner
     result = {}
@@ -440,7 +447,7 @@ def active_reset_experiment(root):
         "tracked side effect\n"
     )
     assert agent.run.task is None
-    assert agent.session.data["active_run_id"] == ""
+    assert agent.session.active_run_id == ""
 
     return {
         "reset_requested_while_runner_active": reset_reason,
@@ -524,10 +531,10 @@ def child_delegation_experiment(root):
         child_clients.append(client)
         return client
 
+    runtime_workspace = Workspace.build(root)
     parent = Pico(
         model_client=FakeModelClient([]),
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command="verify",
@@ -535,6 +542,9 @@ def child_delegation_experiment(root):
         ),
         command_runner_factory=_passing_runner,
         subagent_model_client_factory=child_factory,
+        session=SessionStore(root / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     activate(
         parent,

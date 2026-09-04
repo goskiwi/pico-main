@@ -6,16 +6,11 @@ from pico.cli import (
     detect_verification_command,
     resolve_verification_command,
 )
-from pico.session_store import SESSION_SCHEMA_VERSION, SessionStore
+from pico.session_store import Session, SessionStore
 
 
-def _session(session_id, root, active_run_id):
-    return {
-        "schema_version": SESSION_SCHEMA_VERSION,
-        "id": session_id,
-        "workspace_root": str(root),
-        "active_run_id": active_run_id,
-    }
+def _session(store, session_id, root, active_run_id):
+    return Session(store, session_id, root, active_run_id)
 
 
 def test_cli_detects_pytest_without_user_configuration(tmp_path):
@@ -44,15 +39,15 @@ def test_explicit_verifier_overrides_auto_detection(tmp_path):
 
 def test_latest_active_ignores_newer_completed_sessions(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    store.save(_session("active", tmp_path, "run_active"))
-    store.save(_session("completed", tmp_path, ""))
+    store.save(_session(store, "active", tmp_path, "run_active"))
+    store.save(_session(store, "completed", tmp_path, ""))
 
     assert store.latest_active() == "active"
 
 
 def test_cli_reports_the_unfinished_run_without_resuming_it(tmp_path):
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    store.save(_session("session_active", tmp_path, "run_active"))
+    store.save(_session(store, "session_active", tmp_path, "run_active"))
 
     assert _unfinished_session(tmp_path) == {
         "session_id": "session_active",

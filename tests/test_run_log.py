@@ -1,9 +1,11 @@
+
 import json
 
 import pytest
 
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.delivery import FinalDiff
+from pico.history import RunHistory
 from pico.run_cli import run_main
 from pico.run_log import RunEvent, RunLog, replay_events
 from pico.run_projection import RunOutcome
@@ -182,7 +184,7 @@ def test_observation_batch_round_trips_in_original_order(tmp_path):
 
     replayed = store.replay("run")
     assert replayed.pending_call_ids == ()
-    assert [event.call_id for event in log.context_events() if event.kind == "tool_result"] == [
+    assert [event.call_id for event in RunHistory(log.events).context_events() if event.kind == "tool_result"] == [
         "call_a",
         "call_b",
     ]
@@ -457,13 +459,14 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
         seen.extend(events)
         return "short"
 
-    result = log.compact(
+    result = RunHistory(log.events).plan_compaction(
         retain_tokens=1,
         history_token_counter=lambda text: max(1, len(text)),
         summary_builder=summarize,
     )
     assert result is not None
-    compacted, _metadata = result
+    summary, covered, _metadata = result
+    compacted = log.append_compaction(summary, covered)
     assert [event.kind for event in seen] == ["model_instruction"]
     assert seen[0].content == "historical fact that must be summarized"
     assert len(compacted.covered_event_ids) == 4
@@ -483,18 +486,18 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     recent_projection = "\n".join(
         (
             "Current run events:",
-            log._render_event(recent_one),
-            log._render_event(recent_two),
+            RunHistory._render_event(recent_one),
+            RunHistory._render_event(recent_two),
         )
     )
-    result = log.compact(
+    result = RunHistory(log.events).plan_compaction(
         retain_tokens=wire_tokens(recent_projection),
         history_token_counter=wire_tokens,
         summary_builder=lambda _events: "short",
     )
 
     assert result is not None
-    _event, metadata = result
+    _summary, _covered, metadata = result
     assert metadata["retained_events"] == 2
     assert metadata["retained_tokens"] == wire_tokens(recent_projection)
 
@@ -506,26 +509,26 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     old = log.append_model_instruction("old")
     recent = log.append_model_instruction("recent")
 
-    first = log._commit_compaction(
+    first = log.append_compaction(
         "first summary",
         [user.event_id, old.event_id],
     )
     later = log.append_model_instruction("later")
-    assert [event.event_id for event in log.active_events()] == [
+    assert [event.event_id for event in RunHistory(log.events).active_events()] == [
         first.event_id,
         recent.event_id,
         later.event_id,
     ]
 
-    second = log._commit_compaction(
+    second = log.append_compaction(
         "second summary",
         [first.event_id, recent.event_id],
     )
     expected = [second.event_id, later.event_id]
 
-    assert [event.event_id for event in log.active_events()] == expected
+    assert [event.event_id for event in RunHistory(log.events).active_events()] == expected
     restored = RunLog.restore("run", store)
-    assert [event.event_id for event in restored.active_events()] == expected
+    assert [event.event_id for event in RunHistory(restored.events).active_events()] == expected
 
 
 def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path):
@@ -553,9 +556,9 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
                 "result " + "x" * 250,
             )
         )
-    log._commit_compaction("SUMMARY-MARKER", [user.event_id, old.event_id])
+    log.append_compaction("SUMMARY-MARKER", [user.event_id, old.event_id])
 
-    rendered, metadata = log.render_compacted_projection(
+    rendered, metadata = RunHistory(log.events).render_compacted_projection(
         retain_tokens=600,
         token_counter=len,
     )
@@ -593,7 +596,7 @@ def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
             )
         )
 
-    rendered, _metadata = log.render_recent_projection(
+    rendered, _metadata = RunHistory(log.events).render_recent_projection(
         retain_tokens=1,
         token_counter=len,
     )
@@ -601,7 +604,7 @@ def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
     assert "call_a" in rendered and "call_b" in rendered
     assert rendered.count("[tool/read_file/success/none]") == 2
     with pytest.raises(ValueError, match="cannot split"):
-        log._commit_compaction(
+        log.append_compaction(
             "invalid boundary",
             [user.event_id, old.event_id, batch.event_id],
         )

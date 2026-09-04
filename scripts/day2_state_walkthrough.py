@@ -33,12 +33,14 @@ def print_section(title, value):
 
 def build_agent(root, model, *, session=None):
     store = SessionStore(root / ".pico" / "sessions")
+    runtime_workspace = Workspace.build(root)
     return Pico(
         model_client=model,
-        workspace=Workspace.build(root),
-        session_store=store,
-        session=session,
+        workspace=runtime_workspace,
         config=PicoConfig(mode="ask", verification_command=""),
+        session=session
+        if session is not None
+        else store.create(runtime_workspace.root),
     )
 
 
@@ -308,7 +310,7 @@ def interrupted_read_experiment(root):
             potential_effects=[],
         )
     )
-    session_id = original.session.data["id"]
+    session_id = original.session.id
     loaded_session = SessionStore(root / ".pico" / "sessions").load(session_id)
 
     # Creating a second Pico simulates a new process. Its constructor loads the

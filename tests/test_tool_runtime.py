@@ -1,7 +1,11 @@
 import os
+import shutil
+import subprocess
 import threading
 import time
-from unittest.mock import patch
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,11 +32,14 @@ from pico.task_state import TaskContract
 
 def build_agent(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    runtime_workspace = Workspace.build(tmp_path)
     return Pico(
         model_client=FakeModelClient([]),
-        workspace=Workspace.build(tmp_path),
-        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(mode="auto"),
+        session=SessionStore(tmp_path / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
 
 
@@ -40,7 +47,7 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
     run_log = RunLog(
         run_id,
         "task_tool_test",
-        agent.session.data["id"],
+        agent.session.id,
         agent.dependencies.run_store,
     )
     first = run_log.append_user(
@@ -62,9 +69,202 @@ def run_active(agent, call):
     return agent.tools.execute_pending(call.call_id)
 
 
+def test_tightened_tool_allowlist_applies_to_model_single_and_batch(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, allowed_tools=("list_files",))
+    assert {tool["name"] for tool in agent.tools.model_action_tools()} == {
+        "list_files", "submit_final"
+    }
+    denied = run_active(agent, ToolCall("read_file", {"path": "README.md"}, "single"))
+    assert denied.status == "rejected"
+    calls = (ToolCall("read_file", {"path": "README.md"}, "read"),
+             ToolCall("list_files", {}, "list"))
+    batch = agent.apply_run_event(agent.run.run_log.append_tool_batch(calls))
+    results = agent.tools.execute_pending_batch(batch.batch_id)
+    assert all(result.execution_state == "not_started" for result in results)
+
+
+def test_verification_side_effect_survives_resubmission_and_replay(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, verification_command=(
+        "test -f generated.txt || printf generated > generated.txt"
+    ))
+    agent.model_client.outputs = [
+        ModelAction.tool("write_file", {"path": "created.txt", "content": "created\n"}),
+        ModelAction.final("done"), ModelAction.final("done"), ModelAction.final("done"),
+    ]
+    outcome = agent.ask("Create created.txt only")
+    assert outcome.status == "stopped"
+    assert len(agent.run.evidence.verifications) == 1
+    replayed = agent.dependencies.run_store.replay(outcome.run_id)
+    effects = replayed.evidence.unrepaired_uncertain_effects()
+    assert any("generated.txt" in effect["affected_paths"] for effect in effects)
+
+
+def test_each_single_call_receives_its_own_current_context(tmp_path):
+    agent = build_agent(tmp_path)
+    contexts = []
+
+    def observe(context, _args):
+        contexts.append(context)
+        return ToolRunnerResult("observed")
+
+    agent.tools.registry["list_files"]["run"] = observe
+    run_active(agent, ToolCall("list_files", {}, "first"))
+    agent.run.execution_context = None
+    agent.reset()
+    start_run(agent, run_id="run_second")
+    run_active(agent, ToolCall("list_files", {}, "second"))
+
+    first, second = contexts
+    assert first is not second
+    assert first.tool_call_id == "first" and second.tool_call_id == "second"
+    assert first.run_id == "run_tool_test" and second.run_id == "run_second"
+    assert first.working_state is not second.working_state
+    assert first.execution_context is not second.execution_context
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_large_dirty_file_read_edit_final_diff_and_replay(tmp_path, newline):
+    target = tmp_path / "large.txt"
+    tail = ("context" + newline) * 10 + "x" * (9 * 1024 * 1024) + newline
+    target.write_bytes(("committed" + newline + tail).encode())
+    for args in (
+        ["init", "-q"], ["add", "large.txt"],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-qm", "baseline"],
+    ):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+    target.write_bytes(("用户修改" + newline + tail).encode())
+    agent = build_agent(tmp_path)
+    observed = run_active(agent, ToolCall("read_file", {
+        "path": "large.txt", "start_line": 1, "end_line": 1,
+    }, "read_large"))
+    assert observed.status == "success"
+    assert "用户修改" in observed.content
+    assert observed.structured["revision"] == file_revision(target)
+
+    edited = run_active(agent, ToolCall("edit_file", {
+        "path": "large.txt", "old_text": "用户修改", "new_text": "Pico 修改",
+        "expected_revision": observed.structured["revision"],
+    }, "edit_large"))
+    assert edited.status == "success"
+    final = build_final_diff(agent)
+    diff = agent.dependencies.artifacts.read_internal_text("run_tool_test", final.artifact_id)
+    assert "-用户修改" in diff and "+Pico 修改" in diff
+    assert "committed" not in diff
+    assert len(diff) < 2000  # Unchanged CRLF lines must not become changes.
+    assert target.read_bytes() == ("Pico 修改" + newline + tail).encode()
+    agent.apply_run_event(agent.run.run_log.append_final("done", final))
+    replayed = agent.dependencies.run_store.replay("run_tool_test")
+    assert replayed.final_diff == final
+    assert replayed.evidence.change_set.render_final_diff(
+        tmp_path, agent.dependencies.artifacts, "run_tool_test"
+    ) == diff
+
+
+def test_read_long_unicode_line_bounds_output_and_keeps_full_revision(tmp_path):
+    target = tmp_path / "long.txt"
+    target.write_text("汉字" * 1_500_000 + "\nlast\n")
+    agent = build_agent(tmp_path)
+    read = agent.tools.registry["read_file"]["run"]
+    result = read(agent.tools.context(call_id="probe"), {"path": "long.txt", "start_line": 1, "end_line": 2})
+    assert result.structured["truncated"]
+    assert result.structured["has_more"]
+    assert result.structured["revision"] == file_revision(target)
+    assert result.structured["total_lines"] == 2
+    assert len(result.content.encode()) < tools_module.READ_FILE_MAX_OUTPUT_BYTES + 512
+    assert "read output truncated" in result.content
+    last = read(agent.tools.context(call_id="probe"), {"path": "long.txt", "start_line": 2, "end_line": 2})
+    assert "2: last" in last.content
+    assert not last.structured["truncated"]
+
+
+@pytest.mark.parametrize("engine", ["rg", "python"])
+def test_search_includes_large_files(tmp_path, monkeypatch, engine):
+    if engine == "rg" and not shutil.which("rg"):
+        pytest.skip("rg is not installed")
+    if engine == "python":
+        monkeypatch.setattr(tools_module.shutil, "which", lambda _name: None)
+    (tmp_path / "large.txt").write_text("padding\n" * 400_000 + "UNIQUE_NEEDLE\n")
+    agent = build_agent(tmp_path)
+    result = agent.tools.execute_manual("search", {"path": ".", "pattern": "UNIQUE_NEEDLE"})
+    assert result.status == "success"
+    assert "UNIQUE_NEEDLE" in result.content
+
+
+def test_fallback_search_bounds_long_matching_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(tools_module.shutil, "which", lambda _name: None)
+    (tmp_path / "large.txt").write_text("needle" + "x" * 3_000_000)
+    agent = build_agent(tmp_path)
+    result = agent.tools.registry["search"]["run"](agent.tools.context(call_id="probe"), {"path": ".", "pattern": "needle"})
+    assert result.structured["truncated"]
+    assert len(result.content.encode()) < tools_module.SEARCH_MAX_OUTPUT_BYTES + 128
+
+
+def test_preimage_copies_bytes_in_chunks_and_is_immutable(tmp_path, monkeypatch):
+    source = tmp_path / "original.txt"
+    content = "汉字\r\n".encode() * 400_000
+    source.write_bytes(content)
+    agent = build_agent(tmp_path)
+    original_open = Path.open
+    sizes = []
+
+    def checked_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path != source:
+            return handle
+        proxy = MagicMock(wraps=handle)
+        proxy.__enter__.return_value = proxy
+        proxy.__exit__.side_effect = handle.__exit__
+
+        def read(size=-1):
+            assert 0 < size <= 1024 * 1024
+            sizes.append(size)
+            return handle.read(size)
+
+        proxy.read.side_effect = read
+        return proxy
+
+    monkeypatch.setattr(Path, "open", checked_open)
+    store = agent.dependencies.artifacts
+    descriptor = store.write_workspace_preimage("manual", "copy", "original.txt", source)
+    assert store.write_workspace_preimage("manual", "copy", "original.txt", source) == descriptor
+    assert len(sizes) > 2
+    assert store.read_internal("manual", descriptor["artifact_id"])[1] == content
+    root = agent.dependencies.run_store.artifact_dir("manual")
+    assert not list(root.glob("*.tmp"))
+    (root / f"{descriptor['artifact_id']}.txt").write_bytes(b"corrupted")
+    with pytest.raises(RuntimeError, match="immutable artifact collision"):
+        store.write_workspace_preimage("manual", "copy", "original.txt", source)
+
+
+def test_preimage_publication_failure_does_not_modify_source(tmp_path, monkeypatch):
+    target = tmp_path / "original.txt"
+    target.write_text("before\n")
+    agent = build_agent(tmp_path)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr("pico.artifacts.os.link", fail)
+    outcome = run_active(agent, ToolCall("edit_file", {
+        "path": "original.txt", "old_text": "before", "new_text": "after",
+        "expected_revision": file_revision(target),
+    }, "backup_failure"))
+    assert outcome.execution_state == "not_started"
+    assert outcome.failure.code == "effect_planning_failed"
+    assert target.read_text() == "before\n"
+    root = agent.dependencies.run_store.artifact_dir("run_tool_test")
+    assert not list(root.glob("preimage_*"))
+    assert not list(root.glob("*.tmp"))
+
+
+
+
 def code_command_agent(tmp_path, *, approved=True):
     agent = build_agent(tmp_path)
-    agent.config = PicoConfig.build(agent.config, mode="code")
+    agent.config = replace(agent.config, mode="code")
     agent.tools.approve = lambda *_args, **_kwargs: approved
     return agent
 
@@ -228,14 +428,17 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
     )
 
     with patch.dict(os.environ, {"CUSTOM_SECRET_NAME": secret}):
+        runtime_workspace = Workspace.build(tmp_path)
         agent = Pico(
             client,
-            Workspace.build(tmp_path),
-            SessionStore(tmp_path / ".pico" / "sessions"),
+            runtime_workspace,
             config=PicoConfig(
                 mode="auto",
                 verification_command="",
                 secret_env_names=frozenset({"CUSTOM_SECRET_NAME"}),
+            ),
+            session=SessionStore(tmp_path / ".pico" / "sessions").create(
+                runtime_workspace.root
             ),
         )
         assert agent.ask(
@@ -248,14 +451,14 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
         persisted = event.payload["outcome"]["content"]
         agent.reset()
 
-        def fail_with_secret(_args):
+        def fail_with_secret(_context, _args):
             raise RuntimeError(secret)
 
         agent.tools.registry["list_files"]["run"] = fail_with_secret
         failed = agent.tools.execute_manual("list_files", {})
 
         (tmp_path / "state-change.txt").write_text("changed\n", encoding="utf-8")
-        agent.tools.registry["list_files"]["run"] = lambda _args: ToolRunnerResult(
+        agent.tools.registry["list_files"]["run"] = lambda _context, _args: ToolRunnerResult(
             (secret + "\n") * 2000,
             structured={"secret": secret},
         )
@@ -423,7 +626,7 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
     agent = build_agent(tmp_path)
     executions = []
 
-    def write_then_fail(args):
+    def write_then_fail(_context, args):
         executions.append(1)
         target = tmp_path / args["path"]
         target.write_text(args["content"], encoding="utf-8")
@@ -462,7 +665,7 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
 def test_unknown_runner_exception_after_write_records_replayable_transition(tmp_path):
     agent = build_agent(tmp_path)
 
-    def write_then_raise(args):
+    def write_then_raise(_context, args):
         (tmp_path / args["path"]).write_text(args["content"], encoding="utf-8")
         raise RuntimeError("crashed after write")
 
@@ -590,7 +793,7 @@ def test_controlled_stop_survives_external_workspace_drift(tmp_path, stop_mode):
     replayed = agent.dependencies.run_store.replay("run_tool_test")
     assert replayed.terminal
     assert replayed.final_diff is None
-    assert agent.session.data["active_run_id"] == ""
+    assert agent.session.active_run_id == ""
     assert agent.run.execution_context is None
     if stop_mode == "reset":
         assert agent.run.task is None
@@ -671,6 +874,11 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
     )
     batch = agent.apply_run_event(run_log.append_tool_batch(calls))
     barrier = threading.Barrier(2)
+
+    def no_rebuild():
+        pytest.fail("batch execution must reuse the existing tool registry")
+
+    monkeypatch.setattr(tools_module, "build_tool_registry", no_rebuild)
     b_finished = threading.Event()
     counter_lock = threading.Lock()
     active = 0
@@ -682,7 +890,7 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
         with counter_lock:
             active += 1
             max_active = max(max_active, active)
-            call_ids_by_path[args["path"]] = context.tool_call_id()
+            call_ids_by_path[args["path"]] = context.tool_call_id
         barrier.wait(timeout=2)
         if args["path"] == "a.txt":
             assert b_finished.wait(timeout=2)
@@ -693,8 +901,8 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
         return ToolRunnerResult("worker result " + args["path"])
 
     monkeypatch.setitem(
-        tools_module._TOOL_RUNNERS,
-        "read_file",
+        agent.tools.registry["read_file"],
+        "run",
         parallel_read,
     )
 
@@ -750,7 +958,7 @@ def test_observation_batch_does_not_swallow_process_interrupts(
     def interrupted(_context, _args):
         raise KeyboardInterrupt
 
-    monkeypatch.setitem(tools_module._TOOL_RUNNERS, "list_files", interrupted)
+    monkeypatch.setitem(agent.tools.registry["list_files"], "run", interrupted)
 
     with pytest.raises(KeyboardInterrupt):
         agent.tools.execute_pending_batch(batch.batch_id)
@@ -771,7 +979,7 @@ def test_observation_batch_preserves_reported_side_effects(
     batch = agent.apply_run_event(run_log.append_tool_batch(calls))
 
     def impure_observation(context, _args):
-        if context.tool_call_id() == "call_known":
+        if context.tool_call_id == "call_known":
             return ToolRunnerResult(
                 "known effect",
                 affected_paths=("changed.txt",),
@@ -780,8 +988,8 @@ def test_observation_batch_preserves_reported_side_effects(
         return ToolRunnerResult("unknown effect", effect_scope="workspace")
 
     monkeypatch.setitem(
-        tools_module._TOOL_RUNNERS,
-        "list_files",
+        agent.tools.registry["list_files"],
+        "run",
         impure_observation,
     )
 

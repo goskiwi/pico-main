@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+from .contracts import FailureInfo, ToolOutcome
 from .delivery import (
     build_final_diff,
     build_stopped_final_diff,
@@ -17,6 +19,7 @@ from .runtime_state import ActiveRunState
 from .task_state import TaskContract
 
 if TYPE_CHECKING:
+    from .prompt_builder import ModelPrompt
     from .runtime import Pico
 
 
@@ -24,7 +27,7 @@ if TYPE_CHECKING:
 class AgentLoopState:
     user_message: str
     run_started_at: float
-    prompt_snapshot: tuple[Any, dict[str, Any]] | None = None
+    prompt_snapshot: tuple[ModelPrompt, tuple[str, ...]] | None = None
     provider_context_tokens: int | None = None
     overflow_recovery_attempted: bool = False
     invalid_output_count: int = 0
@@ -34,7 +37,7 @@ class AgentLoopState:
 
 
 def _state_from_snapshot(runtime: Pico, run_id, events, projection):
-    session_id = str(runtime.session.data["id"])
+    session_id = str(runtime.session.id)
     if not events:
         raise ValueError("active Run Log is missing or empty")
     if projection.run_id != run_id or projection.session_id != session_id:
@@ -58,11 +61,11 @@ def load_resumable_run(runtime: Pico):
     pointer, the Run Store may discover the latest orphaned unfinished Run.
     """
 
-    session_id = str(runtime.session.data["id"])
-    if runtime.session.data.get("workspace_root") != str(runtime.workspace.root):
+    session_id = str(runtime.session.id)
+    if runtime.session.workspace_root != runtime.workspace.root:
         raise ValueError("session workspace does not match runtime workspace")
 
-    pointed_run_id = str(runtime.session.data.get("active_run_id", ""))
+    pointed_run_id = str(runtime.session.active_run_id)
     if pointed_run_id:
         run_id = pointed_run_id
         events, projection = runtime.dependencies.run_store.load_run(run_id)
@@ -94,7 +97,7 @@ def reload_current_run(runtime: Pico):
         return load_resumable_run(runtime)
     events, projection = runtime.dependencies.run_store.load_run(run_id)
     runtime.run = _state_from_snapshot(runtime, run_id, events, projection)
-    pointed_run_id = str(runtime.session.data.get("active_run_id", ""))
+    pointed_run_id = str(runtime.session.active_run_id)
     expected_pointer = "" if projection.terminal else run_id
     if pointed_run_id != expected_pointer:
         runtime.session.set_active_run(expected_pointer)
@@ -118,6 +121,90 @@ def _reload_if_snapshot_is_stale(runtime: Pico):
     return run
 
 
+def reconcile_interrupted(runtime):
+    run_log = runtime.run.run_log
+    if run_log is None:
+        return ()
+    pending_calls = run_log.pending_tool_calls()
+    if not pending_calls:
+        return ()
+    started_by_id = {
+        entry.call_id: entry
+        for entry in run_log.events
+        if entry.kind == "tool_started"
+    }
+    reconciled = []
+    for call in pending_calls:
+        started = started_by_id.get(call.call_id)
+        if started is None:
+            detail = "tool call was persisted but never entered execution"
+            outcome = ToolOutcome(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                status="error",
+                execution_state="not_started",
+                side_effect_state="none",
+                content=detail,
+                failure=FailureInfo(
+                    "operation_not_started",
+                    detail,
+                    "retry_after_wait",
+                ),
+            )
+        else:
+            potential = list(started.payload.get("potential_effects", []))
+            changed = []
+            transitions = []
+            for effect in potential:
+                logical = str(effect.get("path", ""))
+                if not logical:
+                    continue
+                path = Path(logical)
+                if not path.is_absolute():
+                    path = runtime.workspace.resolve_path(logical)
+                before = str(effect.get("before_state", ""))
+                before_artifact_id = str(effect.get("before_artifact_id", ""))
+                after = runtime.workspace.path_state(path)
+                if before != after:
+                    changed.append(logical)
+                    transitions.append(
+                        {
+                            "path": logical,
+                            "before_state": before,
+                            "after_state": after,
+                            "before_artifact_id": before_artifact_id,
+                        }
+                    )
+            effect_scope = str(started.payload.get("effect_scope", "none"))
+            unknown = effect_scope == "workspace" and not potential
+            uncertain = bool(changed or unknown)
+            detail = "tool execution was interrupted before a durable result"
+            outcome = ToolOutcome(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                status="partial_success" if uncertain else "error",
+                execution_state="failed",
+                side_effect_state=(
+                    "partial" if changed else ("unknown" if unknown else "none")
+                ),
+                content=detail,
+                failure=FailureInfo(
+                    "operation_interrupted",
+                    detail,
+                    "no_retry" if uncertain else "retry_after_wait",
+                ),
+                affected_paths=tuple(changed),
+                effect_scope=effect_scope if changed or unknown else "none",
+                structured={"path_transitions": transitions},
+            )
+        entry = run_log.append_tool_result(
+            outcome,
+            recovered_from_interruption=True,
+        )
+        reconciled.append((outcome, entry))
+    return tuple(reconciled)
+
+
 class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
@@ -136,7 +223,7 @@ class RunLifecycle:
             raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
         try:
-            reconciled = run_log.reconcile_interrupted(runtime)
+            reconciled = reconcile_interrupted(runtime)
             for _outcome, entry in reconciled:
                 runtime.apply_run_event(entry)
             if resumed:
@@ -170,7 +257,7 @@ class RunLifecycle:
         _reload_if_snapshot_is_stale(runtime)
         if runtime.run.resumable:
             if (
-                runtime.session.data.get("active_run_id")
+                runtime.session.active_run_id
                 != runtime.run.projection.run_id
             ):
                 runtime.session.set_active_run(runtime.run.projection.run_id)
@@ -189,7 +276,7 @@ class RunLifecycle:
         run_log = RunLog(
             run_id,
             task_id,
-            runtime.session.data["id"],
+            runtime.session.id,
             runtime.dependencies.run_store,
         )
         try:

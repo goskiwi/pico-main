@@ -29,6 +29,8 @@ include = ["pico*", "applications*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m 'not archived_report'"
+markers = ["archived_report: checks historical JSON reports; does not execute the current Runtime"]
 
 [tool.ruff.lint]
 extend-select = ["C901"]

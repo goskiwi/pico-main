@@ -119,15 +119,18 @@ def main():
                 ModelAction.final("Fixed calculator.add and verified the change."),
             ]
         )
+        runtime_workspace = Workspace.build(root)
         agent = Pico(
             model_client=model,
-            workspace=Workspace.build(root),
-            session_store=SessionStore(root / ".pico" / "sessions"),
+            workspace=runtime_workspace,
             config=PicoConfig(
                 mode="auto",
                 verification_command=verify_command,
             ),
             command_runner=command_runner,
+            session=SessionStore(root / ".pico" / "sessions").create(
+                runtime_workspace.root
+            ),
         )
 
         outcome = agent.ask(

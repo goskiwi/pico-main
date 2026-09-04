@@ -122,13 +122,16 @@ def main():
                 ModelAction.final("Concurrent edit preserved and repair completed."),
             ]
         )
+        runtime_workspace = Workspace.build(root)
         repaired = Pico(
             model_client=repair_model,
-            workspace=Workspace.build(root),
-            session_store=SessionStore(root / ".pico" / "sessions"),
+            workspace=runtime_workspace,
             config=PicoConfig(
                 mode="auto",
                 verification_command="",
+            ),
+            session=SessionStore(root / ".pico" / "sessions").create(
+                runtime_workspace.root
             ),
         )
         run_outcome = repaired.ask(
@@ -138,6 +141,7 @@ def main():
 
         denied_root = root / "denied"
         denied_root.mkdir()
+        runtime_workspace = Workspace.build(denied_root)
         denied = Pico(
             model_client=FakeModelClient(
                 [
@@ -155,11 +159,13 @@ def main():
                     ),
                 ]
             ),
-            workspace=Workspace.build(denied_root),
-            session_store=SessionStore(denied_root / ".pico" / "sessions"),
+            workspace=runtime_workspace,
             config=PicoConfig(
                 mode="code",
                 verification_command="",
+            ),
+            session=SessionStore(denied_root / ".pico" / "sessions").create(
+                runtime_workspace.root
             ),
         )
         denied.tools.approve = lambda *_args, **_kwargs: False

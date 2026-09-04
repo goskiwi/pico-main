@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from .contracts import TOOL_ARTIFACT_ID
@@ -42,21 +44,49 @@ class ArtifactStore:
         )
         return descriptor
 
-    def write_workspace_preimage(self, run_id, call_id, logical_path, content):
-        raw_content = str(content)
-        data = raw_content.encode("utf-8")
-        digest = hashlib.sha256(data).hexdigest()
+    def write_workspace_preimage(self, run_id, call_id, logical_path, source_path):
+        """Copy original bytes without holding the source text in memory."""
+
+        root = self.run_store.artifact_dir(run_id).resolve()
+        root.mkdir(parents=True, exist_ok=True)
         key_digest = hashlib.sha256(
             f"{call_id}:{logical_path}".encode()
         ).hexdigest()
-        artifact_id = f"preimage_{key_digest[:16]}_{digest[:10]}"
-        return self._write_internal(
-            run_id,
-            artifact_id,
-            raw_content,
-            kind="workspace_preimage",
-            metadata={"path": str(logical_path)},
+        digest = hashlib.sha256()
+        size = 0
+        with tempfile.NamedTemporaryFile(dir=root, suffix=".tmp") as staged:
+            with Path(source_path).open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    staged.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+            staged.flush()
+            os.fsync(staged.fileno())
+            artifact_id = f"preimage_{key_digest[:16]}_{digest.hexdigest()[:10]}"
+            content_path = self._internal_artifact_path(root, artifact_id, ".txt")
+            try:
+                os.link(staged.name, content_path)
+            except FileExistsError:
+                staged.seek(0)
+                with content_path.open("rb") as existing:
+                    while chunk := staged.read(1024 * 1024):
+                        if existing.read(len(chunk)) != chunk:
+                            raise RuntimeError(f"immutable artifact collision: {content_path.name}") from None
+                    if existing.read(1):
+                        raise RuntimeError(f"immutable artifact collision: {content_path.name}") from None
+        descriptor = {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "artifact_id": artifact_id,
+            "kind": "workspace_preimage",
+            "sha256": digest.hexdigest(),
+            "size_bytes": size,
+            "path": str(logical_path),
+        }
+        self._write_once(
+            self._internal_artifact_path(root, artifact_id, ".json"),
+            json.dumps(descriptor, indent=2, sort_keys=True) + "\n",
         )
+        return descriptor
 
     def write_final_diff(self, run_id, content):
         raw_content = str(content)

@@ -81,7 +81,7 @@ def main():
         print_section(
             "3. 启动时的恢复探测（这是一个全新 Session）",
             {
-                "active_run_id": agent.session.data["active_run_id"],
+                "active_run_id": agent.session.active_run_id,
                 "projection_run_id": agent.run.projection.run_id,
                 "resumable": agent.run.resumable,
             },
@@ -91,7 +91,7 @@ def main():
         assert isinstance(outcome, RunOutcome)
         assert outcome.status == "completed"
         assert outcome.answer == "README 已读取，文件工具工作正常。"
-        assert agent.session.data["active_run_id"] == ""
+        assert agent.session.active_run_id == ""
         assert agent.run.task.contract.allows_workspace_mutation is False
 
         events = agent.run.run_log.events
@@ -109,7 +109,7 @@ def main():
         print_section(
             "5. 终态 Session 与 Run Log",
             {
-                "session_active_run_id": agent.session.data["active_run_id"],
+                "session_active_run_id": agent.session.active_run_id,
                 "events": event_rows,
                 "run_outcome_is_persisted_fact": False,
                 "explanation": (

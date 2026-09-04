@@ -17,25 +17,27 @@ class GitWorktreeError(RuntimeError):
     pass
 
 
-def _git(root, *args, input_bytes=None):
-    result = subprocess.run(
-        ["git", *args],
-        cwd=Path(root),
-        input=input_bytes,
-        capture_output=True,
-        check=False,
-    )
+def _git(root, *args, input_bytes=None, execution_context=None):
+    timeout = execution_context.bounded_timeout(10) if execution_context else 10
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=Path(root), input=input_bytes, capture_output=True,
+            check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GitWorktreeError(f"Git command failed: {exc}") from exc
     if result.returncode:
         detail = (result.stderr or result.stdout).decode("utf-8", errors="replace")
         raise GitWorktreeError(detail.strip() or f"git {' '.join(args)} failed")
     return result.stdout
 
 
-def require_clean_repository(root):
+def require_clean_repository(root, *, execution_context=None):
     root = Path(root).resolve()
     try:
         top = Path(
-            _git(root, "rev-parse", "--show-toplevel")
+            _git(root, "rev-parse", "--show-toplevel", execution_context=execution_context)
             .decode("utf-8")
             .strip()
         ).resolve()
@@ -49,6 +51,7 @@ def require_clean_repository(root):
         "--porcelain",
         "-z",
         "--untracked-files=no",
+        execution_context=execution_context,
     )
     untracked = tuple(
         path
@@ -58,6 +61,7 @@ def require_clean_repository(root):
             "--others",
             "--exclude-standard",
             "-z",
+            execution_context=execution_context,
         ).split(b"\0")
         if path and path != b".pico" and not path.startswith(b".pico/")
     )
@@ -65,17 +69,18 @@ def require_clean_repository(root):
         raise GitWorktreeError(
             "implementation subtasks require a clean working tree before delegation"
         )
-    return _git(root, "rev-parse", "HEAD").decode("utf-8").strip()
+    return _git(root, "rev-parse", "HEAD", execution_context=execution_context).decode("utf-8").strip()
 
 
-def repository_changed_paths(root):
-    tracked = _git(root, "diff", "--name-only", "-z", "HEAD")
+def repository_changed_paths(root, *, execution_context=None):
+    tracked = _git(root, "diff", "--name-only", "-z", "HEAD", execution_context=execution_context)
     untracked = _git(
         root,
         "ls-files",
         "--others",
         "--exclude-standard",
         "-z",
+        execution_context=execution_context,
     )
     return tuple(
         sorted(
@@ -95,6 +100,7 @@ class GitWorktree:
     label: str
     container_root: Path | None = None
     path: Path | None = None
+    execution_context: object | None = None
 
     def create(self):
         if self.path is not None:
@@ -109,6 +115,7 @@ class GitWorktree:
                 "--detach",
                 str(self.path),
                 self.base_sha,
+                execution_context=self.execution_context,
             )
         except Exception:
             self.cleanup()
@@ -116,10 +123,10 @@ class GitWorktree:
         return self.path
 
     def apply_patch(self, patch):
-        apply_patch(self.path, patch)
+        apply_patch(self.path, patch, execution_context=self.execution_context)
 
     def changed_paths(self):
-        return repository_changed_paths(self.path)
+        return repository_changed_paths(self.path, execution_context=self.execution_context)
 
     def patch(self):
         changed = self.changed_paths()
@@ -133,12 +140,13 @@ class GitWorktree:
                 "--others",
                 "--exclude-standard",
                 "-z",
+                execution_context=self.execution_context,
             ).split(b"\0")
             if item
         }
         if untracked:
-            _git(self.path, "add", "-N", "--", *sorted(untracked))
-        return _git(self.path, "diff", "--binary", "--no-ext-diff", "HEAD")
+            _git(self.path, "add", "-N", "--", *sorted(untracked), execution_context=self.execution_context)
+        return _git(self.path, "diff", "--binary", "--no-ext-diff", "HEAD", execution_context=self.execution_context)
 
     def write_patch(self, destination):
         payload = self.patch()
@@ -166,7 +174,7 @@ class GitWorktree:
         self.container_root = None
 
 
-def apply_patch(root, patch):
+def apply_patch(root, patch, *, execution_context=None):
     payload = bytes(patch)
-    _git(root, "apply", "--check", "--whitespace=nowarn", "-", input_bytes=payload)
-    _git(root, "apply", "--whitespace=nowarn", "-", input_bytes=payload)
+    _git(root, "apply", "--check", "--whitespace=nowarn", "-", input_bytes=payload, execution_context=execution_context)
+    _git(root, "apply", "--whitespace=nowarn", "-", input_bytes=payload, execution_context=execution_context)

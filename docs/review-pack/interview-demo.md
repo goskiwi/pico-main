@@ -72,7 +72,7 @@ Approval、preimage 以及执行事务的 `tool_started/tool_result`。Batch 不
 
 ### 1:45～2:30：恢复与状态投影
 
-Session 只保存 `active_run_id`。重启时 Runtime 重放 RunLog；未完成工具不会盲目重试，
+Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话历史。重启时 Runtime 重放 RunLog；未完成工具不会盲目重试，
 而是比较声明路径的 before/current state，追加 `not_started`、`error`、`partial` 或
 `unknown` ToolOutcome。每次 Resume 输入先写 `user_guidance` Fact，因此二次崩溃后仍能
 重建当时交给模型的约束。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存

@@ -243,10 +243,10 @@ def main(argv=None):
         args.temperature,
         args.timeout,
     )
+    runtime_workspace = Workspace.build(workspace)
     agent = Pico(
         model_client=client,
-        workspace=Workspace.build(workspace),
-        session_store=SessionStore(workspace / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
             allowed_tools=("read_file", "edit_file", "update_working_state"),
@@ -261,6 +261,9 @@ def main(argv=None):
             verification_command=VISIBLE_COMMAND,
         ),
         command_runner=CommandRunner(workspace),
+        session=SessionStore(workspace / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     outcome = agent.ask(
         build_prompt(),

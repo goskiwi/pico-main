@@ -8,10 +8,16 @@ from pico.task_state import TaskContract
 
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
-    return Pico(FakeModelClient([]), Workspace.build(tmp_path),
-                SessionStore(tmp_path / ".pico/sessions"),
-                config=PicoConfig(mode="auto", verification_command=""),
-                **kwargs)
+    runtime_workspace = Workspace.build(tmp_path)
+    return Pico(
+        FakeModelClient([]),
+        runtime_workspace,
+        config=PicoConfig(mode="auto", verification_command=""),
+        **kwargs,
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
+    )
 
 
 def run_active(agent, call):
@@ -20,7 +26,7 @@ def run_active(agent, call):
         run_log = RunLog(
             "run_safety_test",
             "task_safety_test",
-            agent.session.data["id"],
+            agent.session.id,
             agent.dependencies.run_store,
         )
         first = run_log.append_user(

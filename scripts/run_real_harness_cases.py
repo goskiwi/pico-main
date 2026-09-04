@@ -189,11 +189,10 @@ def _client(args):
 
 
 def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier="", session=None, run_store=None):
+    runtime_workspace = Workspace.build(workspace)
     return Pico(
         model_client=client,
-        workspace=Workspace.build(workspace),
-        session_store=SessionStore(workspace / ".pico" / "sessions"),
-        session=session,
+        workspace=runtime_workspace,
         run_store=run_store,
         config=PicoConfig(
             mode=mode,
@@ -206,6 +205,11 @@ def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier
             verification_command=verifier,
         ),
         command_runner=CommandRunner(workspace),
+        session=session
+        if session is not None
+        else SessionStore(workspace / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
 
 
@@ -416,7 +420,7 @@ def run_resume(args, runtime, workspace):
         "call_interrupted_edit",
     )
     preimage = original.dependencies.artifacts.write_workspace_preimage(
-        run_id, call.call_id, "recovery.txt", "baseline\n"
+        run_id, call.call_id, "recovery.txt", target
     )
     original.apply_run_event(original.run.run_log.append_tool_call(call))
     original.apply_run_event(
@@ -435,7 +439,7 @@ def run_resume(args, runtime, workspace):
     target.write_text("partial\n", encoding="utf-8")
     original.run.execution_context = None
 
-    session = session_store.load(original.session.data["id"])
+    session = session_store.load(original.session.id)
     resumed = _agent(
         _client(args),
         workspace,

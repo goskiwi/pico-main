@@ -17,8 +17,8 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支以及 Agent Turn/Deadline 停止条件。
 3. `AgentLoop._handle_tool_turn()` → `ToolRuntime.execute_pending*()`：单 Call 或 Observation Batch
    由 Loop 接受并持久化，Started/Result 由 ToolRuntime 持久化。
-4. `RunLog` 的 `_RunProtocol`、`append()`、`reconcile_interrupted()` 与 `replay_events()`：理解
-   一个 Pending Tool transaction、Observation Batch 与 Crash recovery；第一遍在 `compact()` 前停止。
+4. `RunLog` 的 `_RunProtocol`、`append()` 与 `replay_events()`，以及 `run_lifecycle.reconcile_interrupted()`：理解
+   一个 Pending Tool transaction、Observation Batch 与 Crash recovery；历史筛选和压缩计划在 Day 5 阅读 `RunHistory`。
 5. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
 6. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
    Verification 的顺序理解 Runtime 完成权。
@@ -36,7 +36,7 @@ Adapter 细节和 Semantic Compaction 都留到后续章节。
 | [`pico/runtime.py`](../pico/runtime.py) | `Pico` 组合根、八个顶层组件以及 `ask()` 入口 |
 | [`pico/agent_loop.py`](../pico/agent_loop.py) | 模型轮、工具轮、Provider 续接和停止条件的控制流 |
 | [`pico/tool_runtime.py`](../pico/tool_runtime.py) | 模型可见工具的唯一公开执行边界，以及 Call/Started/Result 因果顺序 |
-| [`pico/run_log.py`](../pico/run_log.py) | Run Fact 的严格协议、追加、Compaction 与中断对账 |
+| [`pico/run_log.py`](../pico/run_log.py) | Run Fact 的严格协议与追加；历史视图在 `history.py`，恢复协调在 Lifecycle |
 | [`pico/run_projection.py`](../pico/run_projection.py) | 从 Fact 重建 Task、Evidence、Metrics、Pending Call IDs 和终态 receipt |
 | [`pico/completion_controller.py`](../pico/completion_controller.py) | 是否允许模型最终提交的 Runtime 决策 |
 
@@ -45,6 +45,12 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 核心状态源。
 
 ## 从一个真实 CLI 请求开始
+
+程序入口先准备对象，再交给 Pico：`SessionStore.create(workspace.root)` 新建会话，
+`SessionStore.load(session_id)` 恢复会话，两者都直接返回 `Session`。
+`Pico(model_client, workspace, session, config=...)` 不再包装会话字典；会话通过
+`session.id`、`session.active_run_id` 访问。`PicoConfig(...)` 构造时即完成校验与规范化，
+修改使用 `dataclasses.replace(config, ...)`，不存在第二次 `build/normalized` 加工。
 
 下面的参数都由当前 CLI 提供。CLI 会识别仓库中的 Python 测试并自动配置验证：
 
@@ -98,7 +104,7 @@ Pico.__init__
 
 Pico.ask
   -> RunLifecycle.initialize
-  -> RunLog.reconcile_interrupted
+  -> run_lifecycle.reconcile_interrupted
   -> append user_guidance
   -> run_resumed
 ```

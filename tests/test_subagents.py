@@ -14,7 +14,7 @@ from pico import (
 from pico.command_runner import CommandResult
 from pico.completion_controller import CompletionController
 from pico.contracts import ToolCall
-from pico.execution import ExecutionContext
+from pico.execution import ExecutionContext, ExecutionDeadlineExceeded
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.subagents.contracts import (
@@ -24,6 +24,7 @@ from pico.subagents.contracts import (
     ChildSpec,
     ChildSuccess,
 )
+from pico.subagents.worktree import _git
 from pico.task_state import TaskContract
 
 CHILD_SUCCESS_FIELDS = {
@@ -33,6 +34,24 @@ CHILD_SUCCESS_FIELDS = {
     "child_run_id",
     "result",
 }
+
+
+def test_child_git_consumes_parent_remaining_time(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    timeouts = []
+    def run(_argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
+
+    monkeypatch.setattr("pico.subagents.worktree.subprocess.run", run)
+    parent = ExecutionContext.root(max_seconds=0.25)
+    assert _git(tmp_path, "status", execution_context=parent) == b"ok"
+    assert 0 < timeouts[0] <= 0.25
+    expired = ExecutionContext.root(max_seconds=0, deadline=0)
+    with pytest.raises(ExecutionDeadlineExceeded):
+        _git(tmp_path, "status", execution_context=expired)
+    assert len(timeouts) == 1
 
 
 def git(root, *args):
@@ -115,7 +134,7 @@ def activate_parent(
     run_log = RunLog(
         "run_parent",
         "task_parent",
-        parent.session.data["id"],
+        parent.session.id,
         parent.dependencies.run_store,
     )
     first = run_log.append_user(
@@ -141,10 +160,10 @@ def build_parent(
     runner_factory=None,
 ):
     runner_factory = runner_factory or RunnerFactory()
+    runtime_workspace = Workspace.build(root)
     parent = Pico(
         FakeModelClient([]),
-        Workspace.build(root),
-        SessionStore(root / ".pico" / "sessions"),
+        runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command=verification_command,
@@ -152,6 +171,9 @@ def build_parent(
         ),
         command_runner_factory=runner_factory,
         subagent_model_client_factory=child_factory,
+        session=SessionStore(root / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     activate_parent(
         parent,

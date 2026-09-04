@@ -56,7 +56,10 @@ class PromptBuilder:
             runtime.workspace.root,
             runtime.workspace.cwd,
         )
-        self._context = _ContextAssembler(runtime)
+        self._context = _ContextAssembler(
+            runtime, instructions=self._instructions,
+            repository_instructions=self._repository_instructions,
+        )
 
     @property
     def instructions(self):

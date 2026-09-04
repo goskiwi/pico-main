@@ -16,7 +16,7 @@ Terminology in this document is strict:
 | Scope | Source of truth | Derived state |
 |---|---|---|
 | Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Tool Call IDs and final Diff receipt |
-| Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived and `reload_required` is only a process-local cache-validity bit |
+| Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task, RunLog and execution state |
 | Task contract | First `user_message.contract`, derived deterministically from the request and explicit Mode | Goal, maximum write capability, write scope and change-verification requirement |
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |

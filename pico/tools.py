@@ -13,7 +13,6 @@ import stat
 import subprocess
 import time
 from collections import deque
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -34,10 +33,9 @@ from .verification import (
 from .working_state import normalize_working_update
 from .workspace import IGNORED_PATH_NAMES
 
-READ_FILE_MAX_BYTES = 8 * 1024 * 1024
+READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
 READ_FILE_MAX_LINES = 2000
 SEARCH_MAX_FILES = 5000
-SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
@@ -177,19 +175,19 @@ BASE_TOOL_SPECS = {
 }
 
 
-def build_tool_registry(context):
+def build_tool_registry():
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
     tools = {}
     for name, spec in BASE_TOOL_SPECS.items():
         tool = {
             **spec,
-            "validate": partial(_TOOL_VALIDATORS[name], context),
-            "run": partial(_TOOL_RUNNERS[name], context),
+            "validate": _TOOL_VALIDATORS[name],
+            "run": _TOOL_RUNNERS[name],
         }
         planner = _TOOL_EFFECT_PLANNERS.get(name)
         if planner is not None:
-            tool["potential_effects"] = partial(planner, context)
+            tool["potential_effects"] = planner
         tools[name] = tool
     return tools
 
@@ -264,15 +262,11 @@ def _validate_read_file(context, args):
         > READ_FILE_MAX_LINES
     ):
         raise ValueError(f"read_file returns at most {READ_FILE_MAX_LINES} lines")
-    if path.stat().st_size > READ_FILE_MAX_BYTES:
-        raise ValueError(
-            f"read_file target exceeds {READ_FILE_MAX_BYTES} bytes; use search or a narrower artifact"
-        )
     return args
 
 
 def _validate_read_artifact(context, args):
-    if context.artifact_store is None or not context.run_id():
+    if context.artifact_store is None or not context.run_id:
         raise ValueError("artifact store is unavailable")
     return args
 
@@ -321,8 +315,8 @@ def _validate_edit_file(context, args):
 
 
 def _validate_working_state(context, args):
-    state = context.working_state()
-    if state is None or not context.tool_call_id():
+    state = context.working_state
+    if state is None or not context.tool_call_id:
         raise ValueError("working state updates require an active Run tool call")
     normalized = normalize_working_update(args)
     state.updated(normalized)
@@ -385,23 +379,32 @@ def tool_read_file(context, args):
     start_line = int(args.get("start_line", 1))
     requested_end_line = int(args.get("end_line", 200))
     digest = hashlib.sha256()
-    rendered = []
+    rendered = bytearray()
     total_lines = 0
+    number = 1
+    line_start = True
+    truncated = False
+    actual_end_line = None
     with path.open("rb") as handle:
-        for number, raw_line in enumerate(handle, start=1):
-            digest.update(raw_line)
+        for chunk in iter(lambda: handle.readline(64 * 1024), b""):
+            digest.update(chunk)
             total_lines = number
             if start_line <= number <= requested_end_line:
-                line = raw_line.decode("utf-8", errors="replace")
-                line = line.removesuffix("\n").removesuffix("\r")
-                rendered.append(f"{number:>4}: {line}")
-    body = "\n".join(rendered)
+                prefix = f"{number:>4}: ".encode() if line_start else b""
+                content = prefix + chunk
+                available = READ_FILE_MAX_OUTPUT_BYTES - len(rendered)
+                rendered.extend(content[:available])
+                truncated |= len(content) > available
+                if available > 0:
+                    actual_end_line = number
+            line_start = chunk.endswith(b"\n")
+            if line_start:
+                number += 1
+    body = rendered.decode("utf-8", errors="replace").replace("\r\n", "\n").rstrip("\n")
+    body = body.encode("utf-8")[:READ_FILE_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    if truncated:
+        body += "\n[read output truncated; narrow the line range or search for specific content]"
     revision = "sha256:" + digest.hexdigest()
-    actual_end_line = (
-        min(requested_end_line, total_lines)
-        if total_lines >= start_line
-        else None
-    )
     relative = path.relative_to(context.workspace_root).as_posix()
     return ToolRunnerResult(
         f"# {relative}\nrevision: {revision}\n{body}",
@@ -410,7 +413,8 @@ def tool_read_file(context, args):
             "start_line": start_line,
             "end_line": actual_end_line,
             "total_lines": total_lines,
-            "has_more": total_lines > requested_end_line,
+            "has_more": truncated or total_lines > requested_end_line,
+            "truncated": truncated,
             "revision": revision,
         },
     )
@@ -418,7 +422,7 @@ def tool_read_file(context, args):
 
 def tool_read_artifact(context, args):
     page = context.artifact_store.read_slice(
-        context.run_id(),
+        context.run_id,
         args["artifact_id"],
         args["offset"],
         args["max_bytes"],
@@ -454,8 +458,6 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
             "--smart-case",
             "--max-columns",
             "2000",
-            "--max-filesize",
-            str(SEARCH_MAX_FILE_BYTES),
             "--",
             pattern,
             relative_path,
@@ -566,10 +568,7 @@ def _fallback_search_files(path, deadline):
             candidate = Path(entry.path)
             if stat.S_ISDIR(metadata.st_mode):
                 pending.append(candidate)
-            elif (
-                stat.S_ISREG(metadata.st_mode)
-                and metadata.st_size <= SEARCH_MAX_FILE_BYTES
-            ):
+            elif stat.S_ISREG(metadata.st_mode):
                 files.append(candidate)
                 if len(files) >= SEARCH_MAX_FILES:
                     limited = True
@@ -599,6 +598,7 @@ def _fallback_search(context, path, pattern):
         )
     files, limited = _fallback_search_files(path, deadline)
     matches = []
+    output_bytes = 0
     timed_out = False
     for file_path in files:
         if time.monotonic() >= deadline:
@@ -612,10 +612,12 @@ def _fallback_search(context, path, pattern):
                         break
                     if expression.search(line):
                         line = line.removesuffix("\n").removesuffix("\r")
-                        matches.append(
-                            f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
-                        )
-                        if len(matches) >= SEARCH_MAX_MATCHES:
+                        result = f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
+                        encoded = result.encode("utf-8")
+                        available = max(0, SEARCH_MAX_OUTPUT_BYTES - output_bytes - 1)
+                        matches.append(encoded[:available].decode("utf-8", errors="ignore"))
+                        output_bytes += min(len(encoded), available) + 1
+                        if len(matches) >= SEARCH_MAX_MATCHES or len(encoded) > available:
                             limited = True
                             break
         except OSError:
@@ -746,7 +748,7 @@ def tool_run_command(context, args):
         cwd=context.workspace_root,
         timeout=RUN_COMMAND_TIMEOUT_SECONDS,
         env={},
-        execution_context=context.execution_context(),
+        execution_context=context.execution_context,
     )
     snapshot_failure = None
     try:

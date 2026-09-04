@@ -1,3 +1,4 @@
+
 import pytest
 
 from pico import (
@@ -12,6 +13,7 @@ from pico import (
 from pico.contracts import ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
+from pico.run_lifecycle import reconcile_interrupted
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
@@ -30,11 +32,12 @@ def build_interrupted_run(tmp_path, config=None):
     effective_config = config or PicoConfig(
         mode="auto", verification_command=""
     )
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        store,
+        runtime_workspace,
         config=effective_config,
+        session=store.create(runtime_workspace.root),
     )
     contract = TaskContract(
         "Inspect",
@@ -49,7 +52,7 @@ def build_interrupted_run(tmp_path, config=None):
     log = RunLog(
         "run_interrupted",
         "task_interrupted",
-        agent.session.data["id"],
+        agent.session.id,
         agent.dependencies.run_store,
     )
     first = log.append_user(contract)
@@ -61,13 +64,13 @@ def build_interrupted_run(tmp_path, config=None):
 
 
 def resumed_agent(agent, store, outputs, config=None):
+    runtime_workspace = Workspace.build(agent.workspace.root)
     return Pico(
         FakeModelClient(outputs),
-        Workspace.build(agent.workspace.root),
-        store,
-        session=store.load(agent.session.data["id"]),
+        runtime_workspace,
         run_store=agent.dependencies.run_store,
         config=config or PicoConfig(mode="auto", verification_command=""),
+        session=store.load(agent.session.id),
     )
 
 
@@ -198,11 +201,12 @@ def test_resume_cannot_widen_original_ask_contract(tmp_path):
 
 def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
     store = SessionStore(tmp_path / ".pico/sessions")
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        store,
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=store.create(runtime_workspace.root),
     )
     original = agent.session.set_active_run
     captured = ""
@@ -223,7 +227,7 @@ def test_user_contract_is_durable_before_session_pointer(tmp_path, monkeypatch):
     original_complete = agent.model_client.complete_action
 
     def complete_with_durable_pointer(*args, **kwargs):
-        assert agent.session.data["active_run_id"] == captured
+        assert agent.session.active_run_id == captured
         return original_complete(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -241,11 +245,14 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
     monkeypatch,
     ambiguous_kind,
 ):
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient(observed_final("Recovered.")),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
     )
     original_append = agent.dependencies.run_store.append_event
     failed = False
@@ -270,7 +277,7 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
     run_id = agent.run.projection.run_id
     assert run_id
     assert agent.run.resumable is True
-    assert agent.session.data["active_run_id"] == run_id
+    assert agent.session.active_run_id == run_id
     assert [event.sequence for event in agent.run.run_log.events] == list(
         range(1, len(agent.run.run_log.events) + 1)
     )
@@ -284,11 +291,14 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
     tmp_path,
     monkeypatch,
 ):
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
     )
     store = agent.dependencies.run_store
     original_append = store.append_event
@@ -308,7 +318,7 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
 
     assert agent.run.task is None
     assert agent.run.run_log is None
-    assert agent.session.data["active_run_id"] == ""
+    assert agent.session.active_run_id == ""
     agent.reset()
 
     agent.model_client.outputs.extend(observed_final("Retried."))
@@ -316,11 +326,14 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
 
 
 def test_same_runtime_reuses_unfinished_run_after_unhandled_model_error(tmp_path):
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
     )
 
     with pytest.raises(RuntimeError, match="ran out of outputs"):
@@ -345,11 +358,14 @@ def test_manual_tool_is_rejected_while_resumable_run_is_dormant(tmp_path):
 
 
 def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient(observed_final("Done.")),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico/sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
     )
     assert agent.ask("Finish").answer == "Done."
     terminal_run_id = agent.run.projection.run_id
@@ -357,7 +373,7 @@ def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
 
     restarted = resumed_agent(agent, agent.session.store, [])
 
-    assert restarted.session.data["active_run_id"] == ""
+    assert restarted.session.active_run_id == ""
     assert restarted.run.task is None
     assert restarted.run.resumable is False
 
@@ -365,11 +381,12 @@ def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
 @pytest.mark.parametrize("corruption", ["missing", "malformed"])
 def test_corrupt_session_pointer_fails_closed(tmp_path, corruption):
     store = SessionStore(tmp_path / ".pico/sessions")
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        store,
+        runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
+        session=store.create(runtime_workspace.root),
     )
     run_id = "run_corrupt_pointer"
     agent.session.set_active_run(run_id)
@@ -431,7 +448,7 @@ def test_started_changed_path_recovers_as_partial_without_replay(tmp_path):
     restored = RunLog.restore("run_interrupted", resumed.dependencies.run_store)
     resumed.run.projection = resumed.dependencies.run_store.replay("run_interrupted")
     resumed.run.run_log = restored
-    restored.reconcile_interrupted(resumed)
+    reconcile_interrupted(resumed)
     result = restored.events[-1]
     assert result.outcome_status == "partial_success"
     assert result.side_effect_state == "partial"

@@ -130,7 +130,7 @@ Child Run Log、Session、Artifact 和 Patch 位于 Parent Run 的 `subagents/<c
     subagents/<child_id>/{sessions,runs,patch.diff}
 ```
 
-Session 只保存 `active_run_id`。恢复会重放 Run Log、修复末尾未完成的 Tool 事务，并把新的
+Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话历史。恢复会重放 Run Log、修复末尾未完成的 Tool 事务，并把新的
 resume 请求作为 `user_guidance` Fact 持久化。文件工具不能访问 `.git/` 或 `.pico/`；固定
 `run_command` 和 Verification 都拥有当前用户的宿主权限，不能被描述为 Sandbox。
 两者共用 Repository 净状态观察：HEAD、staged/unstaged diff 与非忽略 untracked revision。
@@ -157,6 +157,14 @@ uv run python scripts/day7_runtime_capstone.py
 uv run pytest -q
 uv run ruff check pico applications tests scripts
 ```
+
+默认测试执行当前代码，排除历史报告检查。历史 JSON 报告单独检查：
+
+```bash
+uv run pytest -q -m archived_report tests/archived_reports
+```
+
+这条命令不会调用 LLM，也不代表当前代码通过真实模型验收。
 
 ## Scope
 

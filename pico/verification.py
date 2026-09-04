@@ -287,6 +287,7 @@ def verify_workspace(
         "finished_changed_path_states": dict(started_changed_path_states),
         "exit_code": None,
         "output": "",
+        "workspace_changes": [],
     }
     try:
         started_workspace_state = capture_repository_state(root)
@@ -343,6 +344,10 @@ def verify_workspace(
         repository_state_changes(started_workspace_state, finished_workspace_state)
         if finished_workspace_state is not None
         else ()
+    )
+    record["workspace_changes"] = (
+        sorted(set(workspace_changes) | set(changed_during_verification))
+        if finished_workspace_state is not None else None
     )
     if workspace_changes:
         reasons.append(

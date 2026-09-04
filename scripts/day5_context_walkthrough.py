@@ -16,6 +16,7 @@ from pico import (
     Workspace,
 )
 from pico.execution import ExecutionContext
+from pico.history import RunHistory
 from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
@@ -68,11 +69,14 @@ def build_agent(root, *, pressure_window=False):
                 "compaction_keep_recent_tokens": 700,
             }
         )
+    runtime_workspace = Workspace.build(root)
     return Pico(
         model_client=FakeModelClient([]),
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / "sessions"),
+        workspace=runtime_workspace,
         config=PicoConfig(**config),
+        session=SessionStore(root / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
 
 
@@ -85,7 +89,7 @@ def activate(agent, run_id, goal):
     run_log = RunLog(
         run_id,
         f"task_{run_id}",
-        agent.session.data["id"],
+        agent.session.id,
         agent.dependencies.run_store,
     )
     agent.run.run_log = run_log
@@ -413,7 +417,7 @@ def semantic_compaction_experiment(root):
     agent.prompt.semantic_summarizer = summarizer
     original_physical = tuple(run_log.events)
     original_ids = [event.event_id for event in original_physical]
-    original_history_view_count = len(run_log.active_events())
+    original_history_view_count = len(RunHistory(run_log.events).active_events())
 
     compaction, history_override = agent.prompt.prepare_compaction(
         QUERY,
@@ -426,7 +430,7 @@ def semantic_compaction_experiment(root):
         history_override=history_override,
     )
     physical_after = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
-    history_view_after = tuple(run_log.active_events())
+    history_view_after = tuple(RunHistory(run_log.events).active_events())
     physical_counts = durable_kind_counts(physical_after)
     compaction_event = physical_after[-1]
     summary = compaction_event.content

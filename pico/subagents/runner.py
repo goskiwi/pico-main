@@ -236,6 +236,7 @@ class SubagentRunner:
             self.parent.workspace.root,
             record.base_sha,
             record.child_id,
+            execution_context=self.parent.run.execution_context,
         )
         handle.create()
         self._worktrees[(run_id, record.child_id)] = handle
@@ -282,13 +283,13 @@ class SubagentRunner:
         return Pico(
             model_client=self.model_client_factory(record.spec),
             workspace=workspace,
-            session_store=SessionStore(task_root / "sessions"),
             run_store=RunStore(task_root / "runs"),
             config=config,
-            command_runner=(
-                self.parent.dependencies.command_runner_factory(workspace_root)
+            command_runner=self.parent.dependencies.command_runner_factory(
+                workspace_root
             ),
             parent_execution_context=self.parent.run.execution_context,
+            session=SessionStore(task_root / "sessions").create(workspace.root),
         )
 
     def _run_child(self, run_id, record):
@@ -354,7 +355,8 @@ class SubagentRunner:
         try:
             if spec.role == "implement":
                 record.base_sha = require_clean_repository(
-                    self.parent.workspace.root
+                    self.parent.workspace.root,
+                    execution_context=self.parent.run.execution_context,
                 )
                 self._prepare_implement_worktree(run_id, record)
             self._run_child(run_id, record)

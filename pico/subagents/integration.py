@@ -67,7 +67,10 @@ class PatchIntegrator:
 
     def _require_parent_base(self, base_sha, phase):
         try:
-            current = require_clean_repository(self.parent.workspace.root)
+            current = require_clean_repository(
+                self.parent.workspace.root,
+                execution_context=self.parent.run.execution_context,
+            )
         except GitWorktreeError as exc:
             raise ValueError(f"parent workspace changed {phase}") from exc
         if current != base_sha:
@@ -90,6 +93,7 @@ class PatchIntegrator:
             self.parent.workspace.root,
             record.base_sha,
             "integration-" + record.child_id,
+            execution_context=self.parent.run.execution_context,
         )
         try:
             integration.create()
@@ -105,7 +109,8 @@ class PatchIntegrator:
             if hashlib.sha256(verified_patch).hexdigest() != patch_receipt.sha256:
                 raise ValueError("verification changed the immutable Child patch")
             self._require_parent_base(record.base_sha, "during patch verification")
-            apply_patch(self.parent.workspace.root, patch)
+            apply_patch(self.parent.workspace.root, patch,
+                        execution_context=self.parent.run.execution_context)
         finally:
             integration.cleanup()
 

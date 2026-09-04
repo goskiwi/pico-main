@@ -1,10 +1,20 @@
 """Narrow OpenAI-compatible Responses adapter used by the runtime."""
 
+import io
 import json
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
-from http.client import IncompleteRead, RemoteDisconnected
+from contextlib import contextmanager
+from http.client import (
+    HTTPConnection,
+    HTTPException,
+    HTTPSConnection,
+    IncompleteRead,
+    RemoteDisconnected,
+)
 
 from ..contracts import ModelAction, ToolCall
 
@@ -57,6 +67,69 @@ _CONTEXT_OVERFLOW_MESSAGE = (
     "OpenAI-compatible error: provider context window exceeded"
 )
 _HTTP_CONTEXT_MESSAGE_STATUSES = {400, 413, 414, 422}
+
+
+@contextmanager
+def _open_response(request, timeout):
+    """Keep urllib proxy/redirect behavior, but bound headers and body together."""
+    deadline = time.monotonic() + timeout
+    timers = []
+
+    def arm(transport):
+        def expire():
+            try:
+                transport.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            expire()
+            raise TimeoutError("provider request deadline exceeded")
+        timer = threading.Timer(remaining, expire)
+        timer.daemon = True
+        timers.append(timer)
+        timer.start()
+
+    class DeadlineHTTPConnection(HTTPConnection):
+        def connect(self):
+            super().connect()
+            arm(self.sock)
+
+    class DeadlineHTTPSConnection(HTTPSConnection):
+        def connect(self):
+            super().connect()
+            arm(self.sock)
+
+    class HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(DeadlineHTTPConnection, req)
+
+    class HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(DeadlineHTTPSConnection, req, context=self._context)
+
+    try:
+        opener = urllib.request.build_opener(HTTPHandler(), HTTPSHandler())
+        try:
+            response = opener.open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            with exc:
+                body = exc.read()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("provider request deadline exceeded") from None
+            raise urllib.error.HTTPError(
+                exc.url, exc.code, exc.reason, exc.headers, io.BytesIO(body)
+            ) from None
+        with response:
+            yield response
+        if time.monotonic() >= deadline:
+            raise TimeoutError("provider request deadline exceeded")
+    finally:
+        for timer in timers:
+            timer.cancel()
+            timer.join()
+
 
 
 def _normalized_error_code(value):
@@ -475,7 +548,7 @@ class OpenAICompatibleModelClient:
             http_failure = None
             transport_failure = False
             try:
-                with urllib.request.urlopen(request, timeout=effective_timeout) as response:
+                with _open_response(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
                     response_headers = getattr(response, "headers", {}) or {}
                     return body_text, response_headers.get("Content-Type", "")
@@ -510,6 +583,8 @@ class OpenAICompatibleModelClient:
                 IncompleteRead,
                 RemoteDisconnected,
                 TimeoutError,
+                HTTPException,
+                OSError,
             ):
                 transport_failure = True
 

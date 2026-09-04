@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 
 from scripts.run_real_compaction import (
     EVIDENCE_COUNT,
@@ -28,15 +26,3 @@ def test_real_compaction_prompt_requires_ordered_reads_and_one_write_scope():
     assert "remove the completed evidence-read" in prompt
     assert f"modify only {TARGET_PATH}" in prompt
     assert "The Runtime owns verification" in prompt
-
-
-def test_published_real_compaction_artifact_passes_all_checks():
-    artifact = json.loads(Path("artifacts/real-compaction.json").read_text())
-
-    assert artifact["passed"] is True
-    assert artifact["analysis"]["compaction_count"] >= 1
-    assert artifact["analysis"]["provider_session_reset_count"] >= 1
-    assert artifact["analysis"]["observation_batch_count"] == 3
-    assert artifact["analysis"]["model_request_count"] <= 10
-    assert len(artifact["analysis"]["evidence_read_paths"]) == EVIDENCE_COUNT
-    assert all(artifact["checks"].values())

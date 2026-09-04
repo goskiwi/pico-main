@@ -13,7 +13,6 @@ from .contracts import ToolFailureError
 from .persistence import atomic_replace_bytes
 
 ABSENT_REVISION = "absent"
-MAX_TEXT_FILE_BYTES = 2_000_000
 MAX_DIAGNOSTIC_LOCATIONS = 8
 MAX_DIAGNOSTIC_EXCERPT_CHARS = 2000
 DIAGNOSTIC_CONTEXT_LINES = 5
@@ -240,11 +239,6 @@ class WorkspaceMutationService:
             raise ValueError(f"path escapes workspace: {path}")
         return target
 
-    @staticmethod
-    def _check_payload(payload):
-        if len(payload) > MAX_TEXT_FILE_BYTES:
-            raise ValueError(f"text mutation exceeds {MAX_TEXT_FILE_BYTES} bytes")
-
     def _require_revision(self, target, logical_path, expected_revision):
         actual = file_revision(target)
         if actual != expected_revision:
@@ -268,7 +262,6 @@ class WorkspaceMutationService:
         target = self._target(path)
         logical_path = target.relative_to(self.root)
         payload = str(content).encode("utf-8")
-        self._check_payload(payload)
         with self._lock:
             actual = file_revision(target)
             if actual != ABSENT_REVISION:
@@ -313,7 +306,6 @@ class WorkspaceMutationService:
                     old_text=old_text,
                 )
             payload = text.replace(str(old_text), str(new_text), 1).encode("utf-8")
-            self._check_payload(payload)
             after = content_revision(payload)
             if actual != after:
                 self._commit(target, logical_path, payload, expected_revision)

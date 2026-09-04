@@ -89,18 +89,18 @@ def build_tool_registry(manager):
                 "a configured verifier, and an isolated Git worktree; it returns an "
                 "immutable patch receipt but never integrates automatically."
             ),
-            "run": lambda args: _delegate(manager, args),
+            "run": lambda context, args: _delegate(manager, args),
         },
         "integrate_child": {
             "args_schema": IntegrateChildArgs,
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "potential_effects": lambda args: _integration_effects(manager, args),
+            "potential_effects": lambda context, args: _integration_effects(manager, args),
             "description": (
                 "Explicitly verify and integrate one completed Implement Child patch into "
                 "the unchanged parent repository."
             ),
-            "run": lambda args: _integrate(manager, args),
+            "run": lambda context, args: _integrate(manager, args),
         },
     }

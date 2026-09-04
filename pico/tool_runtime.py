@@ -51,7 +51,7 @@ ASK_TOOL_NAMES = frozenset(
 class PreparedObservation:
     call: ToolCall
     tool: dict
-    execution_context: object | None
+    context: ToolContext
 
 
 def _run_id(agent):
@@ -64,12 +64,18 @@ class ToolRuntime:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
         self.registry = self._build_registry()
-        self.surface = self._apply_allowlist(self.registry)
-        self.action_schemas = toolkit.build_action_tools(self.surface)
+        self._apply_allowlist(self.registry)
         self._repeat_outcomes = {}
 
+    @property
+    def surface(self):
+        return {
+            name: tool for name, tool in self._apply_allowlist(self.registry).items()
+            if self._tool_allowed_by_mode(name)
+        }
+
     def _build_registry(self):
-        tools = toolkit.build_tool_registry(self.context())
+        tools = toolkit.build_tool_registry()
         if self.runtime.dependencies.subagents is not None:
             from .subagents.tools import build_tool_registry
 
@@ -86,7 +92,7 @@ class ToolRuntime:
         allowed = set(allowed_tools)
         return {name: tool for name, tool in tools.items() if name in allowed}
 
-    def validate(self, name, args):
+    def validate(self, name, args, context):
         runtime = self.runtime
         tool = self.registry.get(name)
         if tool is None:
@@ -94,7 +100,7 @@ class ToolRuntime:
         validated = tool["args_schema"].model_validate(args or {}).model_dump()
         validator = tool.get("validate")
         if validator is not None:
-            validated = validator(validated)
+            validated = validator(context, validated)
         allowed_paths = self._effective_write_scope()
         if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
@@ -109,7 +115,7 @@ class ToolRuntime:
                 validated["allowed_write_paths"], allowed_paths
             )
         if name == "integrate_child" and allowed_paths is not None:
-            _scope, planned_paths = self._potential_effects(tool, validated)
+            _scope, planned_paths = self._potential_effects(tool, context, validated)
             self._require_write_scope(
                 (logical for logical, _path in planned_paths),
                 allowed_paths,
@@ -152,35 +158,23 @@ class ToolRuntime:
         return not (mode == "auto" and name == "run_command")
 
     def model_action_tools(self):
-        return [
-            schema
-            for schema in self.action_schemas
-            if self._tool_allowed_by_mode(schema["name"])
-        ]
+        return toolkit.build_action_tools(self.surface)
 
-    def context(self, *, call_id="", execution_context=None):
+    def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
         return ToolContext(
             workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_tool_path,
             artifact_store=runtime.dependencies.artifacts,
-            run_id_provider=lambda: str(runtime.run.projection.run_id or "manual"),
-            tool_call_id_provider=(
-                (lambda: str(call_id))
-                if call_id
-                else lambda: (
-                    runtime.run.run_log.pending_call_id()
-                    if runtime.run.run_log is not None
-                    else ""
-                )
-            ),
-            working_state_provider=lambda: (
+            run_id=str(runtime.run.projection.run_id or "manual"),
+            tool_call_id=str(call_id),
+            working_state=(
                 runtime.run.task.working if runtime.run.task is not None else None
             ),
-            execution_context_provider=(
-                (lambda: execution_context)
+            execution_context=(
+                execution_context
                 if execution_context is not None
-                else lambda: runtime.run.execution_context
+                else runtime.run.execution_context
             ),
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
@@ -287,10 +281,10 @@ class ToolRuntime:
         )
 
     @staticmethod
-    def _potential_effects(tool, args):
+    def _potential_effects(tool, context, args):
         planner = tool.get("potential_effects")
         if planner is not None:
-            return planner(args)
+            return planner(context, args)
         return (
             "workspace" if tool.get("workspace_mutating", False) else "none"
         ), ()
@@ -323,14 +317,14 @@ class ToolRuntime:
                 _run_id(agent),
                 call.call_id,
                 logical,
-                path.read_text(encoding="utf-8"),
+                path,
             )
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    def _validate_call(self, call):
+    def _validate_call(self, call, context):
         try:
-            args = self.validate(call.name, call.args)
+            args = self.validate(call.name, call.args, context)
         except ToolFailureError as exc:
             return None, self._rejected(
                 call,
@@ -405,26 +399,22 @@ class ToolRuntime:
                 if self.runtime.run.execution_context is not None
                 else None
             )
-            tool = toolkit.build_tool_registry(
-                self.context(
-                    call_id=call.call_id,
-                    execution_context=execution,
-                )
-            )[call.name]
+            context = self.context(call_id=call.call_id, execution_context=execution)
+            tool = self.registry[call.name]
             try:
                 args = tool["args_schema"].model_validate(
                     call.args or {}
                 ).model_dump()
                 validator = tool.get("validate")
                 if validator is not None:
-                    args = validator(args)
+                    args = validator(context, args)
             except Exception as exc:  # noqa: BLE001 - batch admission boundary
                 return (), f"invalid arguments for {call.name}: {exc}"
             prepared.append(
                 PreparedObservation(
                     ToolCall(call.name, args, call.call_id),
                     tool,
-                    execution,
+                    context,
                 )
             )
         return tuple(prepared), ""
@@ -448,11 +438,12 @@ class ToolRuntime:
 
     @staticmethod
     def _run_prepared_observation(prepared):
-        if prepared.execution_context is not None:
-            prepared.execution_context.check_active()
-        result = prepared.tool["run"](prepared.call.args)
-        if prepared.execution_context is not None:
-            prepared.execution_context.check_active()
+        execution = prepared.context.execution_context
+        if execution is not None:
+            execution.check_active()
+        result = prepared.tool["run"](prepared.context, prepared.call.args)
+        if execution is not None:
+            execution.check_active()
         return result
 
     def _observation_outcome(self, prepared, result):
@@ -586,7 +577,8 @@ class ToolRuntime:
         if repeated is not None:
             return repeated
 
-        call, validation_rejection = self._validate_call(call)
+        context = self.context(call_id=call.call_id)
+        call, validation_rejection = self._validate_call(call, context)
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
@@ -598,7 +590,7 @@ class ToolRuntime:
             return self._rejected(call, "approval_denied", "approval denied")
 
         try:
-            potential_scope, potential_paths = self._potential_effects(tool, args)
+            potential_scope, potential_paths = self._potential_effects(tool, context, args)
             effects_before = self._effect_snapshot(agent, potential_paths)
         except Exception as exc:  # noqa: BLE001 - fail before side effect
             return self._rejected(
@@ -641,7 +633,7 @@ class ToolRuntime:
         )
 
         try:
-            execution = tool["run"](args)
+            execution = tool["run"](context, args)
             if not isinstance(execution, ToolRunnerResult):
                 raise TypeError("tool runner must return ToolRunnerResult")
             failure = execution.failure

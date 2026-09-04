@@ -14,7 +14,7 @@ CLI build_agent
   -> resume: RunStore.load_run reads once, validates the Run Log / terminal Artifact,
      and returns that Event snapshot with its Projection
   -> resume: persisted TaskContract keeps the maximum capability; current Mode may narrow it
-  -> RunLog.reconcile_interrupted resolves an unfinished Tool transaction without replay
+  -> run_lifecycle.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> resumed input is appended as user_guidance before run_resumed; new Runs append run_started
   -> Provider action session reset
   -> AgentLoop
@@ -48,6 +48,10 @@ AgentLoop
 `ToolRuntime` is the one public boundary for model-visible tools. Stateless value helpers live in
 the private `tool_execution.py` module; transaction order and persistence stay in `ToolRuntime`.
 Concrete runners receive only a `ToolContext` rather than the whole Pico object.
+The registry stores unbound `runner(context, args)`, validator and effect-planner functions.
+ToolRuntime creates a fresh Context for each Call with explicit Run id, Call id, WorkingState
+and ExecutionContext values. Single and batch execution use the same registry; a Batch does not
+rebuild it for each worker or consult mutable pending-call state through callbacks.
 
 ### Observation Batch
 
@@ -207,6 +211,10 @@ changes—for example, the execution budget leaves only `submit_final`—AgentLo
 session and rebuilds from RunLog before the next request. Changing only the request field inside an
 existing continuation is not treated as a reliable capability boundary.
 
+AgentLoop caches only `(ModelPrompt, tool_names)` for continuation. Prompt build diagnostics
+(section budgets, token estimates and history projection details) remain available to the teaching
+scripts and tests, but are not copied into the loop's cached state.
+
 After a complete Action transaction, Provider-reported `input_tokens` is compared directly with
 `provider_context_limit_tokens - compaction_reserve_tokens`. Reaching that high watermark resets the
 continuation and lets the next fresh Prompt compact/rebuild from RunLog. Missing usage causes no
@@ -252,9 +260,20 @@ second consecutive overflow propagates. Other `RuntimeError` values never enter 
 
 ## Resume
 
-Session stores only `active_run_id`. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, persists the new resume input as `user_guidance`, rebuilds Context from durable Facts, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced; a transient reload failure leaves the process-local `reload_required` cache-validity bit set so the next request retries before using Task state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
+`RunHistory(events)` owns read-only history selection, rendering and compaction planning.
+It neither appends events nor owns a second durable state. Context assembly obtains a plan and
+then explicitly calls `RunLog.append_compaction`; `run_lifecycle.reconcile_interrupted` owns
+interrupted-tool reconciliation. RunLog retains event validation, protocol order and durable append.
+
+Session stores its identity, Workspace root and `active_run_id`, not conversation history. `SessionStore.create/load` return a ready Session object; Pico uses it directly. Pointer updates are saved atomically before changing the in-memory value. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, persists the new resume input as `user_guidance`, rebuilds Context from durable Facts, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced. Subsequent requests compare the in-memory and durable cursors before using the Run state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
 
 ## Completion
+
+Verification records `workspace_changes`: an empty list means no observed change; paths name
+observed repository changes; null means the post-command repository observation failed. Changes
+or an unknown observation enter RunEvidence as an uncertain workspace effect and survive replay.
+A later passing verifier cannot erase that effect. Ordinary assertion failures without side
+effects remain retryable.
 
 `CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; unrepaired `unknown/partial` effects; the persisted maximum capability and no-change Observation requirement; external Workspace drift; change-triggered/current verification; and effects that remain unresolved after verification. A zero-change completion needs at least one successful Observation. A repaired Workspace partial must receive a passing verifier for the current mutation/path state. Completion establishes evidence sufficiency and freshness, not arbitrary business-semantic correctness. `RunEvidence` only answers factual relationship queries; it does not return a completion decision.
 

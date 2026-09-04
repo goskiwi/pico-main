@@ -12,14 +12,13 @@ from .delivery import build_stopped_final_diff
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_lifecycle import load_resumable_run, reload_current_run
+from .run_lifecycle import load_resumable_run, reconcile_interrupted, reload_current_run
 from .run_projection import RunOutcome
 from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
-from .runtime_session import RuntimeSession
 from .runtime_state import ActiveRunState
-from .session_store import SessionStore
+from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
 
@@ -33,10 +32,9 @@ class Pico:
         self,
         model_client,
         workspace,
-        session_store,
+        session: Session,
         *,
         config: PicoConfig | None = None,
-        session=None,
         run_store=None,
         command_runner=None,
         command_runner_factory=None,
@@ -44,14 +42,10 @@ class Pico:
         parent_execution_context=None,
     ):
         self.model_client = model_client
-        self.config = PicoConfig.build(config)
+        self.config = config if config is not None else PicoConfig()
         self.workspace = workspace
         self.run = ActiveRunState()
-        self.session = RuntimeSession(
-            session_store,
-            self.workspace.root,
-            session=session,
-        )
+        self.session = session
 
         effective_run_store = run_store or RunStore(
             self.workspace.root / ".pico" / "runs"
@@ -83,7 +77,6 @@ class Pico:
 
         self.tools = ToolRuntime(self)
         self.prompt = PromptBuilder(self)
-        self.session.save()
         load_resumable_run(self)
 
     def redact_text(self, text):
@@ -153,7 +146,7 @@ class Pico:
         run_log = self.run.run_log
         try:
             if run_log is not None and not self.run.projection.terminal:
-                for _outcome, event in run_log.reconcile_interrupted(self):
+                for _outcome, event in reconcile_interrupted(self):
                     self.apply_run_event(event)
                 self.apply_run_event(
                     run_log.append_stopped(
@@ -165,7 +158,7 @@ class Pico:
         except BaseException:
             reload_current_run(self)
             raise
-        self.session.reset()
+        self.session.set_active_run("")
         self.run = ActiveRunState()
         self.model_client.reset_action_session()
 

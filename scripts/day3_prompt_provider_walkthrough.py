@@ -1,7 +1,7 @@
 """Day 3: inspect Prompt channels and the Responses provider protocol.
 
 This walkthrough never contacts a real network. It uses the real
-OpenAICompatibleModelClient and replaces only ``urllib.request.urlopen`` with
+OpenAICompatibleModelClient and replaces only ``pico.providers.clients._open_response`` with
 small deterministic HTTP responses.
 """
 
@@ -101,14 +101,17 @@ def context_overflow_http_error():
 def build_prompt_fixture(root):
     """Build Prompt and schemas inside a real read-only Run."""
     client = new_client()
+    runtime_workspace = Workspace.build(root)
     bootstrap = Pico(
         model_client=client,
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / "prompt-session"),
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="ask",
             verification_command="",
             max_new_tokens=96,
+        ),
+        session=SessionStore(root / ".pico" / "prompt-session").create(
+            runtime_workspace.root
         ),
     )
     RunLifecycle(bootstrap).initialize(
@@ -178,7 +181,7 @@ def experiment_channels_and_pending(
             },
         )
 
-    with patch("urllib.request.urlopen", urlopen):
+    with patch("pico.providers.clients._open_response", urlopen):
         action = client.complete_action(
             prompt.input_text,
             96,
@@ -320,7 +323,7 @@ def experiment_observation_batch(
         ]
     }
 
-    with patch("urllib.request.urlopen", return_value=Response(payload)):
+    with patch("pico.providers.clients._open_response", return_value=Response(payload)):
         action = client.complete_action(
             prompt.input_text,
             96,
@@ -394,7 +397,7 @@ def experiment_incomplete_is_rejected(
             {"answer": "Accepted only after a complete provider response."},
         )
 
-    with patch("urllib.request.urlopen", urlopen):
+    with patch("pico.providers.clients._open_response", urlopen):
         invalid = client.complete_action(
             prompt.input_text,
             96,
@@ -444,14 +447,17 @@ def experiment_incomplete_is_rejected(
 
 
 def overflow_agent(root, client, session_name):
+    runtime_workspace = Workspace.build(root)
     return Pico(
         model_client=client,
-        workspace=Workspace.build(root),
-        session_store=SessionStore(root / ".pico" / session_name),
+        workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command="",
             max_new_tokens=96,
+        ),
+        session=SessionStore(root / ".pico" / session_name).create(
+            runtime_workspace.root
         ),
     )
 
@@ -490,7 +496,7 @@ def experiment_context_overflow(root):
         success_client,
         "success-sessions",
     )
-    with patch("urllib.request.urlopen", overflow_once):
+    with patch("pico.providers.clients._open_response", overflow_once):
         outcome = success_agent.ask(
             "Return a short provider recovery confirmation",
         )
@@ -535,7 +541,7 @@ def experiment_context_overflow(root):
         "failure-sessions",
     )
     caught = None
-    with patch("urllib.request.urlopen", always_overflow):
+    with patch("pico.providers.clients._open_response", always_overflow):
         try:
             failure_agent.ask(
                 "Return a short provider recovery confirmation",

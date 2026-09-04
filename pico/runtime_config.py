@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
-from typing import Any
+from dataclasses import dataclass, field
 
 from .workspace import normalize_relative_file
 
@@ -43,16 +42,7 @@ class PicoConfig:
     verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
 
-    @classmethod
-    def build(cls, config: PicoConfig | None = None, **overrides: Any) -> PicoConfig:
-        known = {item.name for item in fields(cls)}
-        unknown = sorted(set(overrides) - known)
-        if unknown:
-            raise TypeError(f"unknown Pico configuration: {', '.join(unknown)}")
-        candidate = replace(config, **overrides) if config is not None else cls(**overrides)
-        return candidate.normalized()
-
-    def normalized(self) -> PicoConfig:
+    def __post_init__(self):
         if self.mode not in {"ask", "code", "auto"}:
             raise ValueError("mode must be ask, code, or auto")
         if not isinstance(self.verification_command, str):
@@ -95,20 +85,22 @@ class PicoConfig:
             raise ValueError(
                 "compaction keep_recent must fit below the compaction threshold"
             )
-        return replace(
-            self,
-            mode=str(self.mode),
-            max_agent_turns=max_agent_turns,
-            max_tool_executions=max_tool_executions,
-            max_new_tokens=max_new_tokens,
-            secret_env_names=frozenset(
+        normalized = {
+            "mode": str(self.mode),
+            "max_agent_turns": max_agent_turns,
+            "max_tool_executions": max_tool_executions,
+            "max_new_tokens": max_new_tokens,
+            "secret_env_names": frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
             ),
-            allowed_tools=_allowed_tools(self.allowed_tools),
-            turn_timeout_seconds=turn_timeout_seconds,
-            provider_context_limit_tokens=provider_context_limit_tokens,
-            compaction_reserve_tokens=compaction_reserve_tokens,
-            compaction_keep_recent_tokens=compaction_keep_recent_tokens,
-            verification_command=self.verification_command,
-            allowed_write_paths=_allowed_write_paths(self.allowed_write_paths),
-        )
+            "allowed_tools": _allowed_tools(self.allowed_tools),
+            "turn_timeout_seconds": turn_timeout_seconds,
+            "provider_context_limit_tokens": provider_context_limit_tokens,
+            "compaction_reserve_tokens": compaction_reserve_tokens,
+            "compaction_keep_recent_tokens": compaction_keep_recent_tokens,
+            "verification_command": self.verification_command,
+            "allowed_write_paths": _allowed_write_paths(self.allowed_write_paths),
+        }
+
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)

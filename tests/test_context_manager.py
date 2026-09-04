@@ -1,3 +1,4 @@
+
 import json
 import re
 import subprocess
@@ -10,8 +11,9 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.compaction_summary import SemanticCompactionError
 from pico.context_manager import ContextBudgetExceeded, _ContextAssembler
 from pico.contracts import ToolCall, ToolOutcome
+from pico.history import COMPACTED_HISTORY_OMITTED, RunHistory
 from pico.prompt_builder import AGENTS_MD_MAX_BYTES, load_repository_instructions
-from pico.run_log import COMPACTED_HISTORY_OMITTED, RunLog
+from pico.run_log import RunLog
 from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
@@ -23,11 +25,14 @@ READ_TASK = {
 
 def build_agent(tmp_path, max_new_tokens=64):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    runtime_workspace = Workspace.build(tmp_path)
     return Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="auto", max_new_tokens=max_new_tokens),
+        session=SessionStore(tmp_path / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
 
 
@@ -36,7 +41,7 @@ def activate(agent, goal="Inspect"):
     run_log = RunLog(
         "run_context",
         "task_context",
-        agent.session.data["id"],
+        agent.session.id,
         agent.dependencies.run_store,
     )
     first = run_log.append_user(contract)
@@ -100,15 +105,18 @@ def named_json(input_text, name):
 
 
 def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         FakeModelClient([]),
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="ask", max_new_tokens=64),
+        session=SessionStore(tmp_path / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     activate(agent, "Inspect README")
 
-    input_text, metadata = _ContextAssembler(agent, total_budget=1800).build(
+    input_text, metadata = _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=1800).build(
         "Inspect README"
     )
 
@@ -198,7 +206,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
         return SimpleNamespace(text="", details={"selected_count": 0})
 
     agent.dependencies.repo_map.render = render
-    _ContextAssembler(agent, total_budget=2400).build("continue")
+    _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=2400).build("continue")
 
     query = queries[-1]
     assert "Repair payment retry" in query
@@ -239,7 +247,7 @@ def test_wire_places_current_working_state_after_history(tmp_path):
     )
 
     input_text, metadata = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=2400,
     ).build("continue")
 
@@ -261,7 +269,7 @@ def test_repository_instructions_are_distinct_from_untrusted_context(tmp_path):
     agent = build_agent(tmp_path)
     activate(agent, "Inspect")
 
-    input_text, metadata = _ContextAssembler(agent, total_budget=1800).build(
+    input_text, metadata = _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=1800).build(
         "Inspect"
     )
     context = untrusted_context(input_text)
@@ -366,7 +374,7 @@ def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):
     run_log = activate(agent, goal)
     agent.apply_run_event(run_log.append_user_guidance(latest))
 
-    input_text, metadata = _ContextAssembler(agent, total_budget=3200).build(latest)
+    input_text, metadata = _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=3200).build(latest)
 
     assert named_json(input_text, "task_request") == goal
     assert named_json(input_text, "latest_user_request") == latest
@@ -374,7 +382,7 @@ def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):
     assert metadata["sections"]["latest_user_request"]["budget_tokens"] is None
 
     with pytest.raises(ContextBudgetExceeded):
-        _ContextAssembler(agent, total_budget=300).build(latest)
+        _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=300).build(latest)
 
 
 def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
@@ -390,14 +398,17 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
 
     client = RecordingClient()
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
         client,
-        Workspace.build(tmp_path),
-        SessionStore(tmp_path / ".pico" / "sessions"),
+        runtime_workspace,
         config=PicoConfig(mode="ask", max_new_tokens=64),
+        session=SessionStore(tmp_path / ".pico" / "sessions").create(
+            runtime_workspace.root
+        ),
     )
     activate(agent, "Inspect")
-    manager = _ContextAssembler(agent, total_budget=1800)
+    manager = _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=1800)
 
     _input, empty_metadata = manager.build("Inspect", action_tools=[])
     read_surface = agent.tools.model_action_tools()
@@ -426,7 +437,7 @@ def test_prompt_build_is_read_only_even_above_compaction_threshold(tmp_path):
     generation = run_log.generation
 
     _, metadata = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=1200,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=100,
@@ -457,7 +468,7 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
         append_read(run_log, index, "result " + "x " * 300)
     agent.apply_run_event(run_log.append_user_guidance("continue"))
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=900,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=100,
@@ -519,7 +530,7 @@ def test_compaction_never_covers_the_current_durable_resume_guidance(tmp_path):
         append_read(run_log, index, "new " + "y " * 250)
 
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=1100,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=100,
@@ -543,7 +554,7 @@ def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path)
     for index in range(5):
         append_read(run_log, index, "result " + "x " * 300)
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=900,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=100,
@@ -589,7 +600,7 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
     for index in range(5):
         append_read(run_log, index, "plain result " + "x " * 80)
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=5000,
         compaction_reserve_tokens=500,
         compaction_keep_recent_tokens=1,
@@ -602,15 +613,15 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
         raw,
         manager._fixed_context(raw),
     )
-    active = run_log.active_events()
+    active = RunHistory(run_log.events).active_events()
     retained = active[-2:]
-    summary_events = RunLog._without_projected_state(active[:-2])
+    summary_events = RunHistory._without_projected_state(active[:-2])
     source = "\n".join(
-        RunLog._render_event(event) for event in summary_events
+        RunHistory._render_event(event) for event in summary_events
     )
-    before_wire, _metadata = run_log.render_projection()
+    before_wire, _metadata = RunHistory(run_log.events).render_projection()
     retained_wire = "\n".join(
-        RunLog._render_event(event) for event in retained
+        RunHistory._render_event(event) for event in retained
     )
     summary = ""
     for size in range(1, 2000):
@@ -676,7 +687,7 @@ def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_p
     for index in range(5):
         append_read(run_log, index, "result " + "x " * 300)
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=900,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=180,
@@ -708,7 +719,7 @@ def test_pending_observation_batch_skips_compaction(tmp_path):
             ToolCall("read_file", {"path": "b.py"}, "call_b"),
         )
     )
-    manager = _ContextAssembler(agent, total_budget=300)
+    manager = _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=300)
 
     assert manager.prepare_compaction("continue", provider_context_tokens=299) == (
         None,
@@ -719,7 +730,7 @@ def test_pending_observation_batch_skips_compaction(tmp_path):
 def test_request_larger_than_runtime_budget_is_rejected(tmp_path):
     agent = build_agent(tmp_path, max_new_tokens=100)
     with pytest.raises(ContextBudgetExceeded):
-        _ContextAssembler(agent, total_budget=120).build("X " * 100)
+        _ContextAssembler(agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions, total_budget=120).build("X " * 100)
 
 
 def test_provider_usage_can_trigger_explicit_compaction(tmp_path):
@@ -738,7 +749,7 @@ def test_provider_usage_can_trigger_explicit_compaction(tmp_path):
     for index in range(5):
         append_read(run_log, index, "result " + "x " * 500)
     manager = _ContextAssembler(
-        agent,
+        agent, instructions=agent.prompt.instructions, repository_instructions=agent.prompt.repository_instructions,
         total_budget=10_000,
         compaction_reserve_tokens=2_000,
         compaction_keep_recent_tokens=100,
@@ -782,7 +793,7 @@ def test_history_omits_canonical_contract_and_successful_working_update(tmp_path
         )
     )
 
-    history, metadata = run_log.render_projection()
+    history, metadata = RunHistory(run_log.events).render_projection()
 
     assert "Canonical goal" not in history
     assert "update_working_state" not in history

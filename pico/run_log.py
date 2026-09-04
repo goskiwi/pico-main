@@ -2,28 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from .contracts import EFFECT_SCOPES, FailureInfo, ToolCall, ToolOutcome
+from .contracts import EFFECT_SCOPES, ToolCall, ToolOutcome
 from .delivery import FinalDiff
+from .history import CONTEXT_KINDS, RunHistory
 from .run_projection import RunProjection
 from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
 
-COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
-CONTEXT_KINDS = frozenset(
-    {
-        "user_message",
-        "user_guidance",
-        "assistant_tool_call",
-        "assistant_tool_batch",
-        "tool_result",
-        "model_instruction",
-        "assistant_final",
-        "compaction",
-    }
-)
 RUN_EVENT_KINDS = frozenset(
     {
         *CONTEXT_KINDS,
@@ -173,6 +159,7 @@ def _validate_verification_payload(kind, payload):
             "finished_workspace_mutation_sequence",
             "started_changed_path_states",
             "finished_changed_path_states",
+            "workspace_changes",
         },
         {
             "command",
@@ -182,6 +169,14 @@ def _validate_verification_payload(kind, payload):
     )
     if payload["status"] not in {"passed", "failed", "infrastructure_error"}:
         raise ValueError("verification_result has invalid status")
+    changes = payload["workspace_changes"]
+    if changes is not None and (
+        not isinstance(changes, list)
+        or any(not isinstance(path, str) or not path for path in changes)
+    ):
+        raise TypeError("verification workspace_changes must be paths or null")
+    if (changes is None or changes) and payload["status"] == "passed":
+        raise ValueError("verification with uncertain workspace effects cannot pass")
     if not isinstance(payload["finished_workspace_mutation_sequence"], int):
         raise TypeError(
             "verification_result finished mutation sequence must be an integer"
@@ -493,8 +488,11 @@ class RunLog:
         self.store = store
         self._events = list(events)
         self._protocol = validate_run_events(self._events)
-        compactions = [entry for entry in self._events if entry.kind == "compaction"]
-        self.generation = len(compactions) + 1
+
+
+    @property
+    def generation(self):
+        return 1 + sum(event.kind == "compaction" for event in self._events)
 
     @classmethod
     def restore(cls, run_id, store):
@@ -643,255 +641,22 @@ class RunLog:
             raise RuntimeError("pending tool transaction is an observation batch")
         return pending_calls[0]
 
-    def latest_user_guidance(self):
-        entry = next(
-            (
-                candidate
-                for candidate in reversed(self.active_events())
-                if candidate.kind == "user_guidance"
-            ),
-            None,
-        )
-        return entry.content if entry is not None else ""
 
     def _require_no_pending(self):
         if self.pending_tool_calls():
             raise RuntimeError("pending tool calls must receive results first")
 
-    def reconcile_interrupted(self, runtime):
-        pending_calls = self.pending_tool_calls()
-        if not pending_calls:
-            return ()
-        started_by_id = {
-            entry.call_id: entry
-            for entry in self._events
-            if entry.kind == "tool_started"
-        }
-        reconciled = []
-        for call in pending_calls:
-            started = started_by_id.get(call.call_id)
-            if started is None:
-                detail = "tool call was persisted but never entered execution"
-                outcome = ToolOutcome(
-                    tool_call_id=call.call_id,
-                    tool_name=call.name,
-                    status="error",
-                    execution_state="not_started",
-                    side_effect_state="none",
-                    content=detail,
-                    failure=FailureInfo(
-                        "operation_not_started",
-                        detail,
-                        "retry_after_wait",
-                    ),
-                )
-            else:
-                potential = list(started.payload.get("potential_effects", []))
-                changed = []
-                transitions = []
-                for effect in potential:
-                    logical = str(effect.get("path", ""))
-                    if not logical:
-                        continue
-                    path = Path(logical)
-                    if not path.is_absolute():
-                        path = runtime.workspace.resolve_path(logical)
-                    before = str(effect.get("before_state", ""))
-                    before_artifact_id = str(effect.get("before_artifact_id", ""))
-                    after = runtime.workspace.path_state(path)
-                    if before != after:
-                        changed.append(logical)
-                        transitions.append(
-                            {
-                                "path": logical,
-                                "before_state": before,
-                                "after_state": after,
-                                "before_artifact_id": before_artifact_id,
-                            }
-                        )
-                effect_scope = str(started.payload.get("effect_scope", "none"))
-                unknown = effect_scope == "workspace" and not potential
-                uncertain = bool(changed or unknown)
-                detail = "tool execution was interrupted before a durable result"
-                outcome = ToolOutcome(
-                    tool_call_id=call.call_id,
-                    tool_name=call.name,
-                    status="partial_success" if uncertain else "error",
-                    execution_state="failed",
-                    side_effect_state=(
-                        "partial" if changed else ("unknown" if unknown else "none")
-                    ),
-                    content=detail,
-                    failure=FailureInfo(
-                        "operation_interrupted",
-                        detail,
-                        "no_retry" if uncertain else "retry_after_wait",
-                    ),
-                    affected_paths=tuple(changed),
-                    effect_scope=effect_scope if changed or unknown else "none",
-                    structured={"path_transitions": transitions},
-                )
-            entry = self.append_tool_result(
-                outcome,
-                recovered_from_interruption=True,
-            )
-            reconciled.append((outcome, entry))
-        return tuple(reconciled)
 
-    def context_events(self):
-        calls = {
-            call_id
-            for entry in self._events
-            for call_id in (
-                (entry.call_id,)
-                if entry.kind == "assistant_tool_call"
-                else tuple(call.call_id for call in entry.batch_calls)
-            )
-            if entry.kind in {"assistant_tool_call", "assistant_tool_batch"}
-            and call_id
-        }
-        return tuple(
-            entry
-            for entry in self._events
-            if entry.kind in CONTEXT_KINDS
-            and (entry.kind != "tool_result" or entry.call_id in calls)
-        )
-
-    def active_events(self):
-        active = []
-        for entry in self.context_events():
-            if entry.kind != "compaction":
-                active.append(entry)
-                continue
-            covered = entry.covered_event_ids
-            prefix = tuple(item.event_id for item in active[: len(covered)])
-            if not covered or prefix != covered:
-                raise ValueError(
-                    "compaction coverage must match the active logical prefix"
-                )
-            active = [entry, *active[len(covered) :]]
-        return tuple(active)
-
-    @staticmethod
-    def _history_units(events, *, allow_incomplete=False):
-        units = []
-        index = 0
-        events = tuple(events)
-        while index < len(events):
-            entry = events[index]
-            if entry.kind == "assistant_tool_call":
-                expected_ids = (entry.call_id,)
-            elif entry.kind == "assistant_tool_batch":
-                expected_ids = tuple(call.call_id for call in entry.batch_calls)
-            else:
-                if entry.kind == "tool_result":
-                    raise RuntimeError("Run Log contains an orphan tool result")
-                units.append((entry,))
-                index += 1
-                continue
-            end = index + 1 + len(expected_ids)
-            if end > len(events):
-                if allow_incomplete:
-                    return None
-                raise RuntimeError("Run Log contains an incomplete tool transaction")
-            results = events[index + 1 : end]
-            if tuple(result.call_id for result in results) != expected_ids or any(
-                result.kind != "tool_result" for result in results
-            ):
-                raise RuntimeError("Run Log tool transaction is not contiguous")
-            units.append((entry, *results))
-            index = end
-        return units
-
-    def compact(self, *, retain_tokens, history_token_counter, summary_builder):
-        active = list(self.active_events())
-        latest_guidance_id = self._latest_user_guidance_id(active)
-        units = self._history_units(active, allow_incomplete=True)
-        if units is None:
-            return None
-
-        def render(candidate_units, *, summary=""):
-            events = tuple(
-                event for unit in candidate_units for event in unit
-            )
-            visible = self._without_projected_state(
-                events,
-                projected_guidance_id=latest_guidance_id,
-            )
-            lines = ["Current run events:"]
-            if summary:
-                lines.append(f"[compaction] {summary}")
-            lines.extend(self._render_event(event) for event in visible)
-            if len(lines) == 1:
-                lines.append("- empty")
-            return "\n".join(lines)
-
-        retained = []
-        limit = max(1, int(retain_tokens))
-        for unit in reversed(units):
-            candidate = [unit, *retained]
-            candidate_tokens = max(
-                1,
-                int(history_token_counter(render(candidate))),
-            )
-            if retained and candidate_tokens > limit:
-                break
-            retained = candidate
-        cut = max(0, len(units) - len(retained))
-        guidance_unit_index = next(
-            (
-                index
-                for index, unit in enumerate(units)
-                if any(event.event_id == latest_guidance_id for event in unit)
-            ),
-            None,
-        )
-        if guidance_unit_index is not None and cut > guidance_unit_index:
-            cut = guidance_unit_index
-            retained = units[cut:]
-        retained_tokens = max(
-            1,
-            int(history_token_counter(render(retained))),
-        )
-        compacted = tuple(item for unit in units[:cut] for item in unit)
-        if not compacted:
-            return None
-        summary_events = tuple(
-            self._without_projected_state(
-                compacted,
-                projected_guidance_id=latest_guidance_id,
-            )
-        )
-        if not summary_events:
-            return None
-        summary = summary_builder(summary_events)
-        before = render(units)
-        after = render(retained, summary=summary)
-        if history_token_counter(after) >= history_token_counter(before):
-            return None
-        event = self._commit_compaction(
-            summary,
-            [entry.event_id for entry in compacted],
-        )
-        return event, {
-            "mode": "semantic_history",
-            "covered_events": len(compacted),
-            "retained_events": sum(len(unit) for unit in units[cut:]),
-            "retained_tokens": retained_tokens,
-            "summary_tokens": history_token_counter(render((), summary=summary)),
-        }
-
-    def _commit_compaction(self, content, covered_event_ids):
+    def append_compaction(self, content, covered_event_ids):
         covered = tuple(covered_event_ids)
         if not covered or len(set(covered)) != len(covered):
             raise ValueError("compaction must cover a non-empty unique prefix")
-        active = self.active_events()
+        active = RunHistory(self._events).active_events()
         if covered != tuple(entry.event_id for entry in active[: len(covered)]):
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]
         if remaining and remaining[0].kind == "tool_result":
             raise ValueError("compaction cannot split a tool call/result batch")
-        self.generation += 1
         return self.append(
             "compaction",
             {
@@ -899,180 +664,3 @@ class RunLog:
                 "covered_event_ids": list(covered),
             },
         )
-
-    @staticmethod
-    def _render_event(entry):
-        if entry.kind == "assistant_tool_call":
-            return (
-                f"[assistant/tool] {entry.name} "
-                + json.dumps(entry.args or {}, ensure_ascii=False, sort_keys=True)
-            )
-        if entry.kind == "assistant_tool_batch":
-            calls = [
-                {"call_id": call.call_id, "name": call.name, "args": call.args}
-                for call in entry.batch_calls
-            ]
-            return (
-                f"[assistant/tool_batch/{entry.batch_id}] "
-                + json.dumps(calls, ensure_ascii=False, sort_keys=True)
-            )
-        if entry.kind == "tool_result":
-            artifact = f" artifact={entry.artifact_id}" if entry.artifact_id else ""
-            outcome = ToolOutcome.from_dict(entry.payload["outcome"])
-            return (
-                f"[tool/{entry.name}/{entry.outcome_status}/"
-                f"{entry.side_effect_state}{artifact}] {outcome.render_for_model()}"
-            )
-        return f"[{entry.kind}] {entry.content}"
-
-    @staticmethod
-    def _latest_user_guidance_id(events):
-        return next(
-            (
-                entry.event_id
-                for entry in reversed(tuple(events))
-                if entry.kind == "user_guidance"
-            ),
-            "",
-        )
-
-    @staticmethod
-    def _without_projected_state(events, *, projected_guidance_id=""):
-        selected = []
-        index = 0
-        while index < len(events):
-            entry = events[index]
-            if entry.kind == "user_message":
-                index += 1
-                continue
-            if entry.kind == "user_guidance" and entry.event_id == projected_guidance_id:
-                index += 1
-                continue
-            if (
-                entry.kind == "assistant_tool_call"
-                and entry.name == "update_working_state"
-                and index + 1 < len(events)
-            ):
-                result = events[index + 1]
-                if (
-                    result.kind == "tool_result"
-                    and result.call_id == entry.call_id
-                    and result.outcome_status == "success"
-                ):
-                    index += 2
-                    continue
-            selected.append(entry)
-            index += 1
-        return selected
-
-    def render_projection(self):
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
-        )
-        lines = ["Current run events:"]
-        artifact_references = 0
-        for entry in selected:
-            artifact_references += bool(entry.artifact_id)
-            lines.append(self._render_event(entry))
-        if len(lines) == 1:
-            lines.append("- empty")
-        return "\n".join(lines), {
-            "active_count": len(active),
-            "selected_count": len(selected),
-            "omitted_count": max(0, len(active) - len(selected)),
-            "artifact_references": artifact_references,
-        }
-
-    def render_compacted_projection(self, *, retain_tokens, token_counter):
-        """Render complete summaries followed by a complete recent-event suffix."""
-
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
-        )
-        summaries = tuple(entry for entry in selected if entry.kind == "compaction")
-        if not summaries:
-            return None
-        recent = tuple(entry for entry in selected if entry.kind != "compaction")
-        units = self._history_units(recent)
-
-        limit = max(0, int(retain_tokens))
-
-        def render(candidate):
-            retained_count = sum(len(unit) for unit in candidate)
-            lines = ["Current run events:"]
-            lines.extend(self._render_event(entry) for entry in summaries)
-            if retained_count < len(recent):
-                lines.append(COMPACTED_HISTORY_OMITTED)
-            for unit in candidate:
-                lines.extend(self._render_event(entry) for entry in unit)
-            return "\n".join(lines)
-
-        retained = []
-        minimum = render(retained)
-        if token_counter(minimum) > limit:
-            raise ValueError(
-                "committed compaction summary exceeds the History budget"
-            )
-        for unit in reversed(units):
-            candidate = [unit, *retained]
-            if retained and token_counter(render(candidate)) > limit:
-                break
-            retained = candidate
-        text = render(retained)
-        flattened = tuple(entry for unit in retained for entry in unit)
-        return text, {
-            "active_count": len(active),
-            "selected_count": len(summaries) + len(flattened),
-            "omitted_count": max(
-                0,
-                len(active) - len(summaries) - len(flattened),
-            ),
-            "artifact_references": sum(
-                bool(entry.artifact_id) for entry in (*summaries, *flattened)
-            ),
-            "projection_mode": "compacted_complete_transactions",
-            "retained_tokens": token_counter(text),
-        }
-
-    def render_recent_projection(self, *, retain_tokens, token_counter):
-        """Render a bounded suffix without splitting a Tool transaction."""
-
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
-        )
-        units = self._history_units(selected, allow_incomplete=True) or []
-
-        limit = max(0, int(retain_tokens))
-        retained = []
-
-        def render(candidate):
-            retained_count = sum(len(unit) for unit in candidate)
-            omitted = max(0, len(selected) - retained_count)
-            lines = ["Current run events (bounded fallback):"]
-            lines.append(f"- {omitted} older events omitted")
-            for unit in candidate:
-                lines.extend(self._render_event(entry) for entry in unit)
-            return "\n".join(lines)
-
-        for unit in reversed(units):
-            candidate = [unit, *retained]
-            if retained and token_counter(render(candidate)) > limit:
-                break
-            retained = candidate
-        text = render(retained)
-        flattened = tuple(entry for unit in retained for entry in unit)
-        return text, {
-            "active_count": len(active),
-            "selected_count": len(flattened),
-            "omitted_count": max(0, len(active) - len(flattened)),
-            "artifact_references": sum(
-                bool(entry.artifact_id) for entry in flattened
-            ),
-            "retained_tokens": token_counter(text),
-        }

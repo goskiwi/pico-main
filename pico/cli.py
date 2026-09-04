@@ -161,7 +161,7 @@ def build_welcome(agent, model):
                 "MODE",
                 agent.config.mode,
                 "SESSION",
-                agent.session.data["id"],
+                agent.session.id,
             ),
             row(
                 "VERIFY     "
@@ -218,21 +218,13 @@ def build_agent(args):
         session_id = store.latest_active()
         if not session_id:
             raise ValueError("no unfinished Session is available to resume")
-    if session_id:
-        return Pico(
-            model_client=model,
-            workspace=workspace,
-            session_store=store,
-            session=store.load(session_id),
-            config=config,
-            subagent_model_client_factory=child_model_client_factory,
-        )
+    session = store.load(session_id) if session_id else store.create(workspace.root)
     return Pico(
         model_client=model,
         workspace=workspace,
-        session_store=store,
         config=config,
         subagent_model_client_factory=child_model_client_factory,
+        session=session,
     )
 
 
@@ -276,7 +268,7 @@ def _unfinished_session(cwd):
     session = store.load(session_id)
     return {
         "session_id": session_id,
-        "run_id": session["active_run_id"],
+        "run_id": session.active_run_id,
     }
 
 

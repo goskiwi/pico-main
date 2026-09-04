@@ -8,7 +8,7 @@ from html import escape
 import tiktoken
 
 from .compaction_summary import CompactionSummarizer, SemanticCompactionError
-from .run_log import COMPACTED_HISTORY_OMITTED
+from .history import COMPACTED_HISTORY_OMITTED, RunHistory
 from .working_state import WorkingState
 
 DEFAULT_SECTION_CAPS = {
@@ -51,27 +51,20 @@ class _ContextAssembler:
     def __init__(
         self,
         agent,
+        *,
+        instructions,
+        repository_instructions,
         total_budget=None,
         section_caps=None,
         compaction_reserve_tokens=None,
         compaction_keep_recent_tokens=None,
     ):
         self.agent = agent
-        self.total_budget = int(
-            agent.config.provider_context_limit_tokens
-            if total_budget is None
-            else total_budget
-        )
-        self.compaction_reserve_tokens = int(
-            agent.config.compaction_reserve_tokens
-            if compaction_reserve_tokens is None
-            else compaction_reserve_tokens
-        )
-        self.compaction_keep_recent_tokens = int(
-            agent.config.compaction_keep_recent_tokens
-            if compaction_keep_recent_tokens is None
-            else compaction_keep_recent_tokens
-        )
+        self.instructions = instructions
+        self.repository_instructions = repository_instructions
+        self._total_budget_override = total_budget
+        self._reserve_override = compaction_reserve_tokens
+        self._keep_recent_override = compaction_keep_recent_tokens
         requested_caps = dict(section_caps or {})
         unknown_caps = set(requested_caps) - set(DEFAULT_SECTION_CAPS)
         if unknown_caps:
@@ -93,6 +86,21 @@ class _ContextAssembler:
             else None
         )
 
+    @property
+    def total_budget(self):
+        return (self.agent.config.provider_context_limit_tokens
+                if self._total_budget_override is None else int(self._total_budget_override))
+
+    @property
+    def compaction_reserve_tokens(self):
+        return (self.agent.config.compaction_reserve_tokens
+                if self._reserve_override is None else int(self._reserve_override))
+
+    @property
+    def compaction_keep_recent_tokens(self):
+        return (self.agent.config.compaction_keep_recent_tokens
+                if self._keep_recent_override is None else int(self._keep_recent_override))
+
     def build(
         self,
         user_message,
@@ -104,7 +112,7 @@ class _ContextAssembler:
     ):
         """Build model input without refreshing or writing Runtime state."""
         output_reserve = int(self.agent.config.max_new_tokens)
-        instructions_tokens = self.tokenizer.count(self.agent.prompt.instructions)
+        instructions_tokens = self.tokenizer.count(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(action_tools=action_tools)
         request_overhead_tokens = instructions_tokens + tool_schema_tokens
         raw = self._raw_sections(user_message, history_override=history_override)
@@ -121,7 +129,7 @@ class _ContextAssembler:
             history_budget = self._history_budget(raw, request_overhead_tokens)
             try:
                 compacted_history = (
-                    self.agent.run.run_log.render_compacted_projection(
+                    RunHistory(self.agent.run.run_log.events).render_compacted_projection(
                         retain_tokens=history_budget,
                         token_counter=self._history_token_counter(
                             raw,
@@ -240,7 +248,7 @@ class _ContextAssembler:
             return None, None
 
         raw = self._raw_sections(user_message)
-        instructions_tokens = self.tokenizer.count(self.agent.prompt.instructions)
+        instructions_tokens = self.tokenizer.count(self.instructions)
         request_overhead_tokens = (
             instructions_tokens
             + self._tool_schema_tokens(action_tools=action_tools)
@@ -311,7 +319,7 @@ class _ContextAssembler:
                 raise SemanticCompactionError(
                     "model client does not support isolated semantic compaction"
                 )
-            compacted = run_log.compact(
+            compacted = RunHistory(run_log.events).plan_compaction(
                 retain_tokens=self.compaction_keep_recent_tokens,
                 history_token_counter=history_token_counter,
                 summary_builder=build_summary,
@@ -327,7 +335,7 @@ class _ContextAssembler:
                 self.compaction_keep_recent_tokens,
                 projection_history_budget,
             )
-            history, projection_metadata = run_log.render_recent_projection(
+            history, projection_metadata = RunHistory(run_log.events).render_recent_projection(
                 retain_tokens=history_budget,
                 token_counter=history_token_counter,
             )
@@ -347,7 +355,8 @@ class _ContextAssembler:
                 history,
             )
 
-        event, metadata = compacted
+        summary, covered, metadata = compacted
+        event = run_log.append_compaction(summary, covered)
         self.agent.apply_run_event(event)
         semantic_call = (
             self.semantic_summarizer.calls[-1]
@@ -378,7 +387,7 @@ class _ContextAssembler:
         task = self.agent.run.task
         goal = task.contract.goal if task is not None else str(user_message)
         run_log = self.agent.run.run_log
-        latest = run_log.latest_user_guidance() if run_log is not None else ""
+        latest = RunHistory(run_log.events).latest_user_guidance() if run_log is not None else ""
         return {
             "runtime_policy": self._runtime_policy_text(),
             "repository_instructions": self._repository_instructions_text(),
@@ -553,7 +562,7 @@ class _ContextAssembler:
         run_log = self.agent.run.run_log
         if run_log is None:
             return ""
-        bounded, metadata = run_log.render_recent_projection(
+        bounded, metadata = RunHistory(run_log.events).render_recent_projection(
             retain_tokens=limit,
             token_counter=token_counter,
         )
@@ -658,7 +667,7 @@ class _ContextAssembler:
         return self.agent.workspace.text()
 
     def _repository_instructions_text(self):
-        instructions = self.agent.prompt.repository_instructions
+        instructions = self.repository_instructions
         if not instructions:
             return ""
         lines = ["<repository_instructions>"]
@@ -728,7 +737,7 @@ class _ContextAssembler:
                 "artifact_references": 0,
             }
             return ""
-        history, metadata = run_log.render_projection()
+        history, metadata = RunHistory(run_log.events).render_projection()
         self._last_history_metadata = metadata
         return history if metadata.get("selected_count", 0) else ""
 

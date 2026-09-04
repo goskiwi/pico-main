@@ -13,21 +13,21 @@ from pico import Pico, PicoConfig, RunOutcome, SessionStore, Workspace
 @dataclass(frozen=True, slots=True)
 class CodingResult:
     outcome: RunOutcome
-    changed_paths: tuple[str, ...]
     delivery_status: str
     commit_sha: str = ""
     detail: str = ""
 
 
 def _git(root, *args, check=True):
-    result = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=root,
+            env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"},
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Git command failed: {exc}") from exc
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(detail or f"git {' '.join(args)} failed")
@@ -77,7 +77,7 @@ class CodingWorkflow:
         command_runner_factory=None,
     ):
         self.model_client = model_client
-        self.config = PicoConfig.build(config)
+        self.config = config if config is not None else PicoConfig()
         if not self.config.verification_command.strip():
             raise ValueError(
                 "CodingWorkflow automatic Git delivery requires verification_command"
@@ -91,14 +91,17 @@ class CodingWorkflow:
     def run(self, repository_root, request, *, commit_message=""):
         root = _repository_root(repository_root)
         dirty_before = _dirty_paths(root)
+        runtime_workspace = Workspace.build(root, repo_root_override=root)
         agent = Pico(
             model_client=self.model_client,
-            workspace=Workspace.build(root, repo_root_override=root),
-            session_store=SessionStore(root / ".pico" / "sessions"),
+            workspace=runtime_workspace,
             config=self.config,
             command_runner=self.command_runner,
             command_runner_factory=self.command_runner_factory,
             subagent_model_client_factory=self.subagent_model_client_factory,
+            session=SessionStore(root / ".pico" / "sessions").create(
+                runtime_workspace.root
+            ),
         )
         outcome = agent.ask(request)
         changed_paths = outcome.changed_paths
@@ -106,14 +109,12 @@ class CodingWorkflow:
         if outcome.status != "completed":
             return CodingResult(
                 outcome,
-                changed_paths,
                 "skipped",
                 detail=f"Run ended with status {outcome.status}",
             )
         if not changed_paths:
             return CodingResult(
                 outcome,
-                changed_paths,
                 "skipped",
                 detail="Run produced no net workspace changes",
             )
@@ -122,7 +123,6 @@ class CodingWorkflow:
         if overlap:
             return CodingResult(
                 outcome,
-                changed_paths,
                 "skipped",
                 detail="Pre-existing user changes share Pico paths: "
                 + ", ".join(overlap),
@@ -133,7 +133,6 @@ class CodingWorkflow:
         except RuntimeError as exc:
             return CodingResult(
                 outcome,
-                changed_paths,
                 "failed",
                 detail=f"Workspace changed before Git delivery: {exc}",
             )
@@ -145,7 +144,6 @@ class CodingWorkflow:
             _git(
                 root,
                 "commit",
-                "--no-verify",
                 "-m",
                 message,
                 "--",
@@ -156,14 +154,12 @@ class CodingWorkflow:
             _git(root, "restore", "--staged", "--", *changed_paths, check=False)
             return CodingResult(
                 outcome,
-                changed_paths,
                 "failed",
                 detail=str(exc),
             )
 
         return CodingResult(
             outcome,
-            changed_paths,
             "committed",
             commit_sha=commit_sha,
             detail=message,

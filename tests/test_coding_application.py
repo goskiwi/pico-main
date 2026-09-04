@@ -64,6 +64,17 @@ def workflow(client):
     )
 
 
+@pytest.mark.parametrize("hook_name", ["prepare-commit-msg", "post-commit"])
+def test_automatic_delivery_disables_all_git_hooks(tmp_path, hook_name):
+    init_repository(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / hook_name
+    hook.write_text("#!/bin/sh\nprintf hook > hook-ran.txt\n")
+    hook.chmod(0o755)
+    result = workflow(edit_client(tmp_path)).run(tmp_path, "Update subject")
+    assert result.delivery_status == "committed"
+    assert not (tmp_path / "hook-ran.txt").exists()
+
+
 def test_coding_workflow_requires_runtime_verification():
     client = FakeModelClient([])
 
@@ -92,7 +103,7 @@ def test_coding_workflow_commits_only_pico_paths_and_preserves_user_index(tmp_pa
 
     assert result.outcome.status == "completed"
     assert result.delivery_status == "committed"
-    assert result.changed_paths == ("subject.txt",)
+    assert result.outcome.changed_paths == ("subject.txt",)
     assert result.commit_sha == git(tmp_path, "rev-parse", "HEAD")
     assert result.commit_sha != initial
     assert git(tmp_path, "show", "HEAD:subject.txt") == "agent"

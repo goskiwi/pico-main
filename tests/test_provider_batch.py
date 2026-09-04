@@ -79,7 +79,7 @@ def test_provider_parses_ordered_multi_call_response():
         captured.update(json.loads(request.data))
         return batch_response()
 
-    with patch("urllib.request.urlopen", urlopen):
+    with patch("pico.providers.clients._open_response", urlopen):
         action = client().complete_action(
             "inspect",
             64,
@@ -103,7 +103,7 @@ def test_provider_returns_all_batch_results_in_one_continuation():
         requests.append(json.loads(request.data))
         return batch_response() if len(requests) == 1 else final_response()
 
-    with patch("urllib.request.urlopen", urlopen):
+    with patch("pico.providers.clients._open_response", urlopen):
         action = instance.complete_action(
             "inspect",
             64,
@@ -133,7 +133,7 @@ def test_provider_returns_all_batch_results_in_one_continuation():
 
 def test_provider_refuses_partial_batch_results():
     instance = client()
-    with patch("urllib.request.urlopen", return_value=batch_response()):
+    with patch("pico.providers.clients._open_response", return_value=batch_response()):
         instance.complete_action(
             "inspect",
             64,
@@ -168,7 +168,7 @@ def test_provider_returns_correction_for_missing_batch_call_name():
             ]
         }
     )
-    with patch("urllib.request.urlopen", return_value=malformed):
+    with patch("pico.providers.clients._open_response", return_value=malformed):
         action = client().complete_action(
             "inspect",
             64,
@@ -199,7 +199,7 @@ def test_provider_rejects_unknown_call_anywhere_in_batch():
             ]
         }
     )
-    with patch("urllib.request.urlopen", return_value=malformed):
+    with patch("pico.providers.clients._open_response", return_value=malformed):
         action = client().complete_action(
             "inspect",
             64,

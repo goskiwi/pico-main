@@ -124,8 +124,7 @@ class AgentLoop:
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
         if loop_state.prompt_snapshot is not None:
-            _prompt, snapshot_metadata = loop_state.prompt_snapshot
-            prior_names = tuple(snapshot_metadata.get("tool_names", ()))
+            _prompt, prior_names = loop_state.prompt_snapshot
             if prior_names != tool_surface.names:
                 agent.model_client.reset_action_session()
                 loop_state.prompt_snapshot = None
@@ -143,20 +142,17 @@ class AgentLoop:
                 provider_context_tokens=loop_state.provider_context_tokens,
                 action_tools=tool_surface.tools,
             )
-            prompt, prompt_metadata = agent.prompt.build(
+            prompt, _metadata = agent.prompt.build(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 compaction_metadata=compaction_metadata,
                 history_override=history_override,
                 action_tools=tool_surface.tools,
             )
-            prompt_metadata["tool_names"] = list(tool_surface.names)
             loop_state.provider_context_tokens = None
-            loop_state.prompt_snapshot = (prompt, dict(prompt_metadata))
+            loop_state.prompt_snapshot = (prompt, tool_surface.names)
         else:
-            prompt, original_metadata = loop_state.prompt_snapshot
-            prompt_metadata = dict(original_metadata)
-        prompt_metadata["tool_names"] = list(tool_surface.names)
+            prompt, _names = loop_state.prompt_snapshot
         return prompt
 
     def _request_action(
