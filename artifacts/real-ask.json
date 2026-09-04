@@ -21,14 +21,14 @@
           "path": "README.md",
           "start_line": 1
         },
-        "call_id": "call_i8LfjiW0FNfoj6icNSvWp85v",
+        "call_id": "call_J3jbcRrtecZKItx0myg4Gitw",
         "name": "read_file"
       }
     ],
     "tool_results": [
       {
         "affected_paths": [],
-        "call_id": "call_i8LfjiW0FNfoj6icNSvWp85v",
+        "call_id": "call_J3jbcRrtecZKItx0myg4Gitw",
         "execution_state": "completed",
         "failure": "",
         "name": "read_file",
@@ -39,7 +39,7 @@
     ]
   },
   "artifact_type": "pico-real-ask",
-  "captured_at": "2026-09-03T07:42:01.268831+00:00",
+  "captured_at": "2026-09-04T01:18:27.719553+00:00",
   "changed_paths": [],
   "checks": {
     "ask_surface_exact": true,
@@ -54,9 +54,8 @@
     "answer": "ORBIT-7",
     "changed_paths": [],
     "final_diff": {
-      "diff_artifact_id": "",
-      "diff_bytes": 0,
-      "unavailable_reason": ""
+      "artifact_id": "",
+      "size_bytes": 0
     },
     "metrics": {
       "executed_tool_count": 1,
@@ -77,18 +76,18 @@
       "tool_counts": {
         "read_file": 1
       },
-      "turn_duration_ms": 19777,
+      "turn_duration_ms": 65560,
       "verification_counts": {}
     },
-    "run_id": "run_20260903-074141-a00c1c",
+    "run_id": "run_20260904-011722-fc9b53",
     "status": "completed",
     "stop_reason": "final_answer_returned"
   },
   "passed": true,
-  "run_id": "run_20260903-074141-a00c1c",
+  "run_id": "run_20260904-011722-fc9b53",
   "runtime": {
-    "branch": "codex/pico-explicit-modes",
-    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "branch": "master",
+    "commit_sha": "0b6a6dc599779d670e35a7dc1bea7dc69b53f6c1",
     "working_tree_dirty": false
   },
   "tool_surface": [

@@ -37,7 +37,7 @@
           "path": "subject.txt",
           "start_line": 1
         },
-        "call_id": "call_7Ld9LZK9yDJ353eIlB4MQnDh",
+        "call_id": "call_6ONGGbpcwyOQRerTvgqRfv7T",
         "name": "read_file"
       },
       {
@@ -47,7 +47,7 @@
           "old_text": "alpha",
           "path": "subject.txt"
         },
-        "call_id": "call_Y88dJetyGkpr6ml9G98Ep7gN",
+        "call_id": "call_M5xN6Lyo7WmAgbIVgyaZF4Yz",
         "name": "edit_file"
       },
       {
@@ -56,7 +56,7 @@
           "path": "subject.txt",
           "start_line": 1
         },
-        "call_id": "call_rjZ2XEzBXhcshR0KtSjqyTtf",
+        "call_id": "call_qqbfLCmBy3HMnEDeqh7MeaTs",
         "name": "read_file"
       },
       {
@@ -66,14 +66,14 @@
           "old_text": "alpha",
           "path": "subject.txt"
         },
-        "call_id": "call_YJgwc4iWnVZ0odMEq9tVzKUL",
+        "call_id": "call_VleAObMrBFgojCRSRdAhIQfJ",
         "name": "edit_file"
       }
     ],
     "tool_results": [
       {
         "affected_paths": [],
-        "call_id": "call_7Ld9LZK9yDJ353eIlB4MQnDh",
+        "call_id": "call_6ONGGbpcwyOQRerTvgqRfv7T",
         "execution_state": "completed",
         "failure": "",
         "name": "read_file",
@@ -83,7 +83,7 @@
       },
       {
         "affected_paths": [],
-        "call_id": "call_Y88dJetyGkpr6ml9G98Ep7gN",
+        "call_id": "call_M5xN6Lyo7WmAgbIVgyaZF4Yz",
         "execution_state": "failed",
         "failure": "revision_conflict",
         "name": "edit_file",
@@ -93,7 +93,7 @@
       },
       {
         "affected_paths": [],
-        "call_id": "call_rjZ2XEzBXhcshR0KtSjqyTtf",
+        "call_id": "call_qqbfLCmBy3HMnEDeqh7MeaTs",
         "execution_state": "completed",
         "failure": "",
         "name": "read_file",
@@ -105,7 +105,7 @@
         "affected_paths": [
           "subject.txt"
         ],
-        "call_id": "call_YJgwc4iWnVZ0odMEq9tVzKUL",
+        "call_id": "call_VleAObMrBFgojCRSRdAhIQfJ",
         "execution_state": "completed",
         "failure": "",
         "name": "edit_file",
@@ -116,7 +116,7 @@
     ]
   },
   "artifact_type": "pico-real-revision-repair",
-  "captured_at": "2026-09-03T07:46:18.545771+00:00",
+  "captured_at": "2026-09-04T01:19:37.131568+00:00",
   "changed_paths": [
     "subject.txt"
   ],
@@ -134,14 +134,13 @@
   },
   "model": "gpt-5.6-luna",
   "outcome": {
-    "answer": "Updated `subject.txt`: replaced `alpha` with `agent` and preserved the concurrent `external` line. The edit succeeded after retrying with the current revision.",
+    "answer": "Updated subject.txt: replaced `alpha` with `agent` and preserved the concurrent `external` line. The edit succeeded after rereading and retrying with the current revision.",
     "changed_paths": [
       "subject.txt"
     ],
     "final_diff": {
-      "diff_artifact_id": "diff_f71cd4e7f452c7ed_440505e8af",
-      "diff_bytes": 76,
-      "unavailable_reason": ""
+      "artifact_id": "diff_f21c32a0cab2f618_440505e8af",
+      "size_bytes": 76
     },
     "metrics": {
       "executed_tool_count": 4,
@@ -165,20 +164,20 @@
         "edit_file": 2,
         "read_file": 2
       },
-      "turn_duration_ms": 92790,
+      "turn_duration_ms": 47973,
       "verification_counts": {
         "passed": 1
       }
     },
-    "run_id": "run_20260903-074445-d2b0dc",
+    "run_id": "run_20260904-011849-bfaf7b",
     "status": "completed",
     "stop_reason": "final_answer_returned"
   },
   "passed": true,
-  "run_id": "run_20260903-074445-d2b0dc",
+  "run_id": "run_20260904-011849-bfaf7b",
   "runtime": {
-    "branch": "codex/pico-explicit-modes",
-    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "branch": "master",
+    "commit_sha": "0b6a6dc599779d670e35a7dc1bea7dc69b53f6c1",
     "working_tree_dirty": false
   },
   "verification": {

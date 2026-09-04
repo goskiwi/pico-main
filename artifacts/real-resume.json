@@ -38,11 +38,11 @@
       },
       {
         "args": {
-          "end_line": 200,
+          "end_line": 50,
           "path": "recovery.txt",
           "start_line": 1
         },
-        "call_id": "call_o6QlldGwPOlw9NkBDzRi90w6",
+        "call_id": "call_cItOOMuJNGUGFIF02LmOwhdO",
         "name": "read_file"
       },
       {
@@ -52,7 +52,7 @@
           "old_text": "partial\n",
           "path": "recovery.txt"
         },
-        "call_id": "call_nPbN1m48fCZBq34E4DoZtX5j",
+        "call_id": "call_JhXRIDlSKYQmxqoQNadPnJqG",
         "name": "edit_file"
       }
     ],
@@ -71,7 +71,7 @@
       },
       {
         "affected_paths": [],
-        "call_id": "call_o6QlldGwPOlw9NkBDzRi90w6",
+        "call_id": "call_cItOOMuJNGUGFIF02LmOwhdO",
         "execution_state": "completed",
         "failure": "",
         "name": "read_file",
@@ -83,7 +83,7 @@
         "affected_paths": [
           "recovery.txt"
         ],
-        "call_id": "call_nPbN1m48fCZBq34E4DoZtX5j",
+        "call_id": "call_JhXRIDlSKYQmxqoQNadPnJqG",
         "execution_state": "completed",
         "failure": "",
         "name": "edit_file",
@@ -94,7 +94,7 @@
     ]
   },
   "artifact_type": "pico-real-resume",
-  "captured_at": "2026-09-03T07:46:32.159366+00:00",
+  "captured_at": "2026-09-04T01:19:51.362200+00:00",
   "changed_paths": [
     "recovery.txt"
   ],
@@ -118,14 +118,13 @@
   },
   "model": "gpt-5.6-luna",
   "outcome": {
-    "answer": "Replaced `partial` with `recovered` in `recovery.txt`, preserving the file’s other content. The edit completed successfully with one replacement.",
+    "answer": "Repaired `recovery.txt`: replaced `partial` with `recovered` while preserving the file’s other content.",
     "changed_paths": [
       "recovery.txt"
     ],
     "final_diff": {
-      "diff_artifact_id": "diff_0920050ee3f4f13d_9f3533860a",
-      "diff_bytes": 71,
-      "unavailable_reason": ""
+      "artifact_id": "diff_ca4fe70011253bf8_9f3533860a",
+      "size_bytes": 71
     },
     "metrics": {
       "executed_tool_count": 3,
@@ -151,20 +150,20 @@
         "edit_file": 2,
         "read_file": 1
       },
-      "turn_duration_ms": 13520,
+      "turn_duration_ms": 14159,
       "verification_counts": {
         "passed": 1
       }
     },
-    "run_id": "run_20260903-074618-a9103a",
+    "run_id": "run_20260904-011937-bf50ee",
     "status": "completed",
     "stop_reason": "final_answer_returned"
   },
   "passed": true,
-  "run_id": "run_20260903-074618-a9103a",
+  "run_id": "run_20260904-011937-bf50ee",
   "runtime": {
-    "branch": "codex/pico-explicit-modes",
-    "commit_sha": "ee53af8c13269ff22f2b25d05647dc74403a88a9",
+    "branch": "master",
+    "commit_sha": "0b6a6dc599779d670e35a7dc1bea7dc69b53f6c1",
     "working_tree_dirty": false
   },
   "verification": {
