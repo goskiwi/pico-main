@@ -87,11 +87,20 @@ def system_files():
     }
 
 
-def build_prompt():
+def build_prompt(*, delegate=False):
+    workflow = (
+        "Inspect the implementation, then delegate exactly one implement Child to fix "
+        "inventory/pricing.py with that single allowed write path. Integrate the returned "
+        "patch using integrate_child; do not edit files directly. "
+        if delegate
+        else "Solve this small task directly without delegation. "
+    )
     return (
         "Customers report that order totals are too low whenever a line item has a "
         "quantity greater than one. Diagnose and fix the root cause. Preserve the public "
-        "API, do not modify tests, and solve this small task directly without delegation. "
+        "API and do not modify tests. "
+        + workflow
+        +
         "Repository instructions are already supplied by the Runtime, so do not open "
         "AGENTS.md. Use repository tools to locate the implementation; the Runtime owns "
         "verification."
@@ -171,22 +180,27 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--turn-timeout", type=int, default=600)
+    parser.add_argument("--delegate", action="store_true")
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=ROOT / "artifacts" / "real-system-workspace",
+        default=None,
     )
     parser.add_argument(
         "--artifact",
         type=Path,
-        default=ROOT / "artifacts" / "real-system.json",
+        default=None,
     )
     parser.add_argument(
         "--patch",
         type=Path,
-        default=ROOT / "artifacts" / "real-system.patch",
+        default=None,
     )
     args = parser.parse_args(argv)
+    artifact_name = "real-child" if args.delegate else "real-system"
+    args.workspace = args.workspace or ROOT / "artifacts" / f"{artifact_name}-workspace"
+    args.artifact = args.artifact or ROOT / "artifacts" / f"{artifact_name}.json"
+    args.patch = args.patch or ROOT / "artifacts" / f"{artifact_name}.patch"
 
     runtime = git_metadata()
     require_clean_runtime(runtime)
@@ -224,7 +238,7 @@ def main(argv=None):
         "16",
         "--max-tool-executions",
         "20",
-        build_prompt(),
+        build_prompt(delegate=args.delegate),
     ]
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(ROOT)
@@ -248,7 +262,7 @@ def main(argv=None):
     successful_mutations = [
         row
         for row in results
-        if row["name"] in {"write_file", "edit_file"}
+        if row["name"] in {"write_file", "edit_file", "integrate_child"}
         and row["status"] == "success"
         and row["side_effect_state"] == "changed"
     ]
@@ -261,8 +275,6 @@ def main(argv=None):
         "baseline_failure_reproduced": not initial["ok"],
         "cli_completed": cli.returncode == 0,
         "one_terminal_run": projection.status == "completed",
-        "target_located_without_prompt_hint": TARGET_PATH not in build_prompt()
-        and TARGET_PATH in read_paths,
         "implementation_read": TARGET_PATH in read_paths,
         "bounded_successful_mutations": 1 <= len(successful_mutations) <= 3,
         "runtime_verification_passed": any(
@@ -285,8 +297,30 @@ def main(argv=None):
         "bounded_model_turns": projection.model_request_count <= 10,
         "patch_recorded": bool(patch_text),
     }
+    child_receipts = [
+        event.payload["outcome"]["structured"]
+        for event in events
+        if event.kind == "tool_result"
+        and event.name == "delegate"
+        and event.outcome_status == "success"
+    ]
+    if args.delegate:
+        checks["one_child_patch_received"] = (
+            len(child_receipts) == 1 and "patch" in child_receipts[0]
+        )
+        checks["child_patch_integrated"] = sum(
+            row["name"] == "integrate_child" and row["status"] == "success"
+            for row in results
+        ) == 1
+        checks["parent_did_not_edit_directly"] = not any(
+            call["name"] in {"write_file", "edit_file"} for call in calls
+        )
+    else:
+        checks["target_located_without_prompt_hint"] = (
+            TARGET_PATH not in build_prompt() and TARGET_PATH in read_paths
+        )
     artifact = {
-        "artifact_type": "pico-real-system",
+        "artifact_type": "pico-" + artifact_name,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "runtime": runtime,
         "model": args.model,
@@ -303,6 +337,7 @@ def main(argv=None):
             "requested_calls": calls,
             "tool_results": results,
             "event_kinds": [event.kind for event in events],
+            "child_receipts": child_receipts,
         },
         "verification": {"initial": initial, "visible": visible, "hidden": hidden},
         "changed_paths": changed_paths,

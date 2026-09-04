@@ -1,8 +1,11 @@
 diff --git a/inventory/pricing.py b/inventory/pricing.py
-index f63c29b..dde2c0f 100644
+index f63c29b..4aaba34 100644
 --- a/inventory/pricing.py
 +++ b/inventory/pricing.py
-@@ -4,2 +4,2 @@ from .models import LineItem
+@@ -1 +1,2 @@
++# inventory/pricing.py
+ from .models import LineItem
+@@ -4,2 +5,2 @@ from .models import LineItem
  def order_total(items: list[LineItem]) -> int:
 -    return sum(item.unit_price for item in items)
 +    return sum(item.unit_price * item.quantity for item in items)

@@ -25,6 +25,14 @@ def test_real_system_prompt_describes_symptom_without_revealing_target_path():
     assert "do not open AGENTS.md" in prompt
 
 
+def test_real_child_prompt_requires_explicit_patch_integration():
+    prompt = build_prompt(delegate=True)
+
+    assert "exactly one implement Child" in prompt
+    assert "integrate_child" in prompt
+    assert "do not edit files directly" in prompt
+
+
 def test_published_real_cli_system_artifact_passes_every_boundary():
     artifact = json.loads(Path("artifacts/real-system.json").read_text())
 

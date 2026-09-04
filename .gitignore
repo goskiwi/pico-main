@@ -42,6 +42,8 @@ artifacts/*
 !artifacts/real-resume.patch
 !artifacts/real-system.json
 !artifacts/real-system.patch
+!artifacts/real-child.json
+!artifacts/real-child.patch
 release/
 readme_intro_locked/
 output/
