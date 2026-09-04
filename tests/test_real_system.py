@@ -55,3 +55,20 @@ def test_published_real_cli_system_artifact_passes_every_boundary():
     assert "AGENTS-FOLLOWED" in artifact["cli"]["stdout"]
     assert artifact["passed"] is True
     assert all(artifact["checks"].values())
+
+
+def test_published_real_child_artifact_uses_the_new_patch_receipt():
+    artifact = json.loads(Path("artifacts/real-child.json").read_text())
+
+    assert artifact["passed"] is True
+    assert all(artifact["checks"].values())
+    assert artifact["cli"]["exit_code"] == 0
+    receipt, = artifact["analysis"]["child_receipts"]
+    assert set(receipt) == {
+        "child_id", "child_run_id", "role", "status", "result", "patch"
+    }
+    assert set(receipt["patch"]) == {
+        "base_sha", "changed_paths", "sha256", "integrated"
+    }
+    assert receipt["patch"]["changed_paths"] == [TARGET_PATH]
+    assert artifact["checks"]["parent_did_not_edit_directly"] is True

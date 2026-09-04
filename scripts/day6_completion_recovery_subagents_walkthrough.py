@@ -611,7 +611,7 @@ def child_delegation_experiment(root):
             "status": implement.structured["status"],
             "base_sha": implement.structured["patch"]["base_sha"],
             "changed_paths": implement.structured["patch"]["changed_paths"],
-            "patch_sha256": implement.structured["patch"]["sha256"],
+            "sha256": implement.structured["patch"]["sha256"],
             "parent_unchanged_before_integration": (
                 "return 1" in parent_before_integration
             ),

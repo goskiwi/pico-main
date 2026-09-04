@@ -213,9 +213,10 @@ MCP/Skills 都明确不在范围内。
 ## 证据边界
 
 - 当前确定性证据：核心 pytest 与 Day 1–7 Walkthrough。
-- 当前发布的真实模型证据是受控的 `real-compaction.json/.patch`：真实 Provider 使用三个
-  四调用 Observation Batch 完成 12 次证据读取，模型请求从旧证据的 17 次降到 9 次。
-- `run_command`、Crash Resume 与 Worktree Child 的真实回归在临时干净 Git Workspace 中运行，
-  不混入 Core 持久状态。
+- 当前发布的真实模型证据包括 `real-system` CLI 全链路、`real-child` Worktree 委派与集成，
+  以及 Ask、审批拒绝、Revision Conflict 修复和 Crash Resume 专项。
+- `real-compaction.json/.patch` 使用三个四调用 Observation Batch 完成 12 份证据各读取一次，
+  并验证压缩后继续修改和完成。各证据都记录实际 Runtime commit，不以旧轮次数宣传当前版本。
+- 真实回归在独立的受控 Git Workspace 中运行，不修改 Pico 产品源码。
 - Runtime Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
 - 模型后端仍是外部信任边界。
