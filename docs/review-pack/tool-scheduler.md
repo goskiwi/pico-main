@@ -34,14 +34,14 @@ not-started，绝不重放 Runner。
 `batchable_observation` 和固定批次长度已删除。旧事件直接作为不支持的 Run Log kind 拒绝，
 没有兼容或迁移分支。
 
-工具完成后，AgentLoop 使用 Provider 已报告的 input/output token 和实际有界 Tool Result 的
-本地 token 数，计算下一次 continuation 大小。达到 Context high watermark 时，在下一次模型
+工具完成后，Provider client 根据真实的 `function_call_output`、Call ID、instructions 与 tools
+计算下一次 continuation；缺少 Provider usage 时计算完整本地请求。达到 Context high watermark 时，在下一次模型
 请求前重建 Provider session 并从 RunLog 压缩；不等待下一轮已经越界后再处理，也不对尚未发生
 的工具输出做最坏情况猜测。
 
 ## 验证
 
-- 确定性回归：303 passed。
+- 确定性回归：308 passed。
 - 七个 Day 1–7 演示通过。
 - 真实 CLI 修复：模型在首轮返回 3 个 `read_file`，随后独占 `edit_file`；可见和隐藏验证通过。
 - 真实 Child：Parent 的 3 个读取并行，Child Worktree 修改、验证和 Parent 集成通过。

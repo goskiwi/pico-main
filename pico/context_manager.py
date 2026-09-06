@@ -214,6 +214,8 @@ def _assemble_input(raw, context):
     if raw["repository_instructions"]:
         parts.append(raw["repository_instructions"])
     parts.append(raw["task_request"])
+    if raw["runtime_instruction"]:
+        parts.append(raw["runtime_instruction"])
     if context:
         parts.append(_untrusted_envelope(context))
     if raw["latest_user_request"]:

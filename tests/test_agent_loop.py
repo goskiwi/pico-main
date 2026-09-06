@@ -469,6 +469,53 @@ def test_provider_session_continues_below_projected_input_high_watermark(tmp_pat
     )
 
 
+def test_missing_provider_usage_uses_actual_local_continuation_payload(tmp_path):
+    (tmp_path / "large.txt").write_text("x" * 10_000, encoding="utf-8")
+    client = FakeModelClient(
+        [
+            ModelAction.tool(
+                "read_file",
+                {"path": "large.txt", "start_line": 1, "end_line": 1},
+            ),
+            ModelAction.final("Done after locally measured reset."),
+        ]
+    )
+    runtime_workspace = Workspace.build(tmp_path)
+    agent = Pico(
+        client,
+        runtime_workspace,
+        config=PicoConfig(
+            mode="auto",
+            verification_command="",
+            provider_context_limit_tokens=8_000,
+            compaction_reserve_tokens=2_000,
+            compaction_keep_recent_tokens=2_000,
+        ),
+        session=SessionStore(tmp_path / ".pico/sessions").create(
+            runtime_workspace.root
+        ),
+    )
+    original_count = agent.prompt.tokenizer.count
+    agent.prompt.tokenizer.count = lambda text: (
+        7_000
+        if "function_call_output" in str(text) and "large.txt" in str(text)
+        else original_count(text)
+    )
+
+    assert agent.ask("Inspect the large file").status == "completed"
+    entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
+    resets = [
+        entry
+        for entry in entries
+        if entry.kind == "provider_session_reset"
+        and entry.payload["reason"] == "context_high_watermark"
+    ]
+
+    assert len(resets) == 1
+    assert resets[0].payload["input_tokens"] is None
+    assert resets[0].payload["projected_input_tokens"] >= 6_000
+
+
 def test_context_overflow_compacts_and_retries_once(tmp_path):
     for name in ("first.txt", "second.txt"):
         (tmp_path / name).write_text((name + " x" * 200 + "\n") * 80)
@@ -506,8 +553,8 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
             mode="auto",
             verification_command="",
             max_new_tokens=64,
-            provider_context_limit_tokens=3_000,
-            compaction_reserve_tokens=750,
+            provider_context_limit_tokens=100_000,
+            compaction_reserve_tokens=10_000,
             compaction_keep_recent_tokens=100,
         ),
         session=SessionStore(tmp_path / ".pico/sessions").create(

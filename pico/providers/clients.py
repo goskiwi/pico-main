@@ -8,6 +8,8 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.client import (
     HTTPConnection,
     HTTPException,
@@ -32,6 +34,10 @@ class ProviderTransportError(RuntimeError):
 
 class ProviderHTTPError(RuntimeError):
     """The provider returned an HTTP or Responses API error."""
+
+    def __init__(self, message, *, transient=False):
+        self.transient = bool(transient)
+        super().__init__(str(message))
 
 
 _CONTEXT_OVERFLOW_CODES = {
@@ -76,6 +82,17 @@ _CONTEXT_OVERFLOW_MESSAGE = (
     "OpenAI-compatible error: provider context window exceeded"
 )
 _HTTP_CONTEXT_MESSAGE_STATUSES = {400, 413, 414, 422}
+_TRANSIENT_PROVIDER_ERROR_CODES = {
+    "internal_server_error",
+    "overload",
+    "overloaded",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "server_error",
+    "service_unavailable",
+    "temporarily_unavailable",
+    "too_many_requests",
+}
 
 
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
@@ -252,6 +269,19 @@ def _provider_error_detail(error):
     return str(error).strip() or type(error).__name__
 
 
+def _error_payload_is_transient(value):
+    if not isinstance(value, dict):
+        return False
+    if isinstance(value.get("error"), dict):
+        return _error_payload_is_transient(value["error"])
+    identifiers = {
+        _normalized_error_code(value[key])
+        for key in ("code", "reason", "type")
+        if value.get(key) not in (None, "")
+    }
+    return bool(identifiers & _TRANSIENT_PROVIDER_ERROR_CODES)
+
+
 def _http_error_detail(body):
     if not body:
         return "no response body"
@@ -260,6 +290,114 @@ def _http_error_detail(body):
         return _provider_error_detail(json.loads(text))
     except json.JSONDecodeError:
         return text.strip() or "empty response body"
+
+
+def _retry_after_seconds(headers):
+    value = str((headers or {}).get("Retry-After", "")).strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            target = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
+        return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+
+
+def _retry_delay(deadline, attempt, headers=None):
+    delay = max(
+        0.5 * (attempt + 1),
+        _retry_after_seconds(headers) or 0.0,
+    )
+    if deadline - time.monotonic() <= delay:
+        return False
+    time.sleep(delay)
+    return True
+
+
+def _read_http_failure(exc):
+    status = int(exc.code)
+    try:
+        body = exc.read()
+    except (
+        urllib.error.URLError,
+        IncompleteRead,
+        RemoteDisconnected,
+        TimeoutError,
+        OSError,
+        ValueError,
+    ):
+        body = b""
+    headers = getattr(exc, "headers", {}) or {}
+    content_type = headers.get("Content-Type", "")
+    context_overflow = _body_indicates_context_overflow(
+        body,
+        content_type,
+        allow_message_fallback=status in _HTTP_CONTEXT_MESSAGE_STATUSES,
+    )
+    return status, body, headers, context_overflow
+
+
+def _action_result_items(pending_call_ids, results):
+    results = tuple(str(result) for result in results)
+    if pending_call_ids:
+        if len(results) != len(pending_call_ids):
+            raise ValueError("provider continuation requires one result per call")
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
+            }
+            for call_id, result in zip(pending_call_ids, results)
+        ]
+    if len(results) != 1:
+        raise ValueError("provider correction requires exactly one result")
+    return [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": results[0]}],
+        }
+    ]
+
+
+def _projected_context_tokens(
+    action_input,
+    result_items,
+    *,
+    instructions,
+    action_tools,
+    token_counter,
+    provider_input_tokens,
+    provider_output_tokens,
+):
+    if isinstance(provider_input_tokens, int) and isinstance(
+        provider_output_tokens, int
+    ):
+        delta = json.dumps(
+            result_items,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return provider_input_tokens + provider_output_tokens + token_counter(delta)
+    projected = {
+        "instructions": str(instructions),
+        "tools": list(action_tools),
+        "input": [*action_input, *result_items],
+    }
+    return token_counter(
+        json.dumps(
+            projected,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 class FakeModelClient:
@@ -276,6 +414,8 @@ class FakeModelClient:
     def reset_action_session(self):
         self.recorded_action_results = []
         self.recorded_action_result_groups = []
+        self._action_input = []
+        self._pending_call_ids = ()
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
@@ -285,6 +425,31 @@ class FakeModelClient:
         group = tuple(str(result) for result in results)
         self.recorded_action_result_groups.append(group)
         self.recorded_action_results.extend(group)
+        self._action_input.extend(self._result_items(group))
+        self._pending_call_ids = ()
+
+    def _result_items(self, results):
+        return _action_result_items(self._pending_call_ids, results)
+
+    def projected_context_tokens(
+        self,
+        results,
+        *,
+        instructions,
+        action_tools,
+        token_counter,
+        provider_input_tokens=None,
+        provider_output_tokens=None,
+    ):
+        return _projected_context_tokens(
+            self._action_input,
+            self._result_items(results),
+            instructions=instructions,
+            action_tools=action_tools,
+            token_counter=token_counter,
+            provider_input_tokens=provider_input_tokens,
+            provider_output_tokens=provider_output_tokens,
+        )
 
     def complete(self, prompt, max_new_tokens, **kwargs):
         self.prompts.append(prompt)
@@ -303,14 +468,41 @@ class FakeModelClient:
         action_tools,
         **kwargs,
     ):
+        if not self._action_input:
+            self._action_input.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": str(input_text)}],
+                }
+            )
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
         self.instruction_prompts.append(str(instructions))
         output = self.complete(input_text, max_new_tokens, **kwargs)
         if isinstance(output, ModelAction):
-            return output
-        if isinstance(output, dict):
-            return _action_from_response(output, action_tools)
-        raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
+            action = output
+        elif isinstance(output, dict):
+            action = _action_from_response(output, action_tools)
+        else:
+            raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
+        if action.kind == "tool":
+            self._action_input.extend(
+                {
+                    "type": "function_call",
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "arguments": json.dumps(
+                        call.args,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                }
+                for call in action.tool_calls
+            )
+            self._pending_call_ids = tuple(
+                call.call_id for call in action.tool_calls
+            )
+        return action
 
 
 def _normalize_versioned_base_url(base_url):
@@ -503,28 +695,31 @@ class OpenAICompatibleModelClient:
         )
         return int(token_counter(serialized))
 
+    def _result_items(self, results):
+        return _action_result_items(self._pending_call_ids, results)
+
     def record_action_results(self, results):
-        results = tuple(str(result) for result in results)
-        if self._pending_call_ids:
-            if len(results) != len(self._pending_call_ids):
-                raise ValueError("provider continuation requires one result per call")
-            self._action_input.extend(
-                {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": result,
-                }
-                for call_id, result in zip(self._pending_call_ids, results)
-            )
-            self._pending_call_ids = ()
-            return
-        if len(results) != 1:
-            raise ValueError("provider correction requires exactly one result")
-        self._action_input.append(
-            {
-                "role": "user",
-                "content": [{"type": "input_text", "text": results[0]}],
-            }
+        self._action_input.extend(self._result_items(results))
+        self._pending_call_ids = ()
+
+    def projected_context_tokens(
+        self,
+        results,
+        *,
+        instructions,
+        action_tools,
+        token_counter,
+        provider_input_tokens=None,
+        provider_output_tokens=None,
+    ):
+        return _projected_context_tokens(
+            self._action_input,
+            self._result_items(results),
+            instructions=instructions,
+            action_tools=action_tools,
+            token_counter=token_counter,
+            provider_input_tokens=provider_input_tokens,
+            provider_output_tokens=provider_output_tokens,
         )
 
     def _build_payload(
@@ -564,7 +759,7 @@ class OpenAICompatibleModelClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _request_with_retry(self, payload, request_timeout):
+    def _request_response(self, payload, request_timeout):
         request = urllib.request.Request(
             self.base_url + "/responses",
             data=json.dumps(payload).encode("utf-8"),
@@ -576,14 +771,6 @@ class OpenAICompatibleModelClient:
         if request_timeout is not None:
             total_timeout = min(total_timeout, float(request_timeout))
         deadline = time.monotonic() + max(0.001, total_timeout)
-
-        def retry_delay(attempt):
-            delay = 0.5 * (attempt + 1)
-            remaining = deadline - time.monotonic()
-            if remaining <= delay:
-                return False
-            time.sleep(delay)
-            return True
 
         for attempt in range(attempts):
             remaining = deadline - time.monotonic()
@@ -599,37 +786,26 @@ class OpenAICompatibleModelClient:
             effective_timeout = min(float(self.timeout), remaining)
             http_failure = None
             transport_failure = None
+            response_headers = {}
             try:
                 with _open_response(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
                     response_headers = getattr(response, "headers", {}) or {}
-                    return body_text, response_headers.get("Content-Type", "")
-            except urllib.error.HTTPError as exc:
-                status = int(exc.code)
                 try:
-                    error_body = exc.read()
-                except (
-                    urllib.error.URLError,
-                    IncompleteRead,
-                    RemoteDisconnected,
-                    TimeoutError,
-                    OSError,
-                    ValueError,
-                ):
-                    error_body = b""
-                error_headers = getattr(exc, "headers", {}) or {}
-                error_content_type = error_headers.get("Content-Type", "")
-                http_failure = (
-                    status,
-                    _body_indicates_context_overflow(
-                        error_body,
-                        error_content_type,
-                        allow_message_fallback=(
-                            status in _HTTP_CONTEXT_MESSAGE_STATUSES
-                        ),
-                    ),
-                    status in {408, 429} or status >= 500,
-                )
+                    return self._decode_response(
+                        body_text,
+                        response_headers.get("Content-Type", ""),
+                    )
+                except ProviderHTTPError as exc:
+                    if (
+                        exc.transient
+                        and attempt < attempts - 1
+                        and _retry_delay(deadline, attempt, response_headers)
+                    ):
+                        continue
+                    raise
+            except urllib.error.HTTPError as exc:
+                http_failure = _read_http_failure(exc)
             except (
                 urllib.error.URLError,
                 IncompleteRead,
@@ -641,19 +817,25 @@ class OpenAICompatibleModelClient:
                 transport_failure = exc
 
             if http_failure is not None:
-                status, context_overflow, transient = http_failure
+                status, error_body, error_headers, context_overflow = http_failure
+                transient = status in {408, 429} or status >= 500
                 if context_overflow:
                     raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
-                if transient and attempt < attempts - 1 and retry_delay(attempt):
+                if (
+                    transient
+                    and attempt < attempts - 1
+                    and _retry_delay(deadline, attempt, error_headers)
+                ):
                     continue
                 detail = _http_error_detail(error_body)
                 raise ProviderHTTPError(
                     f"OpenAI-compatible request failed with HTTP {status}: {detail}.\n"
                     f"Backend: {self.base_url}\n"
-                    f"Model: {self.model}"
+                    f"Model: {self.model}",
+                    transient=transient,
                 )
             if transport_failure is not None:
-                if attempt < attempts - 1 and retry_delay(attempt):
+                if attempt < attempts - 1 and _retry_delay(deadline, attempt):
                     continue
                 raise ProviderTransportError(
                     "OpenAI-compatible transport failed after "
@@ -693,7 +875,8 @@ class OpenAICompatibleModelClient:
             raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
         if has_error:
             raise ProviderHTTPError(
-                "OpenAI-compatible response error: " + _provider_error_detail(error)
+                "OpenAI-compatible response error: " + _provider_error_detail(error),
+                transient=_error_payload_is_transient(error),
             )
         output = response_data.get("output")
         if not isinstance(output, list) or any(
@@ -724,8 +907,7 @@ class OpenAICompatibleModelClient:
             action_tools=action_tools,
             input_items=self._action_input,
         )
-        body_text, content_type = self._request_with_retry(payload, request_timeout)
-        response_data = self._decode_response(body_text, content_type)
+        response_data = self._request_response(payload, request_timeout)
         self.last_completion_metadata = _extract_usage(response_data)
         action = _action_from_response(response_data, action_tools)
         output = response_data["output"]

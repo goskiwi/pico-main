@@ -28,8 +28,9 @@ class _ProjectedFact:
 
 
 class RunHistory:
-    def __init__(self, events):
+    def __init__(self, events, *, history_projectors=None):
         self._events = tuple(events)
+        self._history_projectors = dict(history_projectors or {})
 
     def latest_user_guidance(self):
         entry = next(
@@ -116,6 +117,7 @@ class RunHistory:
         events,
         *,
         projected_guidance_id="",
+        projected_instruction_id="",
         allow_incomplete=False,
     ):
         """Project response envelopes into independent completed Call facts."""
@@ -128,6 +130,9 @@ class RunHistory:
             if entry.kind == "user_message" or (
                 entry.kind == "user_guidance"
                 and entry.event_id == projected_guidance_id
+            ) or (
+                entry.kind == "model_instruction"
+                and entry.event_id == projected_instruction_id
             ):
                 index += 1
                 continue
@@ -183,33 +188,25 @@ class RunHistory:
         content = str(fact.payload.get("content", ""))
         return f"[{fact.kind}] {content}"
 
-    @staticmethod
-    def _render_compact_unit(unit):
+    def _render_tool_projection(self, unit):
         if len(unit) == 2 and unit[0].kind == "tool_call":
             call, result = unit
             outcome = ToolOutcome.from_dict(result.payload["outcome"])
-            details = {
-                key: call.payload["args"][key]
-                for key in ("path", "artifact_id", "child_id")
-                if key in call.payload["args"]
-            }
-            if result.artifact_id:
-                details["result_artifact"] = result.artifact_id
-            if outcome.failure is not None:
-                details["failure"] = outcome.failure.code
-                details["recovery"] = outcome.failure.recovery
-            suffix = (
-                " " + json.dumps(details, ensure_ascii=False, sort_keys=True)
-                if details
-                else ""
+            projector = self._history_projectors.get(call.payload["name"])
+            if projector is None:
+                return None
+            projection = projector(call.payload["args"], outcome)
+            return "[tool receipt] " + json.dumps(
+                {
+                    "call_id": call.payload["call_id"],
+                    "name": call.payload["name"],
+                    **projection,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             )
-            return (
-                f"[tool receipt] call_id={call.payload['call_id']} "
-                f"name={call.payload['name']} status={outcome.status}"
-                f" side_effect={outcome.side_effect_state}{suffix}"
-            )
-        fact = unit[0]
-        return f"[{fact.kind}] content omitted by History budget"
+        return None
 
     @staticmethod
     def _source_ids(units):
@@ -220,8 +217,7 @@ class RunHistory:
             for event_id in fact.source_event_ids
         }
 
-    @classmethod
-    def _select_recent(cls, units, *, limit, render):
+    def _select_recent(self, units, *, limit, render):
         selected = []
         for unit in reversed(units):
             full = [(unit, False), *selected]
@@ -229,6 +225,8 @@ class RunHistory:
             if full_render[1] <= limit:
                 selected = full
                 continue
+            if self._render_tool_projection(unit) is None:
+                break
             compact = [(unit, True), *selected]
             compact_render = render(compact)
             if compact_render[1] <= limit:
@@ -240,6 +238,7 @@ class RunHistory:
     def plan_compaction(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
         latest_guidance_id = self._latest_user_guidance_id(self._events)
+        pending_instruction_id = self._pending_runtime_instruction_id(self._events)
         units = self._history_units(active, allow_incomplete=True)
         if units is None:
             return None
@@ -249,6 +248,7 @@ class RunHistory:
             projected = self._projection_units(
                 events,
                 projected_guidance_id=latest_guidance_id,
+                projected_instruction_id=pending_instruction_id,
             )
             lines = ["Current run events:"]
             if summary:
@@ -275,6 +275,7 @@ class RunHistory:
         summary_units = self._projection_units(
             compacted,
             projected_guidance_id=latest_guidance_id,
+            projected_instruction_id=pending_instruction_id,
         )
         summary_facts = tuple(fact for unit in summary_units for fact in unit)
         if not summary_facts:
@@ -307,11 +308,28 @@ class RunHistory:
             "",
         )
 
+    @staticmethod
+    def _pending_runtime_instruction_id(events):
+        pending = ""
+        for entry in events:
+            if entry.kind == "model_instruction":
+                pending = entry.event_id
+            elif entry.kind in {
+                "assistant_tool_calls",
+                "assistant_final",
+                "run_stopped",
+            }:
+                pending = ""
+        return pending
+
     def _active_projection_units(self):
         active = self.active_events()
         units = self._projection_units(
             active,
             projected_guidance_id=self._latest_user_guidance_id(self._events),
+            projected_instruction_id=self._pending_runtime_instruction_id(
+                self._events
+            ),
             allow_incomplete=True,
         )
         return active, units or []
@@ -352,7 +370,7 @@ class RunHistory:
                 lines.append(COMPACTED_HISTORY_OMITTED)
             for unit, compact in selected:
                 if compact:
-                    lines.append(self._render_compact_unit(unit))
+                    lines.append(self._render_tool_projection(unit))
                 else:
                     lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)
@@ -394,11 +412,11 @@ class RunHistory:
             lines.append(f"- {omitted} older events omitted")
             if receipts:
                 lines.append(
-                    f"- {receipts} retained tool results reduced to receipts"
+                    f"- {receipts} retained tool results use typed projections"
                 )
             for unit, compact in selected:
                 if compact:
-                    lines.append(self._render_compact_unit(unit))
+                    lines.append(self._render_tool_projection(unit))
                 else:
                     lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)

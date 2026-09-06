@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import Field
 
 from ..contracts import FailureInfo, ToolRunnerResult
+from ..tools import history_projection
 from .contracts import ChildSpec, StrictModel
 
 
@@ -14,6 +15,29 @@ class DelegateArgs(ChildSpec):
 
 class IntegrateChildArgs(StrictModel):
     child_id: str = Field(pattern=r"^child_[a-f0-9]{12}$")
+
+
+DELEGATE_HISTORY_PROJECTION = history_projection(
+    arg_fields=("role", "task", "allowed_write_paths"),
+    result_fields=(
+        "child_id",
+        "child_run_id",
+        "role",
+        "status",
+        "error",
+        "base_sha",
+        "patch",
+    ),
+)
+INTEGRATE_CHILD_HISTORY_PROJECTION = history_projection(
+    arg_fields=("child_id",),
+    result_fields=(
+        "child_id",
+        "status",
+        "base_sha",
+        "path_transitions",
+    ),
+)
 
 
 def _delegate(manager, args):
@@ -95,6 +119,7 @@ def build_tool_registry(manager):
                 "immutable patch receipt but never integrates automatically."
             ),
             "run": lambda context, args: _delegate(manager, args),
+            "history_projection": DELEGATE_HISTORY_PROJECTION,
         },
         "integrate_child": {
             "args_schema": IntegrateChildArgs,
@@ -107,5 +132,6 @@ def build_tool_registry(manager):
                 "the unchanged parent repository."
             ),
             "run": lambda context, args: _integrate(manager, args),
+            "history_projection": INTEGRATE_CHILD_HISTORY_PROJECTION,
         },
     }

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from .contracts import FailureInfo, ToolRunnerResult
-from .tools import ToolArgs
+from .tools import ToolArgs, history_projection
 
 
 class RunCheckArgs(ToolArgs):
@@ -13,6 +13,12 @@ class RunCheckArgs(ToolArgs):
                       description="Self-contained Python code; for pytest, define test functions and fixtures.")
     kind: Literal["python", "pytest"] = "python"
     timeout_seconds: int = Field(default=30, ge=1, le=60)
+
+
+RUN_CHECK_HISTORY_PROJECTION = history_projection(
+    arg_fields=("kind", "timeout_seconds"),
+    result_fields=("kind", "exit_code", "stop_reason", "output_limited"),
+)
 
 
 def _validate(context, args):
@@ -61,4 +67,5 @@ def build_tool_registry():
         ),
         "validate": _validate,
         "run": _run,
+        "history_projection": RUN_CHECK_HISTORY_PROJECTION,
     }}

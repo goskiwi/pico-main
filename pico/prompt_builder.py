@@ -106,7 +106,8 @@ class PromptBuilder:
         minimum_input = context._assemble_input(raw, context._required_context(raw))
         if count_tokens(minimum_input) > available:
             raise context.ContextBudgetExceeded(
-                "runtime policy, repository instructions, task request and WorkingState exceed the model budget"
+                "runtime policy, repository instructions, task request, pending "
+                "Runtime instruction and WorkingState exceed the model budget"
             )
         if history_override is None and history is not None:
             fixed_context = context._fixed_context(
@@ -151,6 +152,7 @@ class PromptBuilder:
             "runtime_policy",
             "repository_instructions",
             "task_request",
+            "runtime_instruction",
             "latest_user_request",
         ):
             value = raw[key]
@@ -203,6 +205,11 @@ class PromptBuilder:
                     else []
                 ),
                 "task_request",
+                *(
+                    ["runtime_instruction"]
+                    if raw["runtime_instruction"]
+                    else []
+                ),
                 *(["untrusted_context"] if rendered_context else []),
                 *(["latest_user_request"] if raw["latest_user_request"] else []),
             ],
@@ -361,7 +368,14 @@ class PromptBuilder:
 
     def _history(self):
         run_log = self.runtime.run.run_log
-        return RunHistory(run_log.events) if run_log is not None else None
+        return (
+            RunHistory(
+                run_log.events,
+                history_projectors=self.runtime.tools.history_projectors(),
+            )
+            if run_log is not None
+            else None
+        )
 
     def _tool_schema_tokens(self, action_tools=None):
         estimator = getattr(
@@ -394,6 +408,15 @@ class PromptBuilder:
             "repo_map": self._repo_map_text(user_message, working_text),
             "working_state": working_text,
             "task_request": "task_request:\n" + json.dumps(goal, ensure_ascii=False),
+            "runtime_instruction": (
+                "runtime_instruction:\n"
+                + json.dumps(
+                    projection.pending_runtime_instruction,
+                    ensure_ascii=False,
+                )
+                if projection.pending_runtime_instruction
+                else ""
+            ),
             "latest_user_request": (
                 "latest_user_request:\n" + json.dumps(latest, ensure_ascii=False)
                 if latest

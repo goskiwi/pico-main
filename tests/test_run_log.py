@@ -11,6 +11,7 @@ from pico.run_log import RunEvent, RunLog, replay_events
 from pico.run_projection import RunOutcome, RunProjection
 from pico.run_store import RunStore
 from pico.task_state import TaskContract
+from pico.tools import build_tool_registry
 
 READ_TASK = {
     "allows_workspace_mutation": False,
@@ -594,12 +595,8 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     assert result is not None
     summary, covered, _metadata = result
     compacted = log.append_compaction(summary, covered)
-    assert [event.kind for event in seen] == [
-        "model_instruction",
-        "model_instruction",
-    ]
+    assert [event.kind for event in seen] == ["model_instruction"]
     assert seen[0].payload["content"] == "historical fact that must be summarized"
-    assert seen[1].payload["content"] == "recent"
     assert len(compacted.covered_event_ids) == 5
 
 
@@ -630,7 +627,14 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     assert result is not None
     _summary, _covered, metadata = result
     assert metadata["retained_events"] == 2
-    assert metadata["retained_tokens"] == wire_tokens(recent_projection)
+    assert metadata["retained_tokens"] == wire_tokens(
+        "\n".join(
+            (
+                "Current run events:",
+                RunHistory._render_fact(RunHistory._event_fact(recent_one)),
+            )
+        )
+    )
 
 
 def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
@@ -727,12 +731,19 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
             )
         )
 
-    rendered, _metadata = RunHistory(log.events).render_recent_projection(
-        retain_tokens=220,
+    projectors = {
+        name: tool["history_projection"]
+        for name, tool in build_tool_registry().items()
+    }
+    rendered, _metadata = RunHistory(
+        log.events,
+        history_projectors=projectors,
+    ).render_recent_projection(
+        retain_tokens=320,
         token_counter=len,
     )
 
-    assert len(rendered) <= 220
+    assert len(rendered) <= 320
     assert "call_b" in rendered
     assert "call_a" not in rendered
     with pytest.raises(ValueError, match="cannot split"):
@@ -740,3 +751,74 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
             "invalid boundary",
             [user.event_id, old.event_id, group.event_id],
         )
+
+
+def test_compact_tool_history_preserves_tool_owned_recovery_fields(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(task_contract())
+    calls = (
+        ToolCall(
+            "search",
+            {"pattern": "SECOND_NEEDLE", "path": "tests"},
+            "search_call",
+        ),
+        ToolCall(
+            "read_file",
+            {"path": "subject.py", "start_line": 40, "end_line": 80},
+            "read_call",
+        ),
+    )
+    log.append_tool_calls(calls)
+    outcomes = (
+        ToolOutcome(
+            "search_call",
+            "search",
+            "success",
+            "completed",
+            "none",
+            "x" * 2000,
+            structured={
+                "engine": "rg",
+                "match_count": 20,
+                "truncated": True,
+                "timed_out": False,
+            },
+        ),
+        ToolOutcome(
+            "read_call",
+            "read_file",
+            "success",
+            "completed",
+            "none",
+            "y" * 2000,
+            structured={
+                "path": "subject.py",
+                "start_line": 40,
+                "end_line": 80,
+                "total_lines": 200,
+                "has_more": True,
+                "truncated": False,
+                "revision": "sha256:" + "a" * 64,
+            },
+        ),
+    )
+    for call, outcome in zip(calls, outcomes):
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_result(outcome)
+    projectors = {
+        name: tool["history_projection"]
+        for name, tool in build_tool_registry().items()
+    }
+
+    rendered, metadata = RunHistory(
+        log.events,
+        history_projectors=projectors,
+    ).render_recent_projection(retain_tokens=1000, token_counter=len)
+
+    assert metadata["retained_tokens"] <= 1000
+    assert "[tool receipt]" in rendered
+    assert "SECOND_NEEDLE" in rendered
+    assert '"start_line":40' in rendered
+    assert '"has_more":true' in rendered
+    assert "sha256:" + "a" * 64 in rendered

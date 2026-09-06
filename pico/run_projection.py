@@ -82,6 +82,8 @@ class RunProjection:
     final_answer: str = ""
     pending_calls: tuple[ToolCall, ...] = ()
     pending_group_id: str = ""
+    pending_runtime_instruction: str = ""
+    pending_runtime_instruction_event_id: str = ""
     started_call_ids: set[str] = field(default_factory=set)
     last_started_ordinal: int = -1
     start_phase_result_count: int = 0
@@ -223,6 +225,8 @@ class RunProjection:
                 self.pending_calls[self.result_count], event.payload["outcome"]
             )
         if event.kind == "assistant_tool_calls":
+            self.pending_runtime_instruction = ""
+            self.pending_runtime_instruction_event_id = ""
             self._begin_calls(event.tool_calls, event.event_id)
         elif event.kind == "tool_started":
             if self.result_count > self.last_started_ordinal:
@@ -235,7 +239,12 @@ class RunProjection:
             self.result_count += 1
             if self.result_count == len(self.pending_calls):
                 self._begin_calls(())
+        elif event.kind == "model_instruction":
+            self.pending_runtime_instruction = str(event.payload["content"])
+            self.pending_runtime_instruction_event_id = event.event_id
         elif event.kind in {"assistant_final", "run_stopped"}:
+            self.pending_runtime_instruction = ""
+            self.pending_runtime_instruction_event_id = ""
             self.status = "completed" if event.kind == "assistant_final" else "stopped"
             self.stop_reason = event.payload["stop_reason"]
             self.final_answer = str(event.payload.get("content", ""))

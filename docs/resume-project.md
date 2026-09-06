@@ -43,7 +43,7 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 已验证的 Projection 状态；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
 是展示格式，不是额外的运行时对象。
 
-每个工具只在一处声明 Schema、权限、校验、Runner、effects 与 concurrency。工具默认独占，
+每个工具只在一处声明 Schema、权限、校验、Runner、effects、concurrency 与 History projection。工具默认独占，
 明确标记的读取工具可以并行；同一响应按连续并行段和独占屏障调度，每个调用独立准入并按原序记账。PromptBuilder 是唯一 Prompt 对象，
 预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
 派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。
@@ -54,8 +54,9 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 工具表、单次与分组调用准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
 不存在“Config 已更新但消费者仍用初始化副本”的行为。验证额外变更进入持久 Evidence，
 不能靠再次提交绕过。Git 交付按命令禁用 hooks；Child Git 操作使用 Parent 剩余时间。
-Provider 保留 urllib 代理与同源重定向，拒绝跨源跳转，连接后以同一请求 deadline 限制响应头和响应体，
-持续小块返回不再无限延长请求。DNS、连接/TLS 由系统及套接字超时控制，普通 Python 计算
+Provider 保留 urllib 代理与同源重定向，拒绝跨源跳转，请求、SSE/JSON 解码和临时错误重试共享同一 deadline；
+HTTP 200 响应中的 `server_error/overloaded` 与 HTTP 429/5xx 使用同一分类，永久请求错误与 Context Overflow 不重试。
+连接后同一 deadline 限制响应头和响应体，持续小块返回不再无限延长请求。DNS、连接/TLS 由系统及套接字超时控制，普通 Python 计算
 仍是协作式停止，不声称整条链路是硬实时系统。
 
 RunHistory 只读选择和渲染历史、生成压缩计划；RunLog 验证并追加压缩事实；Lifecycle

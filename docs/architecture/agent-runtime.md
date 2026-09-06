@@ -48,7 +48,8 @@ AgentLoop
 `ToolRuntime` is the one public boundary for model-visible tools. Stateless value helpers live in
 the private `tool_execution.py` module; transaction order and persistence stay in `ToolRuntime`.
 Concrete runners receive only a `ToolContext` rather than the whole Pico object.
-The registry stores unbound `runner(context, args)`, validator and effect-planner functions.
+The registry stores unbound `runner(context, args)`, validator, effect-planner and typed History
+projection functions.
 ToolRuntime creates a fresh Context for each Call with explicit Run id, Call id, WorkingState
 and ExecutionContext values. Every response uses the same call-sequence path and registry; workers
 do not rebuild it or consult mutable pending-call state through callbacks.
@@ -110,6 +111,7 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 | Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
 | Task contract | First `user_message.contract` | Goal, maximum write capability, write scope and change-verification requirement |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
+| Pending Runtime instruction | Latest `model_instruction` until the next accepted model action | Mandatory trusted prompt section |
 | Large redacted output | Artifact files | Run Log artifact reference |
 | Child receipts | Child Run Logs and Patch files | One explicit Child receipt and integration state |
 
@@ -196,7 +198,8 @@ Responses `instructions`. The first request of a Provider action session sends a
 dedicated `repository_instructions` block. They are project instructions rather than system policy
 or ordinary repository data: the current user request wins on conflict, and ToolRuntime remains the
 permission boundary. An untrusted-context envelope is added only when at least one bounded
-projection is non-empty, and a differing latest request is added only on Resume. The envelope can
+projection is non-empty, a pending Runtime instruction is inserted as trusted mandatory input, and
+a differing latest request is added only on Resume. The envelope can
 include minimal Workspace facts, RepoMap, History and WorkingState. RepoMap is
 ranked from the immutable goal, latest request, current WorkingState and paths already observed or
 changed by the Run. History is rendered before WorkingState so an older summary cannot displace the
@@ -224,13 +227,13 @@ AgentLoop caches only `(ModelPrompt, tool_names)` for continuation. Prompt build
 (section budgets, token estimates and history projection details) remain available to the teaching
 scripts and tests, but are not copied into the loop's cached state.
 
-After a complete Action transaction, AgentLoop calculates the next continuation from values already
-known: Provider-reported input and output tokens plus the tokenizer count of the actual bounded Tool
-Results. Reaching `provider_context_limit_tokens - compaction_reserve_tokens` resets the continuation
+After a complete Action transaction, the Provider client builds the actual next
+`function_call_output` items, including Call IDs and protocol fields. It combines their token count
+with Provider-reported input/output usage, or counts the complete local request representation when
+usage is missing. Reaching `provider_context_limit_tokens - compaction_reserve_tokens` resets the continuation
 before another request and lets the next fresh Prompt compact/rebuild from RunLog. This is not a
 worst-case reservation: tools have already completed and their full results are durable, with large
-model-facing output stored as bounded previews plus Artifacts. Missing Provider usage falls back to
-local fresh-Prompt counting and typed overflow. A typed Provider context overflow still performs one
+model-facing output stored as bounded previews plus Artifacts. A typed Provider context overflow still performs one
 reset, Compaction attempt and retry; a second consecutive overflow propagates.
 
 Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare
@@ -242,7 +245,9 @@ that two-section summary plus coverage metadata; it never contains a seven-part 
 TaskContract, WorkingState and RunEvidence keep their existing owners. A Summary is
 committed only when replacing the covered prefix reduces the final escaped History Wire. Invalid,
 failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool
-Call/Result transactions. Semantic Summary uses one strict request; any failure takes that existing
+Call/Result transactions. Each Tool Registry entry owns the compact fields needed to recover its
+operation; successful WorkingState updates remain in their canonical projection, and a pending
+Runtime instruction remains mandatory outside History. Semantic Summary uses one strict request; any failure takes that existing
 fallback path. Transport retry remains Provider-owned. Original events remain durable.
 
 Day 5 and the demo may assemble the following **Effective Recovery Context** for teaching and
@@ -280,7 +285,7 @@ There is no `protocol_checked` switch or independent Store-level event-construct
 `load_run` reads once and restores protocol plus Projection in one replay; Runtime installs those
 returned objects directly. Store retains its last successfully read/written cursor for recovery.
 
-`RunHistory(events)` owns read-only history selection, rendering and compaction planning.
+`RunHistory(events, history_projectors=...)` owns read-only history selection, rendering and compaction planning.
 It neither appends events nor owns a second durable state. Read `PromptBuilder.build` for the
 complete path from current Runtime inputs through history selection and budgeting to ModelPrompt
 and diagnostics. `PromptBuilder.plan_compaction` directly owns the corresponding planning flow;
@@ -415,5 +420,7 @@ resolve the same workspace root as normal startup.
 Internal paths, revisions and IDs remain exact machine facts. Only display/free-text copies are
 redacted; the same rules apply to tool results and verification events. Provider redirects are
 restricted to the same scheme/host/effective port. Non-completed Responses and SSE streams lacking
-a terminal event never produce executable actions. Git automatic delivery reads NUL-delimited
+a terminal event never produce executable actions. HTTP and response-body transient failures share
+one deadline-controlled retry loop; authentication, request errors and Context Overflow do not retry.
+Git automatic delivery reads NUL-delimited
 name-status records, including both endpoints of renames and copies.

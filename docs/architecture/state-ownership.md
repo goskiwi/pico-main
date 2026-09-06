@@ -20,6 +20,7 @@ Terminology in this document is strict:
 | Task contract | First `user_message.contract`, derived deterministically from the request and explicit Mode | Goal, maximum write capability, write scope and change-verification requirement |
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
+| Runtime correction | Latest `model_instruction` until an accepted Tool or terminal action | Mandatory prompt input across Provider resets |
 | Large output | Artifact content + descriptor | Run Log reference |
 | Child delegation | Child Run Logs and Patch files | One receipt per Child plus explicit integration state |
 
@@ -35,7 +36,7 @@ Invariants:
 
 - `tool_started` is durable before side effects begin.
 - `tool_result` is the only durable completion fact for a Tool call.
-- Context includes TaskContract, WorkingState, repository projections and Run Log facts; Prompt build is read-only.
+- Context includes TaskContract, pending Runtime correction, WorkingState, repository projections and Run Log facts; Prompt build is read-only.
 - Live execution and replay use the same RunProjection reducer.
 - Live code commits one Fact with `RunLog.append`; `RunStore.load_run` owns the single
   persisted read that returns a ready RunLog plus Projection, and `RunStore.replay` is its Projection-only

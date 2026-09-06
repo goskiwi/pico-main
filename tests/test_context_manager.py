@@ -618,6 +618,48 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
     assert guidance.event_id in first[1]
 
 
+def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    instruction = run_log.append_model_instruction(
+        "Read the current revision and repair the rejected edit."
+    )
+
+    prompt, metadata = agent.prompt.build("continue")
+
+    assert named_json(prompt.input_text, "runtime_instruction") == (
+        "Read the current revision and repair the rejected edit."
+    )
+    assert prompt.input_text.count("Read the current revision") == 1
+    assert metadata["section_order"] == [
+        "runtime_policy",
+        "task_request",
+        "runtime_instruction",
+        "untrusted_context",
+    ]
+    assert agent.run.projection.pending_runtime_instruction_event_id == (
+        instruction.event_id
+    )
+
+    call = ToolCall("read_file", {"path": "a.py"}, "read_after_instruction")
+    run_log.append_tool_calls((call,))
+    run_log.append_tool_started(call, effect_scope="none", potential_effects=[])
+    run_log.append_tool_result(
+        ToolOutcome(
+            call.call_id,
+            call.name,
+            "success",
+            "completed",
+            "none",
+            "observed",
+        )
+    )
+    next_prompt, _metadata = agent.prompt.build("continue")
+
+    assert "runtime_instruction:" not in next_prompt.input_text
+    assert agent.run.projection.pending_runtime_instruction == ""
+
+
 def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)

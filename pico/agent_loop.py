@@ -19,6 +19,8 @@ class ModelTurn:
     action: Any
     provider_input_tokens: int | None
     provider_output_tokens: int | None
+    instructions: str
+    action_tools: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,8 @@ class AgentLoop:
             action=action,
             provider_input_tokens=provider_input_tokens,
             provider_output_tokens=completion_metadata.get("output_tokens"),
+            instructions=prompt.instructions,
+            action_tools=tool_surface.tools,
         )
 
     def _resolve_action_tool_surface(self):
@@ -189,27 +193,18 @@ class AgentLoop:
             - config.compaction_reserve_tokens
         )
 
-    def _projected_continuation_tokens(self, turn, provider_results):
-        if not isinstance(turn.provider_input_tokens, int) or not isinstance(
-            turn.provider_output_tokens, int
-        ):
-            return None
-        return (
-            turn.provider_input_tokens
-            + turn.provider_output_tokens
-            + self.agent.prompt.count_tokens("\n".join(provider_results))
-        )
-
     def _continue_provider(self, loop_state, turn, provider_results):
         agent = self.agent
         provider_results = tuple(str(result) for result in provider_results)
-        projected_tokens = self._projected_continuation_tokens(
-            turn, provider_results
+        projected_tokens = agent.model_client.projected_context_tokens(
+            provider_results,
+            instructions=turn.instructions,
+            action_tools=turn.action_tools,
+            token_counter=agent.prompt.count_tokens,
+            provider_input_tokens=turn.provider_input_tokens,
+            provider_output_tokens=turn.provider_output_tokens,
         )
-        if (
-            projected_tokens is not None
-            and projected_tokens >= self._provider_high_watermark()
-        ):
+        if projected_tokens >= self._provider_high_watermark():
             threshold_tokens = self._provider_high_watermark()
             agent.model_client.reset_action_session()
             loop_state.prompt_snapshot = None

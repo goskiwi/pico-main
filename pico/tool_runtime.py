@@ -151,6 +151,26 @@ class ToolRuntime:
     def model_action_tools(self):
         return toolkit.build_action_tools(self._surface(self.effective_policy()))
 
+    def history_projectors(self):
+        projectors = {
+            name: tool["history_projection"]
+            for name, tool in self.registry.items()
+        }
+        from .checks import RUN_CHECK_HISTORY_PROJECTION
+        from .subagents.tools import (
+            DELEGATE_HISTORY_PROJECTION,
+            INTEGRATE_CHILD_HISTORY_PROJECTION,
+        )
+
+        projectors.update(
+            {
+                "run_check": RUN_CHECK_HISTORY_PROJECTION,
+                "delegate": DELEGATE_HISTORY_PROJECTION,
+                "integrate_child": INTEGRATE_CHILD_HISTORY_PROJECTION,
+            }
+        )
+        return projectors
+
     def remaining_budget(self):
         limit = self.runtime.config.max_tool_executions
         if limit is None:
