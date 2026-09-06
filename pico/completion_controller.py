@@ -88,8 +88,8 @@ class CompletionController:
         )
 
     def _task_requirement_blocker(self):
-        task = self.runtime.run.task
-        if task is None:
+        task = self.runtime.run.projection
+        if task.contract is None:
             return "task_requirements_missing", (
                 "Runtime completion gate: task requirements are unavailable."
             )
@@ -110,17 +110,16 @@ class CompletionController:
         return None
 
     def _static_blocker(self):
-        subagents = self.runtime.dependencies.subagents
-        issue = subagents.completion_issue() if subagents is not None else ""
+        issue = self.runtime.run.projection.children.completion_issue()
         if issue:
             return "subtasks_incomplete", f"Runtime completion gate: {issue}."
         return None
 
     def _ensure_verification(self):
         runtime = self.runtime
-        task = runtime.run.task
+        task = runtime.run.projection
         required = bool(
-            task
+            task.contract is not None
             and task.contract.verify_changes
             and runtime.run.evidence.has_net_workspace_change
         )

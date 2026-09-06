@@ -15,7 +15,7 @@ from .repo_map import RepoMap
 from .run_store import RunStore
 
 if TYPE_CHECKING:
-    from .subagents import SubagentRunner
+    from .subagents.runner import SubagentRunner
 
 
 @dataclass(slots=True)
@@ -28,3 +28,4 @@ class RuntimeDependencies:
     repo_map: RepoMap
     subagents: SubagentRunner | None = None
     parent_execution_context: ExecutionContext | None = None
+    check_runner: Callable | None = None

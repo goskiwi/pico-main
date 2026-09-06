@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from .contracts import EFFECT_SCOPES, ToolCall, ToolOutcome
 from .delivery import FinalDiff
@@ -221,127 +222,6 @@ def _validate_event_payload(kind, payload):
         validator(kind, payload)
 
 
-class _RunProtocol:
-    def __init__(self):
-        self.has_user_message = False
-        self.pending_calls = ()
-        self.pending_batch_id = ""
-        self.started_call_ids = set()
-        self.last_started_ordinal = -1
-        self.result_count = 0
-        self.terminal = False
-
-    @property
-    def pending_call_id(self):
-        return self.pending_calls[0].call_id if len(self.pending_calls) == 1 else ""
-
-    def _pending_call(self, call_id):
-        return next(
-            (call for call in self.pending_calls if call.call_id == call_id),
-            None,
-        )
-
-    def _begin_calls(self, calls, *, batch_id=""):
-        self.pending_calls = tuple(calls)
-        self.pending_batch_id = str(batch_id)
-        self.started_call_ids = set()
-        self.last_started_ordinal = -1
-        self.result_count = 0
-
-    def _clear_calls(self):
-        self._begin_calls(())
-
-    def check(self, kind, payload):  # noqa: C901 - linear protocol state machine
-        if self.terminal:
-            raise ValueError("Run Log cannot append after a terminal event")
-        if not self.has_user_message and kind != "user_message":
-            raise ValueError("Run Log must begin with user_message")
-        if kind == "user_message" and self.has_user_message:
-            raise ValueError("Run Log may contain only one user_message")
-        if kind in {"assistant_tool_call", "assistant_tool_batch"}:
-            if self.pending_calls:
-                raise ValueError("Run Log already has pending tool calls")
-        elif kind == "tool_started":
-            call_id = str(payload["tool_call_id"])
-            call = self._pending_call(call_id)
-            if call is None:
-                raise ValueError("tool_started must match a pending tool call")
-            if str(payload["tool_name"]) != call.name:
-                raise ValueError("tool_started tool name does not match the pending call")
-            if self.result_count:
-                raise ValueError("tool_started cannot follow a batch result")
-            if call_id in self.started_call_ids:
-                raise ValueError("pending tool call already started")
-            ordinal = self.pending_calls.index(call)
-            if ordinal <= self.last_started_ordinal:
-                raise ValueError("tool_started calls must preserve batch order")
-        elif kind == "tool_result":
-            outcome = ToolOutcome.from_dict(payload["outcome"])
-            call_id = outcome.tool_call_id
-            if not self.pending_calls or self.result_count >= len(self.pending_calls):
-                raise ValueError("tool_result requires pending tool calls")
-            call = self.pending_calls[self.result_count]
-            if call_id != call.call_id:
-                raise ValueError("tool_result calls must preserve batch order")
-            if outcome.tool_name != call.name:
-                raise ValueError("tool_result tool name does not match the pending call")
-            started = call_id in self.started_call_ids
-            if outcome.execution_state == "not_started" and started:
-                raise ValueError("started tool cannot finish as not_started")
-            if outcome.execution_state != "not_started" and not started:
-                raise ValueError("executed tool_result requires tool_started")
-        elif self.pending_calls and kind not in {"tool_started", "tool_result"}:
-            raise ValueError("pending tool calls must receive results first")
-
-    def apply(self, entry):
-        self.check(entry.kind, entry.payload)
-        if entry.kind == "user_message":
-            self.has_user_message = True
-        elif entry.kind == "assistant_tool_call":
-            self._begin_calls((ToolCall(entry.name, entry.args, entry.call_id),))
-        elif entry.kind == "assistant_tool_batch":
-            self._begin_calls(_batch_calls(entry.payload), batch_id=entry.batch_id)
-        elif entry.kind == "tool_started":
-            call = self._pending_call(entry.call_id)
-            self.started_call_ids.add(entry.call_id)
-            self.last_started_ordinal = self.pending_calls.index(call)
-        elif entry.kind == "tool_result":
-            self.result_count += 1
-            if self.result_count == len(self.pending_calls):
-                self._clear_calls()
-        elif entry.kind in {"assistant_final", "run_stopped"}:
-            self.terminal = True
-
-
-def _validate_event_identity(events, *, expected_run_id=None):
-    if not events:
-        return
-    first = events[0]
-    run_id = first.run_id
-    if expected_run_id is not None and run_id != str(expected_run_id):
-        raise ValueError("Run event belongs to another run")
-    for expected_sequence, entry in enumerate(events, start=1):
-        if entry.sequence != expected_sequence:
-            raise ValueError("Run Log sequence is not contiguous")
-        if entry.event_id != f"{run_id}:event:{expected_sequence:06d}":
-            raise ValueError("Run event id does not match its sequence")
-        if (
-            entry.run_id != run_id
-            or entry.task_id != first.task_id
-            or entry.session_id != first.session_id
-        ):
-            raise ValueError("Run event identity changed within one run")
-
-
-def validate_run_events(events, *, expected_run_id=None):
-    events = tuple(events)
-    _validate_event_identity(events, expected_run_id=expected_run_id)
-    protocol = _RunProtocol()
-    for entry in events:
-        protocol.apply(entry)
-    return protocol
-
-
 @dataclass(frozen=True)
 class RunEvent:
     event_id: str
@@ -469,25 +349,25 @@ class RunEvent:
         return tuple(str(item) for item in self.payload.get("covered_event_ids", []))
 
 
-def replay_events(events):
-    events = tuple(events)
-    validate_run_events(events)
+def replay_events(events, *, expected_run_id=None):
     projection = RunProjection()
     for event in events:
+        if expected_run_id is not None and event.run_id != str(expected_run_id):
+            raise ValueError("Run event belongs to another run")
         projection.apply_event(event)
     return projection
 
 
 class RunLog:
-    """Append-only Run facts plus the model-visible context projection."""
+    """Own event construction, protocol validation and one Run's accepted facts."""
 
-    def __init__(self, run_id, task_id, session_id, store, events=()):
+    def __init__(self, run_id, task_id, session_id, store):
         self.run_id = str(run_id)
         self.task_id = str(task_id)
         self.session_id = str(session_id)
         self.store = store
-        self._events = list(events)
-        self._protocol = validate_run_events(self._events)
+        self._events = []
+        self.projection = RunProjection()
 
 
     @property
@@ -495,31 +375,38 @@ class RunLog:
         return 1 + sum(event.kind == "compaction" for event in self._events)
 
     @classmethod
-    def restore(cls, run_id, store):
-        events = store.read_events(run_id)
+    def _from_events(cls, events, store, *, expected_run_id):
+        """Restore the writer and projection from one storage snapshot."""
+        events = tuple(events)
         if not events:
             raise ValueError("active Run Log is missing or empty")
+        projection = replay_events(events, expected_run_id=expected_run_id)
         first = events[0]
-        return cls(first.run_id, first.task_id, first.session_id, store, events)
+        log = cls(first.run_id, first.task_id, first.session_id, store)
+        log._events = list(events)
+        log.projection = projection
+        return log, projection
 
     @property
     def events(self):
         return tuple(self._events)
 
     def append(self, kind, payload=None):
-        payload = payload or {}
-        _validate_event_payload(kind, payload)
-        self._protocol.check(kind, payload)
-        entry = self.store.append_event(
-            self.run_id,
-            self.task_id,
-            self.session_id,
-            kind,
-            payload,
-            protocol_checked=True,
+        sequence = len(self._events) + 1
+        entry = RunEvent(
+            event_id=f"{self.run_id}:event:{sequence:06d}",
+            sequence=sequence,
+            run_id=self.run_id,
+            task_id=self.task_id,
+            session_id=self.session_id,
+            kind=str(kind),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            payload=dict(payload or {}),
         )
+        self.projection.check_event(entry)
+        self.store._append_event(entry)
         self._events.append(entry)
-        self._protocol.apply(entry)
+        self.projection._advance_event(entry)
         return entry
 
     def append_user(self, contract):
@@ -625,13 +512,13 @@ class RunLog:
         return self.append("run_stopped", payload)
 
     def pending_call_id(self):
-        return self._protocol.pending_call_id
+        return self.projection.pending_call_id or ""
 
     def pending_batch_id(self):
-        return self._protocol.pending_batch_id
+        return self.projection.pending_batch_id
 
     def pending_tool_calls(self):
-        return tuple(self._protocol.pending_calls[self._protocol.result_count :])
+        return tuple(self.projection.pending_calls[self.projection.result_count :])
 
     def pending_tool_call(self):
         pending_calls = self.pending_tool_calls()

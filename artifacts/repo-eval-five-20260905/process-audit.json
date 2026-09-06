@@ -1,0 +1,164 @@
+{
+  "planned_ids": [
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-7571",
+    "sphinx-doc__sphinx-8548",
+    "psf__requests-6028",
+    "astropy__astropy-12907"
+  ],
+  "attempted_ids": [
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-7571",
+    "sphinx-doc__sphinx-8548",
+    "psf__requests-6028",
+    "astropy__astropy-12907"
+  ],
+  "judged_ids": [
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-7571",
+    "sphinx-doc__sphinx-8548",
+    "psf__requests-6028",
+    "astropy__astropy-12907"
+  ],
+  "trials": [
+    {
+      "trial_id": "pytest-dev__pytest-5787__r1__repomap_on",
+      "run_id": "run_20260905-070244-6b11c1",
+      "run_count": 1,
+      "replay_status": "completed",
+      "result_status": "completed",
+      "replay_stop_reason": "final_answer_returned",
+      "event_count": 101,
+      "user_messages": 1,
+      "user_guidance": 0,
+      "pending_tool_calls": 0,
+      "started_tools": 23,
+      "tool_result_statuses": {
+        "success": 23,
+        "rejected": 4
+      },
+      "model_requests": 16,
+      "metered_requests": 16,
+      "public_event_statuses": [
+        "passed"
+      ],
+      "patch_matches_prediction": true,
+      "patch_matches_workspace": true,
+      "changed_paths_match": true,
+      "changed_paths": [
+        "src/_pytest/reports.py"
+      ],
+      "hidden_material_at_workspace_root": false,
+      "missing_usage_calls": 0
+    },
+    {
+      "trial_id": "pytest-dev__pytest-7571__r1__repomap_on",
+      "run_id": "run_20260905-070922-ef320f",
+      "run_count": 1,
+      "replay_status": "completed",
+      "result_status": "completed",
+      "replay_stop_reason": "final_answer_returned",
+      "event_count": 42,
+      "user_messages": 1,
+      "user_guidance": 0,
+      "pending_tool_calls": 0,
+      "started_tools": 9,
+      "tool_result_statuses": {
+        "success": 9
+      },
+      "model_requests": 7,
+      "metered_requests": 7,
+      "public_event_statuses": [
+        "passed"
+      ],
+      "patch_matches_prediction": true,
+      "patch_matches_workspace": true,
+      "changed_paths_match": true,
+      "changed_paths": [
+        "src/_pytest/logging.py"
+      ],
+      "hidden_material_at_workspace_root": false,
+      "missing_usage_calls": 0
+    },
+    {
+      "trial_id": "sphinx-doc__sphinx-8548__r1__repomap_on",
+      "run_id": "run_20260905-071143-81ed78",
+      "run_count": 1,
+      "replay_status": "completed",
+      "result_status": "completed",
+      "replay_stop_reason": "final_answer_returned",
+      "event_count": 99,
+      "user_messages": 1,
+      "user_guidance": 0,
+      "pending_tool_calls": 0,
+      "started_tools": 24,
+      "tool_result_statuses": {
+        "success": 22,
+        "error": 2
+      },
+      "model_requests": 16,
+      "metered_requests": 16,
+      "public_event_statuses": [
+        "passed"
+      ],
+      "patch_matches_prediction": true,
+      "patch_matches_workspace": true,
+      "changed_paths_match": true,
+      "changed_paths": [
+        "sphinx/ext/autodoc/__init__.py"
+      ],
+      "hidden_material_at_workspace_root": false,
+      "missing_usage_calls": 0
+    },
+    {
+      "trial_id": "psf__requests-6028__r1__repomap_on",
+      "run_id": "run_20260905-071751-306a86",
+      "run_count": 1,
+      "replay_status": "stopped",
+      "result_status": "stopped",
+      "replay_stop_reason": "turn_timeout",
+      "event_count": 157,
+      "user_messages": 1,
+      "user_guidance": 0,
+      "pending_tool_calls": 0,
+      "started_tools": 35,
+      "tool_result_statuses": {
+        "success": 33,
+        "rejected": 8,
+        "error": 2
+      },
+      "model_requests": 26,
+      "metered_requests": 26,
+      "public_event_statuses": [],
+      "patch_matches_prediction": true,
+      "patch_matches_workspace": true,
+      "changed_paths_match": true,
+      "changed_paths": [],
+      "hidden_material_at_workspace_root": false,
+      "missing_usage_calls": 1
+    },
+    {
+      "trial_id": "astropy__astropy-12907__r1__repomap_on",
+      "run_id": "run_20260905-072754-7279c6",
+      "run_count": 1,
+      "replay_status": "running",
+      "result_status": null,
+      "replay_stop_reason": "",
+      "event_count": 3,
+      "user_messages": 1,
+      "user_guidance": 0,
+      "pending_tool_calls": 0,
+      "started_tools": 0,
+      "tool_result_statuses": {},
+      "model_requests": 1,
+      "metered_requests": 1,
+      "public_event_statuses": [],
+      "patch_matches_prediction": true,
+      "patch_matches_workspace": true,
+      "changed_paths_match": true,
+      "changed_paths": [],
+      "hidden_material_at_workspace_root": false,
+      "missing_usage_calls": 1
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -24,9 +25,9 @@ from pico.contracts import FailureInfo, ToolCall, ToolOutcome, ToolRunnerResult
 from pico.delivery import build_final_diff
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
+from pico.run_cli import run_main
 from pico.run_lifecycle import AgentLoopState, RunLifecycle
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 
@@ -50,14 +51,14 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
         agent.session.id,
         agent.dependencies.run_store,
     )
-    first = run_log.append_user(
+    run_log.append_user(
         TaskContract(
             goal=goal,
             allows_workspace_mutation=True,
             verify_changes=False,
         )
     )
-    agent.run.projection = RunProjection().apply_event(first)
+    agent.run.projection = run_log.projection
     agent.run.run_log = run_log
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return run_log
@@ -65,7 +66,7 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
 
 def run_active(agent, call):
     run_log = agent.run.run_log or start_run(agent)
-    agent.apply_run_event(run_log.append_tool_call(call))
+    run_log.append_tool_call(call)
     return agent.tools.execute_pending(call.call_id)
 
 
@@ -79,7 +80,7 @@ def test_tightened_tool_allowlist_applies_to_model_single_and_batch(tmp_path):
     assert denied.status == "rejected"
     calls = (ToolCall("read_file", {"path": "README.md"}, "read"),
              ToolCall("list_files", {}, "list"))
-    batch = agent.apply_run_event(agent.run.run_log.append_tool_batch(calls))
+    batch = agent.run.run_log.append_tool_batch(calls)
     results = agent.tools.execute_pending_batch(batch.batch_id)
     assert all(result.execution_state == "not_started" for result in results)
 
@@ -155,7 +156,7 @@ def test_large_dirty_file_read_edit_final_diff_and_replay(tmp_path, newline):
     assert "committed" not in diff
     assert len(diff) < 2000  # Unchanged CRLF lines must not become changes.
     assert target.read_bytes() == ("Pico 修改" + newline + tail).encode()
-    agent.apply_run_event(agent.run.run_log.append_final("done", final))
+    agent.run.run_log.append_final("done", final)
     replayed = agent.dependencies.run_store.replay("run_tool_test")
     assert replayed.final_diff == final
     assert replayed.evidence.change_set.render_final_diff(
@@ -277,7 +278,7 @@ def test_active_run_executes_pending_call_by_id(tmp_path):
         {"path": "declared.txt", "content": "declared\n"},
         "call_persisted",
     )
-    agent.apply_run_event(run_log.append_tool_call(persisted))
+    run_log.append_tool_call(persisted)
 
     outcome = agent.tools.execute_pending(persisted.call_id)
 
@@ -380,7 +381,7 @@ def test_pending_execution_rejects_a_different_call_id(tmp_path):
     agent = build_agent(tmp_path)
     run_log = start_run(agent)
     call = ToolCall("read_file", {"path": "README.md"}, "call_expected")
-    agent.apply_run_event(run_log.append_tool_call(call))
+    run_log.append_tool_call(call)
 
     with pytest.raises(RuntimeError, match="call id does not match"):
         agent.tools.execute_pending("call_other")
@@ -553,14 +554,12 @@ def test_runtime_mutation_records_diff_transition_and_final_diff(tmp_path):
     assert "+alpha" in agent.dependencies.artifacts.read_internal_text(
         "run_tool_test", final_diff.artifact_id
     )
-    agent.apply_run_event(
-        agent.run.run_log.append_final("created", final_diff)
-    )
+    agent.run.run_log.append_final("created", final_diff)
     replayed = agent.dependencies.run_store.replay("run_tool_test")
     assert replayed.final_diff == final_diff
 
 
-def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
+def test_missing_final_diff_blocks_replay_but_not_event_listing(tmp_path, capsys):
     agent = build_agent(tmp_path)
     run_active(
         agent,
@@ -571,7 +570,7 @@ def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
         ),
     )
     final_diff = build_final_diff(agent)
-    agent.apply_run_event(agent.run.run_log.append_final("created", final_diff))
+    agent.run.run_log.append_final("created", final_diff)
     artifact_root = agent.dependencies.run_store.artifact_dir("run_tool_test")
     (artifact_root / f"{final_diff.artifact_id}.txt").unlink()
 
@@ -579,6 +578,12 @@ def test_terminal_replay_rejects_missing_final_diff_artifact(tmp_path):
         agent.dependencies.run_store.load_run("run_tool_test")
     with pytest.raises(ValueError, match="internal artifact is missing"):
         agent.dependencies.run_store.replay("run_tool_test")
+    with pytest.raises(ValueError, match="internal artifact is missing"):
+        run_main(["show", "run_tool_test", "--cwd", str(tmp_path)])
+
+    assert run_main(["events", "run_tool_test", "--cwd", str(tmp_path)]) == 0
+    listed = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert listed == [event.to_dict() for event in agent.run.run_log.events]
 
 
 def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path):
@@ -796,7 +801,7 @@ def test_controlled_stop_survives_external_workspace_drift(tmp_path, stop_mode):
     assert agent.session.active_run_id == ""
     assert agent.run.execution_context is None
     if stop_mode == "reset":
-        assert agent.run.task is None
+        assert agent.run.projection.contract is None
         assert replayed.stop_reason == "user_reset"
     else:
         assert agent.run.projection.summary() == replayed.summary()
@@ -872,7 +877,7 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
             "call_b",
         ),
     )
-    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    batch = run_log.append_tool_batch(calls)
     barrier = threading.Barrier(2)
 
     def no_rebuild():
@@ -929,7 +934,7 @@ def test_cancelled_observation_batch_still_closes_every_call(tmp_path):
         ToolCall("list_files", {"path": "."}, "call_a"),
         ToolCall("list_files", {"path": "."}, "call_b"),
     )
-    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    batch = run_log.append_tool_batch(calls)
     agent.run.execution_context.request_stop("user_cancelled")
 
     outcomes = agent.tools.execute_pending_batch(batch.batch_id)
@@ -953,7 +958,7 @@ def test_observation_batch_does_not_swallow_process_interrupts(
         ToolCall("list_files", {"path": "."}, "call_a"),
         ToolCall("list_files", {"path": "."}, "call_b"),
     )
-    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    batch = run_log.append_tool_batch(calls)
 
     def interrupted(_context, _args):
         raise KeyboardInterrupt
@@ -976,7 +981,7 @@ def test_observation_batch_preserves_reported_side_effects(
         ToolCall("list_files", {"path": "."}, "call_known"),
         ToolCall("list_files", {"path": "."}, "call_unknown"),
     )
-    batch = agent.apply_run_event(run_log.append_tool_batch(calls))
+    batch = run_log.append_tool_batch(calls)
 
     def impure_observation(context, _args):
         if context.tool_call_id == "call_known":

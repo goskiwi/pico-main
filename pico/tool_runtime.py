@@ -67,15 +67,19 @@ class ToolRuntime:
         self._apply_allowlist(self.registry)
         self._repeat_outcomes = {}
 
-    @property
-    def surface(self):
+    def _surface(self, policy):
         return {
-            name: tool for name, tool in self._apply_allowlist(self.registry).items()
-            if self._tool_allowed_by_mode(name)
+            name: tool
+            for name, tool in self._apply_allowlist(self.registry).items()
+            if self._tool_allowed_by_mode(name, policy[0])
         }
 
     def _build_registry(self):
         tools = toolkit.build_tool_registry()
+        if self.runtime.dependencies.check_runner is not None:
+            from .checks import build_tool_registry
+
+            tools.update(build_tool_registry())
         if self.runtime.dependencies.subagents is not None:
             from .subagents.tools import build_tool_registry
 
@@ -92,7 +96,7 @@ class ToolRuntime:
         allowed = set(allowed_tools)
         return {name: tool for name, tool in tools.items() if name in allowed}
 
-    def validate(self, name, args, context):
+    def validate(self, name, args, context, policy):
         runtime = self.runtime
         tool = self.registry.get(name)
         if tool is None:
@@ -101,7 +105,7 @@ class ToolRuntime:
         validator = tool.get("validate")
         if validator is not None:
             validated = validator(context, validated)
-        allowed_paths = self._effective_write_scope()
+        allowed_paths = policy[1]
         if name in {"write_file", "edit_file"} and allowed_paths is not None:
             target = runtime.workspace.resolve_tool_path(validated["path"])
             relative = target.relative_to(runtime.workspace.root).as_posix()
@@ -111,9 +115,7 @@ class ToolRuntime:
             and validated.get("role") == "implement"
             and allowed_paths is not None
         ):
-            self._require_write_scope(
-                validated["allowed_write_paths"], allowed_paths
-            )
+            self._require_write_scope(validated["allowed_write_paths"], allowed_paths)
         if name == "integrate_child" and allowed_paths is not None:
             _scope, planned_paths = self._potential_effects(tool, context, validated)
             self._require_write_scope(
@@ -122,13 +124,18 @@ class ToolRuntime:
             )
         return validated
 
-    def _effective_write_scope(self):
-        task = self.runtime.run.task
-        contract = getattr(task, "contract", None)
-        return intersect_write_scopes(
+    def effective_policy(self):
+        contract = self.runtime.run.projection.contract
+        mode = self.runtime.config.mode
+        if mode == "ask" or (
+            contract is not None and not contract.allows_workspace_mutation
+        ):
+            mode = "ask"
+        paths = intersect_write_scopes(
             getattr(contract, "allowed_write_paths", None),
             self.runtime.config.allowed_write_paths,
         )
+        return mode, (() if mode == "ask" else paths)
 
     @staticmethod
     def _require_write_scope(paths, allowed_paths):
@@ -136,29 +143,16 @@ class ToolRuntime:
             return
         outside = sorted(set(paths) - set(allowed_paths))
         if outside:
-            raise ValueError(
-                "write path outside allowed scope: " + ", ".join(outside)
-            )
+            raise ValueError("write path outside allowed scope: " + ", ".join(outside))
 
-    def _effective_mode(self):
-        task = self.runtime.run.task
-        contract = getattr(task, "contract", None)
-        if (
-            self.runtime.config.mode == "ask"
-            or contract is not None
-            and not contract.allows_workspace_mutation
-        ):
-            return "ask"
-        return self.runtime.config.mode
-
-    def _tool_allowed_by_mode(self, name):
-        mode = self._effective_mode()
+    @staticmethod
+    def _tool_allowed_by_mode(name, mode):
         if mode == "ask":
             return name in ASK_TOOL_NAMES
         return not (mode == "auto" and name == "run_command")
 
     def model_action_tools(self):
-        return toolkit.build_action_tools(self.surface)
+        return toolkit.build_action_tools(self._surface(self.effective_policy()))
 
     def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
@@ -169,7 +163,9 @@ class ToolRuntime:
             run_id=str(runtime.run.projection.run_id or "manual"),
             tool_call_id=str(call_id),
             working_state=(
-                runtime.run.task.working if runtime.run.task is not None else None
+                runtime.run.projection.working
+                if runtime.run.projection.contract is not None
+                else None
             ),
             execution_context=(
                 execution_context
@@ -178,10 +174,11 @@ class ToolRuntime:
             ),
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
+            check_runner=runtime.dependencies.check_runner,
         )
 
     def approve(self, name, args):
-        if self._effective_mode() == "auto" and name != "run_command":
+        if self.runtime.config.mode == "auto" and name != "run_command":
             return True
         try:
             answer = input(
@@ -195,7 +192,7 @@ class ToolRuntime:
         runtime = self.runtime
         if runtime.run.resumable:
             raise RuntimeError("a dormant Run must be resumed before tool execution")
-        if runtime.run.task is None or runtime.run.run_log is None:
+        if runtime.run.projection.contract is None or runtime.run.run_log is None:
             raise RuntimeError("pending tool execution requires an active Run")
         if runtime.run.projection.terminal:
             raise RuntimeError("terminal Run cannot execute additional tools")
@@ -206,17 +203,17 @@ class ToolRuntime:
             raise RuntimeError("call id does not match the pending ToolCall")
         return call
 
-    def _resolve_tool(self, call):
+    def _resolve_tool(self, call, policy):
         tool = self.registry.get(call.name)
         if tool is None:
             return None, self._rejected(
                 call, "unknown_tool", "unknown tool", "retry_after_change"
             )
-        if not self._tool_allowed_by_mode(call.name):
+        if not self._tool_allowed_by_mode(call.name, policy[0]):
             return None, self._rejected(
                 call,
                 "tool_not_allowed",
-                f"tool is unavailable in {self._effective_mode()} mode",
+                f"tool is unavailable in {policy[0]} mode",
                 "no_retry",
             )
         allowed = self.runtime.config.allowed_tools
@@ -224,7 +221,7 @@ class ToolRuntime:
             return None, self._rejected(
                 call, "tool_not_allowed", "tool outside run surface"
             )
-        if self.runtime.run.task is None and not tool.get(
+        if self.runtime.run.projection.contract is None and not tool.get(
             "manual_observation", False
         ):
             return None, self._rejected(
@@ -248,18 +245,14 @@ class ToolRuntime:
         return run_log
 
     @classmethod
-    def _record_tool_started(
-        cls, agent, call, *, effect_scope, potential_effects
-    ):
+    def _record_tool_started(cls, agent, call, *, effect_scope, potential_effects):
         run_log = cls._recorded_run_log(agent, call.call_id)
         if run_log is None:
             return None
-        return agent.apply_run_event(
-            run_log.append_tool_started(
-                call,
-                effect_scope=effect_scope,
-                potential_effects=potential_effects,
-            )
+        return run_log.append_tool_started(
+            call,
+            effect_scope=effect_scope,
+            potential_effects=potential_effects,
         )
 
     @classmethod
@@ -267,7 +260,7 @@ class ToolRuntime:
         run_log = cls._recorded_run_log(agent, outcome.tool_call_id)
         if run_log is None:
             return None
-        return agent.apply_run_event(run_log.append_tool_result(outcome))
+        return run_log.append_tool_result(outcome)
 
     def _reject_repeated_call(self, call, repeat_key):
         previous = self._repeat_outcomes.get(repeat_key, ()) if repeat_key else ()
@@ -285,23 +278,18 @@ class ToolRuntime:
         planner = tool.get("potential_effects")
         if planner is not None:
             return planner(context, args)
-        return (
-            "workspace" if tool.get("workspace_mutating", False) else "none"
-        ), ()
+        return ("workspace" if tool.get("workspace_mutating", False) else "none"), ()
 
     @staticmethod
     def _effect_snapshot(agent, paths):
-        return {
-            logical: agent.workspace.path_state(path)
-            for logical, path in paths
-        }
+        return {logical: agent.workspace.path_state(path) for logical, path in paths}
 
     @staticmethod
     def _preimage_artifacts(agent, call, paths, states, effect_scope):
         if (
             effect_scope != "workspace"
             or agent.run.run_log is None
-            or agent.run.task is None
+            or agent.run.projection.contract is None
         ):
             return {}
         existing_changes = agent.run.evidence.change_set.files
@@ -322,9 +310,9 @@ class ToolRuntime:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    def _validate_call(self, call, context):
+    def _validate_call(self, call, context, policy):
         try:
-            args = self.validate(call.name, call.args, context)
+            args = self.validate(call.name, call.args, context, policy)
         except ToolFailureError as exc:
             return None, self._rejected(
                 call,
@@ -349,7 +337,7 @@ class ToolRuntime:
         runtime = self.runtime
         if runtime.run.resumable:
             raise RuntimeError("a dormant Run must be resumed before batch execution")
-        if runtime.run.task is None or runtime.run.run_log is None:
+        if runtime.run.projection.contract is None or runtime.run.run_log is None:
             raise RuntimeError("pending batch execution requires an active Run")
         if runtime.run.projection.terminal:
             raise RuntimeError("terminal Run cannot execute an observation batch")
@@ -360,7 +348,7 @@ class ToolRuntime:
             raise RuntimeError("active Run has no pending observation batch")
         return calls
 
-    def _batch_policy_error(self, calls):
+    def _batch_policy_error(self, calls, policy):
         if len(calls) > MAX_OBSERVATION_BATCH_CALLS:
             return (
                 f"observation batch contains {len(calls)} calls; "
@@ -371,8 +359,9 @@ class ToolRuntime:
         if limit is not None and executed + len(calls) > limit:
             return "observation batch exceeds the remaining Runtime tool budget"
         invalid = []
+        surface = self._surface(policy)
         for call in calls:
-            tool = self.surface.get(call.name)
+            tool = surface.get(call.name)
             if (
                 tool is None
                 or not tool.get("batchable_observation", False)
@@ -389,7 +378,8 @@ class ToolRuntime:
         return ""
 
     def _prepare_observation_batch(self, calls):
-        detail = self._batch_policy_error(calls)
+        policy = self.effective_policy()
+        detail = self._batch_policy_error(calls, policy)
         if detail:
             return (), detail
         prepared = []
@@ -402,12 +392,7 @@ class ToolRuntime:
             context = self.context(call_id=call.call_id, execution_context=execution)
             tool = self.registry[call.name]
             try:
-                args = tool["args_schema"].model_validate(
-                    call.args or {}
-                ).model_dump()
-                validator = tool.get("validate")
-                if validator is not None:
-                    args = validator(context, args)
+                args = self.validate(call.name, call.args, context, policy)
             except Exception as exc:  # noqa: BLE001 - batch admission boundary
                 return (), f"invalid arguments for {call.name}: {exc}"
             prepared.append(
@@ -430,19 +415,19 @@ class ToolRuntime:
                 f"error: {detail} for observation batch",
                 failure=FailureInfo("invalid_tool_batch", detail, "retry_after_change"),
             )
-            self.runtime.apply_run_event(
-                self.runtime.run.run_log.append_tool_result(outcome)
-            )
+            self.runtime.run.run_log.append_tool_result(outcome)
             outcomes.append(outcome)
         return tuple(outcomes)
 
     @staticmethod
-    def _run_prepared_observation(prepared):
-        execution = prepared.context.execution_context
+    def _invoke_runner(tool, context, args):
+        execution = context.execution_context
         if execution is not None:
             execution.check_active()
-        result = prepared.tool["run"](prepared.context, prepared.call.args)
-        if execution is not None:
+        result = tool["run"](context, args)
+        if not isinstance(result, ToolRunnerResult):
+            raise TypeError("tool runner must return ToolRunnerResult")
+        if execution is not None and tool.get("batchable_observation", False):
             execution.check_active()
         return result
 
@@ -468,12 +453,10 @@ class ToolRuntime:
                 ),
                 structured=typed.structured if typed else None,
             )
-        if not isinstance(result, ToolRunnerResult):
-            return self._observation_outcome(
-                prepared,
-                TypeError("tool runner must return ToolRunnerResult"),
-            )
-        if result.effect_scope != "none" or result.affected_paths:
+        return self._result_outcome(call, result, observation=True)
+
+    def _result_outcome(self, call, result, preimages=None, *, observation=False):
+        if observation and (result.effect_scope != "none" or result.affected_paths):
             paths = tuple(result.affected_paths)
             return self._outcome(
                 call,
@@ -489,7 +472,9 @@ class ToolRuntime:
                 ),
                 affected_paths=paths,
                 effect_scope=result.effect_scope,
-                structured=result.structured,
+                structured=attach_preimage_artifacts(
+                    result.structured, preimages or {}
+                ),
             )
         status, side_effect, paths = classify_runner_result(
             result.failure,
@@ -505,7 +490,7 @@ class ToolRuntime:
             failure=result.failure,
             affected_paths=paths,
             effect_scope=result.effect_scope,
-            structured=result.structured,
+            structured=attach_preimage_artifacts(result.structured, preimages or {}),
         )
 
     def execute_pending_batch(self, batch_id):
@@ -515,19 +500,19 @@ class ToolRuntime:
             return self._reject_observation_batch(calls, detail)
         run_log = self.runtime.run.run_log
         for item in prepared:
-            self.runtime.apply_run_event(
-                run_log.append_tool_started(
-                    item.call,
-                    effect_scope="none",
-                    potential_effects=[],
-                )
+            run_log.append_tool_started(
+                item.call,
+                effect_scope="none",
+                potential_effects=[],
             )
         with ThreadPoolExecutor(
             max_workers=min(MAX_PARALLEL_OBSERVATIONS, len(prepared)),
             thread_name_prefix="pico-observation",
         ) as pool:
             futures = [
-                pool.submit(self._run_prepared_observation, item)
+                pool.submit(
+                    self._invoke_runner, item.tool, item.context, item.call.args
+                )
                 for item in prepared
             ]
             raw_results = []
@@ -539,7 +524,7 @@ class ToolRuntime:
         outcomes = []
         for item, raw in zip(prepared, raw_results):
             outcome = self._observation_outcome(item, raw)
-            self.runtime.apply_run_event(run_log.append_tool_result(outcome))
+            run_log.append_tool_result(outcome)
             outcomes.append(outcome)
         return tuple(outcomes)
 
@@ -554,7 +539,7 @@ class ToolRuntime:
                 "no_retry",
                 record=False,
             )
-        if agent.run.task is not None:
+        if agent.run.projection.contract is not None:
             return self._rejected(
                 call,
                 "run_protocol_violation",
@@ -568,7 +553,8 @@ class ToolRuntime:
         agent = self.runtime
         name, args = call.name, call.args
         run_id = _run_id(agent)
-        tool, admission_rejection = self._resolve_tool(call)
+        policy = self.effective_policy()
+        tool, admission_rejection = self._resolve_tool(call, policy)
         if admission_rejection is not None:
             return admission_rejection
         workspace_mutating = bool(tool.get("workspace_mutating", False))
@@ -578,7 +564,7 @@ class ToolRuntime:
             return repeated
 
         context = self.context(call_id=call.call_id)
-        call, validation_rejection = self._validate_call(call, context)
+        call, validation_rejection = self._validate_call(call, context, policy)
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
@@ -590,7 +576,9 @@ class ToolRuntime:
             return self._rejected(call, "approval_denied", "approval denied")
 
         try:
-            potential_scope, potential_paths = self._potential_effects(tool, context, args)
+            potential_scope, potential_paths = self._potential_effects(
+                tool, context, args
+            )
             effects_before = self._effect_snapshot(agent, potential_paths)
         except Exception as exc:  # noqa: BLE001 - fail before side effect
             return self._rejected(
@@ -633,63 +621,55 @@ class ToolRuntime:
         )
 
         try:
-            execution = tool["run"](context, args)
-            if not isinstance(execution, ToolRunnerResult):
-                raise TypeError("tool runner must return ToolRunnerResult")
-            failure = execution.failure
-            status, side_effect, paths = classify_runner_result(
-                failure,
-                execution.affected_paths,
-                execution.effect_scope,
-            )
-            outcome = self._outcome(
+            execution = self._invoke_runner(tool, context, args)
+            outcome = self._result_outcome(
                 call,
-                status,
-                "completed",
-                side_effect,
-                execution.content,
-                failure=failure,
-                affected_paths=paths,
-                effect_scope=execution.effect_scope,
-                structured=attach_preimage_artifacts(
-                    execution.structured, preimages
-                ),
+                execution,
+                preimages,
+                observation=tool.get("batchable_observation", False),
             )
         except Exception as exc:  # noqa: BLE001 - tool boundary
-            effects_after = self._effect_snapshot(agent, potential_paths)
-            detected_paths = effect_diff(effects_before, effects_after)
-            typed_error = exc if isinstance(exc, ToolFailureError) else None
-            paths = [] if typed_error else detected_paths
-            unknown = bool(not typed_error and workspace_mutating and not potential_paths)
-            uncertain = bool(paths or unknown)
-            transitions = path_transitions(
-                effects_before,
-                effects_after,
-                preimages,
-                paths,
-            )
-            outcome = self._outcome(
-                call,
-                "partial_success" if uncertain else "error",
-                "failed",
-                "partial" if paths else ("unknown" if unknown else "none"),
-                f"error: tool {name} failed: {exc}",
-                failure=(typed_error.failure if typed_error else None)
-                or FailureInfo(
-                    "tool_partial_success"
-                    if paths
-                    else ("tool_effect_unknown" if unknown else "tool_failed"),
-                    str(exc),
-                    "no_retry" if uncertain else "retry_after_change",
-                ),
-                affected_paths=paths,
-                effect_scope=potential_scope,
-                structured=(
-                    typed_error.structured
-                    if typed_error
-                    else {"path_transitions": transitions}
-                ),
-            )
+            if tool.get("batchable_observation", False):
+                outcome = self._observation_outcome(
+                    PreparedObservation(call, tool, context), exc
+                )
+            else:
+                effects_after = self._effect_snapshot(agent, potential_paths)
+                detected_paths = effect_diff(effects_before, effects_after)
+                typed_error = exc if isinstance(exc, ToolFailureError) else None
+                paths = [] if typed_error else detected_paths
+                unknown = bool(
+                    not typed_error and workspace_mutating and not potential_paths
+                )
+                uncertain = bool(paths or unknown)
+                transitions = path_transitions(
+                    effects_before,
+                    effects_after,
+                    preimages,
+                    paths,
+                )
+                outcome = self._outcome(
+                    call,
+                    "partial_success" if uncertain else "error",
+                    "failed",
+                    "partial" if paths else ("unknown" if unknown else "none"),
+                    f"error: tool {name} failed: {exc}",
+                    failure=(typed_error.failure if typed_error else None)
+                    or FailureInfo(
+                        "tool_partial_success"
+                        if paths
+                        else ("tool_effect_unknown" if unknown else "tool_failed"),
+                        str(exc),
+                        "no_retry" if uncertain else "retry_after_change",
+                    ),
+                    affected_paths=paths,
+                    effect_scope=potential_scope,
+                    structured=(
+                        typed_error.structured
+                        if typed_error
+                        else {"path_transitions": transitions}
+                    ),
+                )
 
         self._record_tool_result(agent, outcome)
         if normalized_repeat_key is not None and outcome.side_effect_state in {

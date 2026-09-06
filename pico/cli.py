@@ -229,8 +229,8 @@ def build_agent(args):
 
 
 def _working_state_text(agent):
-    task = agent.run.task
-    if task is None:
+    task = agent.run.projection
+    if task.contract is None:
         return WorkingState().render_panel()
     return "Task goal:\n- " + task.contract.goal + "\n\n" + task.working.render_panel()
 

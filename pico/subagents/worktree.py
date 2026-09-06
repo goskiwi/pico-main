@@ -42,7 +42,9 @@ def require_clean_repository(root, *, execution_context=None):
             .strip()
         ).resolve()
     except GitWorktreeError as exc:
-        raise GitWorktreeError("implementation subtasks require a Git repository") from exc
+        raise GitWorktreeError(
+            f"implementation subtasks require a Git repository: {exc}"
+        ) from exc
     if top != root:
         raise GitWorktreeError("implementation subtasks must run from the repository root")
     tracked_status = _git(

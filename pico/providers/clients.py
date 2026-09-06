@@ -25,6 +25,14 @@ class ProviderContextOverflow(RuntimeError):
     """The provider rejected an input that exceeded its context window."""
 
 
+class ProviderTransportError(RuntimeError):
+    """The provider request failed before a valid HTTP response was received."""
+
+
+class ProviderHTTPError(RuntimeError):
+    """The provider returned an HTTP or Responses API error."""
+
+
 _CONTEXT_OVERFLOW_CODES = {
     "context_length_exceeded",
     "context_window_exceeded",
@@ -213,6 +221,31 @@ def _response_error_payload(response_data):
     if "error" in response_data and response_data.get("error") is not None:
         return True, response_data.get("error")
     return False, None
+
+
+def _provider_error_detail(error):
+    if isinstance(error, dict):
+        if isinstance(error.get("error"), dict):
+            return _provider_error_detail(error["error"])
+        parts = []
+        for key in ("code", "type", "reason", "message", "detail"):
+            value = error.get(key)
+            if value not in (None, ""):
+                item = f"{key}={value}"
+                if item not in parts:
+                    parts.append(item)
+        return "; ".join(parts) or json.dumps(error, ensure_ascii=False)
+    return str(error).strip() or type(error).__name__
+
+
+def _http_error_detail(body):
+    if not body:
+        return "no response body"
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else str(body)
+    try:
+        return _provider_error_detail(json.loads(text))
+    except json.JSONDecodeError:
+        return text.strip() or "empty response body"
 
 
 class FakeModelClient:
@@ -539,14 +572,17 @@ class OpenAICompatibleModelClient:
         for attempt in range(attempts):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend before the request deadline.\n"
+                cause = TimeoutError(
+                    f"request deadline elapsed before attempt {attempt + 1}"
+                )
+                raise ProviderTransportError(
+                    f"OpenAI-compatible transport failed: {cause}.\n"
                     f"Backend: {self.base_url}\n"
                     f"Model: {self.model}"
-                )
+                ) from cause
             effective_timeout = min(float(self.timeout), remaining)
             http_failure = None
-            transport_failure = False
+            transport_failure = None
             try:
                 with _open_response(request, timeout=effective_timeout) as response:
                     body_text = response.read().decode("utf-8")
@@ -585,8 +621,8 @@ class OpenAICompatibleModelClient:
                 TimeoutError,
                 HTTPException,
                 OSError,
-            ):
-                transport_failure = True
+            ) as exc:
+                transport_failure = exc
 
             if http_failure is not None:
                 status, context_overflow, transient = http_failure
@@ -594,19 +630,22 @@ class OpenAICompatibleModelClient:
                     raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
                 if transient and attempt < attempts - 1 and retry_delay(attempt):
                     continue
-                raise RuntimeError(
-                    f"OpenAI-compatible request failed with HTTP {status}.\n"
+                detail = _http_error_detail(error_body)
+                raise ProviderHTTPError(
+                    f"OpenAI-compatible request failed with HTTP {status}: {detail}.\n"
                     f"Backend: {self.base_url}\n"
                     f"Model: {self.model}"
                 )
-            if transport_failure:
+            if transport_failure is not None:
                 if attempt < attempts - 1 and retry_delay(attempt):
                     continue
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend.\n"
+                raise ProviderTransportError(
+                    "OpenAI-compatible transport failed after "
+                    f"{attempt + 1} attempts: {type(transport_failure).__name__}: "
+                    f"{transport_failure}.\n"
                     f"Backend: {self.base_url}\n"
                     f"Model: {self.model}"
-                )
+                ) from transport_failure
         raise RuntimeError("OpenAI-compatible request exhausted retries")
 
     @staticmethod
@@ -637,7 +676,9 @@ class OpenAICompatibleModelClient:
         if has_error and _error_payload_indicates_context_overflow(error):
             raise ProviderContextOverflow(_CONTEXT_OVERFLOW_MESSAGE)
         if has_error:
-            raise RuntimeError("OpenAI-compatible error: backend returned an error")
+            raise ProviderHTTPError(
+                "OpenAI-compatible response error: " + _provider_error_detail(error)
+            )
         output = response_data.get("output")
         if not isinstance(output, list) or any(
             not isinstance(item, dict) for item in output

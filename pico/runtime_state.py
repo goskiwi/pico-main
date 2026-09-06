@@ -16,10 +16,6 @@ class ActiveRunState:
     run_log: RunLog | None = None
 
     @property
-    def task(self):
-        return self.projection.task
-
-    @property
     def evidence(self):
         return self.projection.evidence
 
@@ -32,7 +28,7 @@ class ActiveRunState:
         """Whether this unfinished Run is dormant and safe to resume."""
 
         return bool(
-            self.task is not None
+            self.projection.contract is not None
             and self.run_log is not None
             and not self.projection.terminal
             and self.execution_context is None

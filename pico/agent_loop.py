@@ -137,7 +137,7 @@ class AgentLoop:
                     },
                 )
         if loop_state.prompt_snapshot is None:
-            compaction_metadata, history_override = agent.prompt.prepare_compaction(
+            compaction_metadata, history_override = self.lifecycle.prepare_compaction(
                 loop_state.user_message,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 action_tools=tool_surface.tools,
@@ -241,12 +241,10 @@ class AgentLoop:
         loop_state.completion_block_count = 0
         if len(calls) == 1:
             call = calls[0]
-            agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+            agent.run.run_log.append_tool_call(call)
             outcomes = (agent.tools.execute_pending(call.call_id),)
         else:
-            batch = agent.apply_run_event(
-                agent.run.run_log.append_tool_batch(calls)
-            )
+            batch = agent.run.run_log.append_tool_batch(calls)
             outcomes = agent.tools.execute_pending_batch(batch.batch_id)
 
         model_instruction = self._append_budget_instruction(loop_state)
@@ -274,16 +272,12 @@ class AgentLoop:
             "Runtime tool budget exhausted. Do not call another tool; "
             "use submit_final now with the available evidence."
         )
-        agent.apply_run_event(
-            agent.run.run_log.append_model_instruction(budget_instruction)
-        )
+        agent.run.run_log.append_model_instruction(budget_instruction)
         return budget_instruction
 
     def _handle_invalid_output(self, loop_state, turn):
         loop_state.invalid_output_count += 1
-        self.agent.apply_run_event(
-            self.agent.run.run_log.append_model_instruction(turn.action.content)
-        )
+        self.agent.run.run_log.append_model_instruction(turn.action.content)
         self._continue_provider(loop_state, turn, (turn.action.content,))
         if loop_state.invalid_output_count >= 8:
             return "invalid_output_limit"
@@ -308,9 +302,7 @@ class AgentLoop:
         status,
         instruction,
     ):
-        self.agent.apply_run_event(
-            self.agent.run.run_log.append_model_instruction(instruction)
-        )
+        self.agent.run.run_log.append_model_instruction(instruction)
         self.agent.emit_event(
             "completion_blocked",
             {"status": status, "reason": instruction},

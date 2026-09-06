@@ -17,7 +17,7 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支以及 Agent Turn/Deadline 停止条件。
 3. `AgentLoop._handle_tool_turn()` → `ToolRuntime.execute_pending*()`：单 Call 或 Observation Batch
    由 Loop 接受并持久化，Started/Result 由 ToolRuntime 持久化。
-4. `RunLog` 的 `_RunProtocol`、`append()` 与 `replay_events()`，以及 `run_lifecycle.reconcile_interrupted()`：理解
+4. `RunLog.append()`、`RunProjection.check_event()` 与 `replay_events()`，以及 `run_lifecycle.reconcile_interrupted()`：理解
    一个 Pending Tool transaction、Observation Batch 与 Crash recovery；历史筛选和压缩计划在 Day 5 阅读 `RunHistory`。
 5. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
 6. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
@@ -88,7 +88,7 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 7 | `AgentLoop._handle_tool_turn` | 执行前先原子持久化一个 `assistant_tool_call` 或完整 `assistant_tool_batch` Fact |
 | 8 | `ToolRuntime.execute_pending / execute_pending_batch` | 单 Call 走完整准入、Approval、影响路径与 Preimage；Batch 先整体验证，只让纯 Observation Runner 并行，Result 仍按原顺序落盘；无 Run 的人工观察走 `execute_manual` |
 | 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换；失败用相近代码、匹配行号和建议读取参数驱动重读修正 |
-| 10 | `RunLog.append -> RunProjection.apply_event` | 同一个新 Fact 如何同时推进 Pending、Metrics、WorkingState 和 Evidence |
+| 10 | `RunLog.append -> check_event -> 存储追加 -> _advance_event` | 同一个新 Fact 如何在持久化后推进 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
 
 恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读。构造期只加载并安装 dormant
@@ -109,8 +109,10 @@ Pico.ask
   -> run_resumed
 ```
 
-`load_run` 从同一次持久化读取返回 Events 与 Projection；`RunStore.replay` 是只返回
-Projection 的委托。Live 路径只调用 `apply_event`。
+`load_run` 从同一次持久化读取返回已恢复的 RunLog 与 Projection；事件从 `log.events` 读取。
+`RunStore.replay` 是只返回 Projection 的委托，Runtime 直接安装加载得到的两个对象，不再重建和重复校验。
+实时调用 `RunLog.append`，内部依次执行 `RunProjection.check_event`、存储追加和
+`RunProjection._advance_event`；回放通过 `RunProjection.apply_event` 复用同一套检查与转换。
 
 ## 五层知识结构
 

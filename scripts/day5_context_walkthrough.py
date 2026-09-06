@@ -17,8 +17,8 @@ from pico import (
 )
 from pico.execution import ExecutionContext
 from pico.history import RunHistory
+from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 QUERY = "Where is calculate_invoice_total used?"
@@ -93,8 +93,8 @@ def activate(agent, run_id, goal):
         agent.dependencies.run_store,
     )
     agent.run.run_log = run_log
-    first = run_log.append_user(contract)
-    agent.run.projection = RunProjection().apply_event(first)
+    run_log.append_user(contract)
+    agent.run.projection = run_log.projection
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return run_log
 
@@ -107,14 +107,12 @@ def append_synthetic_historical_transaction(agent, index):
         {"path": f"evidence_{index}.txt", "start_line": 1, "end_line": 20},
         f"call_history_{index}",
     )
-    agent.apply_run_event(run_log.append_tool_call(call))
-    agent.apply_run_event(
-        run_log.append_tool_started(
+    run_log.append_tool_call(call)
+    run_log.append_tool_started(
             call,
             effect_scope="none",
             potential_effects=[],
         )
-    )
     outcome = ToolOutcome(
         tool_call_id=call.call_id,
         tool_name=call.name,
@@ -123,7 +121,7 @@ def append_synthetic_historical_transaction(agent, index):
         side_effect_state="none",
         content=(f"historical fact {index}: " + "invoice evidence " * 220),
     )
-    agent.apply_run_event(run_log.append_tool_result(outcome))
+    run_log.append_tool_result(outcome)
 
 
 def untrusted_context(input_text):
@@ -153,7 +151,7 @@ def semantic_section(summary, title):
 def effective_recovery_context(agent, summary):
     """Compose a teaching view without creating Prompt or durable state."""
     projection = agent.run.projection
-    task = projection.task
+    task = projection
     working = task.working
     evidence = projection.evidence.to_dict()
     categories = {
@@ -164,7 +162,7 @@ def effective_recovery_context(agent, summary):
         },
         "Constraints & Preferences": {
             "source": (
-                "RunProjection.task.working.constraints from successful "
+                "RunProjection.working.constraints from successful "
                 "update_working_state Tool transactions"
             ),
             "value": list(working.constraints),
@@ -177,7 +175,7 @@ def effective_recovery_context(agent, summary):
         },
         "Key Decisions": {
             "source": (
-                "RunProjection.task.working.decisions from successful "
+                "RunProjection.working.decisions from successful "
                 "update_working_state Tool transactions"
             ),
             "value": list(working.decisions),
@@ -185,7 +183,7 @@ def effective_recovery_context(agent, summary):
         },
         "Next Steps": {
             "source": (
-                "RunProjection.task.working.next_steps from successful "
+                "RunProjection.working.next_steps from successful "
                 "update_working_state Tool transactions"
             ),
             "value": list(working.next_steps),
@@ -304,10 +302,10 @@ def build_pressure_fixture(root, run_id):
         },
         f"call_state_{run_id}",
     )
-    agent.apply_run_event(run_log.append_tool_call(state_call))
+    run_log.append_tool_call(state_call)
     state_outcome = agent.tools.execute_pending(state_call.call_id)
     assert state_outcome.status == "success"
-    assert agent.run.task.working.constraints == (WORKING_CONSTRAINT,)
+    assert agent.run.projection.working.constraints == (WORKING_CONSTRAINT,)
     for index in range(6):
         append_synthetic_historical_transaction(agent, index)
     return agent, run_log
@@ -318,7 +316,7 @@ def bounded_fallback_experiment(root):
     original_events = tuple(run_log.events)
     original_ids = [event.event_id for event in original_events]
 
-    compaction, history_override = agent.prompt.prepare_compaction(
+    compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
         provider_context_tokens=3400,
     )
@@ -330,7 +328,8 @@ def bounded_fallback_experiment(root):
     )
     physical_events = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
     context = untrusted_context(prompt.input_text)
-    headers = fallback_entry_headers(history_override)
+    history, history_metadata = history_override
+    headers = fallback_entry_headers(history)
     physical_counts = durable_kind_counts(physical_events)
 
     assert compaction["mode"] == "runtime_recent_transactions"
@@ -341,7 +340,7 @@ def bounded_fallback_experiment(root):
     assert len(headers) == 2
     assert headers[0].startswith("[assistant/tool]")
     assert headers[1].startswith("[tool/read_file/success/none]")
-    assert "tool_started" not in history_override
+    assert "tool_started" not in history
     assert [event.event_id for event in physical_events] == original_ids
     assert all(event.kind != "compaction" for event in physical_events)
     assert physical_counts == {
@@ -352,6 +351,7 @@ def bounded_fallback_experiment(root):
     }
     assert run_log.generation == 1
     assert prompt_metadata["within_budget"] is True
+    assert prompt_metadata["history_projection"] == history_metadata
     assert "Current run events (bounded fallback):" in context["history"]
     assert context["working_state"].startswith("constraints:")
 
@@ -419,7 +419,7 @@ def semantic_compaction_experiment(root):
     original_ids = [event.event_id for event in original_physical]
     original_history_view_count = len(RunHistory(run_log.events).active_events())
 
-    compaction, history_override = agent.prompt.prepare_compaction(
+    compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
         provider_context_tokens=3400,
     )
@@ -483,9 +483,9 @@ def semantic_compaction_experiment(root):
     assert recovery_context["persisted_as_one_view"] is False
     assert recovery_context["sent_as_seven_section_prompt"] is False
     assert recovery_context["used_by_completion_controller"] is False
-    assert agent.run.task.working.constraints == (WORKING_CONSTRAINT,)
-    assert agent.run.task.working.decisions == (WORKING_DECISION,)
-    assert agent.run.task.working.next_steps == (WORKING_NEXT_STEP,)
+    assert agent.run.projection.working.constraints == (WORKING_CONSTRAINT,)
+    assert agent.run.projection.working.decisions == (WORKING_DECISION,)
+    assert agent.run.projection.working.next_steps == (WORKING_NEXT_STEP,)
 
     print_section(
         "C. Context Pressure：Semantic Summary 成功提交",

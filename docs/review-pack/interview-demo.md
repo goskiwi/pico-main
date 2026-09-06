@@ -77,9 +77,10 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 `unknown` ToolOutcome。每次 Resume 输入先写 `user_guidance` Fact，因此二次崩溃后仍能
 重建当时交给模型的约束。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
 Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
-持久 Run ID 由 `RunStore.load_run` 单次读取并返回 Events + Projection；
-`RunStore.replay` 只是 Projection-only 委托。Live 路径只对新 Fact 调用
-`RunProjection.apply_event`，不会再暴露额外的 `from_events` 回放入口。
+持久 Run ID 由 `RunStore.load_run` 单次读取并返回已恢复的 RunLog + Projection；
+`RunStore.replay` 只是 Projection-only 委托。实时调用 `RunLog.append`，内部依次执行
+`RunProjection.check_event`、存储追加和 `RunProjection._advance_event`；回放通过
+`RunProjection.apply_event` 复用同一套检查与转换。
 
 ### 2:30～3:00：完成权
 

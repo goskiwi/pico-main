@@ -88,7 +88,8 @@ def fact_projection_experiment(root):
     )
     run_id = outcome.run_id
     store = agent.dependencies.run_store
-    events, loaded = store.load_run(run_id)
+    log, loaded = store.load_run(run_id)
+    events = log.events
     replayed = store.replay(run_id)
 
     live_summary = agent.run.projection.summary()
@@ -133,7 +134,7 @@ def fact_projection_experiment(root):
         for event in working_state_calls
         for field in event.args
     }
-    final_working_state = replayed.task.working.to_dict()
+    final_working_state = replayed.working.to_dict()
     assert len(working_state_calls) == 2
     assert observed_delta_fields == expected_delta_fields
     assert final_working_state == {
@@ -171,7 +172,7 @@ def fact_projection_experiment(root):
         {
             "all_summaries_equal": True,
             "run_cursor": replayed.last_cursor.to_dict(),
-            "task_contract": replayed.task.contract.to_dict(),
+            "task_contract": replayed.contract.to_dict(),
             "working_state_updates": [
                 {
                     "call_id": event.call_id,
@@ -251,19 +252,16 @@ def batch_prefix_experiment(root):
         ToolCall("read_file", {"path": "a.txt"}, "call_batch_a"),
         ToolCall("read_file", {"path": "b.txt"}, "call_batch_b"),
     )
-    agent.apply_run_event(agent.run.run_log.append_tool_batch(calls))
+    agent.run.run_log.append_tool_batch(calls)
     after_batch = tuple(agent.run.projection.pending_call_ids)
     for call in calls:
-        agent.apply_run_event(
-            agent.run.run_log.append_tool_started(
+        agent.run.run_log.append_tool_started(
                 call,
                 effect_scope="none",
                 potential_effects=[],
             )
-        )
     for call in calls:
-        agent.apply_run_event(
-            agent.run.run_log.append_tool_result(
+        agent.run.run_log.append_tool_result(
                 ToolOutcome(
                     call.call_id,
                     call.name,
@@ -273,7 +271,6 @@ def batch_prefix_experiment(root):
                     "observed",
                 )
             )
-        )
     assert after_batch == ("call_batch_a", "call_batch_b")
     assert agent.run.projection.pending_call_ids == ()
 
@@ -302,14 +299,12 @@ def interrupted_read_experiment(root):
         {"path": "README.md", "start_line": 1, "end_line": 20},
         "call_interrupted_read",
     )
-    original.apply_run_event(original.run.run_log.append_tool_call(call))
-    original.apply_run_event(
-        original.run.run_log.append_tool_started(
+    original.run.run_log.append_tool_call(call)
+    original.run.run_log.append_tool_started(
             call,
             effect_scope="none",
             potential_effects=[],
         )
-    )
     session_id = original.session.id
     loaded_session = SessionStore(root / ".pico" / "sessions").load(session_id)
 
@@ -347,7 +342,8 @@ def interrupted_read_experiment(root):
     assert outcome.run_id == run_id
     assert outcome.status == "completed"
 
-    events, projection = resumed.dependencies.run_store.load_run(run_id)
+    log, projection = resumed.dependencies.run_store.load_run(run_id)
+    events = log.events
     recovered_result = next(
         event
         for event in events

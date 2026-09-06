@@ -15,7 +15,7 @@ Terminology in this document is strict:
 
 | Scope | Source of truth | Derived state |
 |---|---|---|
-| Run | `events.jsonl` | One RunProjection: identity, TaskState, Evidence, Metrics, Pending Tool Call IDs and final Diff receipt |
+| Run | `events.jsonl` | One RunProjection: identity, TaskContract, WorkingState, Evidence, Metrics, Pending Tool Call IDs and final Diff receipt |
 | Session | `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task, RunLog and execution state |
 | Task contract | First `user_message.contract`, derived deterministically from the request and explicit Mode | Goal, maximum write capability, write scope and change-verification requirement |
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
@@ -29,7 +29,7 @@ Terminology in this document is strict:
 |---|---|---|
 | CLI / resume | First `user_message.contract`, then Session `active_run_id`; each resumed input as `user_guidance`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
 | Normal Tool turn | One `assistant_tool_call` or ordered `assistant_tool_batch`, per-Call fsynced `tool_started/tool_result` | ToolRuntime resolves the pending durable transaction; only pure Observation Runners may execute concurrently, while all durable state is updated in original order |
-| Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal TaskLifecycle and final Diff reference after settlement |
+| Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal status and final Diff reference after settlement |
 
 Invariants:
 
@@ -37,10 +37,10 @@ Invariants:
 - `tool_result` is the only durable completion fact for a Tool call.
 - Context includes TaskContract, WorkingState, repository projections and Run Log facts; Prompt build is read-only.
 - Live execution and replay use the same RunProjection reducer.
-- Live code applies one Fact with `RunProjection.apply_event`; `RunStore.load_run` owns the single
-  persisted read that returns Events plus Projection, and `RunStore.replay` is its Projection-only
+- Live code commits one Fact with `RunLog.append`; `RunStore.load_run` owns the single
+  persisted read that returns a ready RunLog plus Projection, and `RunStore.replay` is its Projection-only
   facade; `replay_events` is reserved for an already complete Event sequence.
-- TaskContract, incremental WorkingState, TaskLifecycle, Evidence and Metrics can be rebuilt from the Run Log.
+- TaskContract, incremental WorkingState, terminal fields, Evidence and Metrics can be rebuilt from the Run Log.
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
 - Tool protocol events form one strict single-Call transaction or one ordered, indivisible pure-Observation Batch. Every Call ID receives exactly one Result.

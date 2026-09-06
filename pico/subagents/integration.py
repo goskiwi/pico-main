@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 from ..verification import verify_workspace
 from ..workspace import clip
@@ -27,7 +26,7 @@ class PatchIntegrator:
         patch_receipt = record.completed().patch
         if patch_receipt is None:
             raise ValueError(f"Child patch is missing: {record.child_id}")
-        path = Path(patch_receipt.path)
+        path = self.manager._task_root(run_id, record.child_id) / "patch.diff"
         if not path.is_file():
             raise ValueError(f"Child patch is missing: {record.child_id}")
         patch = path.read_bytes()
@@ -72,13 +71,13 @@ class PatchIntegrator:
                 execution_context=self.parent.run.execution_context,
             )
         except GitWorktreeError as exc:
-            raise ValueError(f"parent workspace changed {phase}") from exc
+            raise ValueError(f"parent workspace changed {phase}: {exc}") from exc
         if current != base_sha:
             raise ValueError(f"parent base changed {phase}")
 
     def integrate_child(self, child_id):
         run_id = self.manager._parent_run_id()
-        record = self.manager._record(run_id, child_id)
+        record = self.parent.run.projection.children.record(child_id)
         if record.spec.role != "implement":
             raise ValueError(f"Child is not an implementation: {child_id}")
         patch_receipt = record.completed().patch
@@ -114,7 +113,6 @@ class PatchIntegrator:
         finally:
             integration.cleanup()
 
-        record.mark_integrated()
         handle = self.manager._release_worktree(run_id, record.child_id)
         if handle is not None:
             handle.cleanup()

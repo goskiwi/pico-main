@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .artifacts import ArtifactStore
-from .run_log import RunEvent, replay_events, validate_run_events
+from .run_log import RunEvent, RunLog, replay_events
 from .run_projection import RunCursor
 
 RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -62,7 +61,8 @@ class RunStore:
             os.fsync(handle.fileno())
         return repaired
 
-    def read_events(self, run_id):
+    def _read_events(self, run_id):
+        """Read records and repair only a torn final line; no sequence policy here."""
         run_id = _run_id(run_id)
         path = self.events_path(run_id)
         if not path.exists():
@@ -79,13 +79,20 @@ class RunStore:
                     f"Run Log line {number} is not valid JSON"
                 ) from exc
             events.append(RunEvent.from_dict(value))
-        validate_run_events(events, expected_run_id=run_id)
-        self._cursors[run_id] = (
+        return events
+
+    def read_events(self, run_id):
+        events = self._read_events(run_id)
+        replay_events(events, expected_run_id=_run_id(run_id))
+        self._remember_cursor(run_id, events)
+        return events
+
+    def _remember_cursor(self, run_id, events):
+        self._cursors[_run_id(run_id)] = (
             RunCursor(events[-1].sequence, events[-1].event_id)
             if events
             else RunCursor()
         )
-        return events
 
     def cursor(self, run_id):
         run_id = _run_id(run_id)
@@ -93,35 +100,10 @@ class RunStore:
             self.read_events(run_id)
         return self._cursors.get(run_id, RunCursor())
 
-    def append_event(
-        self,
-        run_id,
-        task_id,
-        session_id,
-        kind,
-        payload=None,
-        *,
-        protocol_checked=False,
-    ):
-        run_id = _run_id(run_id)
-        payload = dict(payload or {})
-        if not protocol_checked:
-            protocol = validate_run_events(self.read_events(run_id))
-            protocol.check(str(kind), payload)
-        path = self.events_path(run_id)
+    def _append_event(self, entry):
+        """Persist a complete event; only RunLog authorizes new events."""
+        path = self.events_path(entry.run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        cursor = self.cursor(run_id)
-        sequence = cursor.sequence + 1
-        entry = RunEvent(
-            event_id=f"{run_id}:event:{sequence:06d}",
-            sequence=sequence,
-            run_id=run_id,
-            task_id=str(task_id),
-            session_id=str(session_id),
-            kind=str(kind),
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            payload=payload,
-        )
         encoded = (
             json.dumps(entry.to_dict(), sort_keys=True, ensure_ascii=True) + "\n"
         ).encode("utf-8")
@@ -129,15 +111,15 @@ class RunStore:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        self._cursors[run_id] = RunCursor(sequence, entry.event_id)
-        return entry
+        self._cursors[entry.run_id] = RunCursor(entry.sequence, entry.event_id)
 
     def load_run(self, run_id):
-        """Read and project one Run from a single validated Event snapshot."""
+        """Load a ready RunLog and projection from the same validated snapshot."""
 
         run_id = _run_id(run_id)
-        events = tuple(self.read_events(run_id))
-        projection = replay_events(events)
+        events = self._read_events(run_id)
+        log, projection = RunLog._from_events(events, self, expected_run_id=run_id)
+        self._remember_cursor(run_id, log.events)
         final_diff = projection.final_diff
         if final_diff is not None and final_diff.artifact_id:
             descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
@@ -147,38 +129,38 @@ class RunStore:
             )
             if int(descriptor["size_bytes"]) != final_diff.size_bytes:
                 raise ValueError("terminal final Diff descriptor size mismatch")
-        return events, projection
+        return log, projection
 
     def replay(self, run_id):
-        _events, projection = self.load_run(run_id)
+        _log, projection = self.load_run(run_id)
         return projection
 
     def find_active_run(self, session_id):
         if not self.root.exists():
-            return "", (), None
+            return None, None
         candidates = []
         for directory in self.root.iterdir():
             if directory.is_symlink() or not directory.is_dir():
                 continue
             try:
-                events, projection = self.load_run(directory.name)
+                log, projection = self.load_run(directory.name)
             except (OSError, ValueError):
                 continue
-            if not events or events[0].session_id != str(session_id):
+            if log.session_id != str(session_id):
                 continue
             if not projection.terminal:
                 candidates.append(
                     (
-                        events[-1].timestamp,
+                        log.events[-1].timestamp,
                         directory.name,
-                        events,
+                        log,
                         projection,
                     )
                 )
         if candidates:
-            _timestamp, run_id, events, projection = max(
+            _timestamp, _run_id, log, projection = max(
                 candidates,
                 key=lambda item: (item[0], item[1]),
             )
-            return run_id, events, projection
-        return "", (), None
+            return log, projection
+        return None, None

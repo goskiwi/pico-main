@@ -1,0 +1,140 @@
+{
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+  "harness_version": "4.1.0",
+  "selection_note": "人工按机制与仓库多样性选择；非随机样本，不能外推到 SWE-bench 总体。未根据 Pico 运行结果筛选。难度为数据集原标签，不是本项目测量。",
+  "tasks": [
+    {
+      "instance_id": "pytest-dev__pytest-10051",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "aa55975c7d3f6c9f6d7f68accc41bb7cadf0eb9a",
+      "title": "日志捕获状态一致性",
+      "selection_reason": "fixture、阶段记录与清理之间的状态关系",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/10051",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/logging/test_fixture.py",
+      "public_verification_scope": "原仓库公开回归测试；用于协议开发样本，不含数据集 test_patch。",
+      "check_directory": "testing/logging"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-10356",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "3c1534944cbd34e8a41bc9e76818018fadefc9a1",
+      "title": "继承与标记解析",
+      "selection_reason": "沿继承层次定位标记合并与覆盖语义",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/10356",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/test_mark.py",
+      "public_verification_scope": "原仓库已有 marker 子系统测试；在本题首次模型作答前选定，不包含数据集 test_patch。",
+      "check_directory": "testing"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-5787",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "955e54221008aba577ecbaefa15679f6777d3bf8",
+      "title": "异常链序列化",
+      "selection_reason": "异常表示、链式异常与报告输出的协作",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/5787",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/test_reports.py",
+      "check_directory": "testing",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7571",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "422685d0bdc110547535036c1ff398b5e1c44145",
+      "title": "日志级别恢复",
+      "selection_reason": "fixture 生命周期与全局日志状态恢复",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/7571",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/logging",
+      "check_directory": "testing/logging",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7748",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "9988d5ce267bf0df4791770b469431b1fb00dcdd",
+      "title": "重载方法签名",
+      "selection_reason": "文档字符串签名与重载方法的交互",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/sphinx-doc/sphinx/pull/7748",
+      "public_verification": "python -m pytest -q --tb=short -r fE tests/test_ext_autodoc_configs.py",
+      "public_verification_scope": "原仓库公开回归测试；用于协议开发样本，不含数据集 test_patch。",
+      "check_directory": "tests"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8548",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "dd1615c59dc6fff633e27dbb3861f2d27e1fb976",
+      "title": "继承属性文档",
+      "selection_reason": "成员筛选、继承关系与文档生成",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/sphinx-doc/sphinx/pull/8548",
+      "public_verification": "python -m pytest -q --tb=short -r fE tests/test_ext_autodoc_autoattribute.py tests/test_ext_autodoc_autoclass.py",
+      "check_directory": "tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9229",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "876fa81e0a038cda466925b85ccf6c5452e0f685",
+      "title": "类型别名文档",
+      "selection_reason": "类型别名解析与文档渲染的一致性",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/sphinx-doc/sphinx/pull/9229"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "232dbe41c5250eb7d559d40438c4743483e95f15",
+      "title": "模拟依赖的继承文档",
+      "selection_reason": "mock 对象、继承类与 autodoc 的边界",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/sphinx-doc/sphinx/pull/9658"
+    },
+    {
+      "instance_id": "psf__requests-2931",
+      "repo": "psf/requests",
+      "base_commit": "5f7a3a74aab1625c2bb65f643197ee885e3da576",
+      "title": "二进制请求内容",
+      "selection_reason": "请求准备阶段的字节与字符串处理",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/psf/requests/pull/2931"
+    },
+    {
+      "instance_id": "psf__requests-6028",
+      "repo": "psf/requests",
+      "base_commit": "0192aac24123735b3eaf9b08df46429bb770c283",
+      "title": "代理认证",
+      "selection_reason": "代理配置与认证信息传递",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/psf/requests/pull/6028",
+      "public_verification": "python -m pytest -q --tb=short -r fE tests/test_requests.py -k '(proxy_auth and not proxy_authorization) or proxy_env_vars_override_default or should_strip_auth'",
+      "check_directory": "tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "astropy__astropy-12907",
+      "repo": "astropy/astropy",
+      "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+      "title": "嵌套模型可分离性",
+      "selection_reason": "组合模型的递归结构与矩阵语义",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/astropy/astropy/pull/12907",
+      "public_verification": "python -m pytest -W 'default:Conversion of an array with ndim > 0 to a scalar is deprecated:DeprecationWarning' -q --tb=short -r fE astropy/modeling/tests/test_separable.py astropy/modeling/tests/test_compound.py",
+      "check_directory": "astropy/modeling/tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。 原代码6项测试仅因NumPy 1.25起的数组转标量弃用警告失败；仅将该警告设为default保留显示，测试及断言全部保留。"
+    },
+    {
+      "instance_id": "astropy__astropy-13579",
+      "repo": "astropy/astropy",
+      "base_commit": "0df94ff7097961e92fd7812036a24b145bc13ca8",
+      "title": "切片坐标转换",
+      "selection_reason": "切片、轴映射与正反坐标转换",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/astropy/astropy/pull/13579"
+    }
+  ]
+}

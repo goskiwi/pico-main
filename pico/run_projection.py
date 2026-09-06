@@ -6,9 +6,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from .contracts import ToolCall, ToolOutcome
 from .delivery import FinalDiff
 from .evidence import RunEvidence
-from .task_state import TaskContract, TaskState
+from .subagents.contracts import ChildState
+from .task_state import TaskContract
+from .working_state import WorkingState
 
 
 @dataclass(frozen=True)
@@ -18,27 +21,6 @@ class RunCursor:
 
     def to_dict(self):
         return {"sequence": self.sequence, "event_id": self.event_id}
-
-
-@dataclass
-class RunIdentity:
-    run_id: str = ""
-    task_id: str = ""
-    session_id: str = ""
-
-    def observe(self, event):
-        candidate = (str(event.run_id), str(event.task_id), str(event.session_id))
-        current = (self.run_id, self.task_id, self.session_id)
-        if self.run_id and candidate != current:
-            raise ValueError("Run event identity changed inside one projection")
-        self.run_id, self.task_id, self.session_id = candidate
-
-    def to_dict(self):
-        return {
-            "run_id": self.run_id,
-            "task_id": self.task_id,
-            "session_id": self.session_id,
-        }
 
 
 @dataclass
@@ -87,89 +69,118 @@ class RunMetrics:
 
 @dataclass
 class RunProjection:
-    identity: RunIdentity = field(default_factory=RunIdentity)
-    task: TaskState | None = None
+    run_id: str = ""
+    task_id: str = ""
+    session_id: str = ""
+    contract: TaskContract | None = None
+    working: WorkingState = field(default_factory=WorkingState)
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
-    pending_call_ids: tuple[str, ...] = ()
+    children: ChildState = field(default_factory=ChildState)
+    status: str = "running"
+    stop_reason: str = ""
+    final_answer: str = ""
+    pending_calls: tuple[ToolCall, ...] = ()
+    pending_batch_id: str = ""
+    started_call_ids: set[str] = field(default_factory=set)
+    last_started_ordinal: int = -1
+    result_count: int = 0
     final_diff: FinalDiff | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
-    def apply_event(self, event):
-        self.identity.observe(event)
-        if event.kind == "user_message":
-            if self.task is not None:
-                raise ValueError("Run projection may contain only one task contract")
-            self.task = TaskState.create(
-                TaskContract.from_dict(event.payload["contract"])
-            )
-        elif self.task is None:
-            raise ValueError("Run projection requires task contract before other events")
-        else:
-            self.task.apply_event(event)
+    def check_event(self, event):  # noqa: C901 - linear protocol state machine
+        kind, payload = event.kind, event.payload
+        expected = self.last_cursor.sequence + 1
+        if event.sequence != expected:
+            raise ValueError("Run Log sequence is not contiguous")
+        if event.event_id != f"{event.run_id}:event:{expected:06d}":
+            raise ValueError("Run event id does not match its sequence")
+        if self.run_id and (event.run_id, event.task_id, event.session_id) != (
+            self.run_id,
+            self.task_id,
+            self.session_id,
+        ):
+            raise ValueError("Run event identity changed within one run")
+        if self.terminal:
+            raise ValueError("Run Log cannot append after a terminal event")
+        if self.contract is None and kind != "user_message":
+            raise ValueError("Run Log must begin with user_message")
+        if kind == "user_message" and self.contract is not None:
+            raise ValueError("Run Log may contain only one user_message")
+        if kind in {"assistant_tool_call", "assistant_tool_batch"}:
+            if self.pending_calls:
+                raise ValueError("Run Log already has pending tool calls")
+        elif kind == "tool_started":
+            call_id = str(payload["tool_call_id"])
+            call = self._pending_call(call_id)
+            if call is None:
+                raise ValueError("tool_started must match a pending tool call")
+            if str(payload["tool_name"]) != call.name:
+                raise ValueError(
+                    "tool_started tool name does not match the pending call"
+                )
+            if self.result_count:
+                raise ValueError("tool_started cannot follow a batch result")
+            if call_id in self.started_call_ids:
+                raise ValueError("pending tool call already started")
+            ordinal = self.pending_calls.index(call)
+            if ordinal <= self.last_started_ordinal:
+                raise ValueError("tool_started calls must preserve batch order")
+        elif kind == "tool_result":
+            outcome = ToolOutcome.from_dict(payload["outcome"])
+            call_id = outcome.tool_call_id
+            if not self.pending_calls or self.result_count >= len(self.pending_calls):
+                raise ValueError("tool_result requires pending tool calls")
+            call = self.pending_calls[self.result_count]
+            if call_id != call.call_id:
+                raise ValueError("tool_result calls must preserve batch order")
+            if outcome.tool_name != call.name:
+                raise ValueError(
+                    "tool_result tool name does not match the pending call"
+                )
+            started = call_id in self.started_call_ids
+            if outcome.execution_state == "not_started" and started:
+                raise ValueError("started tool cannot finish as not_started")
+            if outcome.execution_state != "not_started" and not started:
+                raise ValueError("executed tool_result requires tool_started")
+            self.children.check_result(call, payload["outcome"])
+        elif self.pending_calls and kind not in {"tool_started", "tool_result"}:
+            raise ValueError("pending tool calls must receive results first")
 
-        self.evidence.apply_event(event)
-        self.metrics.apply_event(event)
-        if event.kind == "assistant_tool_call":
-            self.pending_call_ids = (event.call_id,)
-        elif event.kind == "assistant_tool_batch":
-            self.pending_call_ids = tuple(
-                call.call_id for call in event.batch_calls
-            )
-        elif event.kind == "tool_result":
-            if not self.pending_call_ids or event.call_id != self.pending_call_ids[0]:
-                raise ValueError("tool result does not match projected pending order")
-            self.pending_call_ids = self.pending_call_ids[1:]
-        if event.kind in {"assistant_final", "run_stopped"}:
-            raw_final_diff = event.payload.get("final_diff")
-            self.final_diff = (
-                FinalDiff.from_dict(raw_final_diff)
-                if raw_final_diff is not None
-                else None
-            )
-            if event.kind == "assistant_final" and self.final_diff is None:
+        if kind in {"assistant_final", "run_stopped"}:
+            raw = payload.get("final_diff")
+            final_diff = FinalDiff.from_dict(raw) if raw is not None else None
+            if kind == "assistant_final" and final_diff is None:
                 raise ValueError("completed Run requires a final Diff")
-            if self.final_diff is not None and bool(
-                self.evidence.changed_paths
-            ) != bool(self.final_diff.artifact_id):
+            if final_diff is not None and bool(self.evidence.changed_paths) != bool(
+                final_diff.artifact_id
+            ):
                 raise ValueError("terminal final Diff does not match net changes")
-        self.last_cursor = RunCursor(event.sequence, event.event_id)
-        return self
+
+    def _pending_call(self, call_id):
+        return next(
+            (call for call in self.pending_calls if call.call_id == call_id), None
+        )
+
+    def _begin_calls(self, calls, batch_id=""):
+        self.pending_calls = tuple(calls)
+        self.pending_batch_id = batch_id
+        self.started_call_ids.clear()
+        self.last_started_ordinal = -1
+        self.result_count = 0
 
     @property
     def terminal(self):
-        return bool(
-            self.task
-            and self.task.lifecycle.status in {"completed", "stopped"}
-        )
+        return self.status in {"completed", "stopped"}
+
+    @property
+    def pending_call_ids(self):
+        return tuple(call.call_id for call in self.pending_calls[self.result_count :])
 
     @property
     def pending_call_id(self):
-        return self.pending_call_ids[0] if len(self.pending_call_ids) == 1 else None
-
-    @property
-    def run_id(self):
-        return self.identity.run_id
-
-    @property
-    def task_id(self):
-        return self.identity.task_id
-
-    @property
-    def session_id(self):
-        return self.identity.session_id
-
-    @property
-    def status(self):
-        return self.task.lifecycle.status if self.task else "running"
-
-    @property
-    def stop_reason(self):
-        return self.task.lifecycle.stop_reason if self.task else ""
-
-    @property
-    def final_answer(self):
-        return self.task.lifecycle.final_answer if self.task else ""
+        ids = self.pending_call_ids
+        return ids[0] if len(ids) == 1 else None
 
     @property
     def model_request_count(self):
@@ -183,12 +194,65 @@ class RunProjection:
     def turn_duration_ms(self):
         return self.metrics.turn_duration_ms
 
+    def apply_event(self, event):
+        self.check_event(event)
+        return self._advance_event(event)
+
+    def _advance_event(self, event):
+        self.run_id, self.task_id, self.session_id = (
+            event.run_id,
+            event.task_id,
+            event.session_id,
+        )
+        if event.kind == "user_message":
+            self.contract = TaskContract.from_dict(event.payload["contract"])
+        self.working.apply_event(event)
+        self.evidence.apply_event(event)
+        self.metrics.apply_event(event)
+        if event.kind == "tool_result":
+            self.children.apply_result(
+                self.pending_calls[self.result_count], event.payload["outcome"]
+            )
+        if event.kind == "assistant_tool_call":
+            self._begin_calls((ToolCall(event.name, event.args, event.call_id),))
+        elif event.kind == "assistant_tool_batch":
+            self._begin_calls(event.batch_calls, event.batch_id)
+        elif event.kind == "tool_started":
+            self.started_call_ids.add(event.call_id)
+            self.last_started_ordinal = self.pending_calls.index(
+                self._pending_call(event.call_id)
+            )
+        elif event.kind == "tool_result":
+            self.result_count += 1
+            if self.result_count == len(self.pending_calls):
+                self._begin_calls(())
+        elif event.kind in {"assistant_final", "run_stopped"}:
+            self.status = "completed" if event.kind == "assistant_final" else "stopped"
+            self.stop_reason = event.payload["stop_reason"]
+            self.final_answer = str(event.payload.get("content", ""))
+            raw = event.payload.get("final_diff")
+            self.final_diff = FinalDiff.from_dict(raw) if raw is not None else None
+        self.last_cursor = RunCursor(event.sequence, event.event_id)
+        return self
+
     def summary(self):
-        if self.task is None:
+        if self.contract is None:
             raise ValueError("Run projection has no task")
         return {
-            "identity": self.identity.to_dict(),
-            "task": self.task.to_dict(),
+            "identity": {
+                "run_id": self.run_id,
+                "task_id": self.task_id,
+                "session_id": self.session_id,
+            },
+            "task": {
+                "contract": self.contract.to_dict(),
+                "working": self.working.to_dict(),
+                "lifecycle": {
+                    "status": self.status,
+                    "stop_reason": self.stop_reason,
+                    "final_answer": self.final_answer,
+                },
+            },
             "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
             "pending_call_ids": list(self.pending_call_ids),

@@ -40,6 +40,7 @@ class Pico:
         command_runner_factory=None,
         subagent_model_client_factory=None,
         parent_execution_context=None,
+        check_runner=None,
     ):
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
@@ -66,9 +67,10 @@ class Pico:
             command_runner_factory=command_runner_factory,
             repo_map=RepoMap(self.workspace.root),
             parent_execution_context=parent_execution_context,
+            check_runner=check_runner,
         )
         if subagent_model_client_factory is not None:
-            from .subagents import SubagentRunner
+            from .subagents.runner import SubagentRunner
 
             self.dependencies.subagents = SubagentRunner(
                 self,
@@ -93,20 +95,14 @@ class Pico:
         )
 
     def emit_event(self, event_type, payload=None):
-        task_state = self.run.task
+        task_state = self.run.projection
         run_log = self.run.run_log
-        if task_state is None or run_log is None:
-            raise RuntimeError("Run event requires an active TaskState and RunLog")
+        if task_state.contract is None or run_log is None:
+            raise RuntimeError("Run event requires an active contract and RunLog")
         if self.run.projection.run_id != run_log.run_id:
-            raise RuntimeError("active TaskState and RunLog belong to different Runs")
+            raise RuntimeError("active Projection and RunLog belong to different Runs")
         payload = self.redact_value(payload or {})
         entry = run_log.append(event_type, payload)
-        return self.apply_run_event(entry)
-
-    def apply_run_event(self, entry):
-        if self.run.task is None or self.run.projection.run_id != entry.run_id:
-            raise RuntimeError("Run event does not belong to the active projection")
-        self.run.projection.apply_event(entry)
         return entry
 
     def run_verification(self, started_workspace_mutation_sequence):
@@ -146,15 +142,12 @@ class Pico:
         run_log = self.run.run_log
         try:
             if run_log is not None and not self.run.projection.terminal:
-                for _outcome, event in reconcile_interrupted(self):
-                    self.apply_run_event(event)
-                self.apply_run_event(
-                    run_log.append_stopped(
+                reconcile_interrupted(self)
+                run_log.append_stopped(
                         "Session reset by user.",
                         "user_reset",
                         build_stopped_final_diff(self),
                     )
-                )
         except BaseException:
             reload_current_run(self)
             raise

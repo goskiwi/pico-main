@@ -2,7 +2,6 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 
@@ -29,17 +28,17 @@ def run_active(agent, call):
             agent.session.id,
             agent.dependencies.run_store,
         )
-        first = run_log.append_user(
+        run_log.append_user(
             TaskContract(
                 goal="Exercise path safety",
                 allows_workspace_mutation=True,
                 verify_changes=False,
             )
         )
-        agent.run.projection = RunProjection().apply_event(first)
+        agent.run.projection = run_log.projection
         agent.run.run_log = run_log
         agent.run.execution_context = ExecutionContext.root(max_seconds=30)
-    agent.apply_run_event(run_log.append_tool_call(call))
+    run_log.append_tool_call(call)
     return agent.tools.execute_pending(call.call_id)
 
 

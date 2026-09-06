@@ -14,7 +14,7 @@ from .delivery import (
 )
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
-from .run_projection import RunOutcome, RunProjection
+from .run_projection import RunOutcome
 from .runtime_state import ActiveRunState
 from .task_state import TaskContract
 
@@ -36,20 +36,12 @@ class AgentLoopState:
     starting_model_request_count: int = 0
 
 
-def _state_from_snapshot(runtime: Pico, run_id, events, projection):
+def _state_from_snapshot(runtime: Pico, run_log, projection):
     session_id = str(runtime.session.id)
-    if not events:
+    if not run_log.events:
         raise ValueError("active Run Log is missing or empty")
-    if projection.run_id != run_id or projection.session_id != session_id:
+    if projection.run_id != run_log.run_id or projection.session_id != session_id:
         raise ValueError("active Run does not belong to this Session")
-    first = events[0]
-    run_log = RunLog(
-        first.run_id,
-        first.task_id,
-        first.session_id,
-        runtime.dependencies.run_store,
-        events,
-    )
     return ActiveRunState(projection=projection, run_log=run_log)
 
 
@@ -67,16 +59,13 @@ def load_resumable_run(runtime: Pico):
 
     pointed_run_id = str(runtime.session.active_run_id)
     if pointed_run_id:
-        run_id = pointed_run_id
-        events, projection = runtime.dependencies.run_store.load_run(run_id)
+        run_log, projection = runtime.dependencies.run_store.load_run(pointed_run_id)
     else:
-        run_id, events, projection = runtime.dependencies.run_store.find_active_run(
-            session_id
-        )
-    if not run_id:
+        run_log, projection = runtime.dependencies.run_store.find_active_run(session_id)
+    if run_log is None:
         return runtime.run
 
-    state = _state_from_snapshot(runtime, run_id, events, projection)
+    state = _state_from_snapshot(runtime, run_log, projection)
     if projection.terminal:
         if pointed_run_id:
             runtime.session.set_active_run("")
@@ -85,7 +74,7 @@ def load_resumable_run(runtime: Pico):
 
     runtime.run = state
     if not pointed_run_id:
-        runtime.session.set_active_run(run_id)
+        runtime.session.set_active_run(run_log.run_id)
     return runtime.run
 
 
@@ -95,8 +84,8 @@ def reload_current_run(runtime: Pico):
     run_id = str(runtime.run.projection.run_id)
     if not run_id:
         return load_resumable_run(runtime)
-    events, projection = runtime.dependencies.run_store.load_run(run_id)
-    runtime.run = _state_from_snapshot(runtime, run_id, events, projection)
+    run_log, projection = runtime.dependencies.run_store.load_run(run_id)
+    runtime.run = _state_from_snapshot(runtime, run_log, projection)
     pointed_run_id = str(runtime.session.active_run_id)
     expected_pointer = "" if projection.terminal else run_id
     if pointed_run_id != expected_pointer:
@@ -129,9 +118,7 @@ def reconcile_interrupted(runtime):
     if not pending_calls:
         return ()
     started_by_id = {
-        entry.call_id: entry
-        for entry in run_log.events
-        if entry.kind == "tool_started"
+        entry.call_id: entry for entry in run_log.events if entry.kind == "tool_started"
     }
     reconciled = []
     for call in pending_calls:
@@ -209,6 +196,19 @@ class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
+    def prepare_compaction(
+        self, user_message, *, provider_context_tokens=None, action_tools=None
+    ):
+        plan, metadata, history = self.runtime.prompt.plan_compaction(
+            user_message,
+            provider_context_tokens=provider_context_tokens,
+            action_tools=action_tools,
+        )
+        if plan is not None:
+            self.runtime.run.run_log.append_compaction(*plan)
+            metadata["committed"] = True
+        return metadata, history
+
     def initialize(
         self,
         user_message,
@@ -223,13 +223,9 @@ class RunLifecycle:
             raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
         try:
-            reconciled = reconcile_interrupted(runtime)
-            for _outcome, entry in reconciled:
-                runtime.apply_run_event(entry)
+            reconcile_interrupted(runtime)
             if resumed:
-                runtime.apply_run_event(
-                    run_log.append_user_guidance(user_message)
-                )
+                run_log.append_user_guidance(user_message)
 
             runtime.emit_event(
                 "run_resumed" if resumed else "run_started",
@@ -256,16 +252,16 @@ class RunLifecycle:
         runtime = self.runtime
         _reload_if_snapshot_is_stale(runtime)
         if runtime.run.resumable:
-            if (
-                runtime.session.active_run_id
-                != runtime.run.projection.run_id
-            ):
+            if runtime.session.active_run_id != runtime.run.projection.run_id:
                 runtime.session.set_active_run(runtime.run.projection.run_id)
             return True
 
-        if runtime.run.task is not None and not runtime.run.projection.terminal:
+        if (
+            runtime.run.projection.contract is not None
+            and not runtime.run.projection.terminal
+        ):
             raise RuntimeError("unfinished Run is not dormant and cannot be resumed")
-        if runtime.run.run_log is not None and runtime.run.task is None:
+        if runtime.run.run_log is not None and runtime.run.projection.contract is None:
             raise RuntimeError("Run state contains a Run Log without a TaskContract")
 
         run_id = runtime.new_run_id()
@@ -280,8 +276,8 @@ class RunLifecycle:
             runtime.dependencies.run_store,
         )
         try:
-            first = run_log.append_user(contract)
-            projection = RunProjection().apply_event(first)
+            run_log.append_user(contract)
+            projection = run_log.projection
         except BaseException:
             runtime.run = ActiveRunState()
             load_resumable_run(runtime)
@@ -330,14 +326,10 @@ class RunLifecycle:
     def finish_success(self, loop_state, final) -> RunOutcome:
         runtime = self.runtime
         final_diff = build_final_diff(runtime)
-        runtime.apply_run_event(
-            runtime.run.run_log.append_final(
-                final,
-                final_diff,
-                turn_duration_ms=int(
-                    (time.monotonic() - loop_state.run_started_at) * 1000
-                ),
-            )
+        runtime.run.run_log.append_final(
+            final,
+            final_diff,
+            turn_duration_ms=int((time.monotonic() - loop_state.run_started_at) * 1000),
         )
         outcome = RunOutcome(runtime.run.projection)
         try:
@@ -351,15 +343,11 @@ class RunLifecycle:
     def finish_stopped(self, loop_state) -> RunOutcome:
         final, stop_reason = self._stopped_result(loop_state.execution_stop)
         final_diff = build_stopped_final_diff(self.runtime)
-        self.runtime.apply_run_event(
-            self.runtime.run.run_log.append_stopped(
-                final,
-                stop_reason,
-                final_diff,
-                turn_duration_ms=int(
-                    (time.monotonic() - loop_state.run_started_at) * 1000
-                ),
-            )
+        self.runtime.run.run_log.append_stopped(
+            final,
+            stop_reason,
+            final_diff,
+            turn_duration_ms=int((time.monotonic() - loop_state.run_started_at) * 1000),
         )
         runtime = self.runtime
         outcome = RunOutcome(runtime.run.projection)

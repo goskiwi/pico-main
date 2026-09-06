@@ -1,16 +1,11 @@
-"""Runtime-owned task requirements, working notes, and lifecycle state."""
+"""Runtime-owned task requirements; live state belongs to RunProjection."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .working_state import WorkingState
 from .workspace import normalize_relative_file
 
-STATUS_RUNNING = "running"
-STATUS_COMPLETED = "completed"
-STATUS_STOPPED = "stopped"
-TASK_STATUSES = frozenset({STATUS_RUNNING, STATUS_COMPLETED, STATUS_STOPPED})
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 
 
@@ -88,72 +83,4 @@ class TaskContract:
                 if self.allowed_write_paths is None
                 else list(self.allowed_write_paths)
             ),
-        }
-
-
-@dataclass
-class TaskLifecycle:
-    status: str = STATUS_RUNNING
-    stop_reason: str = ""
-    final_answer: str = ""
-
-    def validate(self):
-        if self.status not in TASK_STATUSES:
-            raise ValueError(f"invalid task status: {self.status}")
-        if self.status == STATUS_RUNNING:
-            if self.stop_reason or self.final_answer:
-                raise ValueError("running task cannot have terminal fields")
-        elif self.status == STATUS_COMPLETED:
-            if self.stop_reason != STOP_REASON_FINAL_ANSWER_RETURNED:
-                raise ValueError(
-                    "completed task requires final_answer_returned stop_reason"
-                )
-            if not self.final_answer.strip():
-                raise ValueError("completed task requires final_answer")
-        elif not self.stop_reason:
-            raise ValueError("stopped task requires stop_reason")
-        return self
-
-    def apply_event(self, event):
-        if event.kind == "assistant_final":
-            self.status = STATUS_COMPLETED
-            self.stop_reason = str(event.payload["stop_reason"])
-            self.final_answer = str(event.payload.get("content", ""))
-        elif event.kind == "run_stopped":
-            self.status = STATUS_STOPPED
-            self.stop_reason = str(event.payload.get("stop_reason", ""))
-            self.final_answer = str(event.payload.get("content", ""))
-        return self.validate()
-
-    def to_dict(self):
-        self.validate()
-        return {
-            "status": self.status,
-            "stop_reason": self.stop_reason,
-            "final_answer": self.final_answer,
-        }
-
-
-@dataclass
-class TaskState:
-    contract: TaskContract
-    working: WorkingState = field(default_factory=WorkingState)
-    lifecycle: TaskLifecycle = field(default_factory=TaskLifecycle)
-
-    @classmethod
-    def create(cls, contract):
-        if not isinstance(contract, TaskContract):
-            raise TypeError("task state requires a TaskContract")
-        return cls(contract=contract)
-
-    def apply_event(self, event):
-        self.working.apply_event(event)
-        self.lifecycle.apply_event(event)
-        return self
-
-    def to_dict(self):
-        return {
-            "contract": self.contract.to_dict(),
-            "working": self.working.to_dict(),
-            "lifecycle": self.lifecycle.to_dict(),
         }

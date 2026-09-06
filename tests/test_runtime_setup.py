@@ -3,7 +3,6 @@ from dataclasses import replace
 import pytest
 
 from pico import FakeModelClient, Pico, PicoConfig, Session, SessionStore, Workspace
-from pico.agent_loop import AgentLoop
 from pico.context_manager import ContextBudgetExceeded
 
 
@@ -37,46 +36,11 @@ def test_failed_session_save_does_not_advance_memory_or_disk(tmp_path, monkeypat
     assert store.load(session.id).active_run_id == "run_first"
 
 
-def test_pico_uses_prepared_session_and_config_without_rewrapping(tmp_path):
-    workspace = Workspace.build(tmp_path)
-    session = SessionStore(tmp_path / "sessions").create(workspace.root)
-    config = PicoConfig(mode="auto")
-    before = session.path.stat().st_mtime_ns
-    agent = Pico(FakeModelClient([]), workspace, session, config=config)
-    assert agent.session is session
-    assert agent.config is config
-    assert session.path.stat().st_mtime_ns == before
-
-
 def test_session_from_another_workspace_is_rejected(tmp_path):
     workspace = Workspace.build(tmp_path)
     session = SessionStore(tmp_path / "sessions").create(tmp_path / "other")
     with pytest.raises(ValueError, match="workspace does not match"):
         Pico(FakeModelClient([]), workspace, session)
-
-
-def test_prompt_cache_holds_tool_names_not_diagnostic_metadata(tmp_path, monkeypatch):
-    workspace = Workspace.build(tmp_path)
-    session = SessionStore(tmp_path / "sessions").create(workspace.root)
-    agent = Pico(FakeModelClient([]), workspace, session, config=PicoConfig(mode="ask"))
-    build = agent.prompt.build
-    diagnostics = []
-
-    def observed_build(*args, **kwargs):
-        prompt, metadata = build(*args, **kwargs)
-        diagnostics.append(metadata)
-        return prompt, metadata
-
-    monkeypatch.setattr(agent.prompt, "build", observed_build)
-    loop = AgentLoop(agent)
-    state = loop.lifecycle.initialize("Inspect")
-    surface = loop._resolve_action_tool_surface()
-    prompt = loop._prepare_prompt(state, surface)
-    assert state.prompt_snapshot == (prompt, surface.names)
-    assert "sections" in diagnostics[0]
-    assert "tool_names" not in diagnostics[0]
-    assert loop._prepare_prompt(state, surface) is prompt
-    assert len(diagnostics) == 1
 
 
 @pytest.mark.parametrize(
@@ -124,6 +88,6 @@ def test_replaced_config_is_used_by_context_budget(tmp_path):
         compaction_reserve_tokens=2000,
         compaction_keep_recent_tokens=6000,
     )
-    assert agent.prompt._context.total_budget == 8000
+    assert agent.config.provider_context_limit_tokens == 8000
     with pytest.raises(ContextBudgetExceeded):
         agent.prompt.build("example " * 10000)

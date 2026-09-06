@@ -38,6 +38,19 @@ Parent 使用单个 `delegate` 创建一个 Explore 或 Implement Child，再用
 
 ## 对象与调用边界
 
+当前结构重构将身份、TaskContract、WorkingState 和终态字段直接归入 RunProjection，移除
+TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 负责校验、落盘、推进
+同一个 Projection；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
+是展示格式，不是额外的运行时对象。
+
+每个工具只在一处声明 Schema、权限、校验、Runner 与 effects。单次与批次共用参数准备、
+Runner 调用和结果归类；批次保留整批准入与按原序记账。PromptBuilder 是唯一 Prompt 对象，
+预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
+派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。
+
+本轮不解决审查记录中的跨源凭据转发、暂存重命名、多个 Child 顺序集成、中断后补丁自动
+判定、多写者与资源优化问题，不作生产就绪承诺。
+
 工具表、单次与批量准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
 不存在“Config 已更新但消费者仍用初始化副本”的行为。验证额外变更进入持久 Evidence，
 不能靠再次提交绕过。Git 交付按命令禁用 hooks；Child Git 操作使用 Parent 剩余时间。
@@ -46,6 +59,7 @@ Provider 保留 urllib 的代理与重定向处理，连接后以同一请求 de
 仍是协作式停止，不声称整条链路是硬实时系统。
 
 RunHistory 只读选择和渲染历史、生成压缩计划；RunLog 验证并追加压缩事实；Lifecycle
-负责恢复对账。历史 LLM JSON 检查与当前代码回归分开，正式 LLM 报告仍要求干净提交。
+负责恢复对账。当前代码回归不再包含历史 LLM JSON 成绩断言，历史报告仅保留为运行记录，
+正式 LLM 报告仍要求干净提交。
 
 SessionStore 直接创建或加载 Session；Pico 接收现成对象，不再包装裸字典。PicoConfig 构造即校验，修改走 dataclasses.replace。工具表只保存未绑定函数，单次调用与 Observation Batch 都显式传入本次 ToolContext，不通过回调寻找当前调用，也不重建整张工具表。Prompt 缓存只保留 Prompt 和工具名；详细预算诊断仍供 Day3/Day5 使用。CodingResult 只在 RunOutcome 外增加 Git 交付信息，变化路径统一读取 outcome.changed_paths。

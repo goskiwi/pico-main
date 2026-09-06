@@ -1,10 +1,16 @@
 import threading
 import time
+import urllib.error
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from pico.providers.clients import OpenAICompatibleModelClient
+from pico.providers.clients import (
+    OpenAICompatibleModelClient,
+    ProviderHTTPError,
+    ProviderTransportError,
+)
 
 
 def test_deadline_transport_preserves_http_redirects():
@@ -86,3 +92,34 @@ def test_provider_total_deadline_interrupts_continuous_slow_response(phase):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_provider_transport_error_preserves_cause_and_attempt_count(monkeypatch):
+    @contextmanager
+    def failed_open(_request, timeout):
+        del timeout
+        raise urllib.error.URLError("DNS lookup failed")
+        yield
+
+    monkeypatch.setattr("pico.providers.clients._open_response", failed_open)
+    monkeypatch.setattr("pico.providers.clients.time.sleep", lambda _seconds: None)
+    client = OpenAICompatibleModelClient(
+        "test", "https://example.test/v1", "", None, 10
+    )
+
+    with pytest.raises(ProviderTransportError) as caught:
+        client._request_with_retry({}, request_timeout=10)
+
+    assert "3 attempts" in str(caught.value)
+    assert "URLError: <urlopen error DNS lookup failed>" in str(caught.value)
+    assert isinstance(caught.value.__cause__, urllib.error.URLError)
+
+
+def test_provider_response_error_preserves_code_and_message():
+    body = '{"error":{"code":"unsupported_parameter","message":"temperature is unsupported"}}'
+
+    with pytest.raises(ProviderHTTPError) as caught:
+        OpenAICompatibleModelClient._decode_response(body, "application/json")
+
+    assert "code=unsupported_parameter" in str(caught.value)
+    assert "message=temperature is unsupported" in str(caught.value)

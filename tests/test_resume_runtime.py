@@ -15,7 +15,6 @@ from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_lifecycle import reconcile_interrupted
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 
 
@@ -55,8 +54,8 @@ def build_interrupted_run(tmp_path, config=None):
         agent.session.id,
         agent.dependencies.run_store,
     )
-    first = log.append_user(contract)
-    projection = RunProjection().apply_event(first)
+    log.append_user(contract)
+    projection = log.projection
     agent.run.projection = projection
     agent.run.run_log = log
     agent.session.set_active_run(projection.run_id)
@@ -78,7 +77,7 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     agent, store, projection, log = build_interrupted_run(tmp_path)
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     call = ToolCall("read_file", {"path": "README.md"}, "read")
-    agent.apply_run_event(log.append_tool_call(call))
+    log.append_tool_call(call)
     assert agent.tools.execute_pending(call.call_id).status == "success"
     agent.session.set_active_run("")
 
@@ -95,12 +94,12 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
     assert len(snapshots) == 1
     assert resumed.run.projection is snapshots[0][1]
-    assert resumed.run.run_log.events == snapshots[0][0]
-    assert resumed.run.projection.last_cursor.event_id == snapshots[0][0][-1].event_id
+    assert resumed.run.run_log is snapshots[0][0]
+    assert resumed.run.projection.last_cursor.event_id == snapshots[0][0].events[-1].event_id
     assert resumed.run.resumable is True
     assert resumed.ask("Continue").answer == "Recovered."
     assert resumed.run.projection.run_id == projection.run_id
-    assert resumed.run.task.contract.goal == "Inspect"
+    assert resumed.run.projection.contract.goal == "Inspect"
     assert resumed.run.projection.pending_call_id is None
     prompt = resumed.model_client.prompts[0]
     assert prompt.count('latest_user_request:\n"Continue"') == 1
@@ -124,7 +123,7 @@ def test_resume_reuses_persisted_contract(tmp_path):
     outcome = resumed.ask("Continue")
 
     assert outcome.answer == "Recovered."
-    assert resumed.run.task.contract == projection.task.contract
+    assert resumed.run.projection.contract == projection.contract
 
 
 def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_path):
@@ -161,7 +160,7 @@ def test_resume_keeps_contract_scope_and_applies_current_narrower_policy(tmp_pat
     )
 
     assert resumed.ask("Continue").answer == "Recovered."
-    assert resumed.run.task.contract.allowed_write_paths == ("README.md",)
+    assert resumed.run.projection.contract.allowed_write_paths == ("README.md",)
     tool_result = next(
         event for event in resumed.run.run_log.events if event.kind == "tool_result"
     )
@@ -254,21 +253,19 @@ def test_same_runtime_reloads_a_durably_committed_ambiguous_append(
             runtime_workspace.root
         ),
     )
-    original_append = agent.dependencies.run_store.append_event
+    original_append = agent.dependencies.run_store._append_event
     failed = False
 
-    def commit_then_raise(*args, **kwargs):
+    def commit_then_raise(event):
         nonlocal failed
-        event = original_append(*args, **kwargs)
-        kind = str(args[3]) if len(args) > 3 else str(kwargs.get("kind", ""))
-        if kind == ambiguous_kind and not failed:
+        original_append(event)
+        if event.kind == ambiguous_kind and not failed:
             failed = True
             raise OSError("ambiguous append")
-        return event
 
     monkeypatch.setattr(
         agent.dependencies.run_store,
-        "append_event",
+        "_append_event",
         commit_then_raise,
     )
     with pytest.raises(OSError, match="ambiguous append"):
@@ -301,22 +298,21 @@ def test_precommit_first_event_failure_restores_empty_runtime_state(
         ),
     )
     store = agent.dependencies.run_store
-    original_append = store.append_event
+    original_append = store._append_event
     failed = False
 
-    def fail_before_commit(*args, **kwargs):
+    def fail_before_commit(event):
         nonlocal failed
-        kind = str(args[3]) if len(args) > 3 else str(kwargs.get("kind", ""))
-        if kind == "user_message" and not failed:
+        if event.kind == "user_message" and not failed:
             failed = True
             raise OSError("precommit failure")
-        return original_append(*args, **kwargs)
+        return original_append(event)
 
-    monkeypatch.setattr(store, "append_event", fail_before_commit)
+    monkeypatch.setattr(store, "_append_event", fail_before_commit)
     with pytest.raises(OSError, match="precommit failure"):
         agent.ask("Inspect")
 
-    assert agent.run.task is None
+    assert agent.run.projection.contract is None
     assert agent.run.run_log is None
     assert agent.session.active_run_id == ""
     agent.reset()
@@ -374,7 +370,7 @@ def test_terminal_session_pointer_is_cleaned_on_startup(tmp_path):
     restarted = resumed_agent(agent, agent.session.store, [])
 
     assert restarted.session.active_run_id == ""
-    assert restarted.run.task is None
+    assert restarted.run.projection.contract is None
     assert restarted.run.resumable is False
 
 
@@ -445,8 +441,7 @@ def test_started_changed_path_recovers_as_partial_without_replay(tmp_path):
     )
     (tmp_path / "x.txt").write_text("side effect\n", encoding="utf-8")
     resumed = resumed_agent(agent, store, [])
-    restored = RunLog.restore("run_interrupted", resumed.dependencies.run_store)
-    resumed.run.projection = resumed.dependencies.run_store.replay("run_interrupted")
+    restored, resumed.run.projection = resumed.dependencies.run_store.load_run("run_interrupted")
     resumed.run.run_log = restored
     reconcile_interrupted(resumed)
     result = restored.events[-1]

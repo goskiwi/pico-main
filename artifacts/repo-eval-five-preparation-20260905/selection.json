@@ -1,0 +1,88 @@
+{
+  "selected_at": "2026-09-05T07:01:16.954603+00:00",
+  "task_ids": [
+    "pytest-dev__pytest-5787",
+    "pytest-dev__pytest-7571",
+    "sphinx-doc__sphinx-8548",
+    "psf__requests-6028",
+    "astropy__astropy-12907"
+  ],
+  "selection_reason": "从未作答且已有有效独立验收环境的候选中选取四个仓库：异常报告、日志生命周期、继承属性、代理认证、组合模型；仅按问题类别与可运行环境选择，不按模型成绩筛选。",
+  "excluded_previously_attempted": [
+    "pytest-dev__pytest-10051",
+    "pytest-dev__pytest-10356",
+    "sphinx-doc__sphinx-7748"
+  ],
+  "excluded_environment_invalid": [
+    "psf__requests-2931"
+  ],
+  "model": "gpt-5.6-luna",
+  "variants": [
+    "repomap_on"
+  ],
+  "repeats": 1,
+  "max_run_seconds_per_task": 600,
+  "policy": "Complete public environment checks before model calls. No manual guidance or candidate patch editing; preserve every attempt. No RepoMap benefit claim from this single-arm batch.",
+  "tasks": [
+    {
+      "instance_id": "pytest-dev__pytest-5787",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "955e54221008aba577ecbaefa15679f6777d3bf8",
+      "title": "异常链序列化",
+      "selection_reason": "异常表示、链式异常与报告输出的协作",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/5787",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/test_reports.py",
+      "check_directory": "testing",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7571",
+      "repo": "pytest-dev/pytest",
+      "base_commit": "422685d0bdc110547535036c1ff398b5e1c44145",
+      "title": "日志级别恢复",
+      "selection_reason": "fixture 生命周期与全局日志状态恢复",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/pytest-dev/pytest/pull/7571",
+      "public_verification": "python -m pytest -q --tb=short -r fE testing/logging",
+      "check_directory": "testing/logging",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-8548",
+      "repo": "sphinx-doc/sphinx",
+      "base_commit": "dd1615c59dc6fff633e27dbb3861f2d27e1fb976",
+      "title": "继承属性文档",
+      "selection_reason": "成员筛选、继承关系与文档生成",
+      "difficulty": "1-4 hours",
+      "source_url": "https://github.com/sphinx-doc/sphinx/pull/8548",
+      "public_verification": "python -m pytest -q --tb=short -r fE tests/test_ext_autodoc_autoattribute.py tests/test_ext_autodoc_autoclass.py",
+      "check_directory": "tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "psf__requests-6028",
+      "repo": "psf/requests",
+      "base_commit": "0192aac24123735b3eaf9b08df46429bb770c283",
+      "title": "代理认证",
+      "selection_reason": "代理配置与认证信息传递",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/psf/requests/pull/6028",
+      "public_verification": "python -m pytest -q --tb=short -r fE tests/test_requests.py -k '(proxy_auth and not proxy_authorization) or proxy_env_vars_override_default or should_strip_auth'",
+      "check_directory": "tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    },
+    {
+      "instance_id": "astropy__astropy-12907",
+      "repo": "astropy/astropy",
+      "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+      "title": "嵌套模型可分离性",
+      "selection_reason": "组合模型的递归结构与矩阵语义",
+      "difficulty": "15 min - 1 hour",
+      "source_url": "https://github.com/astropy/astropy/pull/12907",
+      "public_verification": "python -m pytest -q --tb=short -r fE astropy/modeling/tests/test_separable.py astropy/modeling/tests/test_compound.py",
+      "check_directory": "astropy/modeling/tests",
+      "public_verification_scope": "在本轮首次模型作答前，按公开问题涉及的子系统选择原仓库已有测试；未读取参考补丁或数据集 test_patch。Requests 仅选无需网络服务的代理与认证测试。"
+    }
+  ]
+}

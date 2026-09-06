@@ -190,7 +190,7 @@ def main():
         assert outcome.stop_reason == replayed.stop_reason
         assert outcome.final_diff == replayed.final_diff
         assert outcome.metrics == replayed.metrics.to_dict()
-        assert replayed.task.working.next_steps == ()
+        assert replayed.working.next_steps == ()
         assert evidence.changed_paths == ["calculator.py"]
         assert evidence.latest_verification_for_state(
             evidence.last_workspace_mutation_sequence,
@@ -209,7 +209,7 @@ def main():
             {
                 "run_outcome": outcome.to_dict(),
                 "calculator.py": target.read_text(encoding="utf-8"),
-                "working_state": replayed.task.working.to_dict(),
+                "working_state": replayed.working.to_dict(),
             },
         )
         print_section(

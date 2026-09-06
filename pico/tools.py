@@ -99,99 +99,6 @@ class UpdateWorkingStateArgs(ToolArgs):
     remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
 
 
-BASE_TOOL_SPECS = {
-    "list_files": {
-        "args_schema": ListFilesArgs,
-        "risky": False,
-        "manual_observation": True,
-        "batchable_observation": True,
-        "description": "List files in the workspace.",
-    },
-    "read_file": {
-        "args_schema": ReadFileArgs,
-        "risky": False,
-        "manual_observation": True,
-        "batchable_observation": True,
-        "description": "Read a UTF-8 file by line range.",
-    },
-    "read_artifact": {
-        "args_schema": ReadArtifactArgs,
-        "risky": False,
-        "manual_observation": True,
-        "batchable_observation": True,
-        "description": (
-            "Read up to 8 KiB from a truncated tool-output artifact in the current run."
-        ),
-    },
-    "search": {
-        "args_schema": SearchArgs,
-        "risky": False,
-        "manual_observation": True,
-        "batchable_observation": True,
-        "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "run_command": {
-        "args_schema": RunCommandArgs,
-        "risky": True,
-        "workspace_mutating": True,
-        "description": (
-            "Run one user-approved diagnostic command from the trusted workspace root. "
-            "Use it for tests, linters, type checks, git status/diff, and reproductions. "
-            "It is host execution, not a sandbox, and must not modify repository files. "
-            "Mutating shell commands are not supported by this Runtime."
-        ),
-    },
-    "write_file": {
-        "args_schema": WriteFileArgs,
-        "risky": True,
-        "workspace_mutating": True,
-        "state_mutating": True,
-        "description": (
-            "Create a new UTF-8 text file. The target must not already exist; "
-            "read and use edit_file for every change to an existing file."
-        ),
-    },
-    "edit_file": {
-        "args_schema": EditFileArgs,
-        "risky": True,
-        "workspace_mutating": True,
-        "state_mutating": True,
-        "description": (
-            "Replace one exact, unique text block in a file. Keep old_text as small as "
-            "possible while still unique; do not include large unchanged regions. old_text "
-            "must contain only actual file content: exclude read_file's file/revision headers "
-            "and line-number prefixes."
-        ),
-    },
-    "update_working_state": {
-        "args_schema": UpdateWorkingStateArgs,
-        "risky": False,
-        "description": (
-            "Incrementally update the current Run's constraints, evidence-backed decisions, "
-            "and next steps. The Runtime owns the immutable goal. Do not store current file "
-            "contents, transient command output, guesses, or cross-task project knowledge here."
-        ),
-    },
-}
-
-
-def build_tool_registry():
-    # 工具不是动态发现的，而是显式注册的。
-    # 这样模型看到的是一个有边界、可审计的动作集合。
-    tools = {}
-    for name, spec in BASE_TOOL_SPECS.items():
-        tool = {
-            **spec,
-            "validate": _TOOL_VALIDATORS[name],
-            "run": _TOOL_RUNNERS[name],
-        }
-        planner = _TOOL_EFFECT_PLANNERS.get(name)
-        if planner is not None:
-            tool["potential_effects"] = planner
-        tools[name] = tool
-    return tools
-
-
 def function_schema(args_schema: type[BaseModel]) -> dict[str, Any]:
     schema = args_schema.model_json_schema()
     schema.pop("title", None)
@@ -241,7 +148,9 @@ def build_action_tools(tools):
 def _validate_list_files(context, args):
     path = context.path(args.get("path", "."))
     if not path.exists():
-        raise ToolFailureError("missing_path", f"path does not exist: {args.get('path', '.')}")
+        raise ToolFailureError(
+            "missing_path", f"path does not exist: {args.get('path', '.')}"
+        )
     if not path.is_dir():
         raise ToolFailureError("invalid_path_type", "path is not a directory")
     return args
@@ -256,9 +165,7 @@ def _validate_read_file(context, args):
     if int(args.get("end_line", 200)) < int(args.get("start_line", 1)):
         raise ValueError("invalid line range")
     if (
-        int(args.get("end_line", 200))
-        - int(args.get("start_line", 1))
-        + 1
+        int(args.get("end_line", 200)) - int(args.get("start_line", 1)) + 1
         > READ_FILE_MAX_LINES
     ):
         raise ValueError(f"read_file returns at most {READ_FILE_MAX_LINES} lines")
@@ -276,7 +183,9 @@ def _validate_search(context, args):
         raise ValueError("pattern must not be empty")
     path = context.path(args.get("path", "."))
     if not path.exists():
-        raise ToolFailureError("missing_path", f"path does not exist: {args.get('path', '.')}")
+        raise ToolFailureError(
+            "missing_path", f"path does not exist: {args.get('path', '.')}"
+        )
     return args
 
 
@@ -332,30 +241,13 @@ def _validate_run_command(context, args):
     return {"command": command}
 
 
-_TOOL_VALIDATORS = {
-    "list_files": _validate_list_files,
-    "read_file": _validate_read_file,
-    "read_artifact": _validate_read_artifact,
-    "search": _validate_search,
-    "run_command": _validate_run_command,
-    "write_file": _validate_write_file,
-    "edit_file": _validate_edit_file,
-    "update_working_state": _validate_working_state,
-}
-
-
-def validate_tool(context, name, args):
-    spec = BASE_TOOL_SPECS.get(name)
-    if spec is None:
-        raise ValueError(f"unknown tool: {name}")
-    validated = spec["args_schema"].model_validate(args or {}).model_dump()
-    return _TOOL_VALIDATORS[name](context, validated)
-
-
 def tool_list_files(context, args):
     path = context.path(args.get("path", "."))
     entries = [
-        item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
+        item
+        for item in sorted(
+            path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())
+        )
         if item.name not in IGNORED_PATH_NAMES
     ]
     selected = entries[:200]
@@ -401,7 +293,9 @@ def tool_read_file(context, args):
             if line_start:
                 number += 1
     body = rendered.decode("utf-8", errors="replace").replace("\r\n", "\n").rstrip("\n")
-    body = body.encode("utf-8")[:READ_FILE_MAX_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    body = body.encode("utf-8")[:READ_FILE_MAX_OUTPUT_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
     if truncated:
         body += "\n[read output truncated; narrow the line range or search for specific content]"
     revision = "sha256:" + digest.hexdigest()
@@ -523,7 +417,9 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
         lines.append("[search result limit reached]")
     elif process.returncode not in {0, 1}:
         detail = stderr or f"rg exited with {process.returncode}"
-        code = "invalid_search_pattern" if "regex" in detail.lower() else "search_failed"
+        code = (
+            "invalid_search_pattern" if "regex" in detail.lower() else "search_failed"
+        )
         failure = FailureInfo(code, detail, "retry_after_change")
     content = "\n".join(lines).replace(str(root) + "/", "")
     if not content:
@@ -615,9 +511,14 @@ def _fallback_search(context, path, pattern):
                         result = f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
                         encoded = result.encode("utf-8")
                         available = max(0, SEARCH_MAX_OUTPUT_BYTES - output_bytes - 1)
-                        matches.append(encoded[:available].decode("utf-8", errors="ignore"))
+                        matches.append(
+                            encoded[:available].decode("utf-8", errors="ignore")
+                        )
                         output_bytes += min(len(encoded), available) + 1
-                        if len(matches) >= SEARCH_MAX_MATCHES or len(encoded) > available:
+                        if (
+                            len(matches) >= SEARCH_MAX_MATCHES
+                            or len(encoded) > available
+                        ):
                             limited = True
                             break
         except OSError:
@@ -782,8 +683,7 @@ def tool_run_command(context, args):
         failure = FailureInfo(
             "command_modified_repository",
             "diagnostic command changed repository-visible state without "
-            "a trustworthy Run-start preimage: "
-            + ", ".join(changes[:20]),
+            "a trustworthy Run-start preimage: " + ", ".join(changes[:20]),
             "user_action_required",
         )
     elif result.infrastructure_error:
@@ -812,25 +712,84 @@ def tool_run_command(context, args):
     )
 
 
-_TOOL_RUNNERS = {
-    "list_files": tool_list_files,
-    "read_file": tool_read_file,
-    "read_artifact": tool_read_artifact,
-    "search": tool_search,
-    "run_command": tool_run_command,
-    "write_file": tool_write_file,
-    "edit_file": tool_edit_file,
-    "update_working_state": tool_update_working_state,
-}
-
-
 def _workspace_file_effects(context, args):
     path = context.path(args["path"])
     logical = path.relative_to(context.workspace_root).as_posix()
     return "workspace", ((logical, path),)
 
 
-_TOOL_EFFECT_PLANNERS = {
-    "write_file": _workspace_file_effects,
-    "edit_file": _workspace_file_effects,
-}
+def build_tool_registry():
+    """Each tool declares its schema, policy, validator, runner and effects together."""
+    return {
+        "list_files": {
+            "args_schema": ListFilesArgs,
+            "risky": False,
+            "manual_observation": True,
+            "batchable_observation": True,
+            "description": "List files in the workspace.",
+            "validate": _validate_list_files,
+            "run": tool_list_files,
+        },
+        "read_file": {
+            "args_schema": ReadFileArgs,
+            "risky": False,
+            "manual_observation": True,
+            "batchable_observation": True,
+            "description": "Read a UTF-8 file by line range.",
+            "validate": _validate_read_file,
+            "run": tool_read_file,
+        },
+        "read_artifact": {
+            "args_schema": ReadArtifactArgs,
+            "risky": False,
+            "manual_observation": True,
+            "batchable_observation": True,
+            "description": "Read up to 8 KiB from a truncated tool-output artifact in the current run.",
+            "validate": _validate_read_artifact,
+            "run": tool_read_artifact,
+        },
+        "search": {
+            "args_schema": SearchArgs,
+            "risky": False,
+            "manual_observation": True,
+            "batchable_observation": True,
+            "description": "Search the workspace with rg or a simple fallback.",
+            "validate": _validate_search,
+            "run": tool_search,
+        },
+        "run_command": {
+            "args_schema": RunCommandArgs,
+            "risky": True,
+            "workspace_mutating": True,
+            "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
+            "validate": _validate_run_command,
+            "run": tool_run_command,
+        },
+        "write_file": {
+            "args_schema": WriteFileArgs,
+            "risky": True,
+            "workspace_mutating": True,
+            "state_mutating": True,
+            "description": "Create a new UTF-8 text file. The target must not already exist; read and use edit_file for every change to an existing file.",
+            "validate": _validate_write_file,
+            "run": tool_write_file,
+            "potential_effects": _workspace_file_effects,
+        },
+        "edit_file": {
+            "args_schema": EditFileArgs,
+            "risky": True,
+            "workspace_mutating": True,
+            "state_mutating": True,
+            "description": "Replace one exact, unique text block in a file. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's file/revision headers and line-number prefixes.",
+            "validate": _validate_edit_file,
+            "run": tool_edit_file,
+            "potential_effects": _workspace_file_effects,
+        },
+        "update_working_state": {
+            "args_schema": UpdateWorkingStateArgs,
+            "risky": False,
+            "description": "Incrementally update the current Run's constraints, evidence-backed decisions, and next steps. The Runtime owns the immutable goal. Do not store current file contents, transient command output, guesses, or cross-task project knowledge here.",
+            "validate": _validate_working_state,
+            "run": tool_update_working_state,
+        },
+    }

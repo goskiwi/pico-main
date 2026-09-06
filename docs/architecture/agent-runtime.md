@@ -1,6 +1,6 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` reducer builds TaskState, RunEvidence, RunMetrics, one Pending Tool transaction and the final Diff receipt for live execution and replay. A transaction is either one ordinary Call or one ordered pure-Observation Batch. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` owns identity, TaskContract, WorkingState, terminal fields, Evidence, Metrics, Child receipts and the Pending Tool transaction for live execution and replay. RunLog checks the next event, persists it, then advances that same Projection; callers do not separately apply the event. A transaction is either one ordinary Call or one ordered pure-Observation Batch. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
 
 ## Current execution paths
 
@@ -12,7 +12,7 @@ CLI build_agent
   -> load_resumable_run reads Session.active_run_id, or discovers an orphaned unfinished Run
   -> new: explicit Ask/Code/Auto Mode deterministically creates and appends TaskContract
   -> resume: RunStore.load_run reads once, validates the Run Log / terminal Artifact,
-     and returns that Event snapshot with its Projection
+     and returns a ready RunLog plus its Projection from that same snapshot
   -> resume: persisted TaskContract keeps the maximum capability; current Mode may narrow it
   -> run_lifecycle.reconcile_interrupted resolves an unfinished Tool transaction without replay
   -> resumed input is appended as user_guidance before run_resumed; new Runs append run_started
@@ -91,8 +91,8 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
   Result, Verification, Compaction and terminal events are Facts. Workspace files and Artifact
   contents remain facts of their own stores, not duplicated Run Facts.
 - **Projection**: the rebuildable in-memory `RunProjection` produced by reducing Facts. It is not
-  a second persistence format. Live execution calls `apply_event`; `RunStore.load_run` returns one
-  validated Event snapshot and its Projection, while `RunStore.replay` delegates to it and returns
+  a second persistence format. Live execution uses the Projection advanced by `RunLog.append`; `RunStore.load_run` returns one
+  restored RunLog and its Projection, while `RunStore.replay` delegates to it and returns
   only the Projection. Only callers that already own a complete Event sequence use `replay_events`.
 - **Evidence**: `RunEvidence`, derived from Tool Result and Verification Facts. It contains
   observations, side effects, final net changes and verification records.
@@ -260,10 +260,24 @@ second consecutive overflow propagates. Other `RuntimeError` values never enter 
 
 ## Resume
 
+RunLog constructs event identity, sequence and timestamp, validates payload/protocol order,
+then passes the complete RunEvent to the private storage append primitive. RunStore serializes,
+flushes and fsyncs it; only after success does RunLog advance its accepted events and protocol.
+There is no `protocol_checked` switch or independent Store-level event-construction route.
+`load_run` reads once and restores protocol plus Projection in one replay; Runtime installs those
+returned objects directly. Store retains its last successfully read/written cursor for recovery.
+
 `RunHistory(events)` owns read-only history selection, rendering and compaction planning.
-It neither appends events nor owns a second durable state. Context assembly obtains a plan and
-then explicitly calls `RunLog.append_compaction`; `run_lifecycle.reconcile_interrupted` owns
-interrupted-tool reconciliation. RunLog retains event validation, protocol order and durable append.
+It neither appends events nor owns a second durable state. Read `PromptBuilder.build` for the
+complete path from current Runtime inputs through history selection and budgeting to ModelPrompt
+and diagnostics. `PromptBuilder.plan_compaction` directly owns the corresponding planning flow;
+neither entry forwards a long argument list to a second implementation. Context helpers only
+format text, clip sections and calculate token budgets, without accessing the builder or Runtime.
+History text and diagnostics travel together as a `(text, metadata)` pair, including a fallback
+`history_override`; there is no cached `_last_history_metadata` or legacy string override.
+`RunLifecycle.prepare_compaction` submits the returned plan through `RunLog.append_compaction`;
+`run_lifecycle.reconcile_interrupted` owns interrupted-tool reconciliation. RunLog retains event
+validation, protocol order and durable append.
 
 Session stores its identity, Workspace root and `active_run_id`, not conversation history. `SessionStore.create/load` return a ready Session object; Pico uses it directly. Pointer updates are saved atomically before changing the in-memory value. On startup `load_resumable_run` opens that Run Log once, repairs an incomplete final line, reduces events through the same RunProjection used live, and installs the Projection and RunLog directly in `ActiveRunState`. `RunLifecycle` then reconciles an unfinished Tool, persists the new resume input as `user_guidance`, rebuilds Context from durable Facts, resets the Provider session and continues with current Runtime configuration. Resume must keep the persisted TaskContract requirements and write scope; current Tool policy may narrow that scope by intersection but never rewrites it. After any unhandled request exception, Pico reloads the current durable snapshot because the failed append may already have fsynced. Subsequent requests compare the in-memory and durable cursors before using the Run state. A terminal Run Log clears `active_run_id`; an invalid non-empty pointer fails closed.
 

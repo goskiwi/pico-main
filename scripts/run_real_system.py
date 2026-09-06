@@ -169,8 +169,8 @@ def _single_run(workspace):
     if len(run_ids) != 1:
         raise RuntimeError(f"expected one top-level Run, found {len(run_ids)}")
     store = RunStore(root)
-    events, projection = store.load_run(run_ids[0])
-    return run_ids[0], events, projection
+    log, projection = store.load_run(run_ids[0])
+    return run_ids[0], log.events, projection
 
 
 def main(argv=None):

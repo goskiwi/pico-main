@@ -16,7 +16,6 @@ from pico.completion_controller import CompletionController
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext, ExecutionDeadlineExceeded
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.subagents.contracts import (
     ChildFailure,
     ChildPatch,
@@ -24,7 +23,7 @@ from pico.subagents.contracts import (
     ChildSpec,
     ChildSuccess,
 )
-from pico.subagents.worktree import _git
+from pico.subagents.worktree import GitWorktreeError, _git, require_clean_repository
 from pico.task_state import TaskContract
 
 CHILD_SUCCESS_FIELDS = {
@@ -40,6 +39,7 @@ def test_child_git_consumes_parent_remaining_time(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     timeouts = []
+
     def run(_argv, **kwargs):
         timeouts.append(kwargs["timeout"])
         return SimpleNamespace(returncode=0, stdout=b"ok", stderr=b"")
@@ -52,6 +52,18 @@ def test_child_git_consumes_parent_remaining_time(tmp_path, monkeypatch):
     with pytest.raises(ExecutionDeadlineExceeded):
         _git(tmp_path, "status", execution_context=expired)
     assert len(timeouts) == 1
+
+
+def test_child_repository_error_preserves_git_failure(tmp_path, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise GitWorktreeError("Permission denied while reading .git")
+
+    monkeypatch.setattr("pico.subagents.worktree._git", fail)
+
+    with pytest.raises(GitWorktreeError) as caught:
+        require_clean_repository(tmp_path)
+
+    assert "Permission denied while reading .git" in str(caught.value)
 
 
 def git(root, *args):
@@ -137,7 +149,7 @@ def activate_parent(
         parent.session.id,
         parent.dependencies.run_store,
     )
-    first = run_log.append_user(
+    run_log.append_user(
         TaskContract(
             goal="Parent task",
             allows_workspace_mutation=allows_workspace_mutation,
@@ -145,7 +157,7 @@ def activate_parent(
             allowed_write_paths=allowed_write_paths,
         )
     )
-    parent.run.projection = RunProjection().apply_event(first)
+    parent.run.projection = run_log.projection
     parent.run.run_log = run_log
     parent.run.execution_context = ExecutionContext.root(max_seconds=60)
 
@@ -184,7 +196,7 @@ def build_parent(
 
 
 def run_active(parent, call):
-    parent.apply_run_event(parent.run.run_log.append_tool_call(call))
+    parent.run.run_log.append_tool_call(call)
     return parent.tools.execute_pending(call.call_id)
 
 
@@ -227,11 +239,32 @@ def implement_client(path="feature.py"):
 
 
 def delegate_implementation(parent, path="feature.py"):
-    return parent.dependencies.subagents.delegate(
-        "implement",
-        f"Create {path}",
-        (path,),
+    return run_active(
+        parent,
+        ToolCall(
+            "delegate",
+            {
+                "role": "implement",
+                "task": f"Create {path}",
+                "allowed_write_paths": [path],
+            },
+        ),
+    ).structured
+
+
+def test_restored_child_constraints_do_not_require_an_execution_factory(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(
+        root, lambda _spec: implement_client(), allowed_write_paths=("feature.py",)
     )
+    receipt = delegate_implementation(parent)
+    resumed = Pico(
+        FakeModelClient([]), Workspace.build(root), parent.session, config=parent.config
+    )
+    assert resumed.dependencies.subagents is None
+    record = resumed.run.projection.children.record(receipt["child_id"])
+    assert record.completed().patch.integrated is False
+    assert CompletionController(resumed).assess("done").status == "subtasks_incomplete"
 
 
 def test_explore_creates_distinct_ask_mode_non_recursive_children(tmp_path):
@@ -275,10 +308,10 @@ def test_explore_creates_distinct_ask_mode_non_recursive_children(tmp_path):
 
     manager = parent.dependencies.subagents
     for receipt, client in zip(receipts, clients):
-        record = manager._record(parent.run.projection.run_id, receipt["child_id"])
+        record = parent.run.projection.children.record(receipt["child_id"])
         projection = manager._child_projection(parent.run.projection.run_id, record)
         child_tools = set(client.action_tool_surfaces[0])
-        assert projection.task.contract.allows_workspace_mutation is False
+        assert projection.contract.allows_workspace_mutation is False
         assert {"delegate", "integrate_child", "write_file", "edit_file"}.isdisjoint(
             child_tools
         )
@@ -299,7 +332,7 @@ def test_failed_child_keeps_run_id_without_empty_success_fields(tmp_path):
 
 def test_child_result_types_reject_contradictory_success_shapes():
     spec = ChildSpec(role="explore", task="Inspect")
-    patch = ChildPatch(("file.py",), "/tmp/patch.diff", "digest")
+    patch = ChildPatch(("file.py",), "digest")
     with pytest.raises(ValueError, match="Explore Child"):
         ChildRecord("child_example", spec, result=ChildSuccess("run_child", patch))
     with pytest.raises(ValueError, match="requires an error"):
@@ -343,10 +376,8 @@ def test_implement_returns_patch_without_touching_parent(tmp_path):
     )
     receipt = delegate_implementation(parent)
     manager = parent.dependencies.subagents
-    record = manager._record(parent.run.projection.run_id, receipt["child_id"])
-    worktree = manager._worktrees[
-        (parent.run.projection.run_id, receipt["child_id"])
-    ]
+    record = parent.run.projection.children.record(receipt["child_id"])
+    worktree = manager._worktrees[(parent.run.projection.run_id, receipt["child_id"])]
 
     assert set(receipt) == CHILD_SUCCESS_FIELDS | {"patch"}
     assert receipt["status"] == "completed"
@@ -354,10 +385,14 @@ def test_implement_returns_patch_without_touching_parent(tmp_path):
     assert receipt["patch"]["sha256"]
     assert receipt["patch"]["integrated"] is False
     assert not (root / "feature.py").exists()
-    assert Path(record.completed().patch.path).is_file()
+    assert (
+        manager._task_root(parent.run.projection.run_id, record.child_id) / "patch.diff"
+    ).is_file()
     assert worktree.path != root
     assert (worktree.path / "feature.py").read_text() == "feature\n"
-    assert any(runner.calls for runner in runners.runners if runner.root == worktree.path)
+    assert any(
+        runner.calls for runner in runners.runners if runner.root == worktree.path
+    )
 
 
 def test_parent_scope_rejects_implement_before_child_runs(tmp_path):
@@ -400,9 +435,7 @@ def test_integrate_child_rejects_parent_base_drift(tmp_path):
     with pytest.raises(ValueError, match="parent base changed"):
         parent.dependencies.subagents.integrate_child(receipt["child_id"])
 
-    record = parent.dependencies.subagents._record(
-        parent.run.projection.run_id, receipt["child_id"]
-    )
+    record = parent.run.projection.children.record(receipt["child_id"])
     assert record.completed().patch.integrated is False
     assert not (root / "feature.py").exists()
 
@@ -421,9 +454,7 @@ def test_failed_integration_verification_does_not_modify_parent(tmp_path):
     with pytest.raises(RuntimeError, match="verification failed"):
         parent.dependencies.subagents.integrate_child(receipt["child_id"])
 
-    record = parent.dependencies.subagents._record(
-        parent.run.projection.run_id, receipt["child_id"]
-    )
+    record = parent.run.projection.children.record(receipt["child_id"])
     assert record.completed().patch.integrated is False
     assert not (root / "feature.py").exists()
     assert any(runner.fail and runner.calls for runner in runners.runners)

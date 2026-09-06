@@ -1,7 +1,6 @@
 """Synchronous parent/child orchestration for Pico."""
 
 from .contracts import ChildFailure, ChildPatch, ChildRecord, ChildSpec, ChildSuccess
-from .runner import SubagentRunner
 
 __all__ = [
     "ChildFailure",
@@ -9,5 +8,4 @@ __all__ = [
     "ChildRecord",
     "ChildSpec",
     "ChildSuccess",
-    "SubagentRunner",
 ]

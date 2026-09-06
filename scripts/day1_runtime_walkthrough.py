@@ -92,7 +92,7 @@ def main():
         assert outcome.status == "completed"
         assert outcome.answer == "README 已读取，文件工具工作正常。"
         assert agent.session.active_run_id == ""
-        assert agent.run.task.contract.allows_workspace_mutation is False
+        assert agent.run.projection.contract.allows_workspace_mutation is False
 
         events = agent.run.run_log.events
         event_rows = [

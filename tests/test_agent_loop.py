@@ -47,7 +47,7 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     )
 
     assert outcome.answer == "Done."
-    assert agent.run.task.lifecycle.status == "completed"
+    assert agent.run.projection.status == "completed"
 
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert [entry.sequence for entry in entries] == list(range(1, len(entries) + 1))
@@ -207,7 +207,7 @@ def test_invalid_model_outputs_stop_at_the_explicit_limit(tmp_path):
     assert outcome.stop_reason == replayed.stop_reason == "invalid_output_limit"
     assert outcome.final_diff == replayed.final_diff
     assert outcome.metrics == replayed.metrics.to_dict()
-    assert agent.run.task.lifecycle.stop_reason == "invalid_output_limit"
+    assert agent.run.projection.stop_reason == "invalid_output_limit"
     assert agent.run.metrics.model_request_count == 8
 
 
@@ -248,7 +248,7 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
     outcome = agent.ask("Create subject.txt")
 
     assert outcome.answer == "Stopped after repeated rejected completion attempts."
-    assert agent.run.task.lifecycle.stop_reason == "completion_block_limit"
+    assert agent.run.projection.stop_reason == "completion_block_limit"
     events = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert sum(entry.kind == "completion_blocked" for entry in events) == 3
 
@@ -385,8 +385,8 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
             runtime_workspace.root
         ),
     )
-    original_count = agent.prompt._context.tokenizer.count
-    agent.prompt._context.tokenizer.count = lambda text: (
+    original_count = agent.prompt.tokenizer.count
+    agent.prompt.tokenizer.count = lambda text: (
         200 if "alpha" in str(text) else original_count(text)
     )
 
@@ -455,8 +455,8 @@ def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
             runtime_workspace.root
         ),
     )
-    original_count = agent.prompt._context.tokenizer.count
-    agent.prompt._context.tokenizer.count = lambda text: (
+    original_count = agent.prompt.tokenizer.count
+    agent.prompt.tokenizer.count = lambda text: (
         200 if "alpha" in str(text) else original_count(text)
     )
 
@@ -606,7 +606,7 @@ def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
 
     assert outcome.answer == "Done at the tool boundary."
     assert agent.run.metrics.executed_tool_count == 1
-    assert agent.run.task.lifecycle.status == "completed"
+    assert agent.run.projection.status == "completed"
     assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
     resets = [
         event

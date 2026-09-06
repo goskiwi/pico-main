@@ -35,6 +35,8 @@ PICO_OPENAI_MODEL="gpt-5.4"
 
 默认后端要求 `PICO_OPENAI_API_KEY`；有意连接无认证的本机兼容端点时，显式传入
 `--base-url http://127.0.0.1:PORT/v1`。
+Provider 失败会区分传输错误与 HTTP／Responses 错误，保留底层异常类型、重试次数、状态码
+及服务端错误信息；真实评测记录沿用项目的脱敏边界。
 
 用户提交自然语言目标，并显式选择 `ask / code / auto` 模式；默认是 `code`。Runtime 不调用
 隐藏分类模型。TaskContract 只保存原始目标、创建时的最大写能力、验证要求和写路径范围；
@@ -57,9 +59,10 @@ User request + Ask/Code/Auto -> TaskContract
   -> Runtime Verification + Final Diff + RunOutcome
 ```
 
-面试主线只需要五点：
+面试主线只需要六点：
 
-1. **单一事实源**：每个 Run 只有一个 Run Log；Live 与 Replay 共用 `RunProjection.apply_event`。
+1. **单一事实源**：每个 Run 只有一个 Run Log。实时调用 `RunLog.append`，内部依次执行
+   `check_event`、存储追加和 `_advance_event`；回放通过 `RunProjection.apply_event` 复用同一套检查与转换。
 2. **可恢复工具事务**：单调用使用 `assistant_tool_call`；多个纯 Observation 原子写成
    `assistant_tool_batch`。每个 Call 都有 Started/Result，崩溃后逐 Call 闭合且不盲目重放。
 3. **副作用感知调度**：`list_files/read_file/search/read_artifact` 可组成最多四个调用的并行 Batch；
@@ -80,6 +83,10 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 
 CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskContract 和工具预算允许的 Schema 发送
 给 Provider；ToolRuntime 在本机再次执行准入。
+
+程序化 `Pico(..., check_runner=...)` 可选安装 `run_check`：在明确配置的隔离执行器中
+运行临时 Python／pytest 复现，Code／Auto 可用，Ask 不暴露。普通 CLI 默认不安装此工具。
+评测中的 Docker 实现与使用边界见 [复现检查说明](docs/review-pack/isolated-checks.md)。
 
 前四个只读工具可组成 Observation Batch；其余工具必须单独调用。Mixed Batch 在执行前整批
 拒绝，但仍为每个 Call ID 写入一个 `rejected/not_started` Result。
@@ -158,15 +165,22 @@ uv run pytest -q
 uv run ruff check pico applications tests scripts
 ```
 
-默认测试执行当前代码，排除历史报告检查。历史 JSON 报告单独检查：
+测试保留 Runtime 主链、恢复、工具安全、上下文与 RepoMap、Child 集成、Git 交付和评测正确性。
+历史 JSON 成绩断言、演示提示词／样例内容断言及仅固定内部对象结构的测试已移除。
+默认回归不调用 LLM，也不代表当前代码通过真实模型验收；历史报告保留为运行记录。
+Docker 集成测试需准备对应镜像后显式运行：
 
 ```bash
-uv run pytest -q -m archived_report tests/archived_reports
+PICO_TEST_DOCKER=1 uv run pytest -q tests/test_checks_docker.py
 ```
-
-这条命令不会调用 LLM，也不代表当前代码通过真实模型验收。
 
 ## Scope
 
-Pico 不做 Project Memory、Triage、真实 OSS Benchmark、多 Provider、XML 工具协议、Skills、
+新增的 [12 任务真实仓库对照](benchmarks/repo_eval/README.md) 使用 SWE-bench Verified 的
+人工子集，分离模型作答与 Docker 中的独立判分，用于测量 RepoMap 开关的局部收益。
+候选任务、环境验证、真实模型运行和最终成绩是不同阶段，不能把任务清单当成通过报告。
+最新的[五题真实评测](docs/review-pack/repo-eval-five-2026-09-05.md)已完成：2 个试次通过独立验收，
+另有修复不完整、预算耗尽、模型调用异常各 1 个；本轮仅运行 RepoMap 开启组。
+
+Pico 不做 Project Memory、Triage、全量 OSS 排行榜评测、多 Provider、XML 工具协议、Skills、
 MCP、多租户、远程 Worker、分布式调度或旧状态迁移。这些外围实现不在当前面试分支中。

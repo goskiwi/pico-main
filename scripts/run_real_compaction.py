@@ -26,6 +26,7 @@ from pico import (
 from pico.command_runner import CommandRunner, shell_argv
 from pico.config import load_project_env, provider_env
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
+from pico.run_projection import RunProjection
 from scripts.real_case_support import git_metadata, require_clean_runtime
 
 EVIDENCE_COUNT = 12
@@ -140,7 +141,8 @@ def run_command(workspace, command):
     }
 
 
-def analyze_run(events, task_state):
+def analyze_run(events):
+    events = tuple(events)
     kinds = [entry.kind for entry in events]
     turns = [entry for entry in events if entry.kind == "turn_metrics"]
     input_tokens = [
@@ -148,14 +150,21 @@ def analyze_run(events, task_state):
         for entry in turns
     ]
     input_tokens = [value for value in input_tokens if isinstance(value, int)]
-    compactions = [
-        {
-            "covered_event_count": len(entry.covered_event_ids),
-            "summary": entry.payload.get("content", ""),
-        }
-        for entry in events
-        if entry.kind == "compaction"
-    ]
+    compactions = []
+    replayed = RunProjection()
+    for entry in events:
+        before = replayed.working.to_dict() if entry.kind == "compaction" else None
+        replayed.apply_event(entry)
+        if entry.kind == "compaction":
+            after = replayed.working.to_dict()
+            compactions.append({
+                "event_id": entry.event_id,
+                "covered_event_count": len(entry.covered_event_ids),
+                "summary": entry.payload.get("content", ""),
+                "working_state_before": before,
+                "working_state_after": after,
+                "state_preserved": before == after,
+            })
     successful_mutations = [
         entry
         for entry in events
@@ -181,7 +190,7 @@ def analyze_run(events, task_state):
         if call["name"] == "read_file"
         and str(call["args"].get("path", "")).startswith("evidence/")
     ]
-    state = task_state.working
+    state = replayed.working
     return {
         "model_request_count": len(turns),
         "max_single_request_input_tokens": max(input_tokens, default=0),
@@ -192,6 +201,12 @@ def analyze_run(events, task_state):
         "successful_mutation_count": len(successful_mutations),
         "evidence_read_paths": evidence_read_paths,
         "compactions": compactions,
+        "working_state_preserved": bool(compactions)
+        and all(row["state_preserved"] for row in compactions)
+        and any(
+            row["working_state_before"][key]
+            for row in compactions for key in ("constraints", "decisions", "next_steps")
+        ),
         "working_state": state.to_dict(),
     }
 
@@ -270,7 +285,7 @@ def main(argv=None):
     )
     run_id = outcome.run_id
     events = agent.dependencies.run_store.read_events(run_id)
-    analysis = analyze_run(events, agent.run.task)
+    analysis = analyze_run(events)
     visible = run_command(workspace, VISIBLE_COMMAND)
     hidden = run_command(workspace, HIDDEN_COMMAND)
     patch_text = _git(workspace, "diff", "--binary", "--unified=1", "HEAD")
@@ -281,11 +296,7 @@ def main(argv=None):
         "compaction_triggered": analysis["compaction_count"] >= 1,
         "provider_session_reset": analysis["provider_session_reset_count"] >= 1,
         "observation_batch_used": analysis["observation_batch_count"] >= 1,
-        "working_state_preserved": bool(
-            analysis["working_state"]["constraints"]
-            and analysis["working_state"]["decisions"]
-            and analysis["working_state"]["next_steps"]
-        ),
+        "working_state_preserved": analysis["working_state_preserved"],
         "evidence_read_once_in_order": analysis["evidence_read_paths"]
         == [
             f"evidence/segment_{index:02d}.md"

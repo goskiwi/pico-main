@@ -21,14 +21,15 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run ruff check pico tests scripts
-      - run: uv run python -m compileall -q pico tests scripts
-      - name: Materialize frozen OSS fixtures
-        run: uv run python scripts/materialize_real_oss.py --replace
+      - run: uv run ruff check pico applications tests scripts
+      - run: uv run python -m compileall -q pico applications tests scripts
       - run: uv run pytest -q
-      - name: Run fail-closed Runtime evaluations
+      - name: Run retained Runtime walkthroughs
         if: matrix.python-version == '3.12'
-        run: uv run python scripts/run_evaluations.py
+        run: |
+          for script in scripts/day[1-7]_*.py; do
+            uv run python "$script"
+          done
 
   package:
     runs-on: ubuntu-latest

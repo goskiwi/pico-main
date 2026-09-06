@@ -5,10 +5,9 @@ from __future__ import annotations
 import atexit
 import uuid
 
-from ..contracts import ToolOutcome
 from ..run_store import RunStore
 from ..session_store import SessionStore
-from ..workspace import Workspace, normalize_relative_file
+from ..workspace import Workspace
 from .contracts import ChildFailure, ChildPatch, ChildRecord, ChildSpec, ChildSuccess
 from .integration import PatchIntegrator
 from .worktree import GitWorktree, require_clean_repository
@@ -57,115 +56,21 @@ class SubagentRunner:
     def __init__(self, parent, model_client_factory):
         self.parent = parent
         self.model_client_factory = model_client_factory
-        self._records_by_run: dict[str, dict[str, ChildRecord]] = {}
-        self._recovered_runs: set[str] = set()
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
         self.integration = PatchIntegrator(self)
         atexit.register(self.cleanup)
 
     def _parent_run_id(self):
-        if self.parent.run.task is None:
+        if self.parent.run.projection.contract is None:
             raise RuntimeError("subagent execution requires an active parent Run")
         return str(self.parent.run.projection.run_id)
 
     def _run_root(self, run_id):
         return self.parent.dependencies.run_store.run_dir(run_id) / "subagents"
 
-    def _records(self, run_id):
-        records = self._records_by_run.setdefault(run_id, {})
-        if run_id not in self._recovered_runs:
-            self._recover_records(run_id, records)
-            self._recovered_runs.add(run_id)
-        return records
-
-    def _recover_delegate(self, run_id, call, outcome, records):
-        spec = ChildSpec.model_validate(call.args)
-        if spec.role != "implement":
-            return
-        receipt = outcome.structured
-        try:
-            child_id = receipt["child_id"]
-            role = receipt["role"]
-            status = receipt["status"]
-            child_run_id = receipt["child_run_id"]
-            patch_receipt = receipt["patch"]
-            base_sha = patch_receipt["base_sha"]
-            raw_paths = patch_receipt["changed_paths"]
-            patch_sha256 = patch_receipt["sha256"]
-        except (KeyError, TypeError) as exc:
-            raise ValueError("invalid persisted delegate receipt") from exc
-        if not all(
-            isinstance(value, str) and value
-            for value in (child_id, child_run_id, base_sha, patch_sha256)
-        ):
-            raise ValueError("invalid persisted delegate receipt")
-        if role != "implement" or status != "completed":
-            raise ValueError("invalid persisted delegate receipt")
-        if child_id in records or not isinstance(raw_paths, list):
-            raise ValueError("invalid persisted delegate receipt")
-        changed_paths = tuple(normalize_relative_file(path) for path in raw_paths)
-        if not changed_paths or not set(changed_paths) <= set(
-            spec.allowed_write_paths
-        ):
-            raise ValueError("persisted Child paths exceed the delegate call scope")
-        subagent_root = self._run_root(run_id).resolve()
-        patch_path = (subagent_root / child_id / "patch.diff").resolve()
-        try:
-            patch_path.relative_to(subagent_root)
-        except ValueError as exc:
-            raise ValueError("persisted Child patch path escapes its Run") from exc
-        records[child_id] = ChildRecord(
-            child_id=child_id,
-            spec=spec,
-            base_sha=base_sha,
-            result=ChildSuccess(
-                child_run_id,
-                ChildPatch(
-                    changed_paths,
-                    str(patch_path),
-                    patch_sha256,
-                ),
-            ),
-        )
-
-    def _recover_integration(self, call, outcome, records):
-        try:
-            child_id = call.args["child_id"]
-            receipt_child_id = outcome.structured["child_id"]
-        except (KeyError, TypeError) as exc:
-            raise ValueError("invalid persisted integration receipt") from exc
-        if (
-            set(call.args) != {"child_id"}
-            or not isinstance(child_id, str)
-            or receipt_child_id != child_id
-        ):
-            raise ValueError("invalid persisted integration receipt")
-        record = records.get(child_id)
-        if record is None:
-            raise ValueError("persisted integration references an unknown Child")
-        record.mark_integrated()
-
-    def _recover_records(self, run_id, records):
-        calls = {}
-        for event in self.parent.dependencies.run_store.read_events(run_id):
-            if event.kind == "assistant_tool_call":
-                calls[event.call_id] = event
-                continue
-            if event.kind != "tool_result":
-                continue
-            call = calls.get(event.call_id)
-            if call is None or call.name not in {"delegate", "integrate_child"}:
-                continue
-            outcome = ToolOutcome.from_dict(event.payload["outcome"])
-            if outcome.status != "success":
-                continue
-            if call.name == "delegate":
-                self._recover_delegate(run_id, call, outcome, records)
-            else:
-                self._recover_integration(call, outcome, records)
 
     def _new_child_id(self, run_id):
-        records = self._records(run_id)
+        records = self.parent.run.projection.children.records
         while True:
             child_id = "child_" + uuid.uuid4().hex[:12]
             if child_id not in records:
@@ -176,11 +81,6 @@ class SubagentRunner:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _record(self, run_id, child_id):
-        record = self._records(run_id).get(str(child_id))
-        if record is None:
-            raise ValueError(f"unknown child: {child_id}")
-        return record
 
     def _release_worktree(self, run_id, child_id):
         return self._worktrees.pop((run_id, child_id), None)
@@ -198,11 +98,9 @@ class SubagentRunner:
         child_run_id = result.child_run_id if result is not None else ""
         if not child_run_id:
             raise ValueError(f"child has no Run receipt: {record.child_id}")
-        entries, projection = self._child_run_store(run_id, record).load_run(
+        _log, projection = self._child_run_store(run_id, record).load_run(
             child_run_id
         )
-        if not entries:
-            raise ValueError(f"child Run Log is missing: {record.child_id}")
         return projection
 
     def _receipt(self, run_id, record):
@@ -326,12 +224,11 @@ class SubagentRunner:
                 patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
                 patch = ChildPatch(
                     changed_paths,
-                    str(patch_path.resolve()),
                     handle.write_patch(patch_path),
                 )
             record.result = ChildSuccess(child_run_id, patch)
         except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
-            if child is not None and child.run.task is not None:
+            if child is not None and child.run.projection.contract is not None:
                 child_run_id = child.run.projection.run_id
             record.result = ChildFailure(
                 self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
@@ -351,7 +248,6 @@ class SubagentRunner:
         run_id = self._parent_run_id()
         child_id = self._new_child_id(run_id)
         record = ChildRecord(child_id=child_id, spec=spec)
-        self._records(run_id)[child_id] = record
         try:
             if spec.role == "implement":
                 record.base_sha = require_clean_repository(
@@ -377,28 +273,6 @@ class SubagentRunner:
     def integrate_child(self, child_id):
         return self.integration.integrate_child(str(child_id))
 
-    def completion_issue(self):
-        records = self._records(self._parent_run_id())
-        running = sorted(
-            child_id
-            for child_id, record in records.items()
-            if record.result is None
-        )
-        if running:
-            return "children are still running: " + ", ".join(running)
-        unapplied = sorted(
-            child_id
-            for child_id, record in records.items()
-            if record.spec.role == "implement"
-            and isinstance(record.result, ChildSuccess)
-            and record.result.patch is not None
-            and not record.result.patch.integrated
-        )
-        if unapplied:
-            return "completed implementation patches are not integrated: " + ", ".join(
-                unapplied
-            )
-        return ""
 
     def cleanup(self):
         for handle in list(self._worktrees.values()):

@@ -21,7 +21,6 @@ from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
 
@@ -63,10 +62,10 @@ def activate(
         agent.dependencies.run_store,
     )
     agent.run.run_log = run_log
-    first = run_log.append_user(contract)
-    agent.run.projection = RunProjection().apply_event(first)
+    run_log.append_user(contract)
+    agent.run.projection = run_log.projection
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
-    return agent.run.task, run_log
+    return agent.run.projection, run_log
 
 
 def apply_edit(agent, call_id, old_text, new_text):
@@ -81,7 +80,7 @@ def apply_edit(agent, call_id, old_text, new_text):
         },
         call_id,
     )
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+    agent.run.run_log.append_tool_call(call)
     return agent.tools.execute_pending(call.call_id)
 
 
@@ -249,9 +248,8 @@ def recovery_experiment(root):
         },
         "call_interrupted_write",
     )
-    original.apply_run_event(run_log.append_tool_call(call))
-    original.apply_run_event(
-        run_log.append_tool_started(
+    run_log.append_tool_call(call)
+    run_log.append_tool_started(
             call,
             effect_scope="workspace",
             potential_effects=[
@@ -262,7 +260,6 @@ def recovery_experiment(root):
                 }
             ],
         )
-    )
     (root / "interrupted.txt").write_text(
         "side effect happened\n",
         encoding="utf-8",
@@ -426,7 +423,7 @@ def active_reset_experiment(root):
     run_id = agent.run.projection.run_id
 
     agent.reset()
-    state_preserved_until_runner_finishes = agent.run.task is not None
+    state_preserved_until_runner_finishes = agent.run.projection.contract is not None
     reset_reason = agent.run.execution_context.token.reason
     release.set()
     thread.join(timeout=3)
@@ -446,7 +443,7 @@ def active_reset_experiment(root):
     assert (root / "late.txt").read_text(encoding="utf-8") == (
         "tracked side effect\n"
     )
-    assert agent.run.task is None
+    assert agent.run.projection.contract is None
     assert agent.session.active_run_id == ""
 
     return {
@@ -456,7 +453,7 @@ def active_reset_experiment(root):
         ),
         "terminal_event_order": [event.kind for event in events[-2:]],
         "run_outcome": run_outcome.to_dict(),
-        "active_run_state_cleared": agent.run.task is None,
+        "active_run_state_cleared": agent.run.projection.contract is None,
     }
 
 
@@ -481,7 +478,7 @@ def _passing_runner(_root):
 
 def _execute_parent_tool(parent, name, args, call_id):
     call = ToolCall(name, args, call_id)
-    parent.apply_run_event(parent.run.run_log.append_tool_call(call))
+    parent.run.run_log.append_tool_call(call)
     return parent.tools.execute_pending(call.call_id)
 
 

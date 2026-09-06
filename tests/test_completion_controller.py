@@ -9,7 +9,6 @@ from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import content_revision, file_revision
 from pico.run_log import RunEvent, RunLog
-from pico.run_projection import RunProjection
 from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
 
@@ -54,8 +53,8 @@ def active_agent(tmp_path, requirements, verification_command=""):
     )
     contract = TaskContract("task", **requirements)
     log = RunLog("run", "task", agent.session.id, agent.dependencies.run_store)
-    first = log.append_user(contract)
-    agent.run.projection = RunProjection().apply_event(first)
+    log.append_user(contract)
+    agent.run.projection = log.projection
     agent.run.run_log = log
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return agent
@@ -141,7 +140,7 @@ def test_ask_mode_requires_successful_observation(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
     assert CompletionController(agent).assess("done").status == "observation_required"
     call = ToolCall("read_file", {"path": "README.md"}, "read")
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+    agent.run.run_log.append_tool_call(call)
     assert agent.tools.execute_pending(call.call_id).status == "success"
     assert CompletionController(agent).assess("done").allowed
 
@@ -155,7 +154,7 @@ def test_no_change_requires_successful_observation(tmp_path):
     assert agent.run.evidence.touched_paths == ["README.md"]
     assert agent.run.evidence.changed_paths == []
     call = ToolCall("read_file", {"path": "README.md"}, "read_after_revert")
-    agent.apply_run_event(agent.run.run_log.append_tool_call(call))
+    agent.run.run_log.append_tool_call(call)
     assert agent.tools.execute_pending(call.call_id).status == "success"
     assert CompletionController(agent).assess("done").allowed
 
@@ -280,7 +279,7 @@ def test_repaired_partial_requires_current_verification(tmp_path):
 
 def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
-    agent.dependencies.subagents = SimpleNamespace(
+    agent.run.projection.children = SimpleNamespace(
         completion_issue=lambda: "child task is still running"
     )
 

@@ -8,7 +8,7 @@ from pico.delivery import FinalDiff
 from pico.history import RunHistory
 from pico.run_cli import run_main
 from pico.run_log import RunEvent, RunLog, replay_events
-from pico.run_projection import RunOutcome
+from pico.run_projection import RunOutcome, RunProjection
 from pico.run_store import RunStore
 from pico.task_state import TaskContract
 
@@ -40,7 +40,9 @@ def append(store, run_id, kind, payload=None):
         payload = {
             "contract": task_contract(payload.pop("content")).to_dict()
         }
-    return store.append_event(run_id, "task", "session", kind, payload)
+    log = (store.load_run(run_id)[0] if store.has_events(run_id)
+           else RunLog(run_id, "task", "session", store))
+    return log.append(kind, payload)
 
 
 def read_outcome(call_id="read"):
@@ -102,7 +104,7 @@ def test_replay_snapshots_one_iterable_and_validates_event_identity(tmp_path):
 
     replayed = replay_events(iter(events))
     assert replayed.run_id == "run"
-    assert replayed.task.contract.goal == "inspect"
+    assert replayed.contract.goal == "inspect"
 
     malformed = RunEvent(
         event_id="arbitrary",
@@ -123,12 +125,80 @@ def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):
     append(store, "run", "user_message", {"content": "inspect"})
     append(store, "run", "run_started", {"task_id": "task", "workspace_root": "/w"})
 
-    events, loaded = store.load_run("run")
+    log, loaded = store.load_run("run")
+    events = log.events
     replayed = store.replay("run")
 
     assert events == tuple(store.read_events("run"))
     assert loaded.summary() == replayed.summary()
     assert loaded.last_cursor.event_id == events[-1].event_id
+
+
+def test_load_run_reads_once_and_checks_protocol_once_per_event(tmp_path, monkeypatch):
+    store = RunStore(tmp_path / "runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(task_contract())
+    call = ToolCall("read_file", {"path": "README.md"}, "read")
+    log.append_tool_call(call)
+    reads = []
+    checks = []
+    original_read = store._read_events
+    original_check = RunProjection.check_event
+
+    def read(run_id):
+        reads.append(run_id)
+        return original_read(run_id)
+
+    def check(projection, event):
+        checks.append(event.kind)
+        return original_check(projection, event)
+
+    monkeypatch.setattr(store, "_read_events", read)
+    monkeypatch.setattr(RunProjection, "check_event", check)
+    restored, projection = store.load_run("run")
+    assert reads == ["run"]
+    assert checks == ["user_message", "assistant_tool_call"]
+    assert restored.pending_tool_call() == call
+    assert projection.pending_call_id == call.call_id
+
+    started = restored.append_tool_started(call, effect_scope="none", potential_effects=[])
+    assert started.sequence == 3
+    assert started.event_id == "run:event:000003"
+    assert checks == ["user_message", "assistant_tool_call", "tool_started"]
+
+
+def test_log_passes_complete_event_to_storage_before_advancing_state(tmp_path, monkeypatch):
+    store = RunStore(tmp_path / "runs")
+    log = RunLog("run", "task", "session", store)
+    persist = store._append_event
+    accepted = []
+
+    def save(event):
+        assert isinstance(event, RunEvent)
+        assert log.events == ()
+        accepted.append(event)
+        persist(event)
+
+    monkeypatch.setattr(store, "_append_event", save)
+    first = log.append_user(task_contract())
+    assert first is accepted[0]
+    assert log.events == (first,)
+    with pytest.raises(ValueError, match="only one user_message"):
+        log.append_user(task_contract())
+    assert len(accepted) == 1
+
+
+def test_loaded_log_rejects_another_run_identity_before_installing_state(tmp_path):
+    store = RunStore(tmp_path / "runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(task_contract())
+    other = store.events_path("other")
+    other.parent.mkdir()
+    other.write_bytes(store.events_path("run").read_bytes())
+    with pytest.raises(ValueError, match="belongs to another run"):
+        store.load_run("other")
+    with pytest.raises(ValueError, match="belongs to another run"):
+        store.read_events("other")
 
 
 def test_projection_tracks_one_pending_tool_transaction(tmp_path):
@@ -256,7 +326,7 @@ def test_task_contract_is_first_event_and_goal_cannot_be_overwritten(tmp_path):
     original = "repair the original task"
     append(store, "run", "user_message", {"content": original})
     append(store, "run", "run_resumed", {"task_id": "task", "workspace_root": "/w"})
-    assert store.replay("run").task.contract.goal == original
+    assert store.replay("run").contract.goal == original
     with pytest.raises(ValueError, match="only one user_message"):
         append(store, "run", "user_message", {"content": "replace"})
 
@@ -333,20 +403,6 @@ def test_rejects_legacy_payload_shapes():
         )
 
 
-def test_tool_result_rejects_workspace_revision_and_correction_fields(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
-    log = RunLog("run", "task", "session", store)
-    log.append_user(task_contract())
-    log.append_model_instruction("historical fact that must be summarized")
-    call = ToolCall("read_file", {"path": "README.md"}, "read")
-    log.append_tool_call(call)
-    log.append_tool_started(call, effect_scope="none", potential_effects=[])
-    payload = read_outcome().to_dict()
-    assert "correction_action" not in payload
-    with pytest.raises(TypeError):
-        log.append_tool_result(read_outcome(), workspace_revision=0)
-
-
 def test_mismatched_tool_result_is_not_persisted(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
@@ -405,12 +461,8 @@ def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_final(
-        "done",
-        FinalDiff("diff_0000000000000000_0000000000", 1),
-    )
     with pytest.raises(ValueError, match="does not match net changes"):
-        store.replay("run")
+        log.append_final("done", FinalDiff("diff_0000000000000000_0000000000", 1))
 
 
 def test_run_store_rejects_escaping_run_ids(tmp_path):
@@ -424,10 +476,10 @@ def test_find_active_run_uses_last_event_time(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     append(store, "run_z", "user_message", {"content": "old"})
     append(store, "run_a", "user_message", {"content": "new"})
-    run_id, events, projection = store.find_active_run("session")
-    assert run_id == "run_a"
-    assert events[0].content == "new"
-    assert projection.task.contract.goal == "new"
+    log, projection = store.find_active_run("session")
+    assert log.run_id == "run_a"
+    assert log.events[0].content == "new"
+    assert projection.contract.goal == "new"
 
 
 def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
@@ -527,7 +579,7 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     expected = [second.event_id, later.event_id]
 
     assert [event.event_id for event in RunHistory(log.events).active_events()] == expected
-    restored = RunLog.restore("run", store)
+    restored, _projection = store.load_run("run")
     assert [event.event_id for event in RunHistory(restored.events).active_events()] == expected
 
 

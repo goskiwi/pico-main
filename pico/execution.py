@@ -16,18 +16,6 @@ class ExecutionCancelled(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class ExecutionBudget:
-    """One immutable resource contract for a command execution attempt."""
-
-    deadline: float
-    max_output_bytes: int
-
-    def __post_init__(self):
-        if int(self.max_output_bytes) < 1024:
-            raise ValueError("execution max_output_bytes must be at least 1024")
-
-
 @dataclass
 class CancellationToken:
     _event: threading.Event = field(default_factory=threading.Event)

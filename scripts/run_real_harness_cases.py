@@ -422,9 +422,8 @@ def run_resume(args, runtime, workspace):
     preimage = original.dependencies.artifacts.write_workspace_preimage(
         run_id, call.call_id, "recovery.txt", target
     )
-    original.apply_run_event(original.run.run_log.append_tool_call(call))
-    original.apply_run_event(
-        original.run.run_log.append_tool_started(
+    original.run.run_log.append_tool_call(call)
+    original.run.run_log.append_tool_started(
             call,
             effect_scope="workspace",
             potential_effects=[
@@ -435,7 +434,6 @@ def run_resume(args, runtime, workspace):
                 }
             ],
         )
-    )
     target.write_text("partial\n", encoding="utf-8")
     original.run.execution_context = None
 
