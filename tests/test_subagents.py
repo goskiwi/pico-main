@@ -1,6 +1,7 @@
 import shlex
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -204,8 +205,25 @@ def build_parent(
 
 
 def run_active(parent, call):
-    parent.run.run_log.append_tool_call(call)
-    return parent.tools.execute_pending(call.call_id)
+    group = parent.run.run_log.append_tool_calls((call,))
+    return parent.tools.execute_pending_group(group.event_id)[0]
+
+
+def test_child_inherits_parent_parallel_tool_limit(tmp_path):
+    parent, _runner = build_parent(
+        repository(tmp_path), lambda _spec: explore_client()
+    )
+    parent.config = replace(parent.config, max_parallel_tools=2)
+    record = ChildRecord(
+        "child_0123456789ab",
+        ChildSpec(role="explore", task="Inspect the repository"),
+    )
+
+    child = parent.dependencies.subagents._build_child(
+        parent.run.projection.run_id, record
+    )
+
+    assert child.config.max_parallel_tools == 2
 
 
 class DeadlineRecordingClient(FakeModelClient):
@@ -567,20 +585,20 @@ def test_real_child_integration_recovers_only_confirmed_application(tmp_path, ph
     child_id = receipt["child_id"]
     log = parent.run.run_log
     call = ToolCall("integrate_child", {"child_id": child_id}, "interrupted_integration")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     if phase == "before_apply":
         with (
             patch("pico.subagents.integration.PatchIntegrator._publish", side_effect=SystemExit("crash")),
             pytest.raises(SystemExit),
         ):
-            parent.tools.execute_pending(call.call_id)
+            parent.tools.execute_pending_group(log.pending_group_id())
         assert not (root / "feature.py").exists()
     else:
         with (
             patch.object(log, "append_tool_result", side_effect=OSError("crash before result")),
             pytest.raises(OSError),
         ):
-            parent.tools.execute_pending(call.call_id)
+            parent.tools.execute_pending_group(log.pending_group_id())
         assert (root / "feature.py").read_text() == "feature\n"
     if phase == "content_conflict":
         (root / "feature.py").write_text("external change\n")
@@ -699,12 +717,12 @@ def test_child_delivers_recorded_gitignored_changes(tmp_path, mixed, interrupted
     assert child.evidence.changed_paths == paths
     call = ToolCall("integrate_child", {"child_id": record.child_id}, "integrate")
     if interrupted:
-        parent.run.run_log.append_tool_call(call)
+        parent.run.run_log.append_tool_calls((call,))
         with (
             patch.object(parent.run.run_log, "append_tool_result", side_effect=OSError("crash")),
             pytest.raises(OSError),
         ):
-            parent.tools.execute_pending(call.call_id)
+            parent.tools.execute_pending_group(parent.run.run_log.pending_group_id())
         parent = Pico(
             FakeModelClient([ModelAction.final("Files delivered.")]), Workspace.build(root),
             config=parent.config, session=parent.session.store.load(parent.session.id),

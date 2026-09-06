@@ -132,14 +132,10 @@ def _command(workspace, command):
 def _requested_calls(events):
     calls = []
     for event in events:
-        if event.kind == "assistant_tool_call":
-            calls.append(
-                {"call_id": event.call_id, "name": event.name, "args": event.args}
-            )
-        elif event.kind == "assistant_tool_batch":
+        if event.kind == "assistant_tool_calls":
             calls.extend(
                 {"call_id": call.call_id, "name": call.name, "args": call.args}
-                for call in event.batch_calls
+                for call in event.tool_calls
             )
     return calls
 
@@ -422,7 +418,7 @@ def run_resume(args, runtime, workspace):
     preimage = original.dependencies.artifacts.write_workspace_preimage(
         run_id, call.call_id, "recovery.txt", target
     )
-    original.run.run_log.append_tool_call(call)
+    original.run.run_log.append_tool_calls((call,))
     original.run.run_log.append_tool_started(
             call,
             effect_scope="workspace",

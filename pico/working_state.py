@@ -159,8 +159,10 @@ class WorkingState:
 
     def apply_event(self, event):
         payload = dict(event.payload)
-        if event.kind == "assistant_tool_call" and event.name == "update_working_state":
-            self._pending_updates[event.call_id] = dict(event.args)
+        if event.kind == "assistant_tool_calls":
+            for call in event.tool_calls:
+                if call.name == "update_working_state":
+                    self._pending_updates[call.call_id] = dict(call.args)
         elif event.kind == "tool_result":
             update = self._pending_updates.pop(event.call_id, None)
             outcome = dict(payload.get("outcome", {}) or {})

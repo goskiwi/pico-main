@@ -60,7 +60,7 @@ def run_resume_accepted(args, runtime, workspace):
     preimage = original.dependencies.artifacts.write_workspace_preimage(
         run_id, call.call_id, "recovery.txt", target
     )
-    original.run.run_log.append_tool_call(call)
+    original.run.run_log.append_tool_calls((call,))
     original.run.run_log.append_tool_started(call, effect_scope="workspace", potential_effects=[{
         "path": "recovery.txt", "before_state": file_revision(target),
         "before_artifact_id": preimage["artifact_id"],

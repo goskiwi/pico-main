@@ -6,7 +6,7 @@
 
 ## 单一 Run Log
 
-将 TaskContract、恢复 `user_guidance`、单 Tool Call 或纯 Observation Batch、逐 Call `tool_started/tool_result`、Verification、Compaction 和终态写入同一 strict append-only Run Log。实时执行与恢复共用一个 RunProjection，重建 Task、Evidence、Metrics、Pending Call IDs 与最终 Diff receipt。
+将 TaskContract、恢复 `user_guidance`、单 Tool Call 或同一响应的有序 Tool Call group、逐 Call `tool_started/tool_result`、Verification、Compaction 和终态写入同一 strict append-only Run Log。实时执行与恢复共用一个 RunProjection，重建 Task、Evidence、Metrics、Pending Call IDs 与最终 Diff receipt。
 
 ## Crash Resume
 
@@ -16,7 +16,7 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 
 ## 长上下文治理
 
-稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、root→CWD 的独立 `repository_instructions`、Task Request 和非空的有界不可信 Context。AGENTS.md 属于可覆盖的项目指令，不是 system policy，也不参加 History Compaction；当前用户请求冲突时优先。恢复输入从持久 `user_guidance` Fact 投影为最后的 latest request；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前，因此重建 Session 时当前进度不会被原始任务中的步骤重新覆盖。空 Repository Instructions、RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 在 build 前显式准备，以完整 Tool Call/Result 批次为边界；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。七类 Effective Recovery Context 只是教学组合视图。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用近期完整事务的有界投影继续。
+稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、root→CWD 的独立 `repository_instructions`、Task Request 和非空的有界不可信 Context。AGENTS.md 属于可覆盖的项目指令，不是 system policy，也不参加 History Compaction；当前用户请求冲突时优先。恢复输入从物理 Run Log 中最新的 `user_guidance` Fact 投影为最后的 latest request，因此该事件被 Compaction 覆盖后仍不会丢失；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前。空 Repository Instructions、RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 的持久覆盖不切开一次模型响应，模型可见 History 则按每个完成的 Call/Result 独立投影和计入预算；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用严格受预算约束的近期 Call 事实或精简执行收据继续。
 
 ## 工具安全
 
@@ -43,15 +43,15 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 已验证的 Projection 状态；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
 是展示格式，不是额外的运行时对象。
 
-每个工具只在一处声明 Schema、权限、校验、Runner 与 effects。单次与批次共用参数准备、
-Runner 调用和结果归类；批次保留整批准入与按原序记账。PromptBuilder 是唯一 Prompt 对象，
+每个工具只在一处声明 Schema、权限、校验、Runner、effects 与 concurrency。工具默认独占，
+明确标记的读取工具可以并行；同一响应按连续并行段和独占屏障调度，每个调用独立准入并按原序记账。PromptBuilder 是唯一 Prompt 对象，
 预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
 派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。
 
 跨源凭据转发、暂存重命名、多个 Child 顺序集成与中断应用确认已由全链路修复覆盖。
 单 Run Log 仍采用单写者模型；没有引入通用多写者或硬实时执行框架。
 
-工具表、单次与批量准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
+工具表、单次与分组调用准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
 不存在“Config 已更新但消费者仍用初始化副本”的行为。验证额外变更进入持久 Evidence，
 不能靠再次提交绕过。Git 交付按命令禁用 hooks；Child Git 操作使用 Parent 剩余时间。
 Provider 保留 urllib 代理与同源重定向，拒绝跨源跳转，连接后以同一请求 deadline 限制响应头和响应体，
@@ -62,4 +62,4 @@ RunHistory 只读选择和渲染历史、生成压缩计划；RunLog 验证并�
 负责恢复对账。当前代码回归不再包含历史 LLM JSON 成绩断言，历史报告仅保留为运行记录，
 正式 LLM 报告仍要求干净提交。
 
-SessionStore 直接创建或加载 Session；Pico 接收现成对象，不再包装裸字典。PicoConfig 构造即校验，修改走 dataclasses.replace。工具表只保存未绑定函数，单次调用与 Observation Batch 都显式传入本次 ToolContext，不通过回调寻找当前调用，也不重建整张工具表。Prompt 缓存只保留 Prompt 和工具名；详细预算诊断仍供 Day3/Day5 使用。CodingResult 只在 RunOutcome 外增加 Git 交付信息，变化路径统一读取 outcome.changed_paths。
+SessionStore 直接创建或加载 Session；Pico 接收现成对象，不再包装裸字典。PicoConfig 构造即校验，修改走 dataclasses.replace。工具表只保存未绑定函数，单次和分组调用都显式传入本次 ToolContext，不通过回调寻找当前调用，也不重建整张工具表。Prompt 缓存只保留 Prompt 和工具名；详细预算诊断仍供 Day3/Day5 使用。CodingResult 只在 RunOutcome 外增加 Git 交付信息，变化路径统一读取 outcome.changed_paths。

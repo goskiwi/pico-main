@@ -1,6 +1,6 @@
 # Agent Runtime Architecture
 
-Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` owns identity, TaskContract, WorkingState, terminal fields, Evidence, Metrics, Child receipts and the Pending Tool transaction for live execution and replay. RunLog checks the next event, persists it, then advances that same Projection; callers do not separately apply the event. A transaction is either one ordinary Call or one ordered pure-Observation Batch. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
+Pico uses `events.jsonl` as the durable source for each Run's process Facts. One `RunProjection` owns identity, TaskContract, WorkingState, terminal fields, Evidence, Metrics, Child receipts and the pending calls from one model response for live execution and replay. RunLog checks the next event, persists it, then advances that same Projection; callers do not separately apply the event. Each Tool Call owns its Started/Result transaction even when several calls came from one response. Workspace, RepoMap and Artifact stores remain authoritative for their current content.
 
 ## Current execution paths
 
@@ -31,8 +31,8 @@ ceiling and one monotonic Turn deadline.
 AgentLoop
   -> PromptBuilder
   -> OpenAICompatibleModelClient -> ModelAction.tool
-  -> append assistant_tool_call Fact
-  -> ToolRuntime resolves the canonical pending ToolCall from that durable Fact
+  -> append one assistant_tool_calls Fact
+  -> ToolRuntime resolves the canonical ordered Calls from that durable Fact
   -> ToolRuntime validates Registry / Surface / Schema / Policy / Approval
   -> ToolRuntime enforces protocol/repeat guards and captures effects/preimages
   -> private tool_execution helpers calculate preview/redaction/drift/diff/transitions/classification
@@ -50,22 +50,23 @@ the private `tool_execution.py` module; transaction order and persistence stay i
 Concrete runners receive only a `ToolContext` rather than the whole Pico object.
 The registry stores unbound `runner(context, args)`, validator and effect-planner functions.
 ToolRuntime creates a fresh Context for each Call with explicit Run id, Call id, WorkingState
-and ExecutionContext values. Single and batch execution use the same registry; a Batch does not
-rebuild it for each worker or consult mutable pending-call state through callbacks.
+and ExecutionContext values. Every response uses the same call-sequence path and registry; workers
+do not rebuild it or consult mutable pending-call state through callbacks.
 
-### Observation Batch
+### Per-tool concurrency scheduling
 
-One Provider response may contain two to four independent `list_files`, `read_file`, `search`, or
-`read_artifact` calls. AgentLoop persists the complete ordered `assistant_tool_batch` first.
-ToolRuntime performs whole-batch policy, budget, surface and argument preflight before execution.
-Any execution, mutation, state, orchestration or completion call makes the whole Batch rejected;
-every Call still receives one `rejected/not_started/none` Result.
+One Provider response may contain multiple Tool Calls. AgentLoop persists the complete ordered
+`assistant_tool_calls` Fact first. Every registry entry is exclusive by default; `list_files`,
+`read_file`, `search` and `read_artifact` explicitly declare parallel concurrency. ToolRuntime splits
+the response into consecutive parallel segments separated by exclusive calls. Parallel segments
+use a bounded worker pool; exclusive calls execute alone and therefore form ordering barriers.
 
-For an accepted Batch, the main thread writes all `tool_started` Facts in original order. A bounded
-worker pool runs only the raw read-only Runners with per-Call ToolContext values. The main thread
-then performs redaction, Artifact materialization, Projection updates and `tool_result` appends in
-the original Call order. All native `function_call_output` values return to the Provider in one
-continuation. A failed Observation does not cancel valid siblings.
+Every call is admitted independently against the current Surface, Schema, Policy, Approval and
+remaining execution budget. A rejected call receives `rejected/not_started/none`, while valid
+siblings continue. The main thread writes `tool_started` immediately before the corresponding
+segment executes and appends `tool_result` values in original call order. Redaction, Artifact
+materialization and Projection updates remain single-writer operations. All native
+`function_call_output` values return to the Provider in one continuation.
 
 ### Final submission
 
@@ -123,8 +124,7 @@ user_message
 user_guidance
 run_started / run_resumed
 model_requested / turn_metrics
-assistant_tool_call
-assistant_tool_batch
+assistant_tool_calls
 tool_started
 tool_result
 model_instruction
@@ -157,7 +157,7 @@ Final Diff content or descriptor write can therefore be retried by Resume or Res
 
 Before execution, `tool_started` records:
 
-- stable call ID bound to the persisted `assistant_tool_call`;
+- stable call ID bound to the persisted `assistant_tool_calls`;
 - effect scope;
 - exact potential paths;
 - each path's before state/revision and matching transaction preimage.
@@ -173,10 +173,11 @@ After execution, `tool_result` records the canonical ToolOutcome. On resume:
 - mutating tool without enumerable paths: append unknown result;
 - never replay an unfinished non-idempotent tool automatically.
 
-For an interrupted Observation Batch, recovery preserves an existing Result prefix, marks every
-started suffix Call `operation_interrupted/none`, and marks every unstarted suffix Call
-`operation_not_started/none`. It never replays the Runner. The whole Batch, including every Result,
-is one indivisible Compaction/recent-history unit.
+For interrupted call sequences, recovery preserves an existing Result prefix, reconciles every
+started suffix Call from its own declared effects, and marks every unstarted suffix Call
+`operation_not_started/none`. It never replays a Runner. The durable response envelope preserves
+the original order and remains one Compaction coverage boundary; model-visible recent History is
+projected as independently bounded Call/Result facts.
 
 ToolOutcome keeps three explicit state dimensions for direct inspection:
 
@@ -205,8 +206,8 @@ Empty repository instructions, RepoMap, WorkingState and History sections are no
 ordinary project-document bodies are not preloaded. Repository instructions have one 32 KiB total
 byte limit and stay outside History compaction.
 Normal Tool continuation appends native `function_call` and `function_call_output` items to the same
-manual Responses replay instead of rebuilding or resending the dynamic suffix. Observation Batch
-Results are appended together in original Call order before the next Provider request.
+manual Responses replay instead of rebuilding or resending the dynamic suffix. Grouped Results are
+appended together in original Call order before the next Provider request.
 
 Native Function Schemas remain in the Responses `tools` field rather than being copied into
 instructions. For every fresh model turn, AgentLoop computes the schemas currently admitted by the
@@ -223,12 +224,14 @@ AgentLoop caches only `(ModelPrompt, tool_names)` for continuation. Prompt build
 (section budgets, token estimates and history projection details) remain available to the teaching
 scripts and tests, but are not copied into the loop's cached state.
 
-After a complete Action transaction, Provider-reported `input_tokens` is compared directly with
-`provider_context_limit_tokens - compaction_reserve_tokens`. Reaching that high watermark resets the
-continuation and lets the next fresh Prompt compact/rebuild from RunLog. Missing usage causes no
-prediction; output tokens, local Tool Result size and `max_new_tokens` are not combined into a
-synthetic next-request estimate. A typed Provider context overflow still performs one reset,
-Compaction attempt and retry; a second consecutive overflow propagates.
+After a complete Action transaction, AgentLoop calculates the next continuation from values already
+known: Provider-reported input and output tokens plus the tokenizer count of the actual bounded Tool
+Results. Reaching `provider_context_limit_tokens - compaction_reserve_tokens` resets the continuation
+before another request and lets the next fresh Prompt compact/rebuild from RunLog. This is not a
+worst-case reservation: tools have already completed and their full results are durable, with large
+model-facing output stored as bounded previews plus Artifacts. Missing Provider usage falls back to
+local fresh-Prompt counting and typed overflow. A typed Provider context overflow still performs one
+reset, Compaction attempt and retry; a second consecutive overflow propagates.
 
 Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare
 Compaction: an isolated Provider session summarizes historical facts into exactly two semantic
@@ -323,7 +326,8 @@ while preserving the Workspace.
 
 The Parent exposes two synchronous Tools. `delegate` creates exactly one Child with role `explore`
 or `implement`; `integrate_child` accepts exactly one completed implementation receipt by child ID.
-There is no batch request, dependency graph, background queue, or worker-pool scheduler.
+There is no background or parallel Child scheduler. Several delegate calls from one model response
+remain exclusive and execute in order; each Child still completes before the next starts.
 
 An explore Child uses Ask-mode Tools against the Parent Workspace and does not create a Worktree.
 An implement Child must declare non-empty allowed write paths and always runs in a dedicated Git
@@ -404,7 +408,7 @@ the active request deadline/cancellation, and reports missing dependencies or tr
 Artifact pages require at least four bytes and advance across complete UTF-8 characters.
 
 Tool limits apply separately to each ask/resume request. The Run's cumulative metrics are retained
-for reporting; single calls, batches and model tool surfaces consume one shared remaining request
+for reporting; single calls, grouped calls and model tool surfaces consume one shared remaining request
 budget. latest Session selection checks the associated Run's terminal state, and run show/events
 resolve the same workspace root as normal startup.
 

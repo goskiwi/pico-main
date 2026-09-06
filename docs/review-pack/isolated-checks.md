@@ -13,7 +13,7 @@
 与面试主线对应的边界由 `tests/test_checks.py` 验证：
 
 - Ask 不暴露执行工具，未配置执行器时也不安装工具。
-- 非法参数在执行前被拒绝，执行不能混入只读 Observation Batch。
+- 非法参数在执行前被拒绝；`run_check` 默认 exclusive，与相邻读取之间形成执行屏障。
 - 执行失败进入 RunLog，执行器接收当前请求的 Deadline。
 - 模型自行设计的检查通过，不替代 CompletionController 的固定验证，也不能绕过验证失败。
 

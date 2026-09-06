@@ -82,8 +82,8 @@ def apply_edit(agent, call_id, old_text, new_text):
         },
         call_id,
     )
-    agent.run.run_log.append_tool_call(call)
-    return agent.tools.execute_pending(call.call_id)
+    group = agent.run.run_log.append_tool_calls((call,))
+    return agent.tools.execute_pending_group(group.event_id)[0]
 
 
 def completion_experiment(root):
@@ -249,7 +249,7 @@ def recovery_experiment(root):
         },
         "call_interrupted_write",
     )
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
     run_log.append_tool_started(
             call,
             effect_scope="workspace",
@@ -315,10 +315,11 @@ def recovery_experiment(root):
         and event.payload.get("recovered_from_interruption") is True
     ]
     original_calls = [
-        event
+        call
         for event in events
-        if event.kind == "assistant_tool_call"
-        and event.call_id == "call_interrupted_write"
+        if event.kind == "assistant_tool_calls"
+        for call in event.tool_calls
+        if call.call_id == "call_interrupted_write"
     ]
     original_starts = [
         event
@@ -470,8 +471,8 @@ def _passing_runner(_root):
 
 def _execute_parent_tool(parent, name, args, call_id):
     call = ToolCall(name, args, call_id)
-    parent.run.run_log.append_tool_call(call)
-    return parent.tools.execute_pending(call.call_id)
+    group = parent.run.run_log.append_tool_calls((call,))
+    return parent.tools.execute_pending_group(group.event_id)[0]
 
 
 def child_delegation_experiment(root):

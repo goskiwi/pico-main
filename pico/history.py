@@ -1,6 +1,7 @@
 """Read-only history selection, rendering and compaction planning over Run facts."""
 
 import json
+from dataclasses import dataclass
 
 from .contracts import ToolOutcome
 
@@ -9,14 +10,21 @@ CONTEXT_KINDS = frozenset(
     {
         "user_message",
         "user_guidance",
-        "assistant_tool_call",
-        "assistant_tool_batch",
+        "assistant_tool_calls",
         "tool_result",
         "model_instruction",
         "assistant_final",
         "compaction",
     }
 )
+
+
+@dataclass(frozen=True)
+class _ProjectedFact:
+    kind: str
+    payload: dict
+    source_event_ids: tuple[str, ...]
+    artifact_id: str = ""
 
 
 class RunHistory:
@@ -27,7 +35,7 @@ class RunHistory:
         entry = next(
             (
                 candidate
-                for candidate in reversed(self.active_events())
+                for candidate in reversed(self._events)
                 if candidate.kind == "user_guidance"
             ),
             None,
@@ -35,21 +43,17 @@ class RunHistory:
         return entry.content if entry is not None else ""
 
     def context_events(self):
-        calls = {
-            call_id
+        call_ids = {
+            call.call_id
             for entry in self._events
-            for call_id in (
-                (entry.call_id,)
-                if entry.kind == "assistant_tool_call"
-                else tuple(call.call_id for call in entry.batch_calls)
-            )
-            if entry.kind in {"assistant_tool_call", "assistant_tool_batch"} and call_id
+            if entry.kind == "assistant_tool_calls"
+            for call in entry.tool_calls
         }
         return tuple(
             entry
             for entry in self._events
             if entry.kind in CONTEXT_KINDS
-            and (entry.kind != "tool_result" or entry.call_id in calls)
+            and (entry.kind != "tool_result" or entry.call_id in call_ids)
         )
 
     def active_events(self):
@@ -69,21 +73,20 @@ class RunHistory:
 
     @staticmethod
     def _history_units(events, *, allow_incomplete=False):
+        """Return durable response units used only for compaction coverage."""
+
         units = []
         index = 0
         events = tuple(events)
         while index < len(events):
             entry = events[index]
-            if entry.kind == "assistant_tool_call":
-                expected_ids = (entry.call_id,)
-            elif entry.kind == "assistant_tool_batch":
-                expected_ids = tuple(call.call_id for call in entry.batch_calls)
-            else:
+            if entry.kind != "assistant_tool_calls":
                 if entry.kind == "tool_result":
                     raise RuntimeError("Run Log contains an orphan tool result")
                 units.append((entry,))
                 index += 1
                 continue
+            expected_ids = tuple(call.call_id for call in entry.tool_calls)
             end = index + 1 + len(expected_ids)
             if end > len(events):
                 if allow_incomplete:
@@ -98,23 +101,161 @@ class RunHistory:
             index = end
         return units
 
+    @staticmethod
+    def _event_fact(entry):
+        return _ProjectedFact(
+            entry.kind,
+            dict(entry.payload),
+            (entry.event_id,),
+            entry.artifact_id,
+        )
+
+    @classmethod
+    def _projection_units(
+        cls,
+        events,
+        *,
+        projected_guidance_id="",
+        allow_incomplete=False,
+    ):
+        """Project response envelopes into independent completed Call facts."""
+
+        units = []
+        index = 0
+        events = tuple(events)
+        while index < len(events):
+            entry = events[index]
+            if entry.kind == "user_message" or (
+                entry.kind == "user_guidance"
+                and entry.event_id == projected_guidance_id
+            ):
+                index += 1
+                continue
+            if entry.kind != "assistant_tool_calls":
+                if entry.kind == "tool_result":
+                    raise RuntimeError("Run Log contains an orphan tool result")
+                units.append((cls._event_fact(entry),))
+                index += 1
+                continue
+            calls = entry.tool_calls
+            end = index + 1 + len(calls)
+            if end > len(events):
+                if allow_incomplete:
+                    return None
+                raise RuntimeError("Run Log contains an incomplete tool transaction")
+            results = events[index + 1 : end]
+            if tuple(result.call_id for result in results) != tuple(
+                call.call_id for call in calls
+            ) or any(result.kind != "tool_result" for result in results):
+                raise RuntimeError("Run Log tool transaction is not contiguous")
+            for call, result in zip(calls, results):
+                if (
+                    call.name == "update_working_state"
+                    and result.outcome_status == "success"
+                ):
+                    continue
+                call_fact = _ProjectedFact(
+                    "tool_call",
+                    {
+                        "name": call.name,
+                        "args": dict(call.args),
+                        "call_id": call.call_id,
+                    },
+                    (entry.event_id,),
+                )
+                units.append((call_fact, cls._event_fact(result)))
+            index = end
+        return units
+
+    @staticmethod
+    def _render_fact(fact):
+        if fact.kind == "tool_call":
+            return f"[assistant/tool] {fact.payload['name']} " + json.dumps(
+                fact.payload["args"], ensure_ascii=False, sort_keys=True
+            )
+        if fact.kind == "tool_result":
+            artifact = f" artifact={fact.artifact_id}" if fact.artifact_id else ""
+            outcome = ToolOutcome.from_dict(fact.payload["outcome"])
+            return (
+                f"[tool/{outcome.tool_name}/{outcome.status}/"
+                f"{outcome.side_effect_state}{artifact}] {outcome.render_for_model()}"
+            )
+        content = str(fact.payload.get("content", ""))
+        return f"[{fact.kind}] {content}"
+
+    @staticmethod
+    def _render_compact_unit(unit):
+        if len(unit) == 2 and unit[0].kind == "tool_call":
+            call, result = unit
+            outcome = ToolOutcome.from_dict(result.payload["outcome"])
+            details = {
+                key: call.payload["args"][key]
+                for key in ("path", "artifact_id", "child_id")
+                if key in call.payload["args"]
+            }
+            if result.artifact_id:
+                details["result_artifact"] = result.artifact_id
+            if outcome.failure is not None:
+                details["failure"] = outcome.failure.code
+                details["recovery"] = outcome.failure.recovery
+            suffix = (
+                " " + json.dumps(details, ensure_ascii=False, sort_keys=True)
+                if details
+                else ""
+            )
+            return (
+                f"[tool receipt] call_id={call.payload['call_id']} "
+                f"name={call.payload['name']} status={outcome.status}"
+                f" side_effect={outcome.side_effect_state}{suffix}"
+            )
+        fact = unit[0]
+        return f"[{fact.kind}] content omitted by History budget"
+
+    @staticmethod
+    def _source_ids(units):
+        return {
+            event_id
+            for unit in units
+            for fact in unit
+            for event_id in fact.source_event_ids
+        }
+
+    @classmethod
+    def _select_recent(cls, units, *, limit, render):
+        selected = []
+        for unit in reversed(units):
+            full = [(unit, False), *selected]
+            full_render = render(full)
+            if full_render[1] <= limit:
+                selected = full
+                continue
+            compact = [(unit, True), *selected]
+            compact_render = render(compact)
+            if compact_render[1] <= limit:
+                selected = compact
+                continue
+            break
+        return selected
+
     def plan_compaction(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
-        latest_guidance_id = self._latest_user_guidance_id(active)
+        latest_guidance_id = self._latest_user_guidance_id(self._events)
         units = self._history_units(active, allow_incomplete=True)
         if units is None:
             return None
 
         def render(candidate_units, *, summary=""):
             events = tuple(event for unit in candidate_units for event in unit)
-            visible = self._without_projected_state(
+            projected = self._projection_units(
                 events,
                 projected_guidance_id=latest_guidance_id,
             )
             lines = ["Current run events:"]
             if summary:
                 lines.append(f"[compaction] {summary}")
-            lines.extend(self._render_event(event) for event in visible)
+            lines.extend(
+                self._render_fact(fact) for unit in projected for fact in unit
+            )
             if len(lines) == 1:
                 lines.append("- empty")
             return "\n".join(lines)
@@ -123,41 +264,22 @@ class RunHistory:
         limit = max(1, int(retain_tokens))
         for unit in reversed(units):
             candidate = [unit, *retained]
-            candidate_tokens = max(
-                1,
-                int(history_token_counter(render(candidate))),
-            )
-            if retained and candidate_tokens > limit:
+            if history_token_counter(render(candidate)) > limit:
                 break
             retained = candidate
         cut = max(0, len(units) - len(retained))
-        guidance_unit_index = next(
-            (
-                index
-                for index, unit in enumerate(units)
-                if any(event.event_id == latest_guidance_id for event in unit)
-            ),
-            None,
-        )
-        if guidance_unit_index is not None and cut > guidance_unit_index:
-            cut = guidance_unit_index
-            retained = units[cut:]
-        retained_tokens = max(
-            1,
-            int(history_token_counter(render(retained))),
-        )
+        retained_tokens = max(1, int(history_token_counter(render(retained))))
         compacted = tuple(item for unit in units[:cut] for item in unit)
         if not compacted:
             return None
-        summary_events = tuple(
-            self._without_projected_state(
-                compacted,
-                projected_guidance_id=latest_guidance_id,
-            )
+        summary_units = self._projection_units(
+            compacted,
+            projected_guidance_id=latest_guidance_id,
         )
-        if not summary_events:
+        summary_facts = tuple(fact for unit in summary_units for fact in unit)
+        if not summary_facts:
             return None
-        summary = summary_builder(summary_events)
+        summary = summary_builder(summary_facts)
         before = render(units)
         after = render(retained, summary=summary)
         if history_token_counter(after) >= history_token_counter(before):
@@ -175,29 +297,6 @@ class RunHistory:
         )
 
     @staticmethod
-    def _render_event(entry):
-        if entry.kind == "assistant_tool_call":
-            return f"[assistant/tool] {entry.name} " + json.dumps(
-                entry.args or {}, ensure_ascii=False, sort_keys=True
-            )
-        if entry.kind == "assistant_tool_batch":
-            calls = [
-                {"call_id": call.call_id, "name": call.name, "args": call.args}
-                for call in entry.batch_calls
-            ]
-            return f"[assistant/tool_batch/{entry.batch_id}] " + json.dumps(
-                calls, ensure_ascii=False, sort_keys=True
-            )
-        if entry.kind == "tool_result":
-            artifact = f" artifact={entry.artifact_id}" if entry.artifact_id else ""
-            outcome = ToolOutcome.from_dict(entry.payload["outcome"])
-            return (
-                f"[tool/{entry.name}/{entry.outcome_status}/"
-                f"{entry.side_effect_state}{artifact}] {outcome.render_for_model()}"
-            )
-        return f"[{entry.kind}] {entry.content}"
-
-    @staticmethod
     def _latest_user_guidance_id(events):
         return next(
             (
@@ -208,142 +307,123 @@ class RunHistory:
             "",
         )
 
-    @staticmethod
-    def _without_projected_state(events, *, projected_guidance_id=""):
-        selected = []
-        index = 0
-        while index < len(events):
-            entry = events[index]
-            if entry.kind == "user_message":
-                index += 1
-                continue
-            if (
-                entry.kind == "user_guidance"
-                and entry.event_id == projected_guidance_id
-            ):
-                index += 1
-                continue
-            if (
-                entry.kind == "assistant_tool_call"
-                and entry.name == "update_working_state"
-                and index + 1 < len(events)
-            ):
-                result = events[index + 1]
-                if (
-                    result.kind == "tool_result"
-                    and result.call_id == entry.call_id
-                    and result.outcome_status == "success"
-                ):
-                    index += 2
-                    continue
-            selected.append(entry)
-            index += 1
-        return selected
+    def _active_projection_units(self):
+        active = self.active_events()
+        units = self._projection_units(
+            active,
+            projected_guidance_id=self._latest_user_guidance_id(self._events),
+            allow_incomplete=True,
+        )
+        return active, units or []
 
     def render_projection(self):
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
-        )
+        active, units = self._active_projection_units()
+        facts = tuple(fact for unit in units for fact in unit)
         lines = ["Current run events:"]
-        artifact_references = 0
-        for entry in selected:
-            artifact_references += bool(entry.artifact_id)
-            lines.append(self._render_event(entry))
+        lines.extend(self._render_fact(fact) for fact in facts)
         if len(lines) == 1:
             lines.append("- empty")
+        source_ids = self._source_ids(units)
         return "\n".join(lines), {
             "active_count": len(active),
-            "selected_count": len(selected),
-            "omitted_count": max(0, len(active) - len(selected)),
-            "artifact_references": artifact_references,
+            "selected_count": len(source_ids),
+            "omitted_count": max(0, len(active) - len(source_ids)),
+            "artifact_references": sum(bool(fact.artifact_id) for fact in facts),
         }
 
     def render_compacted_projection(self, *, retain_tokens, token_counter):
-        """Render complete summaries followed by a complete recent-event suffix."""
+        """Render committed summaries followed by a bounded per-Call suffix."""
 
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
+        active, units = self._active_projection_units()
+        summaries = tuple(
+            unit for unit in units if len(unit) == 1 and unit[0].kind == "compaction"
         )
-        summaries = tuple(entry for entry in selected if entry.kind == "compaction")
         if not summaries:
             return None
-        recent = tuple(entry for entry in selected if entry.kind != "compaction")
-        units = self._history_units(recent)
-
+        recent = tuple(unit for unit in units if unit not in summaries)
         limit = max(0, int(retain_tokens))
 
-        def render(candidate):
-            retained_count = sum(len(unit) for unit in candidate)
+        def render(selected):
+            selected_units = [unit for unit, _compact in selected]
+            omitted = len(self._source_ids(recent) - self._source_ids(selected_units))
             lines = ["Current run events:"]
-            lines.extend(self._render_event(entry) for entry in summaries)
-            if retained_count < len(recent):
+            lines.extend(self._render_fact(unit[0]) for unit in summaries)
+            if omitted or any(compact for _unit, compact in selected):
                 lines.append(COMPACTED_HISTORY_OMITTED)
-            for unit in candidate:
-                lines.extend(self._render_event(entry) for entry in unit)
-            return "\n".join(lines)
+            for unit, compact in selected:
+                if compact:
+                    lines.append(self._render_compact_unit(unit))
+                else:
+                    lines.extend(self._render_fact(fact) for fact in unit)
+            text = "\n".join(lines)
+            return text, token_counter(text)
 
-        retained = []
-        minimum = render(retained)
-        if token_counter(minimum) > limit:
+        minimum = render([])
+        if minimum[1] > limit:
             raise ValueError("committed compaction summary exceeds the History budget")
-        for unit in reversed(units):
-            candidate = [unit, *retained]
-            if retained and token_counter(render(candidate)) > limit:
-                break
-            retained = candidate
-        text = render(retained)
-        flattened = tuple(entry for unit in retained for entry in unit)
+        retained = self._select_recent(recent, limit=limit, render=render)
+        text, retained_tokens = render(retained)
+        retained_units = [unit for unit, _compact in retained]
+        retained_facts = tuple(fact for unit in retained_units for fact in unit)
+        selected_ids = self._source_ids((*summaries, *retained_units))
         return text, {
             "active_count": len(active),
-            "selected_count": len(summaries) + len(flattened),
-            "omitted_count": max(
-                0,
-                len(active) - len(summaries) - len(flattened),
-            ),
+            "selected_count": len(selected_ids),
+            "omitted_count": max(0, len(active) - len(selected_ids)),
             "artifact_references": sum(
-                bool(entry.artifact_id) for entry in (*summaries, *flattened)
-            ),
-            "projection_mode": "compacted_complete_transactions",
-            "retained_tokens": token_counter(text),
+                bool(fact.artifact_id)
+                for unit in summaries
+                for fact in unit
+            )
+            + sum(bool(fact.artifact_id) for fact in retained_facts),
+            "projection_mode": "compacted_call_transactions",
+            "retained_tokens": retained_tokens,
         }
 
     def render_recent_projection(self, *, retain_tokens, token_counter):
-        """Render a bounded suffix without splitting a Tool transaction."""
+        """Render a suffix that is bounded and independently complete per Call."""
 
-        active = self.active_events()
-        selected = self._without_projected_state(
-            active,
-            projected_guidance_id=self._latest_user_guidance_id(active),
-        )
-        units = self._history_units(selected, allow_incomplete=True) or []
-
+        active, units = self._active_projection_units()
         limit = max(0, int(retain_tokens))
-        retained = []
 
-        def render(candidate):
-            retained_count = sum(len(unit) for unit in candidate)
-            omitted = max(0, len(selected) - retained_count)
+        def render(selected):
+            selected_units = [unit for unit, _compact in selected]
+            omitted = len(self._source_ids(units) - self._source_ids(selected_units))
+            receipts = sum(compact for _unit, compact in selected)
             lines = ["Current run events (bounded fallback):"]
             lines.append(f"- {omitted} older events omitted")
-            for unit in candidate:
-                lines.extend(self._render_event(entry) for entry in unit)
-            return "\n".join(lines)
+            if receipts:
+                lines.append(
+                    f"- {receipts} retained tool results reduced to receipts"
+                )
+            for unit, compact in selected:
+                if compact:
+                    lines.append(self._render_compact_unit(unit))
+                else:
+                    lines.extend(self._render_fact(fact) for fact in unit)
+            text = "\n".join(lines)
+            return text, token_counter(text)
 
-        for unit in reversed(units):
-            candidate = [unit, *retained]
-            if retained and token_counter(render(candidate)) > limit:
-                break
-            retained = candidate
-        text = render(retained)
-        flattened = tuple(entry for unit in retained for entry in unit)
+        minimum = render([])
+        if minimum[1] > limit:
+            return "", {
+                "active_count": len(active),
+                "selected_count": 0,
+                "omitted_count": len(active),
+                "artifact_references": 0,
+                "retained_tokens": 0,
+            }
+        retained = self._select_recent(units, limit=limit, render=render)
+        text, retained_tokens = render(retained)
+        retained_units = [unit for unit, _compact in retained]
+        retained_facts = tuple(fact for unit in retained_units for fact in unit)
+        selected_ids = self._source_ids(retained_units)
         return text, {
             "active_count": len(active),
-            "selected_count": len(flattened),
-            "omitted_count": max(0, len(active) - len(flattened)),
-            "artifact_references": sum(bool(entry.artifact_id) for entry in flattened),
-            "retained_tokens": token_counter(text),
+            "selected_count": len(selected_ids),
+            "omitted_count": max(0, len(active) - len(selected_ids)),
+            "artifact_references": sum(
+                bool(fact.artifact_id) for fact in retained_facts
+            ),
+            "retained_tokens": retained_tokens,
         }

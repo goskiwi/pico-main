@@ -48,24 +48,22 @@ final   -> 交给 CompletionController
 打开 `pico/tool_runtime.py` 和 `pico/run_log.py`：
 
 ```text
-单 Call：
-assistant_tool_call
--> ToolRuntime 按 call_id 取回持久化 ToolCall，再完成准入与私有 helpers
+所有响应：
+assistant_tool_calls（一个或多个有序 Call）
+-> ToolRuntime 取回持久化 Call 序列，再逐 Call 完成准入与私有 helpers
 -> fsynced tool_started + before-state paths
 -> ToolContext-bound Tool Runner
 -> tool_result + side-effect state
 
-Observation Batch：
-assistant_tool_batch
--> 整批完成 Surface / Budget / Schema / 纯读准入
--> 主线程按序写 tool_started
--> 最多四个只读 Runner 并行
+-> 每个 Call 独立完成 Surface / Budget / Schema / Approval 准入
+-> 连续 parallel-safe 调用组成并行段，其他调用形成独占屏障
+-> 并行段受 max_parallel_tools 限制，超过时自动分波
 -> 主线程按序写每个 tool_result，并一次性续接 Provider
 ```
 
 强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界。AgentLoop 接受并持久化
-单 Call 或完整 Observation Batch 后，只把持久标识交给 ToolRuntime；ToolRuntime 取回完整调用并负责参数校验、
-Approval、preimage 以及执行事务的 `tool_started/tool_result`。Batch 不走 Approval，因为只有显式标记的纯 Observation 能通过整批准入。纯值计算下沉到私有
+完整 Tool Call sequence 后，只把持久标识交给 ToolRuntime；ToolRuntime 取回完整调用并负责参数校验、
+Approval、preimage 以及执行事务的 `tool_started/tool_result`。一个调用被拒绝不取消合法兄弟调用；工具默认独占，只有明确标记的读取工具并行。纯值计算下沉到私有
 `tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
 
 `write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。失败反馈不靠增加 Patch 工具：未找到时返回相近当前代码和建议读取范围，多处匹配时返回行号，Revision 冲突时返回新 Revision 和可直接调用的 `read_file` 参数。
@@ -101,7 +99,7 @@ uv run python scripts/day7_runtime_capstone.py
 - `Final Diff`：receipt 指向经过校验的真实 Diff Artifact；
 - `working_state`：当前 Run 的约束、决定和已清空 Next Steps；
 - `tool_transactions`：每个调用都有 Call/Started/Result；
-- `assistant_tool_batch`：纯 Observation 可并行，但 Result 和持久化顺序保持稳定；
+- `assistant_tool_calls`：读取段并行、写入段独占，Result 和持久化顺序保持稳定；
 - `outcome_matches_replay`：返回值与 durable Replay 的终态一致。
 
 现场不运行完整 Evals 或 pytest；把通过结果作为预先准备的证据。只有面试官追问 Crash
@@ -213,10 +211,12 @@ MCP/Skills 都明确不在范围内。
 
 ## 证据边界
 
+- 最新的 [per-tool 调度说明与真实验证](tool-scheduler.md) 覆盖读取并行、写入屏障、逐 Call
+  恢复、提前 Context 轮换、CLI、Child 和 Compaction；旧批次协议没有兼容分支。
 - 当前确定性证据：核心 pytest 与 Day 1–7 Walkthrough。
 - 当前发布的真实模型证据包括 `real-system` CLI 全链路、`real-child` Worktree 委派与集成，
   以及 Ask、审批拒绝、Revision Conflict 修复和 Crash Resume 专项。
-- `real-compaction.json/.patch` 使用三个四调用 Observation Batch 完成 12 份证据各读取一次，
+- `real-compaction.json/.patch` 使用多个 Tool Call group 完成 12 份证据各读取一次，
   并验证压缩后继续修改和完成。各证据都记录实际 Runtime commit，不以旧轮次数宣传当前版本。
 - 真实回归在独立的受控 Git Workspace 中运行，不修改 Pico 产品源码。
 - Runtime Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。

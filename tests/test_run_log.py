@@ -62,8 +62,8 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
     append(
         store,
         "run",
-        "assistant_tool_call",
-        {"name": "read_file", "args": {"path": "README.md"}, "call_id": "read"},
+        "assistant_tool_calls",
+        {"calls": [{"name": "read_file", "args": {"path": "README.md"}, "call_id": "read"}]},
     )
     append(
         store,
@@ -139,7 +139,7 @@ def test_load_run_reads_once_and_checks_protocol_once_per_event(tmp_path, monkey
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
     call = ToolCall("read_file", {"path": "README.md"}, "read")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     reads = []
     checks = []
     original_read = store._read_events
@@ -157,14 +157,14 @@ def test_load_run_reads_once_and_checks_protocol_once_per_event(tmp_path, monkey
     monkeypatch.setattr(RunProjection, "check_event", check)
     restored, projection = store.load_run("run")
     assert reads == ["run"]
-    assert checks == ["user_message", "assistant_tool_call"]
-    assert restored.pending_tool_call() == call
+    assert checks == ["user_message", "assistant_tool_calls"]
+    assert restored.pending_tool_calls() == (call,)
     assert projection.pending_call_id == call.call_id
 
     started = restored.append_tool_started(call, effect_scope="none", potential_effects=[])
     assert started.sequence == 3
     assert started.event_id == "run:event:000003"
-    assert checks == ["user_message", "assistant_tool_call", "tool_started"]
+    assert checks == ["user_message", "assistant_tool_calls", "tool_started"]
 
 
 def test_log_passes_complete_event_to_storage_before_advancing_state(tmp_path, monkeypatch):
@@ -207,20 +207,20 @@ def test_projection_tracks_one_pending_tool_transaction(tmp_path):
     append(
         store,
         "run",
-        "assistant_tool_call",
-        {"name": "read_file", "args": {}, "call_id": "read"},
+        "assistant_tool_calls",
+        {"calls": [{"name": "read_file", "args": {}, "call_id": "read"}]},
     )
     assert store.replay("run").pending_call_id == "read"
     with pytest.raises(ValueError, match="already has pending"):
         append(
             store,
             "run",
-            "assistant_tool_call",
-            {"name": "search", "args": {}, "call_id": "other"},
+            "assistant_tool_calls",
+            {"calls": [{"name": "search", "args": {}, "call_id": "other"}]},
         )
 
 
-def test_observation_batch_round_trips_in_original_order(tmp_path):
+def test_tool_group_round_trips_in_original_order(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
@@ -228,10 +228,10 @@ def test_observation_batch_round_trips_in_original_order(tmp_path):
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("search", {"pattern": "needle", "path": "."}, "call_b"),
     )
-    batch = log.append_tool_batch(calls)
+    group = log.append_tool_calls(calls)
 
-    assert batch.batch_id == "batch_call_a"
-    assert tuple(call.call_id for call in batch.batch_calls) == (
+    assert group.event_id == "run:event:000002"
+    assert tuple(call.call_id for call in group.tool_calls) == (
         "call_a",
         "call_b",
     )
@@ -260,19 +260,61 @@ def test_observation_batch_round_trips_in_original_order(tmp_path):
     ]
 
 
+def test_grouped_working_state_updates_project_in_result_order(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(task_contract())
+    calls = (
+        ToolCall(
+            "update_working_state",
+            {"add_next_steps": ["read evidence"]},
+            "state_add",
+        ),
+        ToolCall(
+            "update_working_state",
+            {
+                "remove_next_steps": ["read evidence"],
+                "add_decisions": ["evidence reviewed"],
+            },
+            "state_finish",
+        ),
+        ToolCall("read_file", {"path": "a.py"}, "read"),
+    )
+    log.append_tool_calls(calls)
+    for call in calls:
+        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_result(
+            ToolOutcome(
+                call.call_id,
+                call.name,
+                "success",
+                "completed",
+                "none",
+                "accepted" if call.name == "update_working_state" else "observed",
+            )
+        )
+
+    restored = store.replay("run")
+    history, _metadata = RunHistory(log.events).render_projection()
+
+    assert log.projection.working.next_steps == ()
+    assert log.projection.working.decisions == ("evidence reviewed",)
+    assert restored.working.to_dict() == log.projection.working.to_dict()
+    assert "update_working_state" not in history
+    assert "[assistant/tool] read_file" in history
+
+
 @pytest.mark.parametrize(
     "payload",
     [
-        {"batch_id": "batch", "calls": []},
+        {"calls": []},
         {
-            "batch_id": "batch",
             "calls": [
                 {"name": "read_file", "args": {}, "call_id": "same"},
                 {"name": "search", "args": {}, "call_id": "same"},
             ],
         },
         {
-            "batch_id": "batch",
             "calls": [
                 {"name": "read_file", "args": {}, "call_id": "a"},
                 {"name": "search", "args": {}, "call_id": ""},
@@ -280,7 +322,7 @@ def test_observation_batch_round_trips_in_original_order(tmp_path):
         },
     ],
 )
-def test_observation_batch_payload_is_strict(payload):
+def test_tool_group_payload_is_strict(payload):
     with pytest.raises(ValueError):
         RunEvent(
             "event",
@@ -288,13 +330,13 @@ def test_observation_batch_payload_is_strict(payload):
             "run",
             "task",
             "session",
-            "assistant_tool_batch",
+            "assistant_tool_calls",
             "now",
             payload,
         )
 
 
-def test_observation_batch_rejects_out_of_order_results(tmp_path):
+def test_tool_group_rejects_out_of_order_results(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
@@ -302,11 +344,11 @@ def test_observation_batch_rejects_out_of_order_results(tmp_path):
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("read_file", {"path": "b.py"}, "call_b"),
     )
-    log.append_tool_batch(calls)
+    log.append_tool_calls(calls)
     for call in calls:
         log.append_tool_started(call, effect_scope="none", potential_effects=[])
 
-    with pytest.raises(ValueError, match="preserve batch order"):
+    with pytest.raises(ValueError, match="preserve group order"):
         log.append_tool_result(
             ToolOutcome(
                 "call_b",
@@ -319,6 +361,27 @@ def test_observation_batch_rejects_out_of_order_results(tmp_path):
         )
     with pytest.raises(RuntimeError, match="pending tool calls"):
         log.append_model_instruction("cannot interleave")
+
+
+def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
+    store = RunStore(tmp_path / ".pico/runs")
+    log = RunLog("run", "task", "session", store)
+    log.append_user(task_contract())
+    calls = tuple(
+        ToolCall("read_file", {"path": f"{name}.py"}, f"call_{name}")
+        for name in ("a", "b", "c")
+    )
+    log.append_tool_calls(calls)
+    log.append_tool_started(calls[0], effect_scope="none", potential_effects=[])
+    log.append_tool_started(calls[1], effect_scope="none", potential_effects=[])
+    log.append_tool_result(
+        ToolOutcome("call_a", "read_file", "success", "completed", "none", "a")
+    )
+
+    with pytest.raises(ValueError, match="unfinished execution barrier"):
+        log.append_tool_started(calls[2], effect_scope="none", potential_effects=[])
+
+    assert log.pending_tool_calls() == calls[1:]
 
 
 def test_task_contract_is_first_event_and_goal_cannot_be_overwritten(tmp_path):
@@ -347,10 +410,22 @@ def test_run_log_repairs_only_incomplete_tail(tmp_path):
 
 
 def test_rejects_legacy_payload_shapes():
+    with pytest.raises(ValueError, match="unsupported Run Log kind"):
+        RunEvent(
+            "legacy",
+            2,
+            "run",
+            "task",
+            "session",
+            "assistant_tool_batch",
+            "now",
+            {"batch_id": "batch", "calls": []},
+        )
+
     with pytest.raises(ValueError, match="invalid user_message payload"):
         RunEvent("e", 1, "run", "task", "session", "user_message", "now", {"content": "old"})
 
-    with pytest.raises(ValueError, match="requires a call id"):
+    with pytest.raises(ValueError, match="unsupported Run Log kind"):
         RunEvent(
             "call",
             2,
@@ -407,7 +482,7 @@ def test_mismatched_tool_result_is_not_persisted(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_tool_call(ToolCall("read_file", {}, "expected"))
+    log.append_tool_calls((ToolCall("read_file", {}, "expected"),))
     wrong = ToolOutcome(
         "wrong",
         "read_file",
@@ -417,11 +492,11 @@ def test_mismatched_tool_result_is_not_persisted(tmp_path):
         "no",
         failure=FailureInfo("rejected", "rejected", "no_retry"),
     )
-    with pytest.raises(ValueError, match="preserve batch order"):
+    with pytest.raises(ValueError, match="preserve group order"):
         log.append_tool_result(wrong)
     assert [event.kind for event in log.events] == [
         "user_message",
-        "assistant_tool_call",
+        "assistant_tool_calls",
     ]
 
 
@@ -492,7 +567,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
         {"add_next_steps": ["read"]},
         "state",
     )
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(call, effect_scope="none", potential_effects=[])
     log.append_tool_result(
         ToolOutcome(
@@ -519,9 +594,13 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     assert result is not None
     summary, covered, _metadata = result
     compacted = log.append_compaction(summary, covered)
-    assert [event.kind for event in seen] == ["model_instruction"]
-    assert seen[0].content == "historical fact that must be summarized"
-    assert len(compacted.covered_event_ids) == 4
+    assert [event.kind for event in seen] == [
+        "model_instruction",
+        "model_instruction",
+    ]
+    assert seen[0].payload["content"] == "historical fact that must be summarized"
+    assert seen[1].payload["content"] == "recent"
+    assert len(compacted.covered_event_ids) == 5
 
 
 def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_path):
@@ -538,8 +617,8 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     recent_projection = "\n".join(
         (
             "Current run events:",
-            RunHistory._render_event(recent_one),
-            RunHistory._render_event(recent_two),
+            RunHistory._render_fact(RunHistory._event_fact(recent_one)),
+            RunHistory._render_fact(RunHistory._event_fact(recent_two)),
         )
     )
     result = RunHistory(log.events).plan_compaction(
@@ -592,7 +671,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     for index in range(2):
         call = ToolCall("read_file", {"path": f"f{index}.py"}, f"call_{index}")
         calls.append(call)
-        log.append_tool_call(call)
+        log.append_tool_calls((call,))
         log.append_tool_started(
             call,
             effect_scope="none",
@@ -621,10 +700,10 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     assert "f1.py" in rendered
     assert "f0.py" not in rendered
     assert "recent events omitted by History budget" in rendered
-    assert metadata["projection_mode"] == "compacted_complete_transactions"
+    assert metadata["projection_mode"] == "compacted_call_transactions"
 
 
-def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
+def test_tool_group_history_is_bounded_per_call(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
@@ -633,7 +712,7 @@ def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("read_file", {"path": "b.py"}, "call_b"),
     )
-    batch = log.append_tool_batch(calls)
+    group = log.append_tool_calls(calls)
     for call in calls:
         log.append_tool_started(call, effect_scope="none", potential_effects=[])
     for call in calls:
@@ -649,14 +728,15 @@ def test_observation_batch_is_one_indivisible_history_unit(tmp_path):
         )
 
     rendered, _metadata = RunHistory(log.events).render_recent_projection(
-        retain_tokens=1,
+        retain_tokens=220,
         token_counter=len,
     )
 
-    assert "call_a" in rendered and "call_b" in rendered
-    assert rendered.count("[tool/read_file/success/none]") == 2
+    assert len(rendered) <= 220
+    assert "call_b" in rendered
+    assert "call_a" not in rendered
     with pytest.raises(ValueError, match="cannot split"):
         log.append_compaction(
             "invalid boundary",
-            [user.event_id, old.event_id, batch.event_id],
+            [user.event_id, old.event_id, group.event_id],
         )

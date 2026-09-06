@@ -38,7 +38,7 @@ def client():
     )
 
 
-def batch_response():
+def multi_call_response():
     return Response(
         {
             "status": "completed",
@@ -82,7 +82,7 @@ def test_provider_parses_ordered_multi_call_response():
 
     def urlopen(request, timeout):
         captured.update(json.loads(request.data))
-        return batch_response()
+        return multi_call_response()
 
     with patch("pico.providers.clients._open_response", urlopen):
         action = client().complete_action(
@@ -100,13 +100,13 @@ def test_provider_parses_ordered_multi_call_response():
     assert captured["parallel_tool_calls"] is True
 
 
-def test_provider_returns_all_batch_results_in_one_continuation():
+def test_provider_returns_all_group_results_in_one_continuation():
     instance = client()
     requests = []
 
     def urlopen(request, timeout):
         requests.append(json.loads(request.data))
-        return batch_response() if len(requests) == 1 else final_response()
+        return multi_call_response() if len(requests) == 1 else final_response()
 
     with patch("pico.providers.clients._open_response", urlopen):
         action = instance.complete_action(
@@ -125,7 +125,7 @@ def test_provider_returns_all_batch_results_in_one_continuation():
         )
 
     assert final == ModelAction.final("done")
-    assert requests[1]["input"][1:4] == json.loads(batch_response().payload)["output"]
+    assert requests[1]["input"][1:4] == json.loads(multi_call_response().payload)["output"]
     outputs = [
         item
         for item in requests[1]["input"]
@@ -137,9 +137,9 @@ def test_provider_returns_all_batch_results_in_one_continuation():
     ]
 
 
-def test_provider_refuses_partial_batch_results():
+def test_provider_refuses_partial_group_results():
     instance = client()
-    with patch("pico.providers.clients._open_response", return_value=batch_response()):
+    with patch("pico.providers.clients._open_response", return_value=multi_call_response()):
         instance.complete_action(
             "inspect",
             64,
@@ -152,10 +152,10 @@ def test_provider_refuses_partial_batch_results():
     except ValueError as exc:
         assert "one result per call" in str(exc)
     else:
-        raise AssertionError("partial batch results must be rejected")
+        raise AssertionError("partial group results must be rejected")
 
 
-def test_provider_returns_correction_for_missing_batch_call_name():
+def test_provider_returns_correction_for_missing_group_call_name():
     malformed = Response(
         {
             "status": "completed",
@@ -187,7 +187,7 @@ def test_provider_returns_correction_for_missing_batch_call_name():
     assert action.content == "function call is missing a name"
 
 
-def test_provider_rejects_unknown_call_anywhere_in_batch():
+def test_provider_rejects_unknown_call_anywhere_in_group():
     malformed = Response(
         {
             "status": "completed",

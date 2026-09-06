@@ -133,10 +133,8 @@ def _run_command(workspace, command):
 def _requested_calls(events):
     calls = []
     for event in events:
-        if event.kind == "assistant_tool_call":
-            calls.append({"name": event.name, "args": event.args})
-        elif event.kind == "assistant_tool_batch":
-            calls.extend({"name": call.name, "args": call.args} for call in event.batch_calls)
+        if event.kind == "assistant_tool_calls":
+            calls.extend({"name": call.name, "args": call.args} for call in event.tool_calls)
     return calls
 
 

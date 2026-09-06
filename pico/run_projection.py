@@ -81,9 +81,10 @@ class RunProjection:
     stop_reason: str = ""
     final_answer: str = ""
     pending_calls: tuple[ToolCall, ...] = ()
-    pending_batch_id: str = ""
+    pending_group_id: str = ""
     started_call_ids: set[str] = field(default_factory=set)
     last_started_ordinal: int = -1
+    start_phase_result_count: int = 0
     result_count: int = 0
     final_diff: FinalDiff | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
@@ -107,7 +108,7 @@ class RunProjection:
             raise ValueError("Run Log must begin with user_message")
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
-        if kind in {"assistant_tool_call", "assistant_tool_batch"}:
+        if kind == "assistant_tool_calls":
             if self.pending_calls:
                 raise ValueError("Run Log already has pending tool calls")
         elif kind == "tool_started":
@@ -119,13 +120,20 @@ class RunProjection:
                 raise ValueError(
                     "tool_started tool name does not match the pending call"
                 )
-            if self.result_count:
-                raise ValueError("tool_started cannot follow a batch result")
             if call_id in self.started_call_ids:
                 raise ValueError("pending tool call already started")
             ordinal = self.pending_calls.index(call)
-            if ordinal <= self.last_started_ordinal:
-                raise ValueError("tool_started calls must preserve batch order")
+            expected_ordinal = max(self.result_count, self.last_started_ordinal + 1)
+            if ordinal != expected_ordinal:
+                raise ValueError("tool_started calls must preserve group order")
+            unresolved_started = self.result_count <= self.last_started_ordinal
+            if (
+                unresolved_started
+                and self.result_count != self.start_phase_result_count
+            ):
+                raise ValueError(
+                    "tool_started cannot cross an unfinished execution barrier"
+                )
         elif kind == "tool_result":
             outcome = ToolOutcome.from_dict(payload["outcome"])
             call_id = outcome.tool_call_id
@@ -133,7 +141,7 @@ class RunProjection:
                 raise ValueError("tool_result requires pending tool calls")
             call = self.pending_calls[self.result_count]
             if call_id != call.call_id:
-                raise ValueError("tool_result calls must preserve batch order")
+                raise ValueError("tool_result calls must preserve group order")
             if outcome.tool_name != call.name:
                 raise ValueError(
                     "tool_result tool name does not match the pending call"
@@ -162,11 +170,12 @@ class RunProjection:
             (call for call in self.pending_calls if call.call_id == call_id), None
         )
 
-    def _begin_calls(self, calls, batch_id=""):
+    def _begin_calls(self, calls, group_id=""):
         self.pending_calls = tuple(calls)
-        self.pending_batch_id = batch_id
+        self.pending_group_id = group_id
         self.started_call_ids.clear()
         self.last_started_ordinal = -1
+        self.start_phase_result_count = 0
         self.result_count = 0
 
     @property
@@ -213,11 +222,11 @@ class RunProjection:
             self.children.apply_result(
                 self.pending_calls[self.result_count], event.payload["outcome"]
             )
-        if event.kind == "assistant_tool_call":
-            self._begin_calls((ToolCall(event.name, event.args, event.call_id),))
-        elif event.kind == "assistant_tool_batch":
-            self._begin_calls(event.batch_calls, event.batch_id)
+        if event.kind == "assistant_tool_calls":
+            self._begin_calls(event.tool_calls, event.event_id)
         elif event.kind == "tool_started":
+            if self.result_count > self.last_started_ordinal:
+                self.start_phase_result_count = self.result_count
             self.started_call_ids.add(event.call_id)
             self.last_started_ordinal = self.pending_calls.index(
                 self._pending_call(event.call_id)

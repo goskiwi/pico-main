@@ -6,7 +6,7 @@ import hashlib
 from contextlib import contextmanager
 from dataclasses import replace
 
-from ..contracts import ToolCall, ToolOutcome
+from ..contracts import ToolOutcome
 from ..mutations import ABSENT_REVISION, content_revision, file_revision
 from ..persistence import atomic_replace_bytes
 from ..run_log import replay_events
@@ -224,9 +224,17 @@ class PatchIntegrator:
     def _applied_receipt_from_history(self, child_id):
         call = started = None
         for event in self.parent.run.run_log.events:
-            if event.kind in {"assistant_tool_call", "assistant_tool_batch"}:
-                call = (ToolCall(event.name, event.args, event.call_id)
-                        if event.name == "integrate_child" and event.args.get("child_id") == child_id else None)
+            if event.kind == "assistant_tool_calls":
+                calls = event.tool_calls
+                call = next(
+                    (
+                        candidate
+                        for candidate in calls
+                        if candidate.name == "integrate_child"
+                        and candidate.args.get("child_id") == child_id
+                    ),
+                    None,
+                )
                 started = None
             elif call is not None and event.kind == "tool_started" and event.call_id == call.call_id:
                 started = event

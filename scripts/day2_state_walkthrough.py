@@ -3,7 +3,7 @@
 The three experiments keep separate questions separate:
 
 1. What is durably stored, and what is derived?
-2. How do one Pending Call and one Observation Batch change across legal transactions?
+2. How do one Pending Call and one Tool-call group change across legal transactions?
 3. What happens when a process stops after ``tool_started`` but before a result?
 """
 
@@ -116,10 +116,11 @@ def fact_projection_experiment(root):
     assert "tool_name" not in raw_result["payload"]
 
     working_state_calls = [
-        event
+        call
         for event in events
-        if event.kind == "assistant_tool_call"
-        and event.name == "update_working_state"
+        if event.kind == "assistant_tool_calls"
+        for call in event.tool_calls
+        if call.name == "update_working_state"
     ]
     expected_delta_fields = {
         "add_constraints",
@@ -131,8 +132,8 @@ def fact_projection_experiment(root):
     }
     observed_delta_fields = {
         field
-        for event in working_state_calls
-        for field in event.args
+        for call in working_state_calls
+        for field in call.args
     }
     final_working_state = replayed.working.to_dict()
     assert len(working_state_calls) == 2
@@ -196,12 +197,13 @@ def fact_projection_experiment(root):
 def pending_prefix_experiment(events):
     """Replay three legal prefixes to make the one Pending Call visible."""
 
-    call_index = next(
-        index
+    call_index, call_id = next(
+        (index, call.call_id)
         for index, event in enumerate(events)
-        if event.kind == "assistant_tool_call" and event.name == "read_file"
+        if event.kind == "assistant_tool_calls"
+        for call in event.tool_calls
+        if call.name == "read_file"
     )
-    call_id = events[call_index].call_id
     started_index = next(
         index
         for index in range(call_index + 1, len(events))
@@ -226,7 +228,7 @@ def pending_prefix_experiment(events):
         "B1. 合法 Event 前缀中的单一 Pending Call",
         [
             {
-                "last_fact": "assistant_tool_call",
+                "last_fact": "assistant_tool_calls",
                 "pending_call_id": after_call.pending_call_id,
             },
             {
@@ -241,19 +243,19 @@ def pending_prefix_experiment(events):
     )
 
 
-def batch_prefix_experiment(root):
-    """Show one durable batch reducing from two pending calls to none."""
+def tool_group_prefix_experiment(root):
+    """Show one durable tool-call group reducing from two pending calls to none."""
 
     (root / "a.txt").write_text("alpha\n", encoding="utf-8")
     (root / "b.txt").write_text("beta\n", encoding="utf-8")
     agent = build_agent(root, FakeModelClient([]))
     RunLifecycle(agent).initialize("Read two files")
     calls = (
-        ToolCall("read_file", {"path": "a.txt"}, "call_batch_a"),
-        ToolCall("read_file", {"path": "b.txt"}, "call_batch_b"),
+        ToolCall("read_file", {"path": "a.txt"}, "call_group_a"),
+        ToolCall("read_file", {"path": "b.txt"}, "call_group_b"),
     )
-    agent.run.run_log.append_tool_batch(calls)
-    after_batch = tuple(agent.run.projection.pending_call_ids)
+    agent.run.run_log.append_tool_calls(calls)
+    after_group = tuple(agent.run.projection.pending_call_ids)
     for call in calls:
         agent.run.run_log.append_tool_started(
                 call,
@@ -271,13 +273,13 @@ def batch_prefix_experiment(root):
                     "observed",
                 )
             )
-    assert after_batch == ("call_batch_a", "call_batch_b")
+    assert after_group == ("call_group_a", "call_group_b")
     assert agent.run.projection.pending_call_ids == ()
 
     print_section(
-        "B2. Observation Batch 是一个有序 Pending 事务",
+        "B2. Tool-call group 是一个有序 Pending 事务",
         {
-            "batch_pending_call_ids": list(after_batch),
+            "group_pending_call_ids": list(after_group),
             "started_order": [call.call_id for call in calls],
             "result_order": [call.call_id for call in calls],
             "pending_after_results": list(agent.run.projection.pending_call_ids),
@@ -299,7 +301,7 @@ def interrupted_read_experiment(root):
         {"path": "README.md", "start_line": 1, "end_line": 20},
         "call_interrupted_read",
     )
-    original.run.run_log.append_tool_call(call)
+    original.run.run_log.append_tool_calls((call,))
     original.run.run_log.append_tool_started(
             call,
             effect_scope="none",
@@ -399,14 +401,14 @@ def main():
         root = Path(directory)
         normal_root = root / "fact-projection"
         recovery_root = root / "interrupted-read"
-        batch_root = root / "observation-batch"
+        group_root = root / "tool-group"
         normal_root.mkdir()
         recovery_root.mkdir()
-        batch_root.mkdir()
+        group_root.mkdir()
 
         _agent, events, _outcome = fact_projection_experiment(normal_root)
         pending_prefix_experiment(events)
-        batch_prefix_experiment(batch_root)
+        tool_group_prefix_experiment(group_root)
         interrupted_read_experiment(recovery_root)
 
 

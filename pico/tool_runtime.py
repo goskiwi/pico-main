@@ -33,8 +33,6 @@ from .tool_execution import (
 if TYPE_CHECKING:
     from .runtime import Pico
 
-MAX_OBSERVATION_BATCH_CALLS = 4
-MAX_PARALLEL_OBSERVATIONS = 4
 ASK_TOOL_NAMES = frozenset(
     {
         "list_files",
@@ -48,7 +46,7 @@ ASK_TOOL_NAMES = frozenset(
 
 
 @dataclass(frozen=True)
-class PreparedObservation:
+class PreparedParallelCall:
     call: ToolCall
     tool: dict
     context: ToolContext
@@ -194,38 +192,24 @@ class ToolRuntime:
             return False
         return answer.strip().lower() in {"y", "yes"}
 
-    def _pending_call(self, call_id):
-        runtime = self.runtime
-        if runtime.run.resumable:
-            raise RuntimeError("a dormant Run must be resumed before tool execution")
-        if runtime.run.projection.contract is None or runtime.run.run_log is None:
-            raise RuntimeError("pending tool execution requires an active Run")
-        if runtime.run.projection.terminal:
-            raise RuntimeError("terminal Run cannot execute additional tools")
-        call = runtime.run.run_log.pending_tool_call()
-        if call is None:
-            raise RuntimeError("active Run has no pending ToolCall fact")
-        if call.call_id != str(call_id):
-            raise RuntimeError("call id does not match the pending ToolCall")
-        return call
-
-    def _resolve_tool(self, call, policy):
+    def _resolve_tool(self, call, policy, *, record=True):
         tool = self.registry.get(call.name)
         if tool is None:
             return None, self._rejected(
-                call, "unknown_tool", "unknown tool", "retry_after_change"
+                call, "unknown_tool", "unknown tool", "retry_after_change",
+                record=record,
             )
         if not self._tool_allowed_by_mode(call.name, policy[0]):
             return None, self._rejected(
                 call,
                 "tool_not_allowed",
                 f"tool is unavailable in {policy[0]} mode",
-                "no_retry",
+                "no_retry", record=record,
             )
         allowed = self.runtime.config.allowed_tools
         if allowed is not None and call.name not in allowed:
             return None, self._rejected(
-                call, "tool_not_allowed", "tool outside run surface"
+                call, "tool_not_allowed", "tool outside run surface", record=record
             )
         if self.runtime.run.projection.contract is None and not tool.get(
             "manual_observation", False
@@ -234,7 +218,7 @@ class ToolRuntime:
                 call,
                 "manual_mutation_forbidden",
                 "manual mode permits observation tools only; mutations require an active Run",
-                "no_retry",
+                "no_retry", record=record,
             )
         return tool, None
 
@@ -243,10 +227,10 @@ class ToolRuntime:
         run_log = agent.run.run_log
         if run_log is None:
             return None
-        pending = run_log.pending_call_id()
+        pending = run_log.pending_tool_calls()
         if not pending:
             raise RuntimeError("active Run has no pending tool call")
-        if pending != str(call_id):
+        if str(call_id) not in {call.call_id for call in pending}:
             raise RuntimeError("tool execution does not match the pending Run call")
         return run_log
 
@@ -309,7 +293,7 @@ class ToolRuntime:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    def _validate_call(self, call, context, policy):
+    def _validate_call(self, call, context, policy, *, record=True):
         try:
             args = self.validate(call.name, call.args, context, policy)
         except ToolFailureError as exc:
@@ -318,104 +302,57 @@ class ToolRuntime:
                 exc.failure.code,
                 exc.failure.detail,
                 exc.failure.recovery,
-                structured=exc.structured,
+                structured=exc.structured, record=record,
             )
         except Exception as exc:  # noqa: BLE001 - validator boundary
             return None, self._rejected(
                 call,
                 "invalid_arguments",
                 str(exc),
-                "retry_after_change",
+                "retry_after_change", record=record,
             )
         return ToolCall(call.name, args, call.call_id), None
 
-    def execute_pending(self, call_id):
-        return self._execute(self._pending_call(call_id))
-
-    def _pending_batch(self, batch_id):
+    def _pending_group(self, group_id):
         runtime = self.runtime
         if runtime.run.resumable:
-            raise RuntimeError("a dormant Run must be resumed before batch execution")
+            raise RuntimeError("a dormant Run must be resumed before grouped execution")
         if runtime.run.projection.contract is None or runtime.run.run_log is None:
-            raise RuntimeError("pending batch execution requires an active Run")
+            raise RuntimeError("pending grouped execution requires an active Run")
         if runtime.run.projection.terminal:
-            raise RuntimeError("terminal Run cannot execute an observation batch")
-        if runtime.run.run_log.pending_batch_id() != str(batch_id):
-            raise RuntimeError("batch id does not match the pending Tool Batch")
+            raise RuntimeError("terminal Run cannot execute a tool group")
+        if runtime.run.run_log.pending_group_id() != str(group_id):
+            raise RuntimeError("group id does not match the pending tool calls")
         calls = runtime.run.run_log.pending_tool_calls()
-        if len(calls) < 2:
-            raise RuntimeError("active Run has no pending observation batch")
+        if not calls:
+            raise RuntimeError("active Run has no pending tool calls")
         return calls
 
-    def _batch_policy_error(self, calls, policy):
-        if len(calls) > MAX_OBSERVATION_BATCH_CALLS:
-            return (
-                f"observation batch contains {len(calls)} calls; "
-                f"maximum is {MAX_OBSERVATION_BATCH_CALLS}"
-            )
-        remaining = self.remaining_budget()
-        if remaining is not None and len(calls) > remaining:
-            return "observation batch exceeds the remaining Runtime tool budget"
-        invalid = []
-        surface = self._surface(policy)
-        for call in calls:
-            tool = surface.get(call.name)
-            if (
-                tool is None
-                or not tool.get("batchable_observation", False)
-                or tool.get("risky", False)
-                or tool.get("workspace_mutating", False)
-                or tool.get("state_mutating", False)
-            ):
-                invalid.append(call.name or "<missing>")
-        if invalid:
-            return (
-                "multiple calls are allowed only for independent observations; "
-                "call these tools alone: " + ", ".join(invalid)
-            )
-        return ""
+    @staticmethod
+    def _parallel_safe(tool):
+        return bool(
+            tool.get("concurrency") == "parallel"
+            and not tool.get("risky", False)
+            and not tool.get("workspace_mutating", False)
+            and not tool.get("state_mutating", False)
+        )
 
-    def _prepare_observation_batch(self, calls):
-        policy = self.effective_policy()
-        detail = self._batch_policy_error(calls, policy)
-        if detail:
-            return (), detail
-        prepared = []
-        for call in calls:
-            execution = (
-                self.runtime.run.execution_context.child()
-                if self.runtime.run.execution_context is not None
-                else None
-            )
-            context = self.context(call_id=call.call_id, execution_context=execution)
-            tool = self.registry[call.name]
-            try:
-                args = self.validate(call.name, call.args, context, policy)
-            except Exception as exc:  # noqa: BLE001 - batch admission boundary
-                return (), f"invalid arguments for {call.name}: {exc}"
-            prepared.append(
-                PreparedObservation(
-                    ToolCall(call.name, args, call.call_id),
-                    tool,
-                    context,
-                )
-            )
-        return tuple(prepared), ""
-
-    def _reject_observation_batch(self, calls, detail):
-        outcomes = []
-        for call in calls:
-            outcome = self._outcome(
-                call,
-                "rejected",
-                "not_started",
-                "none",
-                f"error: {detail} for observation batch",
-                failure=FailureInfo("invalid_tool_batch", detail, "retry_after_change"),
-            )
-            self.runtime.run.run_log.append_tool_result(outcome)
-            outcomes.append(outcome)
-        return tuple(outcomes)
+    def _prepare_parallel_call(self, call, policy):
+        tool, rejection = self._resolve_tool(call, policy, record=False)
+        if rejection is not None:
+            return rejection
+        if not self._parallel_safe(tool):
+            raise RuntimeError(f"tool is not parallel-safe: {call.name}")
+        execution = (
+            self.runtime.run.execution_context.child()
+            if self.runtime.run.execution_context is not None
+            else None
+        )
+        context = self.context(call_id=call.call_id, execution_context=execution)
+        call, rejection = self._validate_call(call, context, policy, record=False)
+        if rejection is not None:
+            return rejection
+        return PreparedParallelCall(call, tool, context)
 
     @staticmethod
     def _invoke_runner(tool, context, args):
@@ -425,11 +362,11 @@ class ToolRuntime:
         result = tool["run"](context, args)
         if not isinstance(result, ToolRunnerResult):
             raise TypeError("tool runner must return ToolRunnerResult")
-        if execution is not None and tool.get("batchable_observation", False):
+        if execution is not None and tool.get("concurrency") == "parallel":
             execution.check_active()
         return result
 
-    def _observation_outcome(self, prepared, result):
+    def _parallel_outcome(self, prepared, result):
         call = prepared.call
         if isinstance(result, BaseException):
             typed = result if isinstance(result, ToolFailureError) else None
@@ -442,7 +379,7 @@ class ToolRuntime:
                 "error",
                 "failed",
                 "none",
-                f"error: observation {call.name} failed: {result}",
+                f"error: parallel tool {call.name} failed: {result}",
                 failure=(typed.failure if typed else None)
                 or FailureInfo(
                     "operation_interrupted" if interrupted else "observation_failed",
@@ -451,21 +388,21 @@ class ToolRuntime:
                 ),
                 structured=typed.structured if typed else None,
             )
-        return self._result_outcome(call, result, observation=True)
+        return self._result_outcome(call, result, parallel=True)
 
-    def _result_outcome(self, call, result, preimages=None, *, observation=False):
-        if observation and (result.effect_scope != "none" or result.affected_paths):
+    def _result_outcome(self, call, result, preimages=None, *, parallel=False):
+        if parallel and (result.effect_scope != "none" or result.affected_paths):
             paths = tuple(result.affected_paths)
             return self._outcome(
                 call,
                 "partial_success",
                 "completed",
                 "unknown",
-                "error: batchable observation reported a side effect\n"
+                "error: parallel-safe tool reported a side effect\n"
                 + str(result.content),
                 failure=FailureInfo(
-                    "observation_reported_side_effect",
-                    "batchable observation reported a side effect",
+                    "parallel_tool_reported_side_effect",
+                    "parallel-safe tool reported a side effect",
                     "user_action_required",
                 ),
                 affected_paths=paths,
@@ -491,39 +428,83 @@ class ToolRuntime:
             structured=attach_preimage_artifacts(result.structured, preimages or {}),
         )
 
-    def execute_pending_batch(self, batch_id):
-        calls = self._pending_batch(batch_id)
-        prepared, detail = self._prepare_observation_batch(calls)
-        if detail:
-            return self._reject_observation_batch(calls, detail)
+    def _execute_parallel_segment(self, calls):
+        policy = self.effective_policy()
+        prepared = [self._prepare_parallel_call(call, policy) for call in calls]
         run_log = self.runtime.run.run_log
-        for item in prepared:
-            run_log.append_tool_started(
-                item.call,
-                effect_scope="none",
-                potential_effects=[],
-            )
-        with ThreadPoolExecutor(
-            max_workers=min(MAX_PARALLEL_OBSERVATIONS, len(prepared)),
-            thread_name_prefix="pico-observation",
-        ) as pool:
-            futures = [
-                pool.submit(
-                    self._invoke_runner, item.tool, item.context, item.call.args
-                )
-                for item in prepared
-            ]
-            raw_results = []
-            for future in futures:
-                try:
-                    raw_results.append(future.result())
-                except Exception as exc:  # noqa: BLE001 - tool runner boundary
-                    raw_results.append(exc)
         outcomes = []
-        for item, raw in zip(prepared, raw_results):
-            outcome = self._observation_outcome(item, raw)
-            run_log.append_tool_result(outcome)
-            outcomes.append(outcome)
+        index = 0
+        while index < len(prepared):
+            item = prepared[index]
+            if isinstance(item, ToolOutcome):
+                run_log.append_tool_result(item)
+                outcomes.append(item)
+                index += 1
+                continue
+            remaining = self.remaining_budget()
+            if remaining == 0:
+                outcome = self._rejected(
+                    item.call, "tool_execution_limit",
+                    "Runtime tool budget exhausted", record=True,
+                )
+                outcomes.append(outcome)
+                index += 1
+                continue
+            group = []
+            while index < len(prepared) and isinstance(
+                prepared[index], PreparedParallelCall
+            ):
+                if remaining is not None and len(group) >= remaining:
+                    break
+                group.append(prepared[index])
+                index += 1
+            for candidate in group:
+                run_log.append_tool_started(
+                    candidate.call, effect_scope="none", potential_effects=[]
+                )
+            with ThreadPoolExecutor(
+                max_workers=min(self.runtime.config.max_parallel_tools, len(group)),
+                thread_name_prefix="pico-tool",
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        self._invoke_runner,
+                        candidate.tool,
+                        candidate.context,
+                        candidate.call.args,
+                    )
+                    for candidate in group
+                ]
+                raw_results = []
+                for future in futures:
+                    try:
+                        raw_results.append(future.result())
+                    except Exception as exc:  # noqa: BLE001 - tool runner boundary
+                        raw_results.append(exc)
+            for candidate, raw in zip(group, raw_results):
+                outcome = self._parallel_outcome(candidate, raw)
+                run_log.append_tool_result(outcome)
+                outcomes.append(outcome)
+        return tuple(outcomes)
+
+    def execute_pending_group(self, group_id):
+        calls = self._pending_group(group_id)
+        outcomes = []
+        parallel = []
+
+        def flush():
+            if parallel:
+                outcomes.extend(self._execute_parallel_segment(tuple(parallel)))
+                parallel.clear()
+
+        for call in calls:
+            tool = self.registry.get(call.name)
+            if tool is not None and self._parallel_safe(tool):
+                parallel.append(call)
+                continue
+            flush()
+            outcomes.append(self._execute(call))
+        flush()
         return tuple(outcomes)
 
     def execute_manual(self, name, args=None):
@@ -550,6 +531,17 @@ class ToolRuntime:
     def _execute(self, call):
         agent = self.runtime
         name, args = call.name, call.args
+        if name == "submit_final":
+            return self._rejected(
+                call,
+                "final_call_must_be_alone",
+                "submit_final must be the only call in its model response",
+                "retry_after_change",
+            )
+        if self.remaining_budget() == 0:
+            return self._rejected(
+                call, "tool_execution_limit", "Runtime tool budget exhausted"
+            )
         policy = self.effective_policy()
         tool, admission_rejection = self._resolve_tool(call, policy)
         if admission_rejection is not None:
@@ -617,12 +609,12 @@ class ToolRuntime:
                 call,
                 execution,
                 preimages,
-                observation=tool.get("batchable_observation", False),
+                parallel=self._parallel_safe(tool),
             )
         except Exception as exc:  # noqa: BLE001 - tool boundary
-            if tool.get("batchable_observation", False):
-                outcome = self._observation_outcome(
-                    PreparedObservation(call, tool, context), exc
+            if self._parallel_safe(tool):
+                outcome = self._parallel_outcome(
+                    PreparedParallelCall(call, tool, context), exc
                 )
             else:
                 effects_after = self._effect_snapshot(agent, potential_paths)

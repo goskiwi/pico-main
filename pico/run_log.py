@@ -48,37 +48,28 @@ def _validate_user_payload(kind, payload):
     TaskContract.from_dict(payload["contract"])
 
 
-def _validate_tool_call_payload(kind, payload):
-    _exact_payload(kind, payload, {"name", "args", "call_id"})
-    if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
-        raise ValueError("assistant_tool_call requires a call id")
-    ToolCall(str(payload["name"]), payload["args"], str(payload["call_id"]))
-
-
-def _batch_calls(payload):
+def _tool_calls(payload):
     return tuple(
         ToolCall(str(item["name"]), item["args"], str(item["call_id"]))
         for item in payload["calls"]
     )
 
 
-def _validate_tool_batch_payload(kind, payload):
-    _exact_payload(kind, payload, {"batch_id", "calls"})
-    if not isinstance(payload["batch_id"], str) or not payload["batch_id"].strip():
-        raise ValueError("assistant_tool_batch requires a batch id")
-    if not isinstance(payload["calls"], list) or len(payload["calls"]) < 2:
-        raise ValueError("assistant_tool_batch requires at least two calls")
+def _validate_tool_calls_payload(kind, payload):
+    _exact_payload(kind, payload, {"calls"})
+    if not isinstance(payload["calls"], list) or not payload["calls"]:
+        raise ValueError("assistant_tool_calls requires at least one call")
     for item in payload["calls"]:
         if not isinstance(item, dict) or set(item) != {"name", "args", "call_id"}:
-            raise ValueError("assistant_tool_batch has an invalid call")
+            raise ValueError("assistant_tool_calls has an invalid call")
         if not isinstance(item["call_id"], str) or not item["call_id"].strip():
-            raise ValueError("assistant_tool_batch calls require call ids")
+            raise ValueError("assistant_tool_calls calls require call ids")
         if not isinstance(item["name"], str) or not item["name"].strip():
-            raise ValueError("assistant_tool_batch calls require tool names")
-    calls = _batch_calls(payload)
+            raise ValueError("assistant_tool_calls calls require tool names")
+    calls = _tool_calls(payload)
     call_ids = tuple(call.call_id for call in calls)
     if len(set(call_ids)) != len(call_ids):
-        raise ValueError("assistant_tool_batch call ids must be unique")
+        raise ValueError("assistant_tool_calls call ids must be unique")
 
 
 def _validate_tool_started_payload(kind, payload):
@@ -207,8 +198,7 @@ _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_text_payload,
-    "assistant_tool_call": _validate_tool_call_payload,
-    "assistant_tool_batch": _validate_tool_batch_payload,
+    "assistant_tool_calls": _validate_tool_calls_payload,
     "tool_started": _validate_tool_started_payload,
     "tool_result": _validate_tool_result_payload,
     "verification_result": _validate_verification_payload,
@@ -295,21 +285,15 @@ class RunEvent:
 
     @property
     def name(self):
-        if self.kind == "assistant_tool_call":
-            return str(self.payload.get("name", ""))
         if self.kind == "tool_result":
             return str(dict(self.payload.get("outcome", {}) or {}).get("tool_name", ""))
         return ""
 
     @property
-    def batch_id(self):
-        return str(self.payload.get("batch_id", ""))
-
-    @property
-    def batch_calls(self):
-        if self.kind != "assistant_tool_batch":
+    def tool_calls(self):
+        if self.kind != "assistant_tool_calls":
             return ()
-        return _batch_calls(self.payload)
+        return _tool_calls(self.payload)
 
     @property
     def args(self):
@@ -317,8 +301,6 @@ class RunEvent:
 
     @property
     def call_id(self):
-        if self.kind == "assistant_tool_call":
-            return str(self.payload.get("call_id", ""))
         if self.kind == "tool_result":
             return str(
                 dict(self.payload.get("outcome", {}) or {}).get("tool_call_id", "")
@@ -414,7 +396,7 @@ class RunLog:
     def pending_tool_starts(self):
         starts = {}
         for entry in reversed(self._events):
-            if entry.kind in {"assistant_tool_call", "assistant_tool_batch"}:
+            if entry.kind == "assistant_tool_calls":
                 break
             if entry.kind == "tool_started":
                 starts[entry.call_id] = entry
@@ -432,21 +414,13 @@ class RunLog:
         self._require_no_pending()
         return self.append("user_guidance", {"content": content})
 
-    def append_tool_call(self, call):
-        return self.append(
-            "assistant_tool_call",
-            {"name": call.name, "args": dict(call.args), "call_id": call.call_id},
-        )
-
-    def append_tool_batch(self, calls):
+    def append_tool_calls(self, calls):
         calls = tuple(calls)
-        if len(calls) < 2:
-            raise ValueError("tool batch requires at least two calls")
-        batch_id = "batch_" + calls[0].call_id
+        if not calls:
+            raise ValueError("tool call sequence cannot be empty")
         return self.append(
-            "assistant_tool_batch",
+            "assistant_tool_calls",
             {
-                "batch_id": batch_id,
                 "calls": [
                     {
                         "name": call.name,
@@ -525,20 +499,11 @@ class RunLog:
     def pending_call_id(self):
         return self.projection.pending_call_id or ""
 
-    def pending_batch_id(self):
-        return self.projection.pending_batch_id
+    def pending_group_id(self):
+        return self.projection.pending_group_id
 
     def pending_tool_calls(self):
         return tuple(self.projection.pending_calls[self.projection.result_count :])
-
-    def pending_tool_call(self):
-        pending_calls = self.pending_tool_calls()
-        if not pending_calls:
-            return None
-        if self.pending_batch_id():
-            raise RuntimeError("pending tool transaction is an observation batch")
-        return pending_calls[0]
-
 
     def _require_no_pending(self):
         if self.pending_tool_calls():
@@ -554,7 +519,7 @@ class RunLog:
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]
         if remaining and remaining[0].kind == "tool_result":
-            raise ValueError("compaction cannot split a tool call/result batch")
+            raise ValueError("compaction cannot split a tool call/result group")
         return self.append(
             "compaction",
             {

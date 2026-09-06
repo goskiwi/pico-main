@@ -28,7 +28,7 @@ Terminology in this document is strict:
 | Path | Durable writes | Rebuildable/current state |
 |---|---|---|
 | CLI / resume | First `user_message.contract`, then Session `active_run_id`; each resumed input as `user_guidance`; `run_started` or `run_resumed`; interrupted reconciliation result when needed | `load_resumable_run` installs one RunLog/RunProjection snapshot in ActiveRunState |
-| Normal Tool turn | One `assistant_tool_call` or ordered `assistant_tool_batch`, per-Call fsynced `tool_started/tool_result` | ToolRuntime resolves the pending durable transaction; only pure Observation Runners may execute concurrently, while all durable state is updated in original order |
+| Normal Tool turn | One ordered `assistant_tool_calls` containing one or more Calls, with per-Call fsynced `tool_started/tool_result` | ToolRuntime partitions calls by per-tool concurrency metadata; parallel-safe segments use bounded workers, exclusive calls form barriers, and durable state advances in original order |
 | Final submission | `model_instruction` + `completion_blocked` when rejected; otherwise `assistant_final` or `run_stopped` with only the `final_diff` receipt | Completion decision before settlement; terminal status and final Diff reference after settlement |
 
 Invariants:
@@ -43,7 +43,7 @@ Invariants:
 - TaskContract, incremental WorkingState, terminal fields, Evidence and Metrics can be rebuilt from the Run Log.
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
-- Tool protocol events form one strict single-Call transaction or one ordered, indivisible pure-Observation Batch. Each call within its transaction receives exactly one Result. Event positions distinguish reused Provider call IDs across completed transactions.
+- One model response remains an ordered durable envelope, while History and WorkingState project each completed Call independently. Each Call receives exactly one Result; event positions distinguish reused Provider call IDs across completed responses.
 - Integration receipts describe confirmed patch application; an interrupted Tool can remain partial while its patch is confirmed applied and awaits current-state verification.
 - Child delegation and integration are synchronous; there is no DAG/background scheduler. Completed Implement receipts and integration state replay from the Parent Run Log, but running Child execution is not resumed across processes.
 - Old persistence formats are rejected; no compatibility or migration branch exists.

@@ -108,12 +108,12 @@ class ModelAction:
         return cls("tool", tool_calls=(ToolCall(name, args, call_id),))
 
     @classmethod
-    def tool_batch(cls, calls):
+    def tools(cls, calls):
         normalized = tuple(calls)
         if len(normalized) < 2:
-            raise ValueError("tool batch requires at least two calls")
+            raise ValueError("tool group requires at least two calls")
         if any(not isinstance(call, ToolCall) for call in normalized):
-            raise TypeError("tool batch entries must be ToolCall values")
+            raise TypeError("tool group entries must be ToolCall values")
         return cls("tool", tool_calls=normalized)
 
     @classmethod

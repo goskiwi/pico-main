@@ -258,8 +258,8 @@ def test_partial_requires_current_verification_even_without_net_change(tmp_path,
     if after is not None:
         add_change(agent, "README.md", "b", after, 2)
     call = ToolCall("read_file", {"path": "README.md"}, "read")
-    agent.run.run_log.append_tool_call(call)
-    assert agent.tools.execute_pending(call.call_id).status == "success"
+    group = agent.run.run_log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
     calls = []
 
     def verify(sequence):

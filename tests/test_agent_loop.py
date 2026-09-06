@@ -335,7 +335,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     )
 
 
-def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
+def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "other.txt").write_text("beta\n", encoding="utf-8")
 
@@ -346,14 +346,14 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
             action = super().complete_action(*args, **kwargs)
             self.request_count += 1
             self.last_completion_metadata = (
-                {"input_tokens": 6500, "output_tokens": 300}
+                {"input_tokens": 5500, "output_tokens": 300}
                 if self.request_count == 1
                 else {"input_tokens": 1000, "output_tokens": 50}
             )
             return action
 
     client = ThresholdClient([
-        ModelAction.tool_batch(
+        ModelAction.tools(
             (
                 ToolCall(
                     "read_file",
@@ -387,7 +387,7 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     )
     original_count = agent.prompt.tokenizer.count
     agent.prompt.tokenizer.count = lambda text: (
-        200 if "alpha" in str(text) else original_count(text)
+        300 if "alpha" in str(text) else original_count(text)
     )
 
     assert agent.ask("Inspect hello").answer == "Done after reset."
@@ -403,7 +403,8 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
     reset = resets[0]
     assert reset.payload == {
         "reason": "context_high_watermark",
-        "input_tokens": 6500,
+        "input_tokens": 5500,
+        "projected_input_tokens": 6100,
         "threshold_tokens": 6000,
     }
     result_sequences = [
@@ -418,20 +419,20 @@ def test_provider_session_resets_at_actual_input_high_watermark(tmp_path):
         entry for entry in entries if entry.kind == "turn_metrics"
     ]
     assert [entry.payload["input_tokens"] for entry in turns] == [
-        6500,
+        5500,
         1000,
         1000,
     ]
 
 
-def test_provider_session_continues_below_actual_input_high_watermark(tmp_path):
+def test_provider_session_continues_below_projected_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
 
     class CapacityClient(FakeModelClient):
         def complete_action(self, *args, **kwargs):
             action = super().complete_action(*args, **kwargs)
             self.last_completion_metadata = {
-                "input_tokens": 5999,
+                "input_tokens": 5000,
                 "output_tokens": 300,
             }
             return action
@@ -765,7 +766,7 @@ def test_final_only_multi_call_is_closed_before_tool_limit_stop(tmp_path):
                 "read_file",
                 {"path": "hello.txt", "start_line": 1, "end_line": 1},
             ),
-            ModelAction.tool_batch(calls),
+            ModelAction.tools(calls),
         ],
     )
     agent.config = replace(agent.config, max_tool_executions=1)
@@ -774,16 +775,16 @@ def test_final_only_multi_call_is_closed_before_tool_limit_stop(tmp_path):
 
     assert outcome.stop_reason == "tool_execution_limit"
     assert agent.run.run_log.pending_tool_calls() == ()
-    batch_results = [
+    group_results = [
         event
         for event in agent.read_run_events(outcome.run_id)
         if event.call_id in {"call_final_a", "call_final_b"}
     ]
-    assert [event.call_id for event in batch_results] == [
+    assert [event.call_id for event in group_results] == [
         "call_final_a",
         "call_final_b",
     ]
-    assert all(event.outcome_status == "rejected" for event in batch_results)
+    assert all(event.outcome_status == "rejected" for event in group_results)
 
 
 def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
@@ -812,7 +813,7 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
     assert sum(entry.payload["outcome"]["execution_state"] == "completed" for entry in results) == 1
 
 
-def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path):
+def test_tool_group_executes_once_and_returns_one_provider_batch(tmp_path):
     (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
     calls = (
@@ -829,15 +830,15 @@ def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Read both files.")],
+        [ModelAction.tools(calls), ModelAction.final("Read both files.")],
     )
 
     outcome = agent.ask("Read a.txt and b.txt")
 
     assert outcome.answer == "Read both files."
     assert agent.run.metrics.executed_tool_count == 2
-    assert len(agent.model_client.recorded_action_result_batches) == 1
-    returned = agent.model_client.recorded_action_result_batches[0]
+    assert len(agent.model_client.recorded_action_result_groups) == 1
+    returned = agent.model_client.recorded_action_result_groups[0]
     assert len(returned) == 2
     assert "alpha" in returned[0]
     assert "beta" in returned[1]
@@ -845,10 +846,10 @@ def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path
     transactions = [
         (event.kind, event.call_id)
         for event in events
-        if event.kind in {"assistant_tool_batch", "tool_started", "tool_result"}
+        if event.kind in {"assistant_tool_calls", "tool_started", "tool_result"}
     ]
     assert transactions == [
-        ("assistant_tool_batch", ""),
+        ("assistant_tool_calls", ""),
         ("tool_started", "call_a"),
         ("tool_started", "call_b"),
         ("tool_result", "call_a"),
@@ -856,7 +857,7 @@ def test_observation_batch_executes_once_and_returns_one_provider_batch(tmp_path
     ]
 
 
-def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
+def test_mixed_tool_group_runs_parallel_read_before_exclusive_write(tmp_path):
     calls = (
         ToolCall(
             "read_file",
@@ -872,28 +873,29 @@ def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool_batch(calls),
-            ModelAction.tool("list_files", {"path": "."}),
-            ModelAction.final("Batch rejected."),
+            ModelAction.tools(calls),
+            ModelAction.final("Mixed group completed."),
         ],
     )
 
-    def approval_must_not_run(*_args, **_kwargs):
-        raise AssertionError("mixed batch must be rejected before Approval")
+    outcome = agent.ask("Read the repository and create forbidden.txt independently")
 
-    agent.tools.approve = approval_must_not_run
-
-    outcome = agent.ask("Try one mixed batch")
-
-    assert outcome.answer == "Batch rejected."
-    assert agent.run.metrics.executed_tool_count == 1
-    assert not (tmp_path / "forbidden.txt").exists()
+    assert outcome.answer == "Mixed group completed."
+    assert agent.run.metrics.executed_tool_count == 2
+    assert (tmp_path / "forbidden.txt").read_text() == "forbidden\n"
     events = agent.read_run_events(outcome.run_id)
-    assert not any(
-        event.kind == "tool_started"
-        and event.call_id in {"call_read", "call_write"}
+    transactions = [
+        (event.kind, event.call_id)
         for event in events
-    )
+        if event.kind in {"assistant_tool_calls", "tool_started", "tool_result"}
+    ]
+    assert transactions == [
+        ("assistant_tool_calls", ""),
+        ("tool_started", "call_read"),
+        ("tool_result", "call_read"),
+        ("tool_started", "call_write"),
+        ("tool_result", "call_write"),
+    ]
     results = [
         event
         for event in events
@@ -901,15 +903,11 @@ def test_mixed_batch_is_rejected_per_call_without_execution(tmp_path):
         and event.call_id in {"call_read", "call_write"}
     ]
     assert [event.call_id for event in results] == ["call_read", "call_write"]
-    assert all(event.outcome_status == "rejected" for event in results)
-    assert all(
-        event.payload["outcome"]["failure"]["code"] == "invalid_tool_batch"
-        for event in results
-    )
-    assert len(agent.model_client.recorded_action_result_batches[0]) == 2
+    assert all(event.outcome_status == "success" for event in results)
+    assert len(agent.model_client.recorded_action_result_groups[0]) == 2
 
 
-def test_observation_batch_reserves_tool_budget_before_execution(tmp_path):
+def test_tool_group_executes_budgeted_prefix_and_rejects_suffix(tmp_path):
     calls = (
         ToolCall(
             "read_file",
@@ -921,16 +919,15 @@ def test_observation_batch_reserves_tool_budget_before_execution(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool_batch(calls),
-            ModelAction.tool("list_files", {"path": "."}),
-            ModelAction.final("Budget rejected."),
+            ModelAction.tools(calls),
+            ModelAction.final("Budgeted prefix completed."),
         ],
     )
     agent.config = replace(agent.config, max_tool_executions=1)
 
-    outcome = agent.ask("Try an oversized batch")
+    outcome = agent.ask("Try two independent reads")
 
-    assert outcome.answer == "Budget rejected."
+    assert outcome.answer == "Budgeted prefix completed."
     assert agent.run.metrics.executed_tool_count == 1
     results = [
         event
@@ -938,7 +935,8 @@ def test_observation_batch_reserves_tool_budget_before_execution(tmp_path):
         if event.kind == "tool_result" and event.call_id in {"call_a", "call_b"}
     ]
     assert len(results) == 2
-    assert all(event.outcome_status == "rejected" for event in results)
+    assert [event.outcome_status for event in results] == ["success", "rejected"]
+    assert results[1].payload["outcome"]["failure"]["code"] == "tool_execution_limit"
 
 
 def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
@@ -953,7 +951,7 @@ def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool_batch(calls),
+            ModelAction.tools(calls),
             ModelAction.tool("list_files", {"path": "."}),
             ModelAction.final("Retried alone."),
         ],
@@ -969,7 +967,10 @@ def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
         and event.call_id in {"call_read", "call_final"}
     ]
     assert [event.call_id for event in results] == ["call_read", "call_final"]
-    assert all(event.outcome_status == "rejected" for event in results)
+    assert [event.outcome_status for event in results] == ["success", "rejected"]
+    assert results[1].payload["outcome"]["failure"]["code"] == (
+        "final_call_must_be_alone"
+    )
 
 
 def test_one_observation_failure_does_not_cancel_batch_siblings(
@@ -992,7 +993,7 @@ def test_one_observation_failure_does_not_cancel_batch_siblings(
     )
     agent = build_agent(
         tmp_path,
-        [ModelAction.tool_batch(calls), ModelAction.final("Observed one file.")],
+        [ModelAction.tools(calls), ModelAction.final("Observed one file.")],
     )
 
     def one_failure(_context, args):
@@ -1014,7 +1015,7 @@ def test_one_observation_failure_does_not_cancel_batch_siblings(
     assert "beta" in results[1].content
 
 
-def test_observation_batch_preflight_is_all_before_execution(tmp_path):
+def test_invalid_parallel_call_does_not_cancel_valid_sibling(tmp_path):
     calls = (
         ToolCall(
             "read_file",
@@ -1026,7 +1027,7 @@ def test_observation_batch_preflight_is_all_before_execution(tmp_path):
     agent = build_agent(
         tmp_path,
         [
-            ModelAction.tool_batch(calls),
+            ModelAction.tools(calls),
             ModelAction.tool("list_files", {"path": "."}),
             ModelAction.final("Preflight rejected."),
         ],
@@ -1036,11 +1037,13 @@ def test_observation_batch_preflight_is_all_before_execution(tmp_path):
 
     assert outcome.answer == "Preflight rejected."
     events = agent.read_run_events(outcome.run_id)
-    assert not any(
-        event.kind == "tool_started"
-        and event.call_id in {"call_invalid", "call_valid"}
+    starts = [
+        event.call_id
         for event in events
-    )
+        if event.kind == "tool_started"
+        and event.call_id in {"call_invalid", "call_valid"}
+    ]
+    assert starts == ["call_valid"]
     results = [
         event
         for event in events
@@ -1048,7 +1051,7 @@ def test_observation_batch_preflight_is_all_before_execution(tmp_path):
         and event.call_id in {"call_invalid", "call_valid"}
     ]
     assert len(results) == 2
-    assert all(event.outcome_status == "rejected" for event in results)
+    assert [event.outcome_status for event in results] == ["rejected", "success"]
 
 
 def test_auto_mode_allows_bounded_file_edits_but_hides_run_command(tmp_path):

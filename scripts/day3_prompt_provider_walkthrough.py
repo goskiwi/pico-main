@@ -301,7 +301,7 @@ def experiment_channels_and_pending(
     client.reset_action_session()
 
 
-def experiment_observation_batch(
+def experiment_tool_group(
     prompt,
     action_tools,
 ):
@@ -356,7 +356,7 @@ def experiment_observation_batch(
     ]
 
     print_section(
-        "B2. Observation Batch 一次回写全部 Result",
+        "B2. Tool-call group 一次回写全部 Result",
         {
             "provider_returned_function_calls": 2,
             "parsed_action": action.kind,
@@ -575,7 +575,7 @@ def experiment_context_overflow(root):
 def main():
     print(
         "Day 3 总流程：\n"
-        "Prompt 三通道 → 单 Call/Observation Batch 续接 → 非法响应纠正 → "
+        "Prompt 三通道 → 单 Call/Tool-call group 续接 → 非法响应纠正 → "
         "Context Overflow 恢复"
     )
     with tempfile.TemporaryDirectory(prefix="pico-day3-") as directory:
@@ -591,7 +591,7 @@ def main():
             metadata,
             action_tools,
         )
-        experiment_observation_batch(
+        experiment_tool_group(
             prompt,
             action_tools,
         )

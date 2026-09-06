@@ -82,8 +82,8 @@ def test_active_run_restores_same_projection(tmp_path, monkeypatch):
     agent, store, projection, log = build_interrupted_run(tmp_path)
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     call = ToolCall("read_file", {"path": "README.md"}, "read")
-    log.append_tool_call(call)
-    assert agent.tools.execute_pending(call.call_id).status == "success"
+    group = log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
     agent.session.set_active_run("")
 
     snapshots = []
@@ -403,7 +403,7 @@ def test_corrupt_session_pointer_fails_closed(tmp_path, corruption):
 def test_persisted_call_without_start_is_not_replayed(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     resumed = resumed_agent(agent, store, observed_final("Recovered."))
     assert resumed.ask("Continue").answer == "Recovered."
     result = next(
@@ -418,7 +418,7 @@ def test_persisted_call_without_start_is_not_replayed(tmp_path):
 def test_started_unchanged_path_recovers_as_no_effect_error(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(
         call,
         effect_scope="workspace",
@@ -436,7 +436,7 @@ def test_started_unchanged_path_recovers_as_no_effect_error(tmp_path):
 def test_started_changed_path_recovers_as_partial_without_replay(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     call = ToolCall("write_file", {"path": "x.txt", "content": "x\n"}, "write")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(
         call,
         effect_scope="workspace",
@@ -472,7 +472,7 @@ def test_recovered_content_is_verified_without_requiring_another_write(
     agent, store, _, log = build_interrupted_run(tmp_path, config=config)
     content = "def add(a, b):\n    return a + b\n"
     call = ToolCall("write_file", {"path": "add.py", "content": content}, "write")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(
         call, effect_scope="workspace",
         potential_effects=[
@@ -485,8 +485,8 @@ def test_recovered_content_is_verified_without_requiring_another_write(
     reconcile_interrupted(resumed)
     resumed.run.execution_context = ExecutionContext.root(max_seconds=30)
     read = ToolCall("read_file", {"path": "add.py"}, "read")
-    resumed.run.run_log.append_tool_call(read)
-    assert resumed.tools.execute_pending(read.call_id).status == "success"
+    group = resumed.run.run_log.append_tool_calls((read,))
+    assert resumed.tools.execute_pending_group(group.event_id)[0].status == "success"
 
     decision = CompletionController(resumed).assess("done")
     assert decision.status == ("allowed" if correct else "verification_failed")
@@ -538,8 +538,8 @@ def test_completion_reruns_verification_after_untracked_dependency_changes(tmp_p
                  config=config, session=store.create(tmp_path))
     RunLifecycle(agent).initialize("Create result.txt so the sum with dependency.txt is 3")
     call = ToolCall("write_file", {"path": "result.txt", "content": "1"}, "write")
-    agent.run.run_log.append_tool_call(call)
-    assert agent.tools.execute_pending(call.call_id).status == "success"
+    group = agent.run.run_log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
     assert CompletionController(agent).assess("done").allowed
     dependency.write_text("9")
     actions = [ModelAction.final("done") for _ in range(3)]
@@ -609,9 +609,9 @@ def test_reused_call_id_is_scoped_to_the_pending_transaction(tmp_path):
     agent, store, _, log = build_interrupted_run(tmp_path)
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     call = ToolCall("read_file", {"path": "README.md"}, "same")
-    log.append_tool_call(call)
-    assert agent.tools.execute_pending("same").status == "success"
-    log.append_tool_call(call)
+    group = log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
+    log.append_tool_calls((call,))
     resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
     assert resumed.ask("Continue").status == "completed"
     recovered = [e for e in resumed.run.run_log.events if e.payload.get("recovered_from_interruption")]
@@ -619,15 +619,15 @@ def test_reused_call_id_is_scoped_to_the_pending_transaction(tmp_path):
     assert recovered[0].payload["outcome"]["execution_state"] == "not_started"
 
 
-@pytest.mark.parametrize("batch", [False, True])
-def test_resumed_request_receives_a_new_tool_budget(tmp_path, batch):
-    count = 2 if batch else 1
+@pytest.mark.parametrize("grouped", [False, True])
+def test_resumed_request_receives_a_new_tool_budget(tmp_path, grouped):
+    count = 2 if grouped else 1
     config = PicoConfig(mode="auto", max_tool_executions=count)
     runtime_workspace = Workspace.build(tmp_path)
     store = SessionStore(tmp_path / ".pico/sessions")
-    action = (ModelAction.tool_batch((ToolCall("list_files", {"path": "."}, "one"),
+    action = (ModelAction.tools((ToolCall("list_files", {"path": "."}, "one"),
                                      ToolCall("list_files", {"path": "."}, "two")))
-              if batch else ModelAction.tool("list_files", {"path": "."}))
+              if grouped else ModelAction.tool("list_files", {"path": "."}))
     agent = Pico(FakeModelClient([action]),
                  runtime_workspace, config=config, session=store.create(tmp_path))
     with pytest.raises(RuntimeError, match="ran out of outputs"):
@@ -653,7 +653,7 @@ def test_interrupted_multi_file_effect_can_be_repaired_by_separate_edits(tmp_pat
     # Inject the durable prefix and file effects of an interrupted integration;
     # recovery must never invoke the original integrate_child call again.
     call = ToolCall("integrate_child", {"child_id": "interrupted_child"}, "integrate")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(
         call, effect_scope="workspace",
         potential_effects=[
@@ -681,13 +681,13 @@ def test_interrupted_multi_file_effect_can_be_repaired_by_separate_edits(tmp_pat
     assert [item["affected_paths"] for item in edits] == [("a.txt",), ("b.txt",)]
 
 
-def test_unstarted_observation_batch_recovers_every_call_without_replay(tmp_path):
+def test_unstarted_group_recovers_every_call_without_replay(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     calls = (
         ToolCall("read_file", {"path": "README.md"}, "call_a"),
         ToolCall("search", {"pattern": "demo", "path": "."}, "call_b"),
     )
-    log.append_tool_batch(calls)
+    log.append_tool_calls(calls)
 
     resumed = resumed_agent(agent, store, observed_final("Recovered."))
     outcome = resumed.ask("Continue")
@@ -707,13 +707,13 @@ def test_unstarted_observation_batch_recovers_every_call_without_replay(tmp_path
     assert resumed.run.projection.pending_call_ids == ()
 
 
-def test_observation_batch_recovery_keeps_result_prefix_and_closes_suffix(tmp_path):
+def test_tool_group_recovery_keeps_result_prefix_and_closes_suffix(tmp_path):
     agent, store, _projection, log = build_interrupted_run(tmp_path)
     calls = (
         ToolCall("read_file", {"path": "README.md"}, "call_a"),
         ToolCall("search", {"pattern": "demo", "path": "."}, "call_b"),
     )
-    log.append_tool_batch(calls)
+    log.append_tool_calls(calls)
     for call in calls:
         log.append_tool_started(call, effect_scope="none", potential_effects=[])
     log.append_tool_result(
@@ -741,3 +741,48 @@ def test_observation_batch_recovery_keeps_result_prefix_and_closes_suffix(tmp_pa
         "operation_interrupted"
     )
     assert results[1].side_effect_state == "none"
+
+
+def test_mixed_tool_group_recovery_reconciles_each_call_without_replay(tmp_path):
+    agent, store, _projection, log = build_interrupted_run(tmp_path)
+    calls = (
+        ToolCall("read_file", {"path": "README.md"}, "call_read"),
+        ToolCall("write_file", {"path": "created.txt", "content": "created\n"}, "call_write"),
+        ToolCall("list_files", {"path": "."}, "call_later"),
+    )
+    log.append_tool_calls(calls)
+    log.append_tool_started(calls[0], effect_scope="none", potential_effects=[])
+    log.append_tool_result(
+        ToolOutcome(
+            "call_read", "read_file", "success", "completed", "none", "durable read"
+        )
+    )
+    log.append_tool_started(
+        calls[1],
+        effect_scope="workspace",
+        potential_effects=[{
+            "path": "created.txt",
+            "before_state": "absent",
+            "before_artifact_id": "",
+        }],
+    )
+    (tmp_path / "created.txt").write_text("created\n", encoding="utf-8")
+
+    resumed = resumed_agent(agent, store, [])
+    RunLifecycle(resumed).initialize("Continue")
+    results = [
+        event
+        for event in resumed.run.run_log.events
+        if event.kind == "tool_result"
+        and event.call_id in {"call_read", "call_write", "call_later"}
+    ]
+
+    assert [event.call_id for event in results] == [
+        "call_read", "call_write", "call_later"
+    ]
+    assert results[0].content == "durable read"
+    assert results[1].side_effect_state == "partial"
+    assert results[1].affected_paths == ("created.txt",)
+    assert results[2].payload["outcome"]["execution_state"] == "not_started"
+    assert resumed.run.projection.pending_call_ids == ()
+    resumed.run.execution_context = None

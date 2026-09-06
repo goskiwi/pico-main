@@ -25,7 +25,10 @@ def tool_events(agent, call_id):
     return [
         event
         for event in agent.run.run_log.events
-        if (event.kind == "assistant_tool_call" and event.call_id == call_id)
+        if (
+            event.kind == "assistant_tool_calls"
+            and any(call.call_id == call_id for call in event.tool_calls)
+        )
         or (event.kind == "tool_started" and event.call_id == call_id)
         or (event.kind == "tool_result" and event.call_id == call_id)
     ]
@@ -221,7 +224,7 @@ def main():
         assert "artifact_id" in repaired_result_event.payload["outcome"]
         assert "correction_action" not in repaired_result_event.payload["outcome"]
         assert repaired_transaction == [
-            "assistant_tool_call",
+            "assistant_tool_calls",
             "tool_started",
             "tool_result",
         ]
@@ -246,7 +249,7 @@ def main():
         )
         assert denied_outcomes[0]["failure"] == "approval_denied"
         assert denied_outcomes[0]["execution_state"] == "not_started"
-        assert denied_transaction == ["assistant_tool_call", "tool_result"]
+        assert denied_transaction == ["assistant_tool_calls", "tool_result"]
         assert set(denied_result_event.payload) == {"outcome"}
         assert denied_tool_outcome.structured == {}
         assert denied_tool_outcome.artifact_id == ""

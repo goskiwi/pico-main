@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 class ModelTurn:
     action: Any
     provider_input_tokens: int | None
+    provider_output_tokens: int | None
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,7 @@ class AgentLoop:
         return ModelTurn(
             action=action,
             provider_input_tokens=provider_input_tokens,
+            provider_output_tokens=completion_metadata.get("output_tokens"),
         )
 
     def _resolve_action_tool_surface(self):
@@ -187,24 +189,37 @@ class AgentLoop:
             - config.compaction_reserve_tokens
         )
 
-    def _should_rotate_provider(self, turn):
-        return isinstance(turn.provider_input_tokens, int) and (
-            turn.provider_input_tokens >= self._provider_high_watermark()
+    def _projected_continuation_tokens(self, turn, provider_results):
+        if not isinstance(turn.provider_input_tokens, int) or not isinstance(
+            turn.provider_output_tokens, int
+        ):
+            return None
+        return (
+            turn.provider_input_tokens
+            + turn.provider_output_tokens
+            + self.agent.prompt.count_tokens("\n".join(provider_results))
         )
 
     def _continue_provider(self, loop_state, turn, provider_results):
         agent = self.agent
         provider_results = tuple(str(result) for result in provider_results)
-        if self._should_rotate_provider(turn):
+        projected_tokens = self._projected_continuation_tokens(
+            turn, provider_results
+        )
+        if (
+            projected_tokens is not None
+            and projected_tokens >= self._provider_high_watermark()
+        ):
             threshold_tokens = self._provider_high_watermark()
             agent.model_client.reset_action_session()
             loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = turn.provider_input_tokens
+            loop_state.provider_context_tokens = projected_tokens
             agent.emit_event(
                 "provider_session_reset",
                 {
                     "reason": "context_high_watermark",
                     "input_tokens": turn.provider_input_tokens,
+                    "projected_input_tokens": projected_tokens,
                     "threshold_tokens": threshold_tokens,
                 },
             )
@@ -237,13 +252,8 @@ class AgentLoop:
             return "tool_execution_limit"
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
-        if len(calls) == 1:
-            call = calls[0]
-            agent.run.run_log.append_tool_call(call)
-            outcomes = (agent.tools.execute_pending(call.call_id),)
-        else:
-            batch = agent.run.run_log.append_tool_batch(calls)
-            outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+        group = agent.run.run_log.append_tool_calls(calls)
+        outcomes = agent.tools.execute_pending_group(group.event_id)
 
         model_instruction = self._append_budget_instruction(loop_state)
         provider_results = [outcome.render_for_model() for outcome in outcomes]

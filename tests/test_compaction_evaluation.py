@@ -12,7 +12,7 @@ def test_compaction_preservation_is_measured_before_completed_steps_are_cleared(
 
     def update(args, call_id):
         call = ToolCall("update_working_state", args, call_id)
-        log.append_tool_call(call)
+        log.append_tool_calls((call,))
         log.append_tool_started(call, effect_scope="none", potential_effects=[])
         log.append_tool_result(ToolOutcome(call_id, call.name, "success", "completed", "none", "accepted"))
 

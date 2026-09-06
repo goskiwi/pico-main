@@ -50,6 +50,7 @@ def test_session_from_another_workspace_is_rejected(tmp_path):
         {"max_new_tokens": 0},
         {"max_agent_turns": 0},
         {"max_tool_executions": 0},
+        {"max_parallel_tools": 0},
         {"turn_timeout_seconds": 0},
         {"verification_command": None},
         {"compaction_reserve_tokens": 1},

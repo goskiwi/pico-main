@@ -68,11 +68,11 @@ def start_run(agent, *, run_id="run_tool_test", goal="Exercise tools"):
 
 def run_active(agent, call):
     run_log = agent.run.run_log or start_run(agent)
-    run_log.append_tool_call(call)
-    return agent.tools.execute_pending(call.call_id)
+    group = run_log.append_tool_calls((call,))
+    return agent.tools.execute_pending_group(group.event_id)[0]
 
 
-def test_tightened_tool_allowlist_applies_to_model_single_and_batch(tmp_path):
+def test_tightened_tool_allowlist_rejects_only_disallowed_group_calls(tmp_path):
     agent = build_agent(tmp_path)
     agent.config = replace(agent.config, allowed_tools=("list_files",))
     assert {tool["name"] for tool in agent.tools.model_action_tools()} == {
@@ -82,9 +82,12 @@ def test_tightened_tool_allowlist_applies_to_model_single_and_batch(tmp_path):
     assert denied.status == "rejected"
     calls = (ToolCall("read_file", {"path": "README.md"}, "read"),
              ToolCall("list_files", {}, "list"))
-    batch = agent.run.run_log.append_tool_batch(calls)
-    results = agent.tools.execute_pending_batch(batch.batch_id)
-    assert all(result.execution_state == "not_started" for result in results)
+    group = agent.run.run_log.append_tool_calls(calls)
+    results = agent.tools.execute_pending_group(group.event_id)
+    assert [result.execution_state for result in results] == [
+        "not_started", "completed"
+    ]
+    assert [result.status for result in results] == ["rejected", "success"]
 
 
 def test_verification_side_effect_survives_resubmission_and_replay(tmp_path):
@@ -277,9 +280,9 @@ def test_active_run_executes_pending_call_by_id(tmp_path):
         {"path": "declared.txt", "content": "declared\n"},
         "call_persisted",
     )
-    run_log.append_tool_call(persisted)
+    group = run_log.append_tool_calls((persisted,))
 
-    outcome = agent.tools.execute_pending(persisted.call_id)
+    outcome = agent.tools.execute_pending_group(group.event_id)[0]
 
     assert outcome.status == "success"
     assert outcome.affected_paths == ("declared.txt",)
@@ -380,10 +383,10 @@ def test_pending_execution_rejects_a_different_call_id(tmp_path):
     agent = build_agent(tmp_path)
     run_log = start_run(agent)
     call = ToolCall("read_file", {"path": "README.md"}, "call_expected")
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
 
-    with pytest.raises(RuntimeError, match="call id does not match"):
-        agent.tools.execute_pending("call_other")
+    with pytest.raises(RuntimeError, match="group id does not match"):
+        agent.tools.execute_pending_group("call_other")
 
 
 def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
@@ -740,8 +743,9 @@ def test_external_drift_is_rejected_before_a_second_runtime_mutation(tmp_path):
         event.kind
         for event in agent.run.run_log.events
         if event.call_id == "call_second_edit"
+        or any(call.call_id == "call_second_edit" for call in event.tool_calls)
     ]
-    assert second_events == ["assistant_tool_call", "tool_result"]
+    assert second_events == ["assistant_tool_calls", "tool_result"]
     replayed = agent.dependencies.run_store.replay("run_tool_test")
     assert replayed.evidence.change_set.files["subject.txt"].current_after_state == (
         first.structured["after_revision"]
@@ -858,7 +862,7 @@ def test_commit_point_conflict_is_typed_external_drift_not_tool_partial(
     assert target.read_text(encoding="utf-8") == "external-change\n"
 
 
-def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
+def test_tool_group_runs_concurrently_but_commits_results_in_call_order(
     tmp_path,
     monkeypatch,
 ):
@@ -878,11 +882,11 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
             "call_b",
         ),
     )
-    batch = run_log.append_tool_batch(calls)
+    group = run_log.append_tool_calls(calls)
     barrier = threading.Barrier(2)
 
     def no_rebuild():
-        pytest.fail("batch execution must reuse the existing tool registry")
+        pytest.fail("group execution must reuse the existing tool registry")
 
     monkeypatch.setattr(tools_module, "build_tool_registry", no_rebuild)
     b_finished = threading.Event()
@@ -912,7 +916,7 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
         parallel_read,
     )
 
-    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+    outcomes = agent.tools.execute_pending_group(group.event_id)
 
     assert max_active == 2
     assert [outcome.tool_call_id for outcome in outcomes] == ["call_a", "call_b"]
@@ -928,17 +932,75 @@ def test_observation_batch_runs_concurrently_but_commits_results_in_call_order(
     ] == ["call_a", "call_b"]
 
 
-def test_cancelled_observation_batch_still_closes_every_call(tmp_path):
+def test_parallel_limit_runs_large_group_in_bounded_waves(tmp_path, monkeypatch):
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, max_parallel_tools=2)
+    run_log = start_run(agent)
+    calls = tuple(
+        ToolCall("list_files", {"path": "."}, f"call_{index}")
+        for index in range(6)
+    )
+    group = run_log.append_tool_calls(calls)
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def measured_read(_context, _args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return ToolRunnerResult("done")
+
+    monkeypatch.setitem(agent.tools.registry["list_files"], "run", measured_read)
+
+    outcomes = agent.tools.execute_pending_group(group.event_id)
+
+    assert max_active == 2
+    assert len(outcomes) == 6
+    assert all(outcome.status == "success" for outcome in outcomes)
+
+
+def test_exclusive_writes_in_group_run_as_separate_ordered_transactions(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = start_run(agent)
+    calls = (
+        ToolCall("write_file", {"path": "a.txt", "content": "a\n"}, "call_a"),
+        ToolCall("write_file", {"path": "b.txt", "content": "b\n"}, "call_b"),
+    )
+    group = run_log.append_tool_calls(calls)
+
+    outcomes = agent.tools.execute_pending_group(group.event_id)
+
+    assert [outcome.status for outcome in outcomes] == ["success", "success"]
+    assert (tmp_path / "a.txt").read_text() == "a\n"
+    assert (tmp_path / "b.txt").read_text() == "b\n"
+    assert [
+        (event.kind, event.call_id)
+        for event in run_log.events
+        if event.kind in {"tool_started", "tool_result"}
+    ] == [
+        ("tool_started", "call_a"),
+        ("tool_result", "call_a"),
+        ("tool_started", "call_b"),
+        ("tool_result", "call_b"),
+    ]
+
+
+def test_cancelled_group_still_closes_every_call(tmp_path):
     agent = build_agent(tmp_path)
     run_log = start_run(agent)
     calls = (
         ToolCall("list_files", {"path": "."}, "call_a"),
         ToolCall("list_files", {"path": "."}, "call_b"),
     )
-    batch = run_log.append_tool_batch(calls)
+    group = run_log.append_tool_calls(calls)
     agent.run.execution_context.request_stop("user_cancelled")
 
-    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+    outcomes = agent.tools.execute_pending_group(group.event_id)
 
     assert len(outcomes) == 2
     assert all(outcome.execution_state == "failed" for outcome in outcomes)
@@ -949,7 +1011,7 @@ def test_cancelled_observation_batch_still_closes_every_call(tmp_path):
     assert run_log.pending_tool_calls() == ()
 
 
-def test_observation_batch_does_not_swallow_process_interrupts(
+def test_tool_group_does_not_swallow_process_interrupts(
     tmp_path,
     monkeypatch,
 ):
@@ -959,7 +1021,7 @@ def test_observation_batch_does_not_swallow_process_interrupts(
         ToolCall("list_files", {"path": "."}, "call_a"),
         ToolCall("list_files", {"path": "."}, "call_b"),
     )
-    batch = run_log.append_tool_batch(calls)
+    group = run_log.append_tool_calls(calls)
 
     def interrupted(_context, _args):
         raise KeyboardInterrupt
@@ -967,12 +1029,12 @@ def test_observation_batch_does_not_swallow_process_interrupts(
     monkeypatch.setitem(agent.tools.registry["list_files"], "run", interrupted)
 
     with pytest.raises(KeyboardInterrupt):
-        agent.tools.execute_pending_batch(batch.batch_id)
+        agent.tools.execute_pending_group(group.event_id)
 
     assert run_log.pending_tool_calls() == calls
 
 
-def test_observation_batch_preserves_reported_side_effects(
+def test_tool_group_preserves_reported_side_effects(
     tmp_path,
     monkeypatch,
 ):
@@ -982,7 +1044,7 @@ def test_observation_batch_preserves_reported_side_effects(
         ToolCall("list_files", {"path": "."}, "call_known"),
         ToolCall("list_files", {"path": "."}, "call_unknown"),
     )
-    batch = run_log.append_tool_batch(calls)
+    group = run_log.append_tool_calls(calls)
 
     def impure_observation(context, _args):
         if context.tool_call_id == "call_known":
@@ -999,7 +1061,7 @@ def test_observation_batch_preserves_reported_side_effects(
         impure_observation,
     )
 
-    outcomes = agent.tools.execute_pending_batch(batch.batch_id)
+    outcomes = agent.tools.execute_pending_group(group.event_id)
 
     assert [outcome.side_effect_state for outcome in outcomes] == [
         "unknown",
@@ -1009,7 +1071,7 @@ def test_observation_batch_preserves_reported_side_effects(
     assert all(outcome.effect_scope == "workspace" for outcome in outcomes)
     assert all(outcome.status == "partial_success" for outcome in outcomes)
     assert all(
-        outcome.failure.code == "observation_reported_side_effect"
+        outcome.failure.code == "parallel_tool_reported_side_effect"
         for outcome in outcomes
     )
 
@@ -1064,7 +1126,12 @@ def test_successful_command_can_finish_without_an_unrelated_observation(tmp_path
     with patch("builtins.input", return_value="yes"):
         result = agent.ask("Run Python to calculate 2 + 2 and report the output")
     assert result.status == "completed"
-    calls = [e.name for e in agent.run.run_log.events if e.kind == "assistant_tool_call"]
+    calls = [
+        call.name
+        for event in agent.run.run_log.events
+        if event.kind == "assistant_tool_calls"
+        for call in event.tool_calls
+    ]
     assert calls == ["run_command"]
     assert agent.run.evidence.successful_observation_count == 0
 
@@ -1099,7 +1166,7 @@ def test_invalid_result_cannot_poison_the_durable_log(tmp_path):
     agent = build_agent(tmp_path)
     log = start_run(agent)
     call = ToolCall("write_file", {"path": "a.txt", "content": "a"}, "write")
-    log.append_tool_call(call)
+    log.append_tool_calls((call,))
     log.append_tool_started(call, effect_scope="workspace", potential_effects=[])
     before = agent.dependencies.run_store.events_path(log.run_id).read_bytes()
     invalid = ToolOutcome("write", "write_file", "success", "completed", "changed", "written",

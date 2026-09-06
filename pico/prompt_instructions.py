@@ -25,7 +25,7 @@ def build_prompt_instructions():
             (
                 "Only the schemas supplied in the Responses tools field for this turn may be called; ToolRuntime validates them again locally.",
                 "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking but never exposes run_command.",
-                "You may call up to four independent list_files, read_file, search, or read_artifact observations in one turn. Call every other function alone; never mix an observation batch with stateful, execution, orchestration, or completion calls.",
+                "Call independent tools together when their arguments do not depend on another call's result. Runtime executes explicitly parallel-safe tools concurrently and gives every other tool an exclusive ordered execution boundary.",
                 "Use run_command only for diagnostics expected not to modify repository files; mutating shell commands are not supported by this Runtime.",
             ),
         ),
@@ -40,6 +40,7 @@ def build_prompt_instructions():
             "Completion",
             (
                 "When the requested work is ready, call submit_final with a concise evidence-backed answer.",
+                "Call submit_final alone; it cannot share a model response with another tool call.",
                 "After submit_final, the Runtime runs its configured verification command when required and constructs the Final Diff.",
                 "Do not run the fixed verifier or generate or inspect the Final Diff yourself; if the Runtime rejects completion, follow its instruction and submit again.",
                 "Keep the final answer concise, concrete, and supported by observed evidence.",

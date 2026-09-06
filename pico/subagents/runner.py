@@ -156,6 +156,7 @@ class SubagentRunner:
             mode=("ask" if record.spec.role == "explore" else "auto"),
             max_agent_turns=CHILD_MAX_AGENT_TURNS,
             max_tool_executions=CHILD_MAX_TOOL_EXECUTIONS,
+            max_parallel_tools=self.parent.config.max_parallel_tools,
             max_new_tokens=self.parent.config.max_new_tokens,
             secret_env_names=self.parent.config.secret_env_names,
             allowed_tools=(

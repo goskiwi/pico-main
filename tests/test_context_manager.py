@@ -30,8 +30,8 @@ def test_complete_working_state_is_visible_after_resume(tmp_path):
     call = ToolCall("update_working_state", {
         "add_constraints": constraints, "add_next_steps": ["NEXT_STEP_MUST_SURVIVE"],
     }, "state")
-    agent.run.run_log.append_tool_call(call)
-    assert agent.tools.execute_pending(call.call_id).status == "success"
+    group = agent.run.run_log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
     resumed = Pico(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
                    session=agent.session.store.load(agent.session.id))
     prompt, metadata = resumed.prompt.build("Continue")
@@ -108,7 +108,7 @@ def activate(agent, goal="Inspect"):
 
 def append_read(run_log, index, content):
     call = ToolCall("read_file", {"path": f"file_{index}.py"}, f"call_{index}")
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
     run_log.append_tool_started(
         call,
         effect_scope="none",
@@ -204,7 +204,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
         {"add_next_steps": ["Inspect retry policy"]},
         "call_state_query",
     )
-    run_log.append_tool_call(state_call)
+    run_log.append_tool_calls((state_call,))
     run_log.append_tool_started(
         state_call,
         effect_scope="none",
@@ -226,7 +226,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
         {"path": "payments/retry.py"},
         "call_read_query",
     )
-    run_log.append_tool_call(read_call)
+    run_log.append_tool_calls((read_call,))
     run_log.append_tool_started(
         read_call,
         effect_scope="none",
@@ -270,7 +270,7 @@ def test_wire_places_current_working_state_after_history(tmp_path):
         {"add_decisions": ["CURRENT-DECISION"]},
         "call_state_order",
     )
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
     run_log.append_tool_started(
         call,
         effect_scope="none",
@@ -536,7 +536,7 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
     )
     assert (
         metadata["history_projection"]["projection_mode"]
-        == "compacted_complete_transactions"
+            == "compacted_call_transactions"
     )
     assert input_text.endswith('latest_user_request:\n"continue"')
     assert named_json(input_text, "task_request") == "Inspect"
@@ -544,7 +544,7 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
     assert metadata["compaction"] == compaction
 
 
-def test_compaction_never_covers_the_current_durable_resume_guidance(tmp_path):
+def test_compaction_covers_resume_history_but_projects_latest_guidance(tmp_path):
     class Summary:
         def __init__(self):
             self.calls = []
@@ -581,11 +581,41 @@ def test_compaction_never_covers_the_current_durable_resume_guidance(tmp_path):
     prompt, _prompt_metadata = manager.build("Keep config.py unchanged")
 
     assert metadata["committed"] is True
-    assert guidance.event_id not in compaction.covered_event_ids
+    assert guidance.event_id in compaction.covered_event_ids
     assert (
         named_json(prompt.input_text, "latest_user_request")
         == "Keep config.py unchanged"
     )
+
+
+def test_resume_guidance_does_not_block_later_compaction(tmp_path):
+    agent = build_agent(tmp_path)
+    run_log = activate(agent)
+    guidance = run_log.append_user_guidance("Keep config.py unchanged")
+    for index in range(5):
+        append_read(run_log, index, "result " + "x " * 250)
+
+    first = RunHistory(run_log.events).plan_compaction(
+        retain_tokens=100,
+        history_token_counter=len,
+        summary_builder=lambda _events: "first summary",
+    )
+    assert first is not None
+    run_log.append_compaction(first[0], first[1])
+    for index in range(5, 10):
+        append_read(run_log, index, "later " + "y " * 250)
+
+    second = RunHistory(run_log.events).plan_compaction(
+        retain_tokens=100,
+        history_token_counter=len,
+        summary_builder=lambda _events: "second summary",
+    )
+
+    assert second is not None
+    run_log.append_compaction(second[0], second[1])
+    rebuilt = RunHistory(run_log.events)
+    assert rebuilt.latest_user_guidance() == "Keep config.py unchanged"
+    assert guidance.event_id in first[1]
 
 
 def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
@@ -686,11 +716,12 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
         count_tokens=manager.count_tokens,
     )
     active = RunHistory(run_log.events).active_events()
-    retained = active[-2:]
-    summary_events = RunHistory._without_projected_state(active[:-2])
-    source = "\n".join(RunHistory._render_event(event) for event in summary_events)
+    history = RunHistory(run_log.events)
+    summary_units = history._projection_units(active)
+    source = "\n".join(
+        history._render_fact(fact) for unit in summary_units for fact in unit
+    )
     before_wire, _metadata = RunHistory(run_log.events).render_projection()
-    retained_wire = "\n".join(RunHistory._render_event(event) for event in retained)
     summary = ""
     for size in range(1, 2000):
         candidate = (
@@ -699,7 +730,7 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
             + "\n\n## Critical Context\n- none"
         )
         after_wire = (
-            "Current run events:\n[compaction] " + candidate + "\n" + retained_wire
+            "Current run events:\n[compaction] " + candidate
         )
         minimum_projection = (
             "Current run events:\n[compaction] "
@@ -731,12 +762,13 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
         "continue",
         provider_context_tokens=4900,
     )
-    history, _history_metadata = history_override
+    history, history_metadata = history_override
 
     assert metadata["failure_code"] == "semantic_summary_not_committed"
     assert metadata["committed"] is False
     assert tuple(run_log.events) == before_events
-    assert "bounded fallback" in history
+    assert history == ""
+    assert history_metadata["retained_tokens"] == 0
 
 
 def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_path):
@@ -763,18 +795,14 @@ def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_p
     metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue"
     )
-    history, _history_metadata = history_override
+    history, history_metadata = history_override
 
     assert tuple(run_log.events) == before
     assert metadata["degraded"] is True
     assert metadata["committed"] is False
     assert "bounded fallback" in history
-    for call_id in {
-        event.call_id
-        for event in before
-        if event.kind == "assistant_tool_call" and event.call_id in history
-    }:
-        assert history.count(call_id) == 2
+    assert history_metadata["retained_tokens"] <= 180
+    assert "[tool receipt]" in history
 
 
 def test_fallback_history_and_metadata_can_be_consumed_by_a_new_builder(tmp_path):
@@ -835,10 +863,10 @@ def test_consecutive_builds_use_the_current_history_metadata(tmp_path):
     assert "LATEST-OBSERVED-FACT" in prompt.input_text
 
 
-def test_pending_observation_batch_skips_compaction(tmp_path):
+def test_pending_group_skips_compaction(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)
-    run_log.append_tool_batch(
+    run_log.append_tool_calls(
         (
             ToolCall("read_file", {"path": "a.py"}, "call_a"),
             ToolCall("read_file", {"path": "b.py"}, "call_b"),
@@ -903,7 +931,7 @@ def test_history_omits_canonical_contract_and_successful_working_update(tmp_path
         {"add_constraints": ["Keep API"]},
         "call_state",
     )
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
     run_log.append_tool_started(
         call,
         effect_scope="none",

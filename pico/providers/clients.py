@@ -275,16 +275,16 @@ class FakeModelClient:
 
     def reset_action_session(self):
         self.recorded_action_results = []
-        self.recorded_action_result_batches = []
+        self.recorded_action_result_groups = []
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
         return 0
 
     def record_action_results(self, results):
-        batch = tuple(str(result) for result in results)
-        self.recorded_action_result_batches.append(batch)
-        self.recorded_action_results.extend(batch)
+        group = tuple(str(result) for result in results)
+        self.recorded_action_result_groups.append(group)
+        self.recorded_action_results.extend(group)
 
     def complete(self, prompt, max_new_tokens, **kwargs):
         self.prompts.append(prompt)
@@ -418,11 +418,11 @@ def _action_from_response(data, action_tools):
             return ModelAction.invalid(
                 "The model response reached max_output_tokens before "
                 "producing complete function calls. Return one concise "
-                "action or an independent observation batch."
+                "action or an independent tool-call group."
             )
         return ModelAction.invalid(
             "The provider returned an incomplete response. Return exactly "
-            "one complete action or observation batch."
+            "one complete action or tool-call group."
         )
     if data.get("status") != "completed":
         return ModelAction.invalid("Only a completed provider response can produce actions.")
@@ -453,7 +453,7 @@ def _action_from_response(data, action_tools):
         parsed.append(parsed_call)
     if len(parsed) > 1:
         try:
-            return ModelAction.tool_batch(parsed)
+            return ModelAction.tools(parsed)
         except ValueError as exc:
             return ModelAction.invalid(str(exc))
     call = parsed[0]

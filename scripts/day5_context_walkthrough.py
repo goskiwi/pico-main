@@ -107,7 +107,7 @@ def append_synthetic_historical_transaction(agent, index):
         {"path": f"evidence_{index}.txt", "start_line": 1, "end_line": 20},
         f"call_history_{index}",
     )
-    run_log.append_tool_call(call)
+    run_log.append_tool_calls((call,))
     run_log.append_tool_started(
             call,
             effect_scope="none",
@@ -224,7 +224,7 @@ def effective_recovery_context(agent, summary):
 def fallback_entry_headers(history):
     headers = []
     for line in str(history).splitlines():
-        if line.startswith("[assistant/tool]"):
+        if line.startswith(("[assistant/tool]", "[tool receipt]")):
             headers.append(line)
         elif line.startswith("[tool/"):
             headers.append(line.split("]", 1)[0] + "]")
@@ -235,7 +235,7 @@ def durable_kind_counts(events):
     return {
         kind: sum(event.kind == kind for event in events)
         for kind in (
-            "assistant_tool_call",
+            "assistant_tool_calls",
             "tool_started",
             "tool_result",
             "compaction",
@@ -302,8 +302,8 @@ def build_pressure_fixture(root, run_id):
         },
         f"call_state_{run_id}",
     )
-    run_log.append_tool_call(state_call)
-    state_outcome = agent.tools.execute_pending(state_call.call_id)
+    group = run_log.append_tool_calls((state_call,))
+    state_outcome = agent.tools.execute_pending_group(group.event_id)[0]
     assert state_outcome.status == "success"
     assert agent.run.projection.working.constraints == (WORKING_CONSTRAINT,)
     for index in range(6):
@@ -330,21 +330,22 @@ def bounded_fallback_experiment(root):
     context = untrusted_context(prompt.input_text)
     history, history_metadata = history_override
     headers = fallback_entry_headers(history)
+    receipt_count = sum(line.startswith("[tool receipt]") for line in headers)
     physical_counts = durable_kind_counts(physical_events)
 
     assert compaction["mode"] == "runtime_recent_transactions"
     assert compaction["degraded"] is True
     assert compaction["committed"] is False
     assert compaction["failure_code"] == "semantic_summary_unavailable"
-    assert compaction["selected_count"] == 2
-    assert len(headers) == 2
-    assert headers[0].startswith("[assistant/tool]")
-    assert headers[1].startswith("[tool/read_file/success/none]")
+    assert compaction["retained_tokens"] <= agent.config.compaction_keep_recent_tokens
+    assert receipt_count >= 1
+    assert headers[-2].startswith("[assistant/tool]")
+    assert headers[-1].startswith("[tool/read_file/success/none]")
     assert "tool_started" not in history
     assert [event.event_id for event in physical_events] == original_ids
     assert all(event.kind != "compaction" for event in physical_events)
     assert physical_counts == {
-        "assistant_tool_call": 7,
+        "assistant_tool_calls": 7,
         "tool_started": 7,
         "tool_result": 7,
         "compaction": 0,
@@ -367,7 +368,8 @@ def bounded_fallback_experiment(root):
             },
             "compaction": compaction,
             "model_visible_history_view": {
-                "retained_call_result_pairs": 1,
+                "retained_call_facts": receipt_count + 1,
+                "receipt_count": receipt_count,
                 "entries": headers,
             },
             "physical_log": {
@@ -394,7 +396,7 @@ class DeterministicSummarizer:
     def summarize(self, events, **_kwargs):
         self.seen_event_kinds = [event.kind for event in events]
         self.seen_tool_names = [
-            event.name for event in events if event.kind == "assistant_tool_call"
+            event.payload["name"] for event in events if event.kind == "tool_call"
         ]
         self.calls.append(
             {
@@ -448,7 +450,7 @@ def semantic_compaction_experiment(root):
     assert run_log.generation == 2
     assert SUMMARY_MARKER in prompt.input_text
     assert prompt_metadata["history_projection"]["projection_mode"] == (
-        "compacted_complete_transactions"
+        "compacted_call_transactions"
     )
     assert len(history_view_after) < original_history_view_count
     assert history_view_after[0].kind == "compaction"
@@ -462,7 +464,7 @@ def semantic_compaction_experiment(root):
     assert any(event.kind == "tool_started" for event in physical_after)
     assert all(event.kind != "tool_started" for event in history_view_after)
     assert physical_counts == {
-        "assistant_tool_call": 7,
+        "assistant_tool_calls": 7,
         "tool_started": 7,
         "tool_result": 7,
         "compaction": 1,

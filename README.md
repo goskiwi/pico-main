@@ -1,7 +1,7 @@
 # Pico
 
 Pico 是一个轻量、本地、单协议的 Coding Agent Runtime。模型每轮通过
-OpenAI-compatible Responses function calling 提出一个动作或独立 Observation Batch；Runtime 掌握工具准入、
+OpenAI-compatible Responses function calling 提出一个或多个工具调用；Runtime 掌握工具准入、
 副作用、持久化、恢复、验证和最终完成权。CLI 还提供一次一个的显式 Child 委派。
 
 Pico 面向用户已经信任的本地仓库。Code 模式允许模型申请一个需要 Approval 的诊断型
@@ -63,11 +63,11 @@ User request + Ask/Code/Auto -> TaskContract
 
 1. **单一事实源**：每个 Run 只有一个 Run Log。实时调用 `RunLog.append`，内部依次执行
    `apply_event` 构造并验证待提交状态、存储追加、发布已验证状态；回放使用同一套转换。
-2. **可恢复工具事务**：单调用使用 `assistant_tool_call`；多个纯 Observation 原子写成
-   `assistant_tool_batch`。每个 Call 都有 Started/Result，崩溃后逐 Call 闭合且不盲目重放。
-3. **副作用感知调度**：`list_files/read_file/search/read_artifact` 可组成最多四个调用的并行 Batch；
-   任何执行、写入、状态、编排或完成动作必须独占一轮。Runner 可并行，RunLog/Projection/Artifact
-   始终由主线程按模型原始顺序提交。
+2. **可恢复工具事务**：每次模型响应统一写成一个 `assistant_tool_calls`，其中包含一个或
+   多个有序 Call。每个 Call 都有独立 Started/Result，崩溃后逐 Call 闭合且不盲目重放。
+3. **按工具能力调度**：工具默认独占，只有显式标记的读取工具可并行；混合调用按原顺序切成
+   并行段和独占段。并行上限只控制同时运行数，不限制一个响应中的调用数。Runner 可并行，
+   RunLog/Projection/Artifact 始终由主线程按模型原始顺序提交。
 4. **Revision-bound 原子修改**：`edit_file` 携带读取时 Revision，提交点再次复验后原子替换，
    外部修改不会被静默覆盖。
 5. **证据驱动完成**：模型调用 `submit_final` 后，Runtime 检查净变化与不确定副作用，运行用户
@@ -88,8 +88,10 @@ CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskCont
 运行临时 Python／pytest 复现，Code／Auto 可用，Ask 不暴露。普通 CLI 默认不安装此工具。
 执行器由调用方提供，接口与信任边界见 [复现检查说明](docs/review-pack/isolated-checks.md)。
 
-前四个只读工具可组成 Observation Batch；其余工具必须单独调用。Mixed Batch 在执行前整批
-拒绝，但仍为每个 Call ID 写入一个 `rejected/not_started` Result。
+前四个只读工具显式声明为 parallel；其余工具默认 exclusive。同一响应可以混合多种工具，
+Runtime 对每个调用独立准入，并在读写边界间建立顺序屏障；一个调用被拒绝不会取消合法兄弟调用。
+`--max-parallel-tools` 只限制同时运行的 parallel Runner 数量（默认 4）；更多调用自动分波，
+不会因为超过并发数而拒绝整个响应。
 
 | 工具 | Ask | Code | Auto | 作用 |
 |---|:---:|:---:|:---:|---|

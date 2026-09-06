@@ -75,15 +75,30 @@ def test_invalid_check_is_rejected_before_executor(tmp_path, args):
     assert outcomes(agent)[0]["execution_state"] == "not_started"
 
 
-def test_check_cannot_join_observation_batch(tmp_path):
+def test_check_runs_exclusively_before_parallel_read(tmp_path):
     def check(**kwargs):
-        raise AssertionError("execution cannot be batched")
+        return CommandResult(0, stdout="checked")
 
     calls = (ToolCall("run_check", {"code": "pass"}),
              ToolCall("read_file", {"path": "README.md"}))
-    agent = agent_at(tmp_path, [ModelAction.tool_batch(calls), *read_and_finish()], runner=check)
-    agent.ask("Inspect")
-    assert all(r["execution_state"] == "not_started" for r in outcomes(agent)[:2])
+    agent = agent_at(
+        tmp_path, [ModelAction.tools(calls), ModelAction.final("done")], runner=check
+    )
+    outcome = agent.ask("Inspect")
+    assert outcome.status == "completed"
+    assert [row["status"] for row in outcomes(agent)] == ["success", "success"]
+    events = [
+        (event.kind, event.call_id)
+        for event in agent.run.run_log.events
+        if event.kind in {"assistant_tool_calls", "tool_started", "tool_result"}
+    ]
+    assert events == [
+        ("assistant_tool_calls", ""),
+        ("tool_started", calls[0].call_id),
+        ("tool_result", calls[0].call_id),
+        ("tool_started", calls[1].call_id),
+        ("tool_result", calls[1].call_id),
+    ]
 
 
 def test_passing_diagnostic_cannot_replace_fixed_verification(tmp_path):

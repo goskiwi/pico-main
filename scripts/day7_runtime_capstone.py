@@ -72,7 +72,7 @@ def main():
                     },
                     call_id="call_plan",
                 ),
-                ModelAction.tool_batch(
+                ModelAction.tools(
                     (
                         ToolCall(
                             "read_file",
@@ -142,14 +142,8 @@ def main():
         evidence = replayed.evidence
         calls = {}
         for event in events:
-            if event.kind == "assistant_tool_call":
-                calls[event.call_id] = ToolCall(
-                    event.name,
-                    event.args,
-                    event.call_id,
-                )
-            elif event.kind == "assistant_tool_batch":
-                calls.update((call.call_id, call) for call in event.batch_calls)
+            if event.kind == "assistant_tool_calls":
+                calls.update((call.call_id, call) for call in event.tool_calls)
         results = {
             event.call_id: event
             for event in events
@@ -198,7 +192,11 @@ def main():
             verification_events[-1]["command"],
         ) is not None
         assert len(command_runner.calls) == 1
-        assert sum(event.kind == "assistant_tool_batch" for event in events) == 1
+        call_events = [
+            event for event in events if event.kind == "assistant_tool_calls"
+        ]
+        assert len(call_events) == 4
+        assert sum(len(event.tool_calls) > 1 for event in call_events) == 1
         assert "calculator.py" in model.prompts[0]
         assert diff_descriptor["size_bytes"] == outcome.final_diff.size_bytes
         assert "-    return left - right" in final_diff_text

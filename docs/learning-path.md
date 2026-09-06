@@ -15,10 +15,10 @@ RepoMap 从 `Pico` 初始化开始默认启用；第一遍先把它当成“非�
 
 1. `PicoConfig.mode` → `RunLifecycle._task_contract()`：显式 Ask/Code/Auto 决定最大能力，不调用隐藏分类模型。
 2. `AgentLoop.run()`：只看 Tool、Invalid、Final 三个分支以及 Agent Turn/Deadline 停止条件。
-3. `AgentLoop._handle_tool_turn()` → `ToolRuntime.execute_pending*()`：单 Call 或 Observation Batch
-   由 Loop 接受并持久化，Started/Result 由 ToolRuntime 持久化。
+3. `AgentLoop._handle_tool_turn()` → `ToolRuntime.execute_pending*()`：单 Call 或同一响应的 Tool Call group
+   由 Loop 接受并持久化；工具默认独占，明确标记的读取工具形成有界并行段。
 4. `RunLog.append()`、`RunProjection.check_event()` 与 `replay_events()`，以及 `run_lifecycle.reconcile_interrupted()`：理解
-   一个 Pending Tool transaction、Observation Batch 与 Crash recovery；历史筛选和压缩计划在 Day 5 阅读 `RunHistory`。
+   Pending Tool transactions、Tool Call group 与 Crash recovery；历史筛选和压缩计划在 Day 5 阅读 `RunHistory`。
 5. `WorkspaceMutationService.edit()`：理解 Revision 在原子提交点再次复验。
 6. `CompletionController.assess()`：按未集成 Child、TaskContract、不确定副作用、Drift、
    Verification 的顺序理解 Runtime 完成权。
@@ -83,11 +83,11 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 1 | `pico/cli.py: main -> build_agent` | CLI 只提交自然语言与 Runtime 配置，不要求用户填写 TaskContract |
 | 2 | `pico/runtime.py: Pico.__init__ -> ask` | 默认构造 RepoMap、ToolRuntime、Prompt，加载可恢复 Run，并进入 AgentLoop |
 | 3 | `pico/run_lifecycle.py: initialize -> _resume_or_create_run` | 新 Run 由显式 Mode 确定性生成 TaskContract；恢复 Run 不能扩大原能力，并在 Provider 前持久化 `user_guidance` |
-| 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction；一个 Tool Action 可带单 Call 或纯 Observation Batch |
+| 4 | `pico/agent_loop.py: run -> _next_model_turn` | 每轮只处理 Tool、Invalid 或 Final 三种 ModelAction；一个 Tool Action 可带一个或多个有序 Call |
 | 5 | `PromptBuilder -> OpenAICompatibleModelClient` | 固定规则进 `instructions`；root→CWD 的 `AGENTS.md` 作为独立 repository instructions 放在 Runtime policy 与 Task Request 之间，普通仓库事实进入非空有界 Context，仅恢复时追加不同的 latest request；当前允许的原生 Schema 直接进入 `tools` |
-| 6 | `providers/clients.py: _action_from_response -> complete_action` | 一个带 `call_id` 的 Function Call 形成单 Call Action；多个 Call 保持原顺序进入 Observation Batch 准入 |
-| 7 | `AgentLoop._handle_tool_turn` | 执行前先原子持久化一个 `assistant_tool_call` 或完整 `assistant_tool_batch` Fact |
-| 8 | `ToolRuntime.execute_pending / execute_pending_batch` | 单 Call 走完整准入、Approval、影响路径与 Preimage；Batch 先整体验证，只让纯 Observation Runner 并行，Result 仍按原顺序落盘；无 Run 的人工观察走 `execute_manual` |
+| 6 | `providers/clients.py: _action_from_response -> complete_action` | 一个带 `call_id` 的 Function Call 形成单 Call Action；多个 Call 保持原顺序进入分组调度 |
+| 7 | `AgentLoop._handle_tool_turn` | 执行前把本次响应的一个或多个 Call 原子持久化为一个 `assistant_tool_calls` Fact |
+| 8 | `ToolRuntime.execute_pending / execute_pending_group` | 每个 Call 独立准入；连续 parallel-safe 调用有界并行，exclusive 调用形成屏障，Result 按原顺序落盘；无 Run 的人工观察走 `execute_manual` |
 | 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换；失败用相近代码、匹配行号和建议读取参数驱动重读修正 |
 | 10 | `RunLog.append -> apply_event 验证待提交状态 -> 存储追加 -> 发布状态` | 同一个新 Fact 如何在写盘前验证全部投影、持久化后发布 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
@@ -119,16 +119,16 @@ Pico.ask
 
 | 层级 | 内容 | 第一次是否必学 |
 |---|---|---|
-| Core | 上述 CLI Trace、TaskContract、增量 WorkingState、单 Pending transaction、Observation Batch、工具安全、恢复、Completion 与 Final Diff | 是 |
+| Core | 上述 CLI Trace、TaskContract、增量 WorkingState、Pending Call group、按工具能力调度、工具安全、恢复、Completion 与 Final Diff | 是 |
 | 默认上下文增强 | 非空 RepoMap 自动提供有界仓库导航 | 功能始终启用；空投影不发送；内部实现第二遍再学 |
 | Context Pressure | Token Budget、Provider Session Rotation、Semantic Compaction、失败后的事务级 Fallback | 仅超长任务需要 |
 | Orchestration Appendix | 单个 Explore/Implement Child、Git Worktree、显式 `integrate_child` | 单 Agent Core 完成后选学 |
 | Application | Coding Workflow 在成功终态后的可选 Git Commit | 最后学习 |
 
 Semantic Compaction 不是每轮执行：必须已有 Run Log、当前没有 Pending Call，并且新 Prompt
-的本地实际组装量或 Provider 上一轮报告的 `input_tokens` 达到
-`provider_context_limit_tokens - compaction_reserve_tokens`，才进入准备分支。AgentLoop 不再用
-output、Tool Result 与 `max_new_tokens` 预测下一轮大小；缺少 Provider usage 时只依赖本地新
+的本地实际组装量，或 Provider 已报告的 input/output 加实际 Tool Result Token 达到
+`provider_context_limit_tokens - compaction_reserve_tokens`，才进入准备分支。这些都是本轮已经
+产生的测量值，不使用 `max_new_tokens` 猜测尚未发生的输出；缺少 Provider usage 时依赖本地新
 Prompt 计数和真实 typed overflow。失败时使用完整 Tool 事务组成的 bounded fallback。
 
 Subagents 在 CLI 中默认提供，因为 `build_agent()` 会安装 Child Model Client Factory；直接使用
@@ -155,7 +155,7 @@ Subagent 实现。
   RunProjection；交互 CLI 使用 `/state` 查看这一当前 Run 投影。
 - 运行 `scripts/day2_state_walkthrough.py` 的三段实验：
   1. 查看原始 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
-  2. Replay 单 Call 前缀，并观察 ordered Observation Batch 的 Pending Call IDs；
+  2. Replay 单 Call 前缀，并观察 ordered Tool Call group 的 Pending Call IDs；
   3. 用新 `Pico` 加载无副作用的中断调用，在下一次 `ask()` 自动对账且不盲目重放 Runner。
 - `reload_required` 是未处理异常后的进程内缓存可信度标记。Day 6 先学习真实 Crash Resume
   和 Active Reset；需要故障注入细节时，再阅读 `tests/test_resume_runtime.py` 中保留的
@@ -173,7 +173,7 @@ Subagent 实现。
 - 理解 Provider Adapter 如何把结构化 Context Overflow 转成唯一的
   `ProviderContextOverflow`；AgentLoop 不读取厂商错误文案，只允许一次重建重试。
 - 运行 `scripts/day3_prompt_provider_walkthrough.py` 的四段实验：最小三通道与稳定 Tool
-  Surface、单 Call 续接与 Observation Batch 聚合 Result、Incomplete 伪 Final 拒绝、Typed Context Overflow
+  Surface、单 Call 续接与 Tool Call group 聚合 Result、Incomplete 伪 Final 拒绝、Typed Context Overflow
   的一次重建重试。
 - 只确认非空 RepoMap 会进入首轮 Context，不在今天学习图算法。
 
@@ -226,8 +226,8 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
 ### Day 7：Capstone 与面试表达
 
 - 运行 `scripts/day7_runtime_capstone.py`，把前六天串成一条完整请求。
-- 观察代码与测试文件在一个 Observation Batch 中并行读取，而 Edit、WorkingState 与
-  `submit_final` 仍沿用确定性单调用路径。
+- 观察代码与测试文件在一个 Tool Call group 的 parallel 段中并行读取，而 Edit、WorkingState 与
+  `submit_final` 使用 exclusive 边界。
 - 直接核对 `RunOutcome.to_dict()` 中的 changed paths、Final Diff、Metrics 与 `RunStore.replay()` 的终态
   一致性。
 - 按 [`review-pack/interview-demo.md`](review-pack/interview-demo.md) 练习 30 秒、3 分钟和

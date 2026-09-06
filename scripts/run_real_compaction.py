@@ -109,20 +109,24 @@ def build_prompt():
     )
     return f"""Complete a controlled long-context coding task.
 
-First call update_working_state. Record these constraints: read every listed evidence
-file exactly once in order, modify only {TARGET_PATH}, and preserve the public API.
-Record a next step to read all evidence before editing.
+Treat injected WorkingState and History as the current progress. Before reading, ensure
+WorkingState contains these constraints: read every listed evidence file exactly once
+in order, modify only {TARGET_PATH}, and preserve the public API. Add only missing
+constraints. Add a next step to read all evidence only when History does not already
+record all reads and no evidence-backed normalization decision exists. Never re-add a
+removed or completed next step. Call update_working_state only when this reconciliation
+changes the state.
 
-Then read every file below exactly once using ordered Observation Batches of four
+Then read every file below exactly once using ordered Tool-call groups of independent
 read_file calls per model response, with start_line=1 and end_line=200 for every call.
 After context compaction or Provider session rebuilding, History may summarize completed
 reads: treat every path listed as Done there as already read and never read it again.
 Do not use Search, List, or delegation:
 {files}
 
-After all evidence is read, call update_working_state again: remove the completed evidence-read
-next step, record the evidence-backed normalization decision, and add only the concrete edit as
-the next step. Read {TARGET_PATH}, apply
+After all evidence is read, ensure WorkingState removes the completed evidence-read next
+step, records the evidence-backed normalization decision, and contains only the concrete
+edit as the next step. Skip this update if that state is already current. Read {TARGET_PATH}, apply
 the smallest exact patch, and call submit_final. The Runtime owns verification.
 """
 
@@ -175,14 +179,10 @@ def analyze_run(events):
     ]
     requested_calls = []
     for entry in events:
-        if entry.kind == "assistant_tool_call":
-            requested_calls.append(
-                {"name": entry.name, "args": entry.args}
-            )
-        elif entry.kind == "assistant_tool_batch":
+        if entry.kind == "assistant_tool_calls":
             requested_calls.extend(
                 {"name": call.name, "args": call.args}
-                for call in entry.batch_calls
+                for call in entry.tool_calls
             )
     evidence_read_paths = [
         call["args"].get("path")
@@ -196,7 +196,7 @@ def analyze_run(events):
         "max_single_request_input_tokens": max(input_tokens, default=0),
         "compaction_count": kinds.count("compaction"),
         "provider_session_reset_count": kinds.count("provider_session_reset"),
-        "observation_batch_count": kinds.count("assistant_tool_batch"),
+        "tool_group_count": kinds.count("assistant_tool_calls"),
         "resume_count": kinds.count("run_resumed"),
         "successful_mutation_count": len(successful_mutations),
         "evidence_read_paths": evidence_read_paths,
@@ -295,7 +295,7 @@ def main(argv=None):
         "initial_failure_reproduced": not initial["ok"],
         "compaction_triggered": analysis["compaction_count"] >= 1,
         "provider_session_reset": analysis["provider_session_reset_count"] >= 1,
-        "observation_batch_used": analysis["observation_batch_count"] >= 1,
+        "tool_group_used": analysis["tool_group_count"] >= 1,
         "working_state_preserved": analysis["working_state_preserved"],
         "evidence_read_once_in_order": analysis["evidence_read_paths"]
         == [

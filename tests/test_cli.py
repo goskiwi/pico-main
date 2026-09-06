@@ -28,6 +28,12 @@ def test_cli_detects_pytest_without_user_configuration(tmp_path):
     assert command.endswith(" -m pytest -q")
 
 
+def test_cli_exposes_parallel_tool_limit():
+    args = cli.build_arg_parser().parse_args(["--max-parallel-tools", "2"])
+
+    assert args.max_parallel_tools == 2
+
+
 def test_cli_does_not_guess_a_verifier_without_python_tests(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
 

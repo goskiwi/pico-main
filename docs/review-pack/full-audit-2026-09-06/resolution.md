@@ -7,12 +7,12 @@
 | 问题 | 状态 | 实现结果 | 主要回归测试 |
 |---|---|---|---|
 | F01 | 已修复 | 拒绝跨源请求；同源流程保留 | [test_cross_origin_redirect_does_not_receive_credentials_or_body](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_provider_deadline.py:51) |
-| F02 | 已修复 | 非完成态、缺失终止事件及矛盾终态不产生动作 | [test_nonterminal_responses_cannot_produce_actions](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_provider_batch.py:221) |
+| F02 | 已修复 | 非完成态、缺失终止事件及矛盾终态不产生动作 | [test_nonterminal_responses_cannot_produce_actions](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_provider_tool_calls.py:223) |
 | F03 | 已修复 | 机器事实保持精确，展示继续脱敏，非法投影不落盘 | [test_redaction_preserves_machine_paths_and_replay](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_tool_runtime.py:1072) |
 | F04 | 已修复 | 事务前像与版本一致，提交点继续检查 revision | [test_preimage_and_commit_revision_cannot_disagree](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_tool_runtime.py:1115) |
 | F05 | 已修复 | 不可读 Git 文件使观察明确失败 | [test_git_snapshot_rejects_unreadable_untracked_content](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_verification.py:241) |
 | F06 | 已修复 | 恢复只关联当前工具事务 | [test_reused_call_id_is_scoped_to_the_pending_transaction](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_resume_runtime.py:608) |
-| F07 | 已修复 | 单调用、批次、工具表面共享请求级预算 | [test_resumed_request_receives_a_new_tool_budget](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_resume_runtime.py:623) |
+| F07 | 已修复 | 单调用、分组调用、工具表面共享请求级预算 | [test_resumed_request_receives_a_new_tool_budget](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_resume_runtime.py:623) |
 | F08 | 已修复 | latest 跳过并清理陈旧终态指针 | [test_resume_latest_skips_stale_terminal_pointer](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_cli.py:55) |
 | F09 | 已修复 | 完整 WorkingState 保留；总窗口不足明确报错 | [test_complete_working_state_is_visible_after_resume](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_context_manager.py:26) |
 | F10 | 已修复 | 迭代 AST 遍历，索引可降级 | [test_deep_syntax_does_not_overflow_the_python_stack](/Users/yankai/Documents/Course/Agents/pico-main/tests/test_repo_map.py:36) |
@@ -25,7 +25,8 @@
 
 ## 整体验证
 
-- 全量测试：305 passed、5 skipped。
+- F01–F16 修复完成后的原始全量测试为 305 passed、5 skipped；后续精简非面试评测并完成
+  per-tool 并发调度重构后，当前回归为 301 passed。
 - Ruff、compileall、git diff --check 通过。
 - 七个学习演示均实际执行通过；Day 3 的模拟响应已使用明确 completed 状态。
 - 单源 Provider 重定向、临时 Git 合并、文件修改和验证命令均经过实际执行或针对性的失败注入。

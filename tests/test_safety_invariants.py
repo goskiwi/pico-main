@@ -38,8 +38,8 @@ def run_active(agent, call):
         agent.run.projection = run_log.projection
         agent.run.run_log = run_log
         agent.run.execution_context = ExecutionContext.root(max_seconds=30)
-    run_log.append_tool_call(call)
-    return agent.tools.execute_pending(call.call_id)
+    group = run_log.append_tool_calls((call,))
+    return agent.tools.execute_pending_group(group.event_id)[0]
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
