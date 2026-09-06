@@ -263,7 +263,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
 def test_wire_places_current_working_state_after_history(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent, "Inspect")
-    run_log.append_model_instruction("OLD-HISTORY")
+    run_log.append_model_instruction("test_instruction", "OLD-HISTORY")
 
     call = ToolCall(
         "update_working_state",
@@ -621,16 +621,24 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
 def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)
-    instruction = run_log.append_model_instruction(
-        "Read the current revision and repair the rejected edit."
+    instruction = agent.append_model_instruction(
+        "revision_conflict",
+        "Read the current revision and repair the rejected edit.",
+        evidence="UNTRUSTED-VERIFIER-OUTPUT",
     )
 
     prompt, metadata = agent.prompt.build("continue")
 
-    assert named_json(prompt.input_text, "runtime_instruction") == (
-        "Read the current revision and repair the rejected edit."
-    )
+    assert named_json(prompt.input_text, "runtime_instruction") == {
+        "code": "revision_conflict",
+        "instruction": "Read the current revision and repair the rejected edit.",
+    }
     assert prompt.input_text.count("Read the current revision") == 1
+    trusted_prefix = prompt.input_text.split("<untrusted_context", 1)[0]
+    assert "UNTRUSTED-VERIFIER-OUTPUT" not in trusted_prefix
+    assert "UNTRUSTED-VERIFIER-OUTPUT" in untrusted_context(
+        prompt.input_text
+    )["runtime_evidence"]
     assert metadata["section_order"] == [
         "runtime_policy",
         "task_request",
@@ -639,6 +647,9 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
     ]
     assert agent.run.projection.pending_runtime_instruction_event_id == (
         instruction.event_id
+    )
+    assert agent.run.projection.pending_runtime_evidence == (
+        "UNTRUSTED-VERIFIER-OUTPUT"
     )
 
     call = ToolCall("read_file", {"path": "a.py"}, "read_after_instruction")

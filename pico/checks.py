@@ -1,5 +1,6 @@
 """Optional diagnostic checks supplied by a trusted isolated execution backend."""
 
+import hashlib
 from typing import Literal
 
 from pydantic import Field
@@ -15,10 +16,21 @@ class RunCheckArgs(ToolArgs):
     timeout_seconds: int = Field(default=30, ge=1, le=60)
 
 
-RUN_CHECK_HISTORY_PROJECTION = history_projection(
+_BASE_RUN_CHECK_HISTORY_PROJECTION = history_projection(
     arg_fields=("kind", "timeout_seconds"),
     result_fields=("kind", "exit_code", "stop_reason", "output_limited"),
 )
+
+
+def _run_check_history_projection(args, outcome):
+    projected = _BASE_RUN_CHECK_HISTORY_PROJECTION(args, outcome)
+    projected["args"]["code_sha256"] = hashlib.sha256(
+        str(args["code"]).encode("utf-8")
+    ).hexdigest()
+    return projected
+
+
+HISTORY_PROJECTORS = {"run_check": _run_check_history_projection}
 
 
 def _validate(context, args):
@@ -67,5 +79,5 @@ def build_tool_registry():
         ),
         "validate": _validate,
         "run": _run,
-        "history_projection": RUN_CHECK_HISTORY_PROJECTION,
+        "history_projection": HISTORY_PROJECTORS["run_check"],
     }}

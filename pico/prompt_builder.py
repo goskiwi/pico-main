@@ -411,10 +411,32 @@ class PromptBuilder:
             "runtime_instruction": (
                 "runtime_instruction:\n"
                 + json.dumps(
-                    projection.pending_runtime_instruction,
+                    {
+                        "code": projection.pending_runtime_instruction_code,
+                        "instruction": projection.pending_runtime_instruction,
+                    },
                     ensure_ascii=False,
+                    sort_keys=True,
                 )
                 if projection.pending_runtime_instruction
+                else ""
+            ),
+            "runtime_evidence": (
+                "runtime_evidence:\n"
+                + json.dumps(
+                    {
+                        "content": projection.pending_runtime_evidence,
+                        "artifact_id": (
+                            projection.pending_runtime_evidence_artifact_id
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if (
+                    projection.pending_runtime_evidence
+                    or projection.pending_runtime_evidence_artifact_id
+                )
                 else ""
             ),
             "latest_user_request": (

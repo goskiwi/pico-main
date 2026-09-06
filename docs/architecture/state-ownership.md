@@ -20,8 +20,8 @@ Terminology in this document is strict:
 | Task contract | First `user_message.contract`, derived deterministically from the request and explicit Mode | Goal, maximum write capability, write scope and change-verification requirement |
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
-| Runtime correction | Latest `model_instruction` until an accepted Tool or terminal action | Mandatory prompt input across Provider resets |
-| Large output | Artifact content + descriptor | Run Log reference |
+| Runtime correction | Latest structured `model_instruction` until an accepted Tool or terminal action | Mandatory trusted control plus untrusted evidence across Provider resets |
+| Large output | Content Artifact or complete ToolOutcome model-envelope Artifact | Bounded model preview plus Run Log references |
 | Child delegation | Child Run Logs and Patch files | One receipt per Child plus explicit integration state |
 
 ## Ownership across the three current paths

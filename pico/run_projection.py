@@ -84,6 +84,9 @@ class RunProjection:
     pending_group_id: str = ""
     pending_runtime_instruction: str = ""
     pending_runtime_instruction_event_id: str = ""
+    pending_runtime_instruction_code: str = ""
+    pending_runtime_evidence: str = ""
+    pending_runtime_evidence_artifact_id: str = ""
     started_call_ids: set[str] = field(default_factory=set)
     last_started_ordinal: int = -1
     start_phase_result_count: int = 0
@@ -227,6 +230,9 @@ class RunProjection:
         if event.kind == "assistant_tool_calls":
             self.pending_runtime_instruction = ""
             self.pending_runtime_instruction_event_id = ""
+            self.pending_runtime_instruction_code = ""
+            self.pending_runtime_evidence = ""
+            self.pending_runtime_evidence_artifact_id = ""
             self._begin_calls(event.tool_calls, event.event_id)
         elif event.kind == "tool_started":
             if self.result_count > self.last_started_ordinal:
@@ -240,11 +246,19 @@ class RunProjection:
             if self.result_count == len(self.pending_calls):
                 self._begin_calls(())
         elif event.kind == "model_instruction":
-            self.pending_runtime_instruction = str(event.payload["content"])
+            self.pending_runtime_instruction = str(event.payload["instruction"])
             self.pending_runtime_instruction_event_id = event.event_id
+            self.pending_runtime_instruction_code = str(event.payload["code"])
+            self.pending_runtime_evidence = str(event.payload["evidence"])
+            self.pending_runtime_evidence_artifact_id = str(
+                event.payload["evidence_artifact_id"]
+            )
         elif event.kind in {"assistant_final", "run_stopped"}:
             self.pending_runtime_instruction = ""
             self.pending_runtime_instruction_event_id = ""
+            self.pending_runtime_instruction_code = ""
+            self.pending_runtime_evidence = ""
+            self.pending_runtime_evidence_artifact_id = ""
             self.status = "completed" if event.kind == "assistant_final" else "stopped"
             self.stop_reason = event.payload["stop_reason"]
             self.final_answer = str(event.payload.get("content", ""))
@@ -273,6 +287,14 @@ class RunProjection:
             },
             "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
+            "runtime_instruction": {
+                "code": self.pending_runtime_instruction_code,
+                "instruction": self.pending_runtime_instruction,
+                "evidence": self.pending_runtime_evidence,
+                "evidence_artifact_id": (
+                    self.pending_runtime_evidence_artifact_id
+                ),
+            },
             "pending_call_ids": list(self.pending_call_ids),
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "run_cursor": self.last_cursor.to_dict(),

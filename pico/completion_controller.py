@@ -15,10 +15,11 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class CompletionDecision:
     status: str
-    content: str
+    instruction: str
+    evidence: str = ""
 
     def __post_init__(self):
-        if not self.status.strip() or not self.content.strip():
+        if not self.status.strip() or not self.instruction.strip():
             raise ValueError("completion decision requires status and content")
 
     @property
@@ -38,16 +39,15 @@ class CompletionController:
             or self._workspace_drift_blocker()
         )
         if blocker:
-            status, instruction = blocker
-            return CompletionDecision(status, instruction)
+            return CompletionDecision(*blocker)
 
         guidance = self._ensure_verification()
         if guidance:
-            return CompletionDecision("verification_failed", guidance)
+            instruction, evidence = guidance
+            return CompletionDecision("verification_failed", instruction, evidence)
         blocker = self._effect_blocker()
         if blocker:
-            status, instruction = blocker
-            return CompletionDecision(status, instruction)
+            return CompletionDecision(*blocker)
         return CompletionDecision("allowed", final)
 
     def _effect_blocker(self):
@@ -62,9 +62,13 @@ class CompletionController:
             }
         )
         detail = ", ".join(paths) or "unknown workspace state"
-        return "partial", (
-            "Runtime completion gate: unknown or untracked side effects: "
-            f"{detail}. Workspace verification cannot establish these effects."
+        return (
+            "partial",
+            (
+                "Resolve the unknown or untracked workspace side effects before "
+                "submitting completion."
+            ),
+            detail,
         )
 
     def _workspace_drift_blocker(self):
@@ -74,30 +78,41 @@ class CompletionController:
         if not drift:
             return None
         paths = ", ".join(item["path"] for item in drift)
-        return "workspace_drift", (
-            "Runtime completion gate: tracked workspace paths changed outside this "
-            f"Run: {paths}. Restore the projected state or reset the Run before "
-            "submitting a final answer."
+        return (
+            "workspace_drift",
+            (
+                "Restore the Runtime-projected workspace state or reset the Run "
+                "before submitting completion."
+            ),
+            paths,
         )
 
     def _task_requirement_blocker(self):
         task = self.runtime.run.projection
         if task.contract is None:
-            return "task_requirements_missing", (
-                "Runtime completion gate: task requirements are unavailable."
+            return (
+                "task_requirements_missing",
+                "Task requirements are unavailable; stop and restore the Run state.",
+                "",
             )
         evidence = self.runtime.run.evidence
         contract = task.contract
         if not contract.allows_workspace_mutation and evidence.touched_paths:
-            return "ask_mode_violation", (
-                "Runtime completion gate: Ask mode produced workspace changes."
+            return (
+                "ask_mode_violation",
+                "Ask mode produced workspace changes; restore them or reset the Run.",
+                ", ".join(evidence.touched_paths),
             )
         return None
 
     def _static_blocker(self):
         issue = self.runtime.run.projection.children.completion_issue()
         if issue:
-            return "subtasks_incomplete", f"Runtime completion gate: {issue}."
+            return (
+                "subtasks_incomplete",
+                "Resolve incomplete Child work before submitting completion.",
+                issue,
+            )
         return None
 
     def _ensure_verification(self):
@@ -111,11 +126,14 @@ class CompletionController:
         # A failed tool is historical fact. Verify its current tracked effects,
         # including changes later reverted, without requiring another mutation.
         if not (required or runtime.run.evidence.partial_workspace_effects()):
-            return ""
+            return None
         if not runtime.config.verification_command:
             return (
-                "Runtime verification is required, but no verification command "
-                "is configured."
+                (
+                    "Configure the required Runtime verification command before "
+                    "submitting completion."
+                ),
+                "",
             )
 
         sequence = runtime.run.evidence.last_workspace_mutation_sequence
@@ -137,13 +155,18 @@ class CompletionController:
             states, runtime.config.verification_command,
         ):
             return (
-                "Runtime workspace changed during verification; run verification "
-                "again before submit_final."
+                (
+                    "The workspace changed during Runtime verification; submit "
+                    "again to run verification against the current state."
+                ),
+                "",
             )
         if current.get("status") != "passed":
             return (
-                "Runtime verification failed; inspect and repair before "
-                "submit_final.\n"
-                + str(current.get("output") or "verification unavailable")
+                (
+                    "Runtime verification failed; inspect the untrusted evidence, "
+                    "repair the code, and submit again."
+                ),
+                str(current.get("output") or "verification unavailable"),
             )
-        return ""
+        return None

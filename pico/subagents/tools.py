@@ -38,6 +38,10 @@ INTEGRATE_CHILD_HISTORY_PROJECTION = history_projection(
         "path_transitions",
     ),
 )
+HISTORY_PROJECTORS = {
+    "delegate": DELEGATE_HISTORY_PROJECTION,
+    "integrate_child": INTEGRATE_CHILD_HISTORY_PROJECTION,
+}
 
 
 def _delegate(manager, args):
@@ -119,7 +123,7 @@ def build_tool_registry(manager):
                 "immutable patch receipt but never integrates automatically."
             ),
             "run": lambda context, args: _delegate(manager, args),
-            "history_projection": DELEGATE_HISTORY_PROJECTION,
+            "history_projection": HISTORY_PROJECTORS["delegate"],
         },
         "integrate_child": {
             "args_schema": IntegrateChildArgs,
@@ -132,6 +136,6 @@ def build_tool_registry(manager):
                 "the unchanged parent repository."
             ),
             "run": lambda context, args: _integrate(manager, args),
-            "history_projection": INTEGRATE_CHILD_HISTORY_PROJECTION,
+            "history_projection": HISTORY_PROJECTORS["integrate_child"],
         },
     }

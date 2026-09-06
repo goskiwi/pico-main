@@ -412,9 +412,49 @@ def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
         "affected_paths",
         "effect_scope",
         "artifact_id",
+        "model_output",
+        "model_artifact_id",
     }
     assert outcome.artifact_id == ""
     assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
+
+
+def test_complete_model_outcome_is_bounded_and_artifacted(tmp_path):
+    agent = build_agent(tmp_path)
+    detail = "E" * 100_000
+    call = ToolCall("run_command", {"command": "pytest -q"}, "large_failure")
+
+    outcome = agent.tools._outcome(
+        call,
+        "error",
+        "failed",
+        "none",
+        "short content",
+        failure=FailureInfo(
+            "command_infrastructure_error",
+            detail,
+            "retry_after_change",
+        ),
+        structured={
+            "command": "pytest -q",
+            "exit_code": 1,
+            "stop_reason": "",
+            "output_limited": False,
+            "repository_changes": [],
+        },
+    )
+
+    assert outcome.artifact_id == ""
+    assert outcome.model_artifact_id.startswith("tool_")
+    assert len(outcome.render_for_model().encode("utf-8")) <= 12 * 1024
+    full = agent.dependencies.artifacts.read_slice(
+        "manual",
+        outcome.model_artifact_id,
+        0,
+        8192,
+    )
+    assert '"failure"' in full["content"]
+    assert full["total_bytes"] > len(outcome.render_for_model())
 
 
 def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path):

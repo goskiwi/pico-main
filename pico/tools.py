@@ -27,7 +27,7 @@ from .verification import (
     repository_state_changes,
 )
 from .working_state import normalize_working_update
-from .workspace import IGNORED_PATH_NAMES
+from .workspace import IGNORED_PATH_NAMES, clip
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
 READ_FILE_MAX_LINES = 2000
@@ -64,13 +64,21 @@ def history_projection(*, arg_fields, result_fields):
         if structured:
             projected["outcome"]["structured"] = structured
         if outcome.failure is not None:
-            projected["outcome"]["failure"] = outcome.failure.to_dict()
+            projected["outcome"]["failure"] = {
+                "code": outcome.failure.code,
+                "detail": clip(outcome.failure.detail, 1000),
+                "recovery": outcome.failure.recovery,
+            }
         if outcome.affected_paths:
             projected["outcome"]["affected_paths"] = list(outcome.affected_paths)
         if outcome.effect_scope != "none":
             projected["outcome"]["effect_scope"] = outcome.effect_scope
         if outcome.artifact_id:
             projected["outcome"]["artifact_id"] = outcome.artifact_id
+        if outcome.model_artifact_id:
+            projected["outcome"]["model_artifact_id"] = (
+                outcome.model_artifact_id
+            )
         return projected
 
     return project
@@ -731,7 +739,13 @@ def build_tool_registry():
             "run": tool_run_command,
             "history_projection": history_projection(
                 arg_fields=("command",),
-                result_fields=("command", "repository_changes"),
+                result_fields=(
+                    "command",
+                    "exit_code",
+                    "stop_reason",
+                    "output_limited",
+                    "repository_changes",
+                ),
             ),
         },
         "write_file": {

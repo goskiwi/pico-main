@@ -361,7 +361,7 @@ def test_tool_group_rejects_out_of_order_results(tmp_path):
             )
         )
     with pytest.raises(RuntimeError, match="pending tool calls"):
-        log.append_model_instruction("cannot interleave")
+        log.append_model_instruction("test_instruction", "cannot interleave")
 
 
 def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
@@ -425,6 +425,18 @@ def test_rejects_legacy_payload_shapes():
 
     with pytest.raises(ValueError, match="invalid user_message payload"):
         RunEvent("e", 1, "run", "task", "session", "user_message", "now", {"content": "old"})
+
+    with pytest.raises(ValueError, match="invalid model_instruction payload"):
+        RunEvent(
+            "instruction",
+            2,
+            "run",
+            "task",
+            "session",
+            "model_instruction",
+            "now",
+            {"content": "legacy"},
+        )
 
     with pytest.raises(ValueError, match="unsupported Run Log kind"):
         RunEvent(
@@ -514,7 +526,7 @@ def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
         "final_diff",
     }
     with pytest.raises(ValueError, match="after a terminal event"):
-        log.append_model_instruction("late")
+        log.append_model_instruction("test_instruction", "late")
 
 
 def test_stopped_run_may_omit_an_unavailable_final_diff(tmp_path):
@@ -562,7 +574,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_model_instruction("historical fact that must be summarized")
+    log.append_model_instruction("test_instruction", "historical fact that must be summarized")
     call = ToolCall(
         "update_working_state",
         {"add_next_steps": ["read"]},
@@ -580,7 +592,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
             "accepted",
         )
     )
-    log.append_model_instruction("recent")
+    log.append_model_instruction("test_instruction", "recent")
     seen = []
 
     def summarize(events):
@@ -596,7 +608,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     summary, covered, _metadata = result
     compacted = log.append_compaction(summary, covered)
     assert [event.kind for event in seen] == ["model_instruction"]
-    assert seen[0].payload["content"] == "historical fact that must be summarized"
+    assert seen[0].payload["instruction"] == "historical fact that must be summarized"
     assert len(compacted.covered_event_ids) == 5
 
 
@@ -604,9 +616,9 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_model_instruction("historical " * 30)
-    recent_one = log.append_model_instruction("recent one")
-    recent_two = log.append_model_instruction("recent two")
+    log.append_model_instruction("test_instruction", "historical " * 30)
+    recent_one = log.append_model_instruction("test_instruction", "recent one")
+    recent_two = log.append_model_instruction("test_instruction", "recent two")
 
     def wire_tokens(text):
         return 100 + len(text)
@@ -641,14 +653,14 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("old")
-    recent = log.append_model_instruction("recent")
+    old = log.append_model_instruction("test_instruction", "old")
+    recent = log.append_model_instruction("test_instruction", "recent")
 
     first = log.append_compaction(
         "first summary",
         [user.event_id, old.event_id],
     )
-    later = log.append_model_instruction("later")
+    later = log.append_model_instruction("test_instruction", "later")
     assert [event.event_id for event in RunHistory(log.events).active_events()] == [
         first.event_id,
         recent.event_id,
@@ -670,7 +682,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("old")
+    old = log.append_model_instruction("test_instruction", "old")
     calls = []
     for index in range(2):
         call = ToolCall("read_file", {"path": f"f{index}.py"}, f"call_{index}")
@@ -711,7 +723,7 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("old")
+    old = log.append_model_instruction("test_instruction", "old")
     calls = (
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("read_file", {"path": "b.py"}, "call_b"),

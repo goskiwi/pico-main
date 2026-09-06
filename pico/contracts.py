@@ -179,6 +179,16 @@ class ToolFailureError(RuntimeError):
         super().__init__(self.failure.detail)
 
 
+def _validate_model_delivery(model_output, model_artifact_id):
+    if not isinstance(model_output, str):
+        raise TypeError("tool model output must be text")
+    if not isinstance(model_artifact_id, str) or (
+        model_artifact_id
+        and not TOOL_ARTIFACT_ID.fullmatch(model_artifact_id)
+    ):
+        raise ValueError("invalid tool model artifact id")
+
+
 @dataclass(frozen=True)
 class ToolOutcome:
     """Canonical fact returned by every tool admission/execution path."""
@@ -194,6 +204,8 @@ class ToolOutcome:
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
     artifact_id: str = ""
+    model_output: str = ""
+    model_artifact_id: str = ""
 
     def __post_init__(self):
         if not isinstance(self.tool_call_id, str) or not self.tool_call_id.strip():
@@ -212,6 +224,7 @@ class ToolOutcome:
             raise TypeError("tool artifact id must be text")
         if self.artifact_id and not TOOL_ARTIFACT_ID.fullmatch(self.artifact_id):
             raise ValueError("invalid tool artifact id")
+        _validate_model_delivery(self.model_output, self.model_artifact_id)
         if not isinstance(self.structured, dict):
             raise TypeError("tool outcome structured result must be an object")
         if self.status == "success" and self.execution_state != "completed":
@@ -243,6 +256,8 @@ class ToolOutcome:
             "affected_paths": list(self.affected_paths),
             "effect_scope": self.effect_scope,
             "artifact_id": self.artifact_id,
+            "model_output": self.model_output,
+            "model_artifact_id": self.model_artifact_id,
         }
 
     @classmethod
@@ -259,6 +274,8 @@ class ToolOutcome:
             "affected_paths",
             "effect_scope",
             "artifact_id",
+            "model_output",
+            "model_artifact_id",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid ToolOutcome")
@@ -266,6 +283,8 @@ class ToolOutcome:
             not isinstance(value["structured"], dict)
             or not isinstance(value["affected_paths"], list)
             or not isinstance(value["artifact_id"], str)
+            or not isinstance(value["model_output"], str)
+            or not isinstance(value["model_artifact_id"], str)
         ):
             raise TypeError("ToolOutcome collection fields have invalid types")
         failure = value["failure"]
@@ -281,9 +300,11 @@ class ToolOutcome:
             affected_paths=tuple(str(item) for item in value["affected_paths"]),
             effect_scope=str(value["effect_scope"]),
             artifact_id=value["artifact_id"],
+            model_output=value["model_output"],
+            model_artifact_id=value["model_artifact_id"],
         )
 
-    def render_for_model(self):
+    def model_payload(self):
         payload = {
             "status": self.status,
             "execution_state": self.execution_state,
@@ -301,6 +322,14 @@ class ToolOutcome:
             payload["effect_scope"] = self.effect_scope
         if self.artifact_id:
             payload["artifact_id"] = self.artifact_id
+        if self.model_artifact_id:
+            payload["model_artifact_id"] = self.model_artifact_id
+        return payload
+
+    def render_for_model(self):
+        if self.model_output:
+            return self.model_output
+        payload = self.model_payload()
         return json.dumps(
             payload,
             ensure_ascii=False,

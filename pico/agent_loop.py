@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -274,12 +275,18 @@ class AgentLoop:
             "Runtime tool budget exhausted. Do not call another tool; "
             "use submit_final now with the available evidence."
         )
-        agent.run.run_log.append_model_instruction(budget_instruction)
+        agent.append_model_instruction(
+            "tool_execution_limit",
+            budget_instruction,
+        )
         return budget_instruction
 
     def _handle_invalid_output(self, loop_state, turn):
         loop_state.invalid_output_count += 1
-        self.agent.run.run_log.append_model_instruction(turn.action.content)
+        self.agent.append_model_instruction(
+            "invalid_model_output",
+            turn.action.content,
+        )
         self._continue_provider(loop_state, turn, (turn.action.content,))
         if loop_state.invalid_output_count >= 8:
             return "invalid_output_limit"
@@ -288,12 +295,13 @@ class AgentLoop:
     def _handle_final_action(self, loop_state, turn):
         assessment = self.completion.assess(turn.action.content.strip())
         if assessment.allowed:
-            return assessment.content
+            return assessment.instruction
         self._block_completion(
             loop_state,
             turn,
             assessment.status,
-            assessment.content,
+            assessment.instruction,
+            assessment.evidence,
         )
         return None
 
@@ -303,14 +311,34 @@ class AgentLoop:
         turn,
         status,
         instruction,
+        evidence,
     ):
-        self.agent.run.run_log.append_model_instruction(instruction)
+        self.agent.append_model_instruction(
+            status,
+            instruction,
+            evidence=evidence,
+        )
         self.agent.emit_event(
             "completion_blocked",
-            {"status": status, "reason": instruction},
+            {
+                "status": status,
+                "instruction": instruction,
+                "evidence": evidence,
+            },
         )
         loop_state.completion_block_count += 1
         if loop_state.completion_block_count >= 3:
             loop_state.execution_stop = "completion_block_limit"
             return
-        self._continue_provider(loop_state, turn, (instruction,))
+        feedback = {
+            "runtime_instruction": {
+                "code": status,
+                "instruction": instruction,
+            },
+            "untrusted_evidence": evidence,
+        }
+        self._continue_provider(
+            loop_state,
+            turn,
+            (json.dumps(feedback, ensure_ascii=False, sort_keys=True),),
+        )

@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .contracts import EFFECT_SCOPES, ToolCall, ToolOutcome
+from .contracts import EFFECT_SCOPES, TOOL_ARTIFACT_ID, ToolCall, ToolOutcome
 from .delivery import FinalDiff
 from .history import CONTEXT_KINDS, RunHistory
 from .run_projection import RunProjection
@@ -41,6 +41,28 @@ def _validate_text_payload(kind, payload):
     _exact_payload(kind, payload, {"content"})
     if not isinstance(payload["content"], str):
         raise TypeError(f"{kind} content must be text")
+
+
+def _validate_model_instruction_payload(kind, payload):
+    _exact_payload(
+        kind,
+        payload,
+        {"code", "instruction", "evidence", "evidence_artifact_id"},
+    )
+    if not isinstance(payload["code"], str) or not payload["code"].strip():
+        raise ValueError("model_instruction requires a code")
+    if (
+        not isinstance(payload["instruction"], str)
+        or not payload["instruction"].strip()
+    ):
+        raise ValueError("model_instruction requires trusted instruction text")
+    if not isinstance(payload["evidence"], str):
+        raise TypeError("model_instruction evidence must be text")
+    artifact_id = payload["evidence_artifact_id"]
+    if not isinstance(artifact_id, str) or (
+        artifact_id and not TOOL_ARTIFACT_ID.fullmatch(artifact_id)
+    ):
+        raise ValueError("model_instruction evidence artifact is invalid")
 
 
 def _validate_user_payload(kind, payload):
@@ -197,7 +219,7 @@ def _validate_verification_payload(kind, payload):
 _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
-    "model_instruction": _validate_text_payload,
+    "model_instruction": _validate_model_instruction_payload,
     "assistant_tool_calls": _validate_tool_calls_payload,
     "tool_started": _validate_tool_started_payload,
     "tool_result": _validate_tool_result_payload,
@@ -274,7 +296,9 @@ class RunEvent:
     def content(self):
         if self.kind == "user_message":
             return str(dict(self.payload.get("contract", {})).get("goal", ""))
-        if self.kind in {"user_guidance", "model_instruction", "assistant_final"}:
+        if self.kind == "model_instruction":
+            return str(self.payload.get("instruction", ""))
+        if self.kind in {"user_guidance", "assistant_final"}:
             return str(self.payload.get("content", ""))
         if self.kind == "tool_result":
             outcome = dict(self.payload.get("outcome", {}) or {})
@@ -325,7 +349,10 @@ class RunEvent:
     @property
     def artifact_id(self):
         outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(outcome.get("artifact_id", ""))
+        return str(
+            outcome.get("model_artifact_id")
+            or outcome.get("artifact_id", "")
+        )
 
     @property
     def covered_event_ids(self):
@@ -465,9 +492,24 @@ class RunLog:
             payload,
         )
 
-    def append_model_instruction(self, content):
+    def append_model_instruction(
+        self,
+        code,
+        instruction,
+        *,
+        evidence="",
+        evidence_artifact_id="",
+    ):
         self._require_no_pending()
-        return self.append("model_instruction", {"content": str(content)})
+        return self.append(
+            "model_instruction",
+            {
+                "code": str(code),
+                "instruction": str(instruction),
+                "evidence": str(evidence),
+                "evidence_artifact_id": str(evidence_artifact_id),
+            },
+        )
 
     def append_final(self, content, final_diff, *, turn_duration_ms=0):
         self._require_no_pending()

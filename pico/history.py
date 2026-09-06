@@ -185,6 +185,13 @@ class RunHistory:
                 f"[tool/{outcome.tool_name}/{outcome.status}/"
                 f"{outcome.side_effect_state}{artifact}] {outcome.render_for_model()}"
             )
+        if fact.kind == "model_instruction":
+            return "[model_instruction] " + json.dumps(
+                fact.payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         content = str(fact.payload.get("content", ""))
         return f"[{fact.kind}] {content}"
 

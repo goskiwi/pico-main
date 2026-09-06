@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from . import tools as toolkit
@@ -29,6 +29,7 @@ from .tool_execution import (
     path_transitions,
     tracked_workspace_drift,
 )
+from .workspace import clip
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -156,19 +157,13 @@ class ToolRuntime:
             name: tool["history_projection"]
             for name, tool in self.registry.items()
         }
-        from .checks import RUN_CHECK_HISTORY_PROJECTION
+        from .checks import HISTORY_PROJECTORS as CHECK_HISTORY_PROJECTORS
         from .subagents.tools import (
-            DELEGATE_HISTORY_PROJECTION,
-            INTEGRATE_CHILD_HISTORY_PROJECTION,
+            HISTORY_PROJECTORS as SUBAGENT_HISTORY_PROJECTORS,
         )
 
-        projectors.update(
-            {
-                "run_check": RUN_CHECK_HISTORY_PROJECTION,
-                "delegate": DELEGATE_HISTORY_PROJECTION,
-                "integrate_child": INTEGRATE_CHILD_HISTORY_PROJECTION,
-            }
-        )
+        projectors.update(CHECK_HISTORY_PROJECTORS)
+        projectors.update(SUBAGENT_HISTORY_PROJECTORS)
         return projectors
 
     def remaining_budget(self):
@@ -726,7 +721,7 @@ class ToolRuntime:
             descriptor = self.runtime.dependencies.artifacts.write_tool_output(
                 _run_id(self.runtime), call.call_id, safe_content
             )
-        return ToolOutcome(
+        outcome = ToolOutcome(
             tool_call_id=call.call_id,
             tool_name=call.name,
             status=status,
@@ -739,3 +734,54 @@ class ToolRuntime:
             effect_scope=effect_scope if side_effect_state != "none" else "none",
             artifact_id=str(descriptor.get("artifact_id", "")),
         )
+        full_model_output = json.dumps(
+            outcome.model_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(full_model_output.encode("utf-8")) <= DEFAULT_TOOL_PREVIEW_BYTES:
+            return replace(outcome, model_output=full_model_output)
+
+        model_descriptor = self.runtime.dependencies.artifacts.write_tool_output(
+            _run_id(self.runtime),
+            call.call_id + "_model",
+            full_model_output,
+        )
+        outcome = replace(
+            outcome,
+            model_artifact_id=model_descriptor["artifact_id"],
+        )
+        projector = self.registry[call.name]["history_projection"]
+        preview = projector(call.args, outcome)
+        preview["outcome"]["content_preview"] = clip(safe_content, 2000)
+        model_output = json.dumps(
+            {
+                "tool_call_id": call.call_id,
+                "tool_name": call.name,
+                **preview,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(model_output.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
+            model_output = json.dumps(
+                {
+                    "tool_call_id": call.call_id,
+                    "tool_name": call.name,
+                    "status": outcome.status,
+                    "execution_state": outcome.execution_state,
+                    "side_effect_state": outcome.side_effect_state,
+                    "affected_paths": list(outcome.affected_paths),
+                    "failure_code": (
+                        outcome.failure.code if outcome.failure else ""
+                    ),
+                    "model_artifact_id": outcome.model_artifact_id,
+                    "projection_omitted": True,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return replace(outcome, model_output=model_output)

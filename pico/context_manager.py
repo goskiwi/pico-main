@@ -20,6 +20,7 @@ CONTEXT_ALLOCATION_ORDER = (
     "history",
 )
 CONTEXT_WIRE_ORDER = (
+    "runtime_evidence",
     "workspace",
     "repo_map",
     "history",
@@ -132,7 +133,11 @@ def _fixed_context(raw, *, section_caps, count_tokens):
 
 
 def _required_context(raw):
-    return {"working_state": raw["working_state"]} if raw.get("working_state") else {}
+    return {
+        key: raw[key]
+        for key in ("runtime_evidence", "working_state")
+        if raw.get(key)
+    }
 
 
 def _clip_complete_lines(text, limit, *, token_counter):

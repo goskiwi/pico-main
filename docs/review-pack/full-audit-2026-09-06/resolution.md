@@ -26,7 +26,7 @@
 ## 整体验证
 
 - F01–F16 修复完成后的原始全量测试为 305 passed、5 skipped；后续精简非面试评测并完成
-  per-tool 并发调度、按 Call History 与 Provider 恢复重构后，当前回归为 308 passed。
+  per-tool 并发调度、按 Call History、Provider 恢复与 ToolOutcome 信任边界重构后，当前回归为 309 passed。
 - Ruff、compileall、git diff --check 通过。
 - 七个学习演示均实际执行通过；Day 3 的模拟响应已使用明确 completed 状态。
 - 单源 Provider 重定向、临时 Git 合并、文件修改和验证命令均经过实际执行或针对性的失败注入。

@@ -546,7 +546,7 @@ def test_completion_blocks_unintegrated_implementation(tmp_path):
     assessment = CompletionController(parent).assess("done")
 
     assert assessment.status == "subtasks_incomplete"
-    assert receipt["child_id"] in assessment.content
+    assert receipt["child_id"] in assessment.evidence
     assert not (root / "feature.py").exists()
 
 

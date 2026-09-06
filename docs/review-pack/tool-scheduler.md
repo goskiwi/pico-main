@@ -41,7 +41,7 @@ not-started，绝不重放 Runner。
 
 ## 验证
 
-- 确定性回归：308 passed。
+- 确定性回归：309 passed。
 - 七个 Day 1–7 演示通过。
 - 真实 CLI 修复：模型在首轮返回 3 个 `read_file`，随后独占 `edit_file`；可见和隐藏验证通过。
 - 真实 Child：Parent 的 3 个读取并行，Child Worktree 修改、验证和 Parent 集成通过。

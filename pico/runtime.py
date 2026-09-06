@@ -19,6 +19,7 @@ from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
+from .tool_execution import DEFAULT_TOOL_PREVIEW_BYTES, model_tool_output
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
 
@@ -104,6 +105,27 @@ class Pico:
         payload = securitylib.redact_facts(payload or {}, self.redact_text)
         entry = run_log.append(event_type, payload)
         return entry
+
+    def append_model_instruction(self, code, instruction, *, evidence=""):
+        run_log = self.run.run_log
+        if run_log is None:
+            raise RuntimeError("Runtime instruction requires an active RunLog")
+        instruction = self.redact_text(str(instruction))
+        evidence = self.redact_text(str(evidence))
+        descriptor = {}
+        if len(evidence.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
+            descriptor = self.dependencies.artifacts.write_tool_output(
+                self.run.projection.run_id,
+                f"runtime_instruction_{len(run_log.events) + 1}",
+                evidence,
+            )
+            evidence = model_tool_output(evidence, descriptor)
+        return run_log.append_model_instruction(
+            code,
+            instruction,
+            evidence=evidence,
+            evidence_artifact_id=str(descriptor.get("artifact_id", "")),
+        )
 
     def run_verification(self, started_workspace_mutation_sequence):
         return run_verification(self, started_workspace_mutation_sequence)

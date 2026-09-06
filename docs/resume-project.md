@@ -43,7 +43,8 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 已验证的 Projection 状态；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
 是展示格式，不是额外的运行时对象。
 
-每个工具只在一处声明 Schema、权限、校验、Runner、effects、concurrency 与 History projection。工具默认独占，
+每个工具只在一处声明 Schema、权限、校验、Runner、effects、concurrency 与 History projection；可选模块导出
+完整 projection Catalog，执行器是否安装只影响当前 Tool Surface。工具默认独占，
 明确标记的读取工具可以并行；同一响应按连续并行段和独占屏障调度，每个调用独立准入并按原序记账。PromptBuilder 是唯一 Prompt 对象，
 预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
 派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。

@@ -156,7 +156,7 @@ def test_required_verification_fails_closed_without_command(tmp_path):
     add_change(agent, "README.md", "a", "b", 1)
     assessment = CompletionController(agent).assess("done")
     assert assessment.status == "verification_failed"
-    assert "no verification command" in assessment.content
+    assert "verification command" in assessment.instruction
 
 
 @pytest.mark.parametrize("side", ["changed", "partial"])
@@ -278,7 +278,7 @@ def test_partial_requires_verifier_even_if_task_did_not_request_one(tmp_path):
     add_change(agent, "README.md", "a", "b", status="error", side="partial")
     decision = CompletionController(agent).assess("done")
     assert decision.status == "verification_failed"
-    assert "no verification command" in decision.content
+    assert "verification command" in decision.instruction
 
 
 def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
@@ -290,4 +290,4 @@ def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
     assessment = CompletionController(agent).assess("done")
 
     assert assessment.status == "subtasks_incomplete"
-    assert "child task is still running" in assessment.content
+    assert "child task is still running" in assessment.evidence
