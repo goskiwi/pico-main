@@ -1,0 +1,125 @@
+{
+  "analysis": {
+    "compaction_count": 1,
+    "compactions": [
+      {
+        "covered_event_count": 16,
+        "event_id": "run_20260906-181413-4f4359:event:000036",
+        "state_preserved": true,
+        "summary": "## Progress\n### Done\n- Completed read_file call_toooANm6ErfIBi1N7HqN2XiT for evidence/segment_01.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_9wRbRovpe1pJvcv9ASlFmolb for evidence/segment_02.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_OaN0fXaaUcSnbQ1ERQW4KEir for evidence/segment_03.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_I3pJooDXtFIly43F4hmXWNK2 for evidence/segment_04.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_SbotlF8962I88tbW0TLwQchK for evidence/segment_05.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_MSqMSh6bzGE12lBhVuCvHG8r for evidence/segment_06.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_Iv9cxI9C56znIjeA0cZs1hGa for evidence/segment_07.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_hnpzZqeBip4SvnIDXv6rkMgV for evidence/segment_08.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_LWRMuM5RhEglIsOaZrWxljIL for evidence/segment_09.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_Zj6L0odEeUTCb5YvKZ2FJI2M for evidence/segment_10.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_cvsHoJDdVaYsdR5wm2VkluV6 for evidence/segment_11.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n- Completed read_file call_IhWkwjPT2VqhqVlrdAPFiKNq for evidence/segment_12.md, lines 1-200; successful, completed, no affected paths, no artifact, effect_scope none, side_effect_state none; returned lines 1-79, total_lines 79, has_more false, truncated false.\n### In Progress\n- none\n### Blocked\n- none\n\n## Critical Context\n- evidence/segment_01.md revision sha256:03a97a93f915df3b3e8bd30ec7db35c3c8717d744513905e0dae6c9edbdd0cb4; line 3 literal: Critical fact: The only permitted production change is src/normalizer.py.\n- evidence/segment_02.md revision sha256:57da7cd3437d40ab69ed582c4c979934695c9e4d5b7231747a002efa4ceea884; line 3 literal: Critical fact: Leading and trailing whitespace must be discarded.\n- evidence/segment_03.md revision sha256:1d5ca7de347db5790b8b01a61d680cb60f12f7e3f067487996d0e0ab16a56ec8; line 3 literal: Critical fact: Every run of internal whitespace must become one ASCII hyphen.\n- evidence/segment_04.md revision sha256:fcefecd3562e8c4bbc5a2790002893a9c284be005179142138a78c4b543679f5; line 3 literal: Critical fact: Alphabetic characters must be normalized to lowercase.\n- evidence/segment_05.md revision sha256:946dcdb34ed2eade09e788f9f5b5cf8f2057b1b5008c51514f1db91650fe8e09; line 3 literal: Critical fact: Existing non-whitespace punctuation, including hyphens, must be preserved.\n- evidence/segment_06.md revision sha256:4a28a0af75315c2c19a600ed8e667a8606b7eb20444bae56427108152d90fc0d; line 3 literal: Critical fact: The public function name and one-argument signature must not change.\n- evidence/segment_07.md revision sha256:bb9cab15f49d8e753f0e134e34ae640a50d7dff8de26a18ad3cd55c558de4e19; line 3 literal: Critical fact: A label containing one word must remain that word after lowercasing.\n- evidence/segment_08.md revision sha256:a49f9f9b267d3aa6985a730300e487026950d07f4c9b249d198b8bb33ae9f5d0; line 3 literal: Critical fact: The implementation must not introduce a dependency or regular expression.\n- evidence/segment_09.md revision sha256:7a9d9f2b6332f6b8b6f9ed570fdbdc69f9c945c12268a8f7c0e96bd572787ac8; line 3 literal: Critical fact: The intended implementation can be expressed with strip, lower, split, and join.\n- evidence/segment_10.md revision sha256:031fb2cf692b496df5cb6e3f3347e23d4e73c067cc2f6a6ce8fa58b4b23a513f; line 3 literal: Critical fact: No evidence file or test file may be modified.\n- evidence/segment_11.md revision sha256:45749b5c1f5a3e1fdc5a385d623acde32f5906ccd0886a53610720cb74fe3356; line 3 literal: Critical fact: The final implementation must be deterministic for tabs and newlines too.\n- evidence/segment_12.md revision sha256:5a826380b54b9a08978dbfa4e1c883150012a1c835bed7ade3ad5fe42a9b97dd; line 3 literal: Critical fact: After the edit, submit completion so the Runtime verifier executes.\n- All twelve read results reported status success, execution_state completed, failure null, affected_paths [], artifact_id \"\", effect_scope \"none\", side_effect_state \"none\". Each read used start_line 1 and end_line 200 and returned structured start_line 1, end_line 79, total_lines 79, has_more false, truncated false.",
+        "working_state_after": {
+          "constraints": [
+            "Read every listed evidence file exactly once in order.",
+            "Modify only src/normalizer.py.",
+            "Preserve the public API."
+          ],
+          "decisions": [],
+          "next_steps": [
+            "Read all evidence files."
+          ],
+          "schema_version": "run-working-state-v2"
+        },
+        "working_state_before": {
+          "constraints": [
+            "Read every listed evidence file exactly once in order.",
+            "Modify only src/normalizer.py.",
+            "Preserve the public API."
+          ],
+          "decisions": [],
+          "next_steps": [
+            "Read all evidence files."
+          ],
+          "schema_version": "run-working-state-v2"
+        }
+      }
+    ],
+    "evidence_read_paths": [
+      "evidence/segment_01.md",
+      "evidence/segment_02.md",
+      "evidence/segment_03.md",
+      "evidence/segment_04.md",
+      "evidence/segment_05.md",
+      "evidence/segment_06.md",
+      "evidence/segment_07.md",
+      "evidence/segment_08.md",
+      "evidence/segment_09.md",
+      "evidence/segment_10.md",
+      "evidence/segment_11.md",
+      "evidence/segment_12.md"
+    ],
+    "max_single_request_input_tokens": 6237,
+    "model_request_count": 7,
+    "provider_session_reset_count": 1,
+    "resume_count": 0,
+    "successful_mutation_count": 1,
+    "tool_group_count": 6,
+    "working_state": {
+      "constraints": [
+        "Read every listed evidence file exactly once in order.",
+        "Modify only src/normalizer.py.",
+        "Preserve the public API."
+      ],
+      "decisions": [
+        "Normalize labels by stripping leading/trailing whitespace, lowercasing, splitting all internal whitespace, and joining with ASCII hyphens while preserving non-whitespace punctuation and the public one-argument API; use no dependency or regular expression."
+      ],
+      "next_steps": [
+        "Apply the exact patch to src/normalizer.py and submit completion."
+      ],
+      "schema_version": "run-working-state-v2"
+    },
+    "working_state_preserved": true
+  },
+  "artifact_type": "pico-real-compaction",
+  "captured_at": "2026-09-06T18:15:58.037936+00:00",
+  "changed_paths": [
+    "src/normalizer.py"
+  ],
+  "checks": {
+    "compaction_triggered": true,
+    "evidence_read_once_in_order": true,
+    "hidden_verifier_passed": true,
+    "initial_failure_reproduced": true,
+    "patch_recorded": true,
+    "provider_session_reset": true,
+    "scope_valid": true,
+    "single_successful_mutation": true,
+    "tool_group_used": true,
+    "visible_verifier_passed": true,
+    "working_state_preserved": true
+  },
+  "final_answer": "Updated `src/normalizer.py` so `normalize_label` strips surrounding whitespace, lowercases text, collapses all internal whitespace, and joins words with ASCII hyphens while preserving the public API. The Runtime verifier will run.",
+  "model": "gpt-5.6-luna",
+  "passed": true,
+  "policy": {
+    "compaction_keep_recent_tokens": 8000,
+    "compaction_reserve_tokens": 8192,
+    "max_agent_turns": 32,
+    "provider_base_url": "https://www.rightapi.ai/codex/v1",
+    "provider_context_limit_tokens": 28000,
+    "turn_timeout_seconds": 900
+  },
+  "run_id": "run_20260906-181413-4f4359",
+  "runtime": {
+    "branch": "codex/interview-ready-runtime",
+    "commit_sha": "ee7eb01901854193484e976d1c67bc7a5c4d0afd",
+    "working_tree_dirty": false
+  },
+  "verification": {
+    "hidden": {
+      "exit_code": 0,
+      "infrastructure_error": false,
+      "ok": true,
+      "stderr": "",
+      "stdout": "",
+      "stop_reason": ""
+    },
+    "visible": {
+      "exit_code": 0,
+      "infrastructure_error": false,
+      "ok": true,
+      "stderr": "",
+      "stdout": "",
+      "stop_reason": ""
+    }
+  }
+}

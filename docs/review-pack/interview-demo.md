@@ -216,7 +216,8 @@ MCP/Skills 都明确不在范围内。
 - 当前确定性证据：核心 pytest 与 Day 1–7 Walkthrough。
 - 当前发布的真实模型证据包括 `real-system` CLI 全链路、`real-child` Worktree 委派与集成，
   以及 Ask、审批拒绝、Revision Conflict 修复和 Crash Resume 专项。
-- Compaction 由确定性回归和 Day 5 覆盖；旧协议生成的真实 Compaction 工件不作为当前版本证据。
+- `real-compaction.json/.patch` 使用多个 Tool Call group 完成 12 份证据各读取一次，
+  并验证 Provider session 轮换、语义压缩、WorkingState 保留、单次修改和最终验证。
   当前发布的真实工件均记录实际 Runtime commit，不以旧轮次数宣传当前版本。
 - 真实回归在独立的受控 Git Workspace 中运行，不修改 Pico 产品源码。
 - Runtime Verification 使用当前用户的本机权限；可信仓库是明确前提，未知代码的隔离由外部 CI、VM 或容器提供。
