@@ -1,8 +1,0 @@
-diff --git a/src/normalizer.py b/src/normalizer.py
-index 2b1500b..02cfeb8 100644
---- a/src/normalizer.py
-+++ b/src/normalizer.py
-@@ -1,2 +1,2 @@
- def normalize_label(value: str) -> str:
--    return value.strip().lower()
-+    return "-".join(value.strip().lower().split())

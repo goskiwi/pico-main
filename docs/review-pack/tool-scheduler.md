@@ -41,13 +41,12 @@ not-started，绝不重放 Runner。
 
 ## 验证
 
-- 确定性回归：301 passed。
+- 确定性回归：303 passed。
 - 七个 Day 1–7 演示通过。
-- 真实 CLI 修复：模型在首轮返回 4 个 `read_file`，随后独占 `edit_file`；可见和隐藏验证通过。
+- 真实 CLI 修复：模型在首轮返回 3 个 `read_file`，随后独占 `edit_file`；可见和隐藏验证通过。
 - 真实 Child：Parent 的 3 个读取并行，Child Worktree 修改、验证和 Parent 集成通过。
-- 真实 Compaction：三个四读取 group 完成 12 份证据；实际 continuation 从 18,539 token 加上
-  输出和工具结果投影为 27,000 token，在 19,808 high watermark 前轮换；压缩、独占修改、
-  可见和隐藏验证全部通过。
+- Compaction 的确定性回归与 Day 5 覆盖按 Call 预算、精简收据、连续压缩以及 Resume
+  guidance 投影。当前真实长上下文刷新连续三次被 Provider overload 中断，未发布旧协议工件。
 
-对应运行证据位于 `artifacts/real-system.json`、`artifacts/real-child.json` 和
-`artifacts/real-compaction.json`。
+当前 commit 的真实运行证据位于 `artifacts/real-system.json` 和
+`artifacts/real-child.json`。
