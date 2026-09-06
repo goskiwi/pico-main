@@ -10,12 +10,10 @@ import tiktoken
 DEFAULT_SECTION_CAPS = {
     "workspace": 600,
     "repo_map": 1200,
-    "working_state": 300,
 }
 FIXED_SECTION_ALLOCATION_ORDER = (
     "workspace",
     "repo_map",
-    "working_state",
 )
 CONTEXT_ALLOCATION_ORDER = (
     *FIXED_SECTION_ALLOCATION_ORDER,
@@ -45,8 +43,10 @@ class Tokenizer:
 
 
 def _render_context(raw, available, *, section_caps, count_tokens, history):
-    rendered = {}
-    budgets = {}
+    rendered = _required_context(raw)
+    budgets = {key: None for key in rendered}
+    if count_tokens(_assemble_input(raw, rendered)) > available:
+        raise ContextBudgetExceeded("current WorkingState and required input exceed the model budget")
     clipped = []
     history_metadata = None
 
@@ -115,7 +115,7 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
 
 
 def _fixed_context(raw, *, section_caps, count_tokens):
-    rendered = {}
+    rendered = _required_context(raw)
     for section in FIXED_SECTION_ALLOCATION_ORDER:
         if not raw[section]:
             continue
@@ -129,6 +129,10 @@ def _fixed_context(raw, *, section_caps, count_tokens):
         if value:
             rendered[section] = value
     return rendered
+
+
+def _required_context(raw):
+    return {"working_state": raw["working_state"]} if raw.get("working_state") else {}
 
 
 def _clip_complete_lines(text, limit, *, token_counter):

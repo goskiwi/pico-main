@@ -1,6 +1,0 @@
-instance_id,repeat,variant,runtime_status,resolved,inference_seconds,input_tokens,output_tokens,total_tokens,provider_total_tokens,provider_total_delta,reported_input_tokens,reported_output_tokens,missing_input_tokens_requests,missing_output_tokens_requests,human_interventions,failure_reason
-pytest-dev__pytest-5787,1,repomap_on,completed,True,396.602,313384,4457,317841,317842,1,313384,4457,0,0,0,
-pytest-dev__pytest-7571,1,repomap_on,completed,True,138.515,78903,1470,80373,80373,0,78903,1470,0,0,0,
-sphinx-doc__sphinx-8548,1,repomap_on,completed,False,366.83,339103,6137,345240,345240,0,339103,6137,0,0,0,independent_tests_failed
-psf__requests-6028,1,repomap_on,stopped,False,600.02,,,,,,603318,19348,1,1,0,runtime_stopped:turn_timeout
-astropy__astropy-12907,1,repomap_on,,False,186.731,,,,,,,,1,1,0,generation_error:RuntimeError

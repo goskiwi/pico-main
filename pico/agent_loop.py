@@ -112,9 +112,8 @@ class AgentLoop:
         agent = self.agent
         tools = tuple(agent.tools.model_action_tools())
         if (
-            agent.config.max_tool_executions is not None
-            and agent.run.metrics.executed_tool_count
-            >= agent.config.max_tool_executions
+            agent.tools.remaining_budget() is not None
+            and agent.tools.remaining_budget() == 0
         ):
             tools = tuple(
                 tool for tool in tools if tool["name"] == "submit_final"
@@ -231,9 +230,8 @@ class AgentLoop:
         agent = self.agent
         calls = turn.action.tool_calls
         budget_exhausted = (
-            agent.config.max_tool_executions is not None
-            and agent.run.metrics.executed_tool_count
-            >= agent.config.max_tool_executions
+            agent.tools.remaining_budget() is not None
+            and agent.tools.remaining_budget() == 0
         )
         if budget_exhausted and len(calls) == 1:
             return "tool_execution_limit"
@@ -263,9 +261,8 @@ class AgentLoop:
     def _append_budget_instruction(self, loop_state):
         agent = self.agent
         if (
-            agent.config.max_tool_executions is None
-            or agent.run.metrics.executed_tool_count
-            < agent.config.max_tool_executions
+            agent.tools.remaining_budget() is None
+            or agent.tools.remaining_budget() > 0
         ):
             return ""
         budget_instruction = (

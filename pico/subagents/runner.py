@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import atexit
 import uuid
+from dataclasses import replace
 
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import Workspace
 from .contracts import ChildFailure, ChildPatch, ChildRecord, ChildSpec, ChildSuccess
 from .integration import PatchIntegrator
-from .worktree import GitWorktree, require_clean_repository
+from .worktree import GitWorktree, _git
 
 EXPLORE_HANDOFF = """
 
@@ -57,7 +58,7 @@ class SubagentRunner:
         self.parent = parent
         self.model_client_factory = model_client_factory
         self._worktrees: dict[tuple[str, str], GitWorktree] = {}
-        self.integration = PatchIntegrator(self)
+        self.integration = PatchIntegrator(parent)
         atexit.register(self.cleanup)
 
     def _parent_run_id(self):
@@ -138,6 +139,7 @@ class SubagentRunner:
         )
         handle.create()
         self._worktrees[(run_id, record.child_id)] = handle
+        self.integration.prepare_child_input(handle, record)
         return handle
 
     def _build_child(self, run_id, record):
@@ -212,20 +214,22 @@ class SubagentRunner:
             patch = None
             if record.spec.role == "implement":
                 handle = self._worktrees[(run_id, record.child_id)]
-                changed_paths = handle.changed_paths()
+                projection.evidence.change_set.require_current_workspace(handle.path)
+                changed_paths = tuple(projection.evidence.changed_paths)
+                git_paths = set(handle.changed_paths())
                 unexpected = sorted(
-                    set(changed_paths) - set(record.spec.allowed_write_paths)
+                    (set(changed_paths) | git_paths) - set(record.spec.allowed_write_paths)
                 )
                 if unexpected:
                     raise ValueError(
                         "write scope violation after execution: "
                         + ", ".join(unexpected)
                     )
-                patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
-                patch = ChildPatch(
-                    changed_paths,
-                    handle.write_patch(patch_path),
-                )
+                if git_paths - set(changed_paths):
+                    raise ValueError("Child workspace changes are missing from the Run")
+                if changed_paths:
+                    patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
+                    patch = ChildPatch(changed_paths, handle.write_patch(patch_path, changed_paths))
             record.result = ChildSuccess(child_run_id, patch)
         except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
             if child is not None and child.run.projection.contract is not None:
@@ -250,10 +254,11 @@ class SubagentRunner:
         record = ChildRecord(child_id=child_id, spec=spec)
         try:
             if spec.role == "implement":
-                record.base_sha = require_clean_repository(
-                    self.parent.workspace.root,
+                record.base_sha = _git(
+                    self.parent.workspace.root, "rev-parse", "HEAD",
                     execution_context=self.parent.run.execution_context,
-                )
+                ).decode().strip()
+                self.integration._parent_changes(record)
                 self._prepare_implement_worktree(run_id, record)
             self._run_child(run_id, record)
         except Exception as exc:  # noqa: BLE001 - Child failure is receipt state
@@ -267,11 +272,20 @@ class SubagentRunner:
                 child_run_id,
             )
         if isinstance(record.result, ChildFailure):
+            handle = self._release_worktree(run_id, child_id)
+            if handle is not None:
+                record.result = replace(
+                    record.result,
+                    error=record.result.error + f"; retained worktree: {handle.path}",
+                )
+        elif record.result.patch is None:
             self._discard_worktree(run_id, child_id)
         return self._receipt(run_id, record)
 
     def integrate_child(self, child_id):
-        return self.integration.integrate_child(str(child_id))
+        result = self.integration.integrate_child(str(child_id))
+        self._discard_worktree(self._parent_run_id(), str(child_id))
+        return result
 
 
     def cleanup(self):

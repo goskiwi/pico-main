@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .evidence import verification_is_current
 from .verification import capture_changed_path_states
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ class CompletionController:
     def assess(self, final: str) -> CompletionDecision:
         blocker = (
             self._static_blocker()
-            or self._unrepaired_effect_blocker()
+            or self._effect_blocker()
             or self._task_requirement_blocker()
             or self._workspace_drift_blocker()
         )
@@ -40,25 +41,17 @@ class CompletionController:
             status, instruction = blocker
             return CompletionDecision(status, instruction)
 
-        verification, guidance = self._ensure_verification()
+        guidance = self._ensure_verification()
         if guidance:
             return CompletionDecision("verification_failed", guidance)
-        blocker = self._effect_blocker(
-            self.runtime.run.evidence.unresolved_effects(verification)
-        )
+        blocker = self._effect_blocker()
         if blocker:
             status, instruction = blocker
             return CompletionDecision(status, instruction)
         return CompletionDecision("allowed", final)
 
-    def _unrepaired_effect_blocker(self):
-        return self._effect_blocker(
-            self.runtime.run.evidence.unrepaired_uncertain_effects()
-        )
-
-    @staticmethod
-    def _effect_blocker(effects):
-        effects = tuple(effects)
+    def _effect_blocker(self):
+        effects = self.runtime.run.evidence.unverifiable_effects()
         if not effects:
             return None
         paths = sorted(
@@ -70,8 +63,8 @@ class CompletionController:
         )
         detail = ", ".join(paths) or "unknown workspace state"
         return "partial", (
-            "Runtime completion gate: unresolved partial side effects: "
-            f"{detail}. Inspect or repair before returning a final answer."
+            "Runtime completion gate: unknown or untracked side effects: "
+            f"{detail}. Workspace verification cannot establish these effects."
         )
 
     def _workspace_drift_blocker(self):
@@ -99,14 +92,6 @@ class CompletionController:
             return "ask_mode_violation", (
                 "Runtime completion gate: Ask mode produced workspace changes."
             )
-        if (
-            not evidence.has_net_workspace_change
-            and evidence.successful_observation_count < 1
-        ):
-            return "observation_required", (
-                "Runtime completion gate: a no-change result requires at least one "
-                "successful observation tool result."
-            )
         return None
 
     def _static_blocker(self):
@@ -123,57 +108,42 @@ class CompletionController:
             and task.contract.verify_changes
             and runtime.run.evidence.has_net_workspace_change
         )
-        partial_repair_requires_verification = bool(
-            runtime.run.evidence.repaired_partials_requiring_verification()
-        )
-        if not (required or partial_repair_requires_verification):
-            return None, ""
+        # A failed tool is historical fact. Verify its current tracked effects,
+        # including changes later reverted, without requiring another mutation.
+        if not (required or runtime.run.evidence.partial_workspace_effects()):
+            return ""
         if not runtime.config.verification_command:
-            return None, (
+            return (
                 "Runtime verification is required, but no verification command "
                 "is configured."
             )
 
         sequence = runtime.run.evidence.last_workspace_mutation_sequence
-        states = capture_changed_path_states(
-            runtime.workspace.root,
-            runtime.run.evidence.changed_paths,
-        )
-        current = runtime.run.evidence.latest_verification_for_state(
-            sequence,
-            states,
-            runtime.config.verification_command,
-        )
-        # Only a passing result is reusable. A failed or infrastructure result
-        # must be retryable on the same code state after repairs to the environment.
-        if current is None or current.get("status") != "passed":
-            payload = runtime.run_verification(sequence)
-            if payload is not None:
-                runtime.emit_event("verification_result", payload)
-
-        states = capture_changed_path_states(
-            runtime.workspace.root,
-            runtime.run.evidence.changed_paths,
-        )
-        current = runtime.run.evidence.latest_verification_for_state(
-            sequence,
-            states,
-            runtime.config.verification_command,
-        )
+        # Changed-path revisions cannot establish whether dependencies or the
+        # execution environment changed. Each submission runs its own verifier.
+        current = runtime.run_verification(sequence)
+        if current is not None:
+            runtime.emit_event("verification_result", current)
         if current and current.get("status") == "infrastructure_error":
             raise RuntimeError(
                 "Runtime verification infrastructure error: "
                 + str(current.get("output") or "verification unavailable")
             )
-        if current is None:
-            return None, (
+        states = capture_changed_path_states(
+            runtime.workspace.root, runtime.run.evidence.changed_paths,
+        )
+        if current is None or not verification_is_current(
+            current, runtime.run.evidence.last_workspace_mutation_sequence,
+            states, runtime.config.verification_command,
+        ):
+            return (
                 "Runtime workspace changed during verification; run verification "
                 "again before submit_final."
             )
         if current.get("status") != "passed":
-            return None, (
+            return (
                 "Runtime verification failed; inspect and repair before "
                 "submit_final.\n"
                 + str(current.get("output") or "verification unavailable")
             )
-        return current, ""
+        return ""

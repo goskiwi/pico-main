@@ -2,9 +2,9 @@
 
 import argparse
 import json
-from pathlib import Path
 
 from .run_store import RunStore
+from .workspace import Workspace
 
 
 def build_run_parser():
@@ -17,7 +17,7 @@ def build_run_parser():
 
 def run_main(argv=None):
     args = build_run_parser().parse_args(argv)
-    store = RunStore(Path(args.cwd).resolve() / ".pico" / "runs")
+    store = RunStore(Workspace.build(args.cwd).root / ".pico" / "runs")
     if not store.has_events(args.run_id):
         raise SystemExit(f"Run Log not found for {args.run_id}")
     if args.command == "show":

@@ -14,6 +14,7 @@ class ActiveRunState:
     projection: RunProjection = field(default_factory=RunProjection)
     execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
+    request_tool_start: int = 0
 
     @property
     def evidence(self):

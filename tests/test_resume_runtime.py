@@ -1,4 +1,8 @@
 
+import shlex
+import sys
+import tempfile
+
 import pytest
 
 from pico import (
@@ -10,10 +14,11 @@ from pico import (
     ToolCall,
     Workspace,
 )
+from pico.completion_controller import CompletionController
 from pico.contracts import ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import file_revision
-from pico.run_lifecycle import reconcile_interrupted
+from pico.run_lifecycle import RunLifecycle, reconcile_interrupted
 from pico.run_log import RunLog
 from pico.task_state import TaskContract
 
@@ -448,6 +453,232 @@ def test_started_changed_path_recovers_as_partial_without_replay(tmp_path):
     assert result.outcome_status == "partial_success"
     assert result.side_effect_state == "partial"
     assert result.affected_paths == ("x.txt",)
+
+
+@pytest.mark.parametrize("correct", [True, False])
+@pytest.mark.parametrize("restart_after_verification", [True, False])
+def test_recovered_content_is_verified_without_requiring_another_write(
+    tmp_path, correct, restart_after_verification,
+):
+    check = (
+        "from pathlib import Path; scope = {}; "
+        "exec(compile(Path('add.py').read_text(), 'add.py', 'exec'), scope); "
+        "assert all(scope['add'](a,b) == a+b "
+        "for a,b in [(2,3),(-2,3),(0,0),(1.5,2.5)])"
+    )
+    config = PicoConfig(
+        mode="auto", verification_command=shlex.join([sys.executable, "-B", "-c", check]),
+    )
+    agent, store, _, log = build_interrupted_run(tmp_path, config=config)
+    content = "def add(a, b):\n    return a + b\n"
+    call = ToolCall("write_file", {"path": "add.py", "content": content}, "write")
+    log.append_tool_call(call)
+    log.append_tool_started(
+        call, effect_scope="workspace",
+        potential_effects=[
+            {"path": "add.py", "before_state": "absent", "before_artifact_id": ""},
+        ],
+    )
+    target = tmp_path / "add.py"
+    target.write_text(content if correct else content.replace("+", "-"))
+    resumed = resumed_agent(agent, store, [], config=config)
+    reconcile_interrupted(resumed)
+    resumed.run.execution_context = ExecutionContext.root(max_seconds=30)
+    read = ToolCall("read_file", {"path": "add.py"}, "read")
+    resumed.run.run_log.append_tool_call(read)
+    assert resumed.tools.execute_pending(read.call_id).status == "success"
+
+    decision = CompletionController(resumed).assess("done")
+    assert decision.status == ("allowed" if correct else "verification_failed")
+    assert len(resumed.run.evidence.verifications) == 1
+    resumed.run.execution_context = None
+    actions = [] if correct else [ModelAction.tool(
+        "edit_file",
+        {"path": "add.py", "old_text": "a - b", "new_text": "a + b",
+         "expected_revision": file_revision(target)},
+        call_id="repair",
+    )]
+    actions.append(ModelAction.final("Addition implemented and verified."))
+    if restart_after_verification:
+        resumed = resumed_agent(resumed, store, actions, config=config)
+    else:
+        resumed.model_client.outputs = actions
+    outcome = resumed.ask("Continue")
+
+    assert outcome.status == "completed"
+    assert target.read_text() == content
+    assert [record["status"] for record in resumed.run.evidence.verifications] == (
+        ["passed", "passed"] if correct else ["failed", "passed"]
+    )
+    events = resumed.run.run_log.events
+    assert sum(event.kind == "tool_started" and event.call_id == "write" for event in events) == 1
+    assert sum(event.kind == "tool_started" and event.call_id == "repair" for event in events) == (0 if correct else 1)
+    replayed = resumed.dependencies.run_store.replay(outcome.run_id)
+    assert replayed.evidence.to_dict() == resumed.run.evidence.to_dict()
+    assert replayed.evidence.partial_workspace_effects()[0]["side_effect_state"] == "partial"
+    diff = resumed.dependencies.artifacts.read_internal_text(
+        outcome.run_id, outcome.final_diff.artifact_id,
+    )
+    assert "+    return a + b" in diff
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_completion_reruns_verification_after_untracked_dependency_changes(tmp_path, restart):
+    dependency = tmp_path / "dependency.txt"
+    dependency.write_text("2")
+    check = (
+        "from pathlib import Path; "
+        "assert int(Path('result.txt').read_text()) + int(Path('dependency.txt').read_text()) == 3"
+    )
+    config = PicoConfig(
+        mode="auto", verification_command=shlex.join([sys.executable, "-B", "-c", check]),
+    )
+    store = SessionStore(tmp_path / ".pico/sessions")
+    agent = Pico(FakeModelClient([]), Workspace.build(tmp_path),
+                 config=config, session=store.create(tmp_path))
+    RunLifecycle(agent).initialize("Create result.txt so the sum with dependency.txt is 3")
+    call = ToolCall("write_file", {"path": "result.txt", "content": "1"}, "write")
+    agent.run.run_log.append_tool_call(call)
+    assert agent.tools.execute_pending(call.call_id).status == "success"
+    assert CompletionController(agent).assess("done").allowed
+    dependency.write_text("9")
+    actions = [ModelAction.final("done") for _ in range(3)]
+    if restart:
+        agent = Pico(FakeModelClient(actions), Workspace.build(tmp_path),
+                     config=config, session=store.load(agent.session.id))
+    else:
+        agent.model_client.outputs = actions
+        agent.run.execution_context = None
+    outcome = agent.ask("Continue")
+    assert outcome.status == "stopped"
+    assert agent.run.evidence.touched_paths == ["result.txt"]
+    assert [v["status"] for v in agent.run.evidence.verifications] == [
+        "passed", "failed", "failed", "failed",
+    ]
+
+
+@pytest.mark.parametrize("suffix", [".txt.", ".json."])
+@pytest.mark.parametrize("finish", ["resume", "reset"])
+def test_partial_final_artifact_write_does_not_block_recovery(tmp_path, monkeypatch, suffix, finish):
+    store = SessionStore(tmp_path / ".pico/sessions")
+    agent = Pico(FakeModelClient([
+        ModelAction.tool("write_file", {"path": "done.txt", "content": "completed work\n"}),
+        ModelAction.final("Done."),
+    ]), Workspace.build(tmp_path), config=PicoConfig(mode="auto"),
+        session=store.create(tmp_path))
+    original_stage = tempfile.NamedTemporaryFile
+    failures = []
+
+    def fail_during_write(*args, **kwargs):
+        stage = original_stage(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
+        if prefix.startswith("diff_") and suffix in prefix:
+            write = stage.write
+
+            def partial_write(data):
+                write(data[:8])
+                stage.flush()
+                failures.append(stage.name)
+                raise OSError("injected partial artifact write")
+
+            stage.write = partial_write
+        return stage
+
+    with monkeypatch.context() as fault:
+        fault.setattr("pico.persistence.tempfile.NamedTemporaryFile", fail_during_write)
+        with pytest.raises(OSError, match="partial artifact write"):
+            agent.ask("Create done.txt")
+    assert len(failures) == 1
+    run_id = agent.run.projection.run_id
+    assert not agent.run.projection.terminal
+    resumed = Pico(FakeModelClient([ModelAction.final("Done.")]), Workspace.build(tmp_path),
+                   config=agent.config, session=store.load(agent.session.id))
+    if finish == "resume":
+        assert resumed.ask("Continue").status == "completed"
+    else:
+        resumed.reset()
+    replayed = resumed.dependencies.run_store.replay(run_id)
+    assert replayed.status == ("completed" if finish == "resume" else "stopped")
+    assert store.load(agent.session.id).active_run_id == ""
+    diff = resumed.dependencies.artifacts.read_internal_text(run_id, replayed.final_diff.artifact_id)
+    assert "+completed work" in diff
+    assert not list(resumed.dependencies.run_store.artifact_dir(run_id).glob("*.tmp"))
+
+
+def test_reused_call_id_is_scoped_to_the_pending_transaction(tmp_path):
+    agent, store, _, log = build_interrupted_run(tmp_path)
+    agent.run.execution_context = ExecutionContext.root(max_seconds=30)
+    call = ToolCall("read_file", {"path": "README.md"}, "same")
+    log.append_tool_call(call)
+    assert agent.tools.execute_pending("same").status == "success"
+    log.append_tool_call(call)
+    resumed = resumed_agent(agent, store, [ModelAction.final("Recovered.")])
+    assert resumed.ask("Continue").status == "completed"
+    recovered = [e for e in resumed.run.run_log.events if e.payload.get("recovered_from_interruption")]
+    assert len(recovered) == 1
+    assert recovered[0].payload["outcome"]["execution_state"] == "not_started"
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_resumed_request_receives_a_new_tool_budget(tmp_path, batch):
+    count = 2 if batch else 1
+    config = PicoConfig(mode="auto", max_tool_executions=count)
+    runtime_workspace = Workspace.build(tmp_path)
+    store = SessionStore(tmp_path / ".pico/sessions")
+    action = (ModelAction.tool_batch((ToolCall("list_files", {"path": "."}, "one"),
+                                     ToolCall("list_files", {"path": "."}, "two")))
+              if batch else ModelAction.tool("list_files", {"path": "."}))
+    agent = Pico(FakeModelClient([action]),
+                 runtime_workspace, config=config, session=store.create(tmp_path))
+    with pytest.raises(RuntimeError, match="ran out of outputs"):
+        agent.ask("Inspect")
+    resumed = resumed_agent(agent, store, [
+        action, ModelAction.final("done"),
+    ], config=config)
+    assert resumed.ask("Inspect again").status == "completed"
+    assert "list_files" in resumed.model_client.action_tool_surfaces[0]
+    assert resumed.model_client.action_tool_surfaces[-1] == ("submit_final",)
+    assert resumed.run.metrics.executed_tool_count == count * 2
+
+
+def test_interrupted_multi_file_effect_can_be_repaired_by_separate_edits(tmp_path):
+    check = (
+        "from pathlib import Path; "
+        "assert all(Path(p).read_text() == 'after' for p in ['a.txt', 'b.txt'])"
+    )
+    config = PicoConfig(
+        mode="auto", verification_command=shlex.join([sys.executable, "-B", "-c", check]),
+    )
+    agent, store, _, log = build_interrupted_run(tmp_path, config=config)
+    # Inject the durable prefix and file effects of an interrupted integration;
+    # recovery must never invoke the original integrate_child call again.
+    call = ToolCall("integrate_child", {"child_id": "interrupted_child"}, "integrate")
+    log.append_tool_call(call)
+    log.append_tool_started(
+        call, effect_scope="workspace",
+        potential_effects=[
+            {"path": path, "before_state": "absent", "before_artifact_id": ""}
+            for path in ("a.txt", "b.txt")
+        ],
+    )
+    actions = []
+    for path in ("a.txt", "b.txt"):
+        target = tmp_path / path
+        target.write_text("before")
+        actions.append(ModelAction.tool(
+            "edit_file",
+            {"path": path, "old_text": "before", "new_text": "after",
+             "expected_revision": file_revision(target)},
+            call_id=f"repair_{path}",
+        ))
+    actions.append(ModelAction.final("Both files repaired and verified."))
+    resumed = resumed_agent(agent, store, actions, config=config)
+    outcome = resumed.ask("Continue")
+    assert outcome.status == "completed"
+    assert resumed.run.evidence.partial_workspace_effects()[0]["affected_paths"] == ("a.txt", "b.txt")
+    assert [item["status"] for item in resumed.run.evidence.verifications] == ["passed"]
+    edits = [item for item in resumed.run.evidence.effects if item["status"] == "success"]
+    assert [item["affected_paths"] for item in edits] == [("a.txt",), ("b.txt",)]
 
 
 def test_unstarted_observation_batch_recovers_every_call_without_replay(tmp_path):

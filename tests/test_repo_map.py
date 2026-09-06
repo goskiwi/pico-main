@@ -1,10 +1,44 @@
 """Direct contracts for tokenizer budgeting and Python repository understanding."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import tiktoken
 
+from pico import FakeModelClient, ModelAction, Pico, PicoConfig, SessionStore, Workspace
 from pico.repo_map import RepoMap, _token_clip, count_tokens
+
+
+def test_repo_map_switch_changes_prompt_and_skips_indexing(tmp_path, monkeypatch):
+    (tmp_path / "payment.py").write_text("def retry_payment():\n    return 1\n")
+    model = FakeModelClient([
+        ModelAction.tool("read_file", {"path": "payment.py"}),
+        ModelAction.final("Inspected payment retries."),
+    ])
+    agent = Pico(model, Workspace.build(tmp_path),
+                 SessionStore(tmp_path / ".pico/sessions").create(tmp_path),
+                 config=PicoConfig(mode="ask"))
+    agent.ask("Explain retry_payment")
+    on_prompt, _ = agent.prompt.build("Explain retry_payment")
+    assert '<section name="repo_map">' in on_prompt.input_text
+    agent.config = replace(agent.config, repo_map_enabled=False)
+
+    def unexpected_index(*args, **kwargs):
+        raise AssertionError("disabled RepoMap must not scan the repository")
+
+    monkeypatch.setattr(agent.dependencies.repo_map, "render", unexpected_index)
+    off_prompt, _ = agent.prompt.build("Explain retry_payment")
+    assert '<section name="repo_map">' not in off_prompt.input_text
+    assert on_prompt.instructions == off_prompt.instructions
+    assert '"Explain retry_payment"' in off_prompt.input_text
+
+
+def test_deep_syntax_does_not_overflow_the_python_stack(tmp_path):
+    (tmp_path / "broken.py").write_text("x = " + "[" * 1500 + "0" + "]" * 1500)
+    (tmp_path / "valid.py").write_text("def useful():\n    return 1\n")
+    result = RepoMap(tmp_path).render("useful")
+    assert "useful" in result.text
+    assert result.details["parsed_files"] == 2
 
 
 def _write_python_repo(root):

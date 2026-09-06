@@ -15,6 +15,7 @@ from http.client import (
     IncompleteRead,
     RemoteDisconnected,
 )
+from urllib.parse import urlsplit
 
 from ..contracts import ModelAction, ToolCall
 
@@ -77,6 +78,18 @@ _CONTEXT_OVERFLOW_MESSAGE = (
 _HTTP_CONTEXT_MESSAGE_STATUSES = {400, 413, 414, 422}
 
 
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        def origin(url):
+            parsed = urlsplit(url)
+            return (parsed.scheme.lower(), parsed.hostname,
+                    parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80))
+
+        if origin(req.full_url) != origin(newurl):
+            raise ProviderTransportError("cross-origin Provider redirect is not allowed")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 @contextmanager
 def _open_response(request, timeout):
     """Keep urllib proxy/redirect behavior, but bound headers and body together."""
@@ -117,8 +130,9 @@ def _open_response(request, timeout):
         def https_open(self, req):
             return self.do_open(DeadlineHTTPSConnection, req, context=self._context)
 
+
     try:
-        opener = urllib.request.build_opener(HTTPHandler(), HTTPSHandler())
+        opener = urllib.request.build_opener(HTTPHandler(), HTTPSHandler(), _SameOriginRedirect())
         try:
             response = opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
@@ -337,11 +351,8 @@ def _iter_sse_events(body_text):
 
 
 def _extract_openai_response_from_sse(body_text):
-    last_response = None
     for event in _iter_sse_events(body_text):
         response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
         if event.get("error"):
             return {"error": event["error"]}
         if event.get("type") == "error":
@@ -359,9 +370,12 @@ def _extract_openai_response_from_sse(body_text):
             "response.incomplete",
         } and isinstance(response, dict):
             terminal = dict(response)
-            terminal["status"] = event["type"].removeprefix("response.")
+            status = event["type"].removeprefix("response.")
+            if terminal.get("status", status) != status:
+                return {"error": {"code": "inconsistent_response_status"}}
+            terminal["status"] = status
             return terminal
-    return last_response
+    return None
 
 
 def _extract_usage(data):
@@ -410,6 +424,8 @@ def _action_from_response(data, action_tools):
             "The provider returned an incomplete response. Return exactly "
             "one complete action or observation batch."
         )
+    if data.get("status") != "completed":
+        return ModelAction.invalid("Only a completed provider response can produce actions.")
     output = data.get("output")
     if not isinstance(output, list) or any(
         not isinstance(item, dict) for item in output
@@ -527,7 +543,7 @@ class OpenAICompatibleModelClient:
             "instructions": str(instructions),
             "input": list(input_items),
             "max_output_tokens": max_new_tokens,
-            "stream": False,
+            "stream": True,
             "store": False,
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
@@ -541,7 +557,7 @@ class OpenAICompatibleModelClient:
     def _request_headers(self):
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "text/event-stream",
             "User-Agent": OPENAI_COMPATIBLE_USER_AGENT,
         }
         if self.api_key:
@@ -716,19 +732,9 @@ class OpenAICompatibleModelClient:
         function_calls = [
             item for item in output if item.get("type") == "function_call"
         ]
-        pending_call_ids = (
-            tuple(str(call.get("call_id") or "") for call in function_calls)
-            if function_calls
-            and response_data.get("status") != "incomplete"
-            and action.kind != "invalid"
-            else ()
-        )
-        if pending_call_ids:
+        if action.kind != "invalid":
             self._action_input.extend(output)
-            self._pending_call_ids = pending_call_ids
-        else:
-            self._action_input.extend(
-                item for item in output if item.get("type") != "function_call"
+            self._pending_call_ids = tuple(
+                str(call.get("call_id") or "") for call in function_calls
             )
-            self._pending_call_ids = ()
         return action

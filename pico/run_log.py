@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -403,11 +404,21 @@ class RunLog:
             timestamp=datetime.now(timezone.utc).isoformat(),
             payload=dict(payload or {}),
         )
-        self.projection.check_event(entry)
+        candidate = deepcopy(self.projection)
+        candidate.apply_event(entry)
         self.store._append_event(entry)
         self._events.append(entry)
-        self.projection._advance_event(entry)
+        self.projection.__dict__.update(candidate.__dict__)
         return entry
+
+    def pending_tool_starts(self):
+        starts = {}
+        for entry in reversed(self._events):
+            if entry.kind in {"assistant_tool_call", "assistant_tool_batch"}:
+                break
+            if entry.kind == "tool_started":
+                starts[entry.call_id] = entry
+        return starts
 
     def append_user(self, contract):
         if not isinstance(contract, TaskContract):

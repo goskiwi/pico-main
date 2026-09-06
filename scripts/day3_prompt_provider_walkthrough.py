@@ -68,7 +68,7 @@ def function_call(name, call_id, arguments):
 
 
 def response_with_call(name, call_id, arguments, *, usage=None):
-    payload = {"output": [function_call(name, call_id, arguments)]}
+    payload = {"status": "completed", "output": [function_call(name, call_id, arguments)]}
     if usage is not None:
         payload["usage"] = usage
     return Response(payload)
@@ -308,6 +308,7 @@ def experiment_observation_batch(
     """B: accept two ordered observations and aggregate their results."""
     client = new_client()
     payload = {
+        "status": "completed",
         "output": [
             {"type": "reasoning", "encrypted_content": "opaque"},
             function_call(

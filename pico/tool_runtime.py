@@ -16,6 +16,8 @@ from .contracts import (
     ToolRunnerResult,
 )
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
+from .mutations import RevisionConflict
+from .security import redact_facts
 from .tool_context import ToolContext
 from .tool_execution import (
     DEFAULT_TOOL_PREVIEW_BYTES,
@@ -25,8 +27,6 @@ from .tool_execution import (
     intersect_write_scopes,
     model_tool_output,
     path_transitions,
-    redact_structured,
-    repeat_key,
     tracked_workspace_drift,
 )
 
@@ -65,7 +65,6 @@ class ToolRuntime:
         self.runtime = runtime
         self.registry = self._build_registry()
         self._apply_allowlist(self.registry)
-        self._repeat_outcomes = {}
 
     def _surface(self, policy):
         return {
@@ -153,6 +152,13 @@ class ToolRuntime:
 
     def model_action_tools(self):
         return toolkit.build_action_tools(self._surface(self.effective_policy()))
+
+    def remaining_budget(self):
+        limit = self.runtime.config.max_tool_executions
+        if limit is None:
+            return None
+        executed = self.runtime.run.metrics.executed_tool_count - self.runtime.run.request_tool_start
+        return max(0, limit - executed)
 
     def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
@@ -262,17 +268,6 @@ class ToolRuntime:
             return None
         return run_log.append_tool_result(outcome)
 
-    def _reject_repeated_call(self, call, repeat_key):
-        previous = self._repeat_outcomes.get(repeat_key, ()) if repeat_key else ()
-        if not previous or previous[-1].side_effect_state not in {"partial", "unknown"}:
-            return None
-        return self._rejected(
-            call,
-            "repeated_identical_call",
-            "same call previously left an uncertain side effect; inspect state before another action",
-            "retry_after_change",
-        )
-
     @staticmethod
     def _potential_effects(tool, context, args):
         planner = tool.get("potential_effects")
@@ -292,11 +287,12 @@ class ToolRuntime:
             or agent.run.projection.contract is None
         ):
             return {}
-        existing_changes = agent.run.evidence.change_set.files
         artifacts = {}
         for logical, path in paths:
             before_state = states.get(logical, "absent")
-            if before_state == "absent" or logical in existing_changes:
+            if call.name == "edit_file" and call.args["expected_revision"] != before_state:
+                raise RevisionConflict(logical, call.args["expected_revision"], before_state)
+            if before_state == "absent":
                 artifacts[logical] = ""
                 continue
             if not path.is_file():
@@ -307,6 +303,9 @@ class ToolRuntime:
                 logical,
                 path,
             )
+            captured = "sha256:" + descriptor["sha256"]
+            if captured != before_state:
+                raise RevisionConflict(logical, before_state, captured)
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
@@ -354,9 +353,8 @@ class ToolRuntime:
                 f"observation batch contains {len(calls)} calls; "
                 f"maximum is {MAX_OBSERVATION_BATCH_CALLS}"
             )
-        limit = self.runtime.config.max_tool_executions
-        executed = self.runtime.run.metrics.executed_tool_count
-        if limit is not None and executed + len(calls) > limit:
+        remaining = self.remaining_budget()
+        if remaining is not None and len(calls) > remaining:
             return "observation batch exceeds the remaining Runtime tool budget"
         invalid = []
         surface = self._surface(policy)
@@ -552,26 +550,16 @@ class ToolRuntime:
     def _execute(self, call):
         agent = self.runtime
         name, args = call.name, call.args
-        run_id = _run_id(agent)
         policy = self.effective_policy()
         tool, admission_rejection = self._resolve_tool(call, policy)
         if admission_rejection is not None:
             return admission_rejection
         workspace_mutating = bool(tool.get("workspace_mutating", False))
-        raw_key = repeat_key(run_id, name, args)
-        repeated = self._reject_repeated_call(call, raw_key)
-        if repeated is not None:
-            return repeated
-
         context = self.context(call_id=call.call_id)
         call, validation_rejection = self._validate_call(call, context, policy)
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
-        normalized_repeat_key = repeat_key(run_id, name, args)
-        repeated = self._reject_repeated_call(call, normalized_repeat_key)
-        if repeated is not None:
-            return repeated
         if tool["risky"] and not self.approve(name, args):
             return self._rejected(call, "approval_denied", "approval denied")
 
@@ -602,6 +590,9 @@ class ToolRuntime:
             preimages = self._preimage_artifacts(
                 agent, call, potential_paths, effects_before, potential_scope
             )
+        except ToolFailureError as exc:
+            return self._rejected(call, exc.failure.code, exc.failure.detail,
+                                  exc.failure.recovery, structured=exc.structured)
         except Exception as exc:  # noqa: BLE001 - fail before side effect
             return self._rejected(
                 call, "effect_planning_failed", str(exc), "retry_after_change"
@@ -672,11 +663,6 @@ class ToolRuntime:
                 )
 
         self._record_tool_result(agent, outcome)
-        if normalized_repeat_key is not None and outcome.side_effect_state in {
-            "partial",
-            "unknown",
-        }:
-            self._repeat_outcomes.setdefault(normalized_repeat_key, []).append(outcome)
         return outcome
 
     def _rejected(
@@ -716,9 +702,7 @@ class ToolRuntime:
         structured=None,
     ):
         safe_content = self.runtime.redact_text(content)
-        safe_structured = redact_structured(
-            dict(structured or {}), self.runtime.redact_text
-        )
+        safe_structured = redact_facts(dict(structured or {}), self.runtime.redact_text)
         if failure is not None:
             failure = FailureInfo(
                 failure.code,

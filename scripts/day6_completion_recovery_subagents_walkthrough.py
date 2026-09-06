@@ -1,7 +1,9 @@
 """Day 6: exercise completion, recovery, reset, and explicit Child integration."""
 
 import json
+import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -173,8 +175,7 @@ def completion_experiment(root):
     assert revert_cursor > first_cursor
     assert net_change_after_revert is False
     assert current_after_revert is None
-    assert revert_assessment.allowed is False
-    assert revert_assessment.status == "observation_required"
+    assert revert_assessment.allowed is True
     assert final_edit.status == "success"
     assert final_cursor > revert_cursor
     assert old_verification_for_final_state is None
@@ -267,10 +268,6 @@ def recovery_experiment(root):
 
     loaded_session = store.load(original.session.id)
     target = root / "interrupted.txt"
-    repair_revision = file_revision(target)
-    command_runner = SequenceCommandRunner(
-        [CommandResult(returncode=0, stdout="1 passed\n")]
-    )
     runtime_workspace = Workspace.build(root)
     resumed = Pico(
         model_client=FakeModelClient(
@@ -284,25 +281,20 @@ def recovery_experiment(root):
                     },
                     call_id="call_recovery_read",
                 ),
-                ModelAction.tool(
-                    "edit_file",
-                    {
-                        "path": "interrupted.txt",
-                        "old_text": "side effect happened",
-                        "new_text": "side effect confirmed",
-                        "expected_revision": repair_revision,
-                    },
-                    call_id="call_recovery_repair",
-                ),
-                ModelAction.final("Recovered, inspected, repaired, and verified."),
+                ModelAction.final("Recovered, inspected, and verified without rewriting."),
             ]
         ),
         workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
-            verification_command="verify",
+            verification_command=shlex.join([
+                sys.executable, "-B", "-c",
+                (
+                    "from pathlib import Path; "
+                    "assert Path('interrupted.txt').read_text() == 'side effect happened\\n'"
+                ),
+            ]),
         ),
-        command_runner=command_runner,
         session=loaded_session,
     )
     assert resumed.run.resumable is True
@@ -345,11 +337,11 @@ def recovery_experiment(root):
     assert len(recovered_results) == len(resumed_events) == 1
     assert len(started_run_events) == 1
     assert run_outcome.status == "completed"
-    assert len(command_runner.calls) == 1
-    assert target.read_text(encoding="utf-8") == "side effect confirmed\n"
-    assert resumed.run.evidence.unresolved_effects(
-        resumed.run.evidence.verifications[-1]
-    ) == []
+    assert len(resumed.run.evidence.verifications) == 1
+    assert resumed.run.evidence.verifications[-1]["status"] == "passed"
+    assert target.read_text(encoding="utf-8") == "side effect happened\n"
+    assert len(resumed.run.evidence.effects) == 1
+    assert resumed.run.evidence.unverifiable_effects() == []
 
     return {
         "startup_active_run_state": startup_state,
@@ -366,12 +358,12 @@ def recovery_experiment(root):
             "original_tool_started_count": len(original_starts),
             "blind_replay_occurred": len(original_starts) != 1,
         },
-        "repair_and_verification": {
+        "current_state_verification": {
             "file_content": target.read_text(encoding="utf-8"),
-            "verification_count": len(command_runner.calls),
-            "unresolved_effects": resumed.run.evidence.unresolved_effects(
-                resumed.run.evidence.verifications[-1]
-            ),
+            "verification_count": len(resumed.run.evidence.verifications),
+            "verification_status": resumed.run.evidence.verifications[-1]["status"],
+            "additional_mutations": len(resumed.run.evidence.effects) - 1,
+            "unverifiable_effects": resumed.run.evidence.unverifiable_effects(),
         },
         "run_outcome": run_outcome.to_dict(),
     }

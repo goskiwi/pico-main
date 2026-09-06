@@ -117,9 +117,7 @@ def reconcile_interrupted(runtime):
     pending_calls = run_log.pending_tool_calls()
     if not pending_calls:
         return ()
-    started_by_id = {
-        entry.call_id: entry for entry in run_log.events if entry.kind == "tool_started"
-    }
+    started_by_id = run_log.pending_tool_starts()
     reconciled = []
     for call in pending_calls:
         started = started_by_id.get(call.call_id)
@@ -184,6 +182,10 @@ def reconcile_interrupted(runtime):
                 effect_scope=effect_scope if changed or unknown else "none",
                 structured={"path_transitions": transitions},
             )
+        if started is not None and call.name == "integrate_child":
+            from .subagents.integration import PatchIntegrator
+
+            outcome = PatchIntegrator(runtime).recover_applied(call, started, outcome)
         entry = run_log.append_tool_result(
             outcome,
             recovered_from_interruption=True,
@@ -224,6 +226,7 @@ class RunLifecycle:
         runtime.run.execution_context = self._root_execution()
         try:
             reconcile_interrupted(runtime)
+            runtime.run.request_tool_start = runtime.run.metrics.executed_tool_count
             if resumed:
                 run_log.append_user_guidance(user_message)
 

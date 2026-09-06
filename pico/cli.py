@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .config import load_project_env, provider_env
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
+from .run_store import RunStore
 from .runtime import Pico, PicoConfig, SessionStore
 from .working_state import WorkingState
 from .workspace import Workspace, middle
@@ -215,7 +216,7 @@ def build_agent(args):
 
     session_id = args.resume
     if session_id == "latest":
-        session_id = store.latest_active()
+        session_id = store.latest_active(RunStore(workspace.root / ".pico" / "runs"))
         if not session_id:
             raise ValueError("no unfinished Session is available to resume")
     session = store.load(session_id) if session_id else store.create(workspace.root)
@@ -259,39 +260,10 @@ def _outcome_summary(agent, outcome):
     return "\n".join(lines)
 
 
-def _unfinished_session(cwd):
-    workspace = Workspace.build(cwd)
-    store = SessionStore(workspace.root / ".pico" / "sessions")
-    session_id = store.latest_active()
-    if not session_id:
-        return None
-    session = store.load(session_id)
-    return {
-        "session_id": session_id,
-        "run_id": session.active_run_id,
-    }
-
-
 def _print_outcome(agent, outcome):
     print(_outcome_summary(agent, outcome))
     print()
     print(outcome.answer)
-
-
-def _build_startup(args):
-    unfinished = None if args.resume else _unfinished_session(args.cwd)
-    return build_agent(args), unfinished
-
-
-def _print_unfinished(unfinished):
-    if not unfinished:
-        return
-    print(
-        "\nUnfinished Run found: "
-        + unfinished["run_id"]
-        + "\nResume with: pico --resume "
-        + unfinished["session_id"]
-    )
 
 
 def build_arg_parser():
@@ -408,7 +380,7 @@ def main(argv=None):
         return run_main(raw_argv[1:])
     args = build_arg_parser().parse_args(raw_argv)
     try:
-        agent, unfinished = _build_startup(args)
+        agent = build_agent(args)
     except (RuntimeError, ValueError) as exc:
         print(f"pico: {exc}", file=sys.stderr)
         return 2
@@ -417,7 +389,6 @@ def main(argv=None):
         agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
     )
     print(build_welcome(agent, model=model))
-    _print_unfinished(unfinished)
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。

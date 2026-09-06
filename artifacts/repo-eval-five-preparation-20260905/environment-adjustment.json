@@ -1,7 +1,0 @@
-{
-  "recorded_at": "2026-09-05T07:02:09.298076+00:00",
-  "instance_id": "astropy__astropy-12907",
-  "before_command": "python -m pytest -q --tb=short -r fE astropy/modeling/tests/test_separable.py astropy/modeling/tests/test_compound.py",
-  "after_command": "python -m pytest -W 'default:Conversion of an array with ndim > 0 to a scalar is deprecated:DeprecationWarning' -q --tb=short -r fE astropy/modeling/tests/test_separable.py astropy/modeling/tests/test_compound.py",
-  "reason": "All six original failures are the same NumPy array-to-scalar DeprecationWarning; retain all tests and assertions and display this warning rather than raising it as an exception. No source, dependency, or independent acceptance changes."
-}

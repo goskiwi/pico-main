@@ -1,9 +1,14 @@
+import shlex
 import subprocess
+import sys
 
-from pico.command_runner import CommandResult
+import pytest
+
+from pico.command_runner import CommandResult, CommandRunner
 from pico.evidence import verification_is_current
 from pico.mutations import file_revision
 from pico.verification import (
+    RepositorySnapshotError,
     capture_repository_state,
     repository_state_changes,
     verify_workspace,
@@ -183,3 +188,65 @@ def test_repository_state_detects_existing_untracked_content_change(tmp_path):
     after = capture_repository_state(tmp_path)
 
     assert repository_state_changes(before, after) == ("notes.txt",)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_snapshot_requires_all_entries_but_allows_exact_limit(tmp_path, monkeypatch, nested):
+    monkeypatch.setattr("pico.verification.VERIFICATION_SNAPSHOT_MAX_ENTRIES", 2)
+    directory = tmp_path / "sub" if nested else tmp_path
+    directory.mkdir(exist_ok=True)
+    for name in (["a"] if nested else ["a", "b"]):
+        (directory / name).write_text("before")
+    _kind, state = capture_repository_state(tmp_path)
+    assert len(state) == 2
+    (directory / "z").write_text("unobserved")
+    with pytest.raises(RepositorySnapshotError, match="exceeded"):
+        capture_repository_state(tmp_path)
+
+
+def test_verifier_reports_unknown_effects_if_post_execution_scan_exceeds_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr("pico.verification.VERIFICATION_SNAPSHOT_MAX_ENTRIES", 2)
+    for name in ("a", "b"):
+        (tmp_path / name).write_text("before")
+    result = verify_workspace(
+        root=tmp_path,
+        command=shlex.join([sys.executable, "-B", "-c", "from pathlib import Path; Path('z').write_text('changed')"]),
+        command_runner=CommandRunner(tmp_path), timeout_seconds=30, redact_text=str,
+        mutation_sequence_provider=lambda: 0, started_workspace_mutation_sequence=0,
+        changed_paths=(),
+    )
+    assert (tmp_path / "z").read_text() == "changed"
+    assert result["status"] == "infrastructure_error"
+    assert result["workspace_changes"] is None
+    assert "exceeded" in result["output"]
+
+
+def test_snapshot_does_not_silently_skip_unreadable_directories(tmp_path, monkeypatch):
+    import os
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    scan = os.scandir
+
+    def read_directory(path):
+        if path == blocked:
+            raise PermissionError("injected unreadable directory")
+        return scan(path)
+
+    monkeypatch.setattr("pico.verification.os.scandir", read_directory)
+    with pytest.raises(RepositorySnapshotError, match="cannot observe directory"):
+        capture_repository_state(tmp_path)
+
+
+def test_git_snapshot_rejects_unreadable_untracked_content(tmp_path, monkeypatch):
+    from pico.workspace import Workspace
+
+    _committed_git_workspace(tmp_path)
+    target = tmp_path / "unreadable.txt"
+    target.write_text("before")
+    observe = Workspace.path_state
+    monkeypatch.setattr(Workspace, "path_state", staticmethod(
+        lambda path: "unavailable" if path == target else observe(path),
+    ))
+    with pytest.raises(RepositorySnapshotError, match="cannot observe file contents"):
+        capture_repository_state(tmp_path)

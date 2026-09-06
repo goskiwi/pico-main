@@ -160,8 +160,6 @@ class FailureInfo:
 
     @property
     def correction_action(self):
-        if self.code == "repeated_identical_call":
-            return "replan"
         return RECOVERY_ACTIONS[self.recovery]
 
 

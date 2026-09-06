@@ -30,6 +30,21 @@ def init_repository(root):
     return git(root, "rev-parse", "HEAD")
 
 
+def test_staged_rename_source_is_protected_from_automatic_delivery(tmp_path):
+    head = init_repository(tmp_path)
+    git(tmp_path, "mv", "subject.txt", "renamed.txt")
+    index_before = git(tmp_path, "diff", "--cached", "--name-status")
+    client = FakeModelClient([
+        ModelAction.tool("write_file", {"path": "subject.txt", "content": "agent\n"}),
+        ModelAction.final("done"),
+    ])
+    result = workflow(client).run(tmp_path, "Create subject.txt")
+    assert result.delivery_status == "skipped"
+    assert "subject.txt" in result.detail
+    assert git(tmp_path, "rev-parse", "HEAD") == head
+    assert git(tmp_path, "diff", "--cached", "--name-status") == index_before
+
+
 def edit_client(root, *, old_text="alpha\n", new_text="agent\n"):
     revision = file_revision(root / "subject.txt")
     return FakeModelClient(

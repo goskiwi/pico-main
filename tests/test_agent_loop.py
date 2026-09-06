@@ -145,8 +145,8 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         if entry.kind == "tool_result"
     }
     conflict = outcomes["call_edit_stale"]
-    assert conflict["status"] == "error"
-    assert conflict["execution_state"] == "failed"
+    assert conflict["status"] == "rejected"
+    assert conflict["execution_state"] == "not_started"
     assert conflict["side_effect_state"] == "none"
     assert ToolOutcome.from_dict(conflict).correction_action == "repair"
     assert conflict["failure"]["code"] == "revision_conflict"

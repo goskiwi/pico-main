@@ -33,47 +33,6 @@ def _git(root, *args, input_bytes=None, execution_context=None):
     return result.stdout
 
 
-def require_clean_repository(root, *, execution_context=None):
-    root = Path(root).resolve()
-    try:
-        top = Path(
-            _git(root, "rev-parse", "--show-toplevel", execution_context=execution_context)
-            .decode("utf-8")
-            .strip()
-        ).resolve()
-    except GitWorktreeError as exc:
-        raise GitWorktreeError(
-            f"implementation subtasks require a Git repository: {exc}"
-        ) from exc
-    if top != root:
-        raise GitWorktreeError("implementation subtasks must run from the repository root")
-    tracked_status = _git(
-        root,
-        "status",
-        "--porcelain",
-        "-z",
-        "--untracked-files=no",
-        execution_context=execution_context,
-    )
-    untracked = tuple(
-        path
-        for path in _git(
-            root,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            execution_context=execution_context,
-        ).split(b"\0")
-        if path and path != b".pico" and not path.startswith(b".pico/")
-    )
-    if tracked_status or untracked:
-        raise GitWorktreeError(
-            "implementation subtasks require a clean working tree before delegation"
-        )
-    return _git(root, "rev-parse", "HEAD", execution_context=execution_context).decode("utf-8").strip()
-
-
 def repository_changed_paths(root, *, execution_context=None):
     tracked = _git(root, "diff", "--name-only", "-z", "HEAD", execution_context=execution_context)
     untracked = _git(
@@ -130,28 +89,19 @@ class GitWorktree:
     def changed_paths(self):
         return repository_changed_paths(self.path, execution_context=self.execution_context)
 
-    def patch(self):
-        changed = self.changed_paths()
-        if not changed:
-            return b""
-        untracked = {
-            item.decode("utf-8")
-            for item in _git(
-                self.path,
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "-z",
-                execution_context=self.execution_context,
-            ).split(b"\0")
-            if item
-        }
-        if untracked:
-            _git(self.path, "add", "-N", "--", *sorted(untracked), execution_context=self.execution_context)
+    def patch(self, changed_paths):
+        # The Run owns the changed paths. Git ignore rules must not discard
+        # explicitly recorded edits when constructing their delivery patch.
+        existing = [path for path in changed_paths if (self.path / path).is_file()]
+        if existing:
+            _git(self.path, "add", "-N", "--force", "--", *existing,
+                 execution_context=self.execution_context)
         return _git(self.path, "diff", "--binary", "--no-ext-diff", "HEAD", execution_context=self.execution_context)
 
-    def write_patch(self, destination):
-        payload = self.patch()
+    def write_patch(self, destination, changed_paths):
+        payload = self.patch(changed_paths)
+        if self.changed_paths() != tuple(changed_paths):
+            raise GitWorktreeError("delivery patch paths do not match the Run changes")
         if not payload:
             raise GitWorktreeError("implementation subtask produced no patch")
         destination = Path(destination)

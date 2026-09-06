@@ -103,10 +103,10 @@ class PromptBuilder:
             - output_reserve
             - request_overhead_tokens
         )
-        minimum_input = context._assemble_input(raw, {})
+        minimum_input = context._assemble_input(raw, context._required_context(raw))
         if count_tokens(minimum_input) > available:
             raise context.ContextBudgetExceeded(
-                "runtime policy, repository instructions, and task request exceed the model budget"
+                "runtime policy, repository instructions, task request and WorkingState exceed the model budget"
             )
         if history_override is None and history is not None:
             fixed_context = context._fixed_context(

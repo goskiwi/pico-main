@@ -182,22 +182,24 @@ class CommandRunner:
 
     @staticmethod
     def _terminate_process_group(process):
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            pass
-        try:
-            stdout, stderr = process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
-        except subprocess.TimeoutExpired:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                os.killpg(process.pid, sig)
             except OSError:
                 pass
-            stdout, stderr = process.communicate()
+            try:
+                return process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                stdout, stderr = exc.output or b"", exc.stderr or b""
+        # Descendants may have detached while retaining our pipes. Stop reading
+        # after the kill grace period instead of waiting for their eventual EOF.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        try:
+            process.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            pass
         return stdout, stderr
 
     def _truncate_output(self, stdout, stderr):

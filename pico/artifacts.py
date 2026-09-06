@@ -194,8 +194,8 @@ class ArtifactStore:
         descriptor, data = self._read_verified(run_id, artifact_id)
         offset = int(offset)
         max_bytes = int(max_bytes)
-        if max_bytes < 1:
-            raise ValueError("artifact page size must be positive")
+        if max_bytes < 4:
+            raise ValueError("artifact page size must be at least 4 bytes for UTF-8")
         max_bytes = min(max_bytes, ARTIFACT_PAGE_MAX_BYTES)
         if offset < 0 or offset > len(data):
             raise ValueError(f"artifact offset {offset} is outside output ({len(data)} bytes)")

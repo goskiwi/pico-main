@@ -447,7 +447,7 @@ class RepoMap:
             else:
                 try:
                     parsed = self._parse_file(relative_path, fingerprint)
-                except OSError:
+                except (OSError, RecursionError):
                     self._file_cache.pop(relative_path.as_posix(), None)
                     skipped_files += 1
                     cache_changed = True
@@ -570,11 +570,13 @@ class RepoMap:
         ]
         references = []
 
-        def visit(node, current_id, scope, parent_kind):
+        pending = [(tree.root_node, module_id, (), "module")]
+        while pending:
+            node, current_id, scope, parent_kind = pending.pop()
             if node.type in {"class_definition", "function_definition"}:
                 name_node = node.child_by_field_name("name")
                 if name_node is None:
-                    return
+                    continue
                 name = _node_text(source, name_node)
                 qualified_name = ".".join((*scope, name)) if scope else name
                 kind = (
@@ -618,11 +620,11 @@ class RepoMap:
                                         kind="inherit",
                                     )
                                 )
-                for child in node.children:
-                    if child == name_node:
-                        continue
-                    visit(child, symbol_id, (*scope, name), kind)
-                return
+                pending.extend(
+                    (child, symbol_id, (*scope, name), kind)
+                    for child in reversed(node.children) if child != name_node
+                )
+                continue
 
             if node.type == "call":
                 function_node = node.child_by_field_name("function")
@@ -644,10 +646,9 @@ class RepoMap:
                     )
                 )
 
-            for child in node.children:
-                visit(child, current_id, scope, parent_kind)
-
-        visit(tree.root_node, module_id, (), "module")
+            pending.extend(
+                (child, current_id, scope, parent_kind) for child in reversed(node.children)
+            )
         return ParsedFile(
             fingerprint=fingerprint,
             symbols=tuple(symbols),

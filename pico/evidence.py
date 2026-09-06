@@ -318,60 +318,27 @@ class RunEvidence:
             None,
         )
 
-    def _repair_after(self, index, effect):
-        if effect["side_effect_state"] != "partial" or not effect["affected_paths"]:
-            return None
-        affected = set(effect["affected_paths"])
-        return next(
-            (
-                later
-                for later in self.effects[index + 1 :]
-                if later["status"] == "success"
-                and later["side_effect_state"] == "changed"
-                and later["effect_scope"] == "workspace"
-                and affected.issubset(set(later["affected_paths"]))
-            ),
-            None,
-        )
-
-    def repaired_partials_requiring_verification(self):
+    def partial_workspace_effects(self):
+        """Historical interrupted/failed mutations, independent of later edits."""
         return [
             effect
-            for index, effect in enumerate(self.effects)
+            for effect in self.effects
             if effect["effect_scope"] in WORKSPACE_SCOPES
-            and self._repair_after(index, effect) is not None
+            and effect["side_effect_state"] == "partial"
         ]
 
-    def unrepaired_uncertain_effects(self):
+    def unverifiable_effects(self):
+        """Effects that a verifier of the tracked workspace cannot account for."""
         return [
             effect
-            for index, effect in enumerate(self.effects)
+            for effect in self.effects
             if effect["side_effect_state"] in {"partial", "unknown"}
             and (
                 effect["side_effect_state"] == "unknown"
-                or self._repair_after(index, effect) is None
+                or effect["effect_scope"] not in WORKSPACE_SCOPES
+                or not effect["affected_paths"]
             )
         ]
-
-    def unresolved_effects(self, current_verification=None):
-        unresolved = []
-        for index, effect in enumerate(self.effects):
-            if effect["side_effect_state"] not in {"partial", "unknown"}:
-                continue
-            if effect["side_effect_state"] == "unknown" or not effect["affected_paths"]:
-                unresolved.append(effect)
-                continue
-            repair = self._repair_after(index, effect)
-            repaired_and_verified = bool(
-                repair is not None
-                and current_verification is not None
-                and current_verification.get("status") == "passed"
-                and int(current_verification["finished_workspace_mutation_sequence"])
-                >= int(repair["event_sequence"])
-            )
-            if not repaired_and_verified:
-                unresolved.append(effect)
-        return unresolved
 
     def to_dict(self):
         return {

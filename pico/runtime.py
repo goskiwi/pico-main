@@ -101,7 +101,7 @@ class Pico:
             raise RuntimeError("Run event requires an active contract and RunLog")
         if self.run.projection.run_id != run_log.run_id:
             raise RuntimeError("active Projection and RunLog belong to different Runs")
-        payload = self.redact_value(payload or {})
+        payload = securitylib.redact_facts(payload or {}, self.redact_text)
         entry = run_log.append(event_type, payload)
         return entry
 

@@ -101,7 +101,7 @@ class SessionStore:
             self, session["id"], Path(session["workspace_root"]), session["active_run_id"]
         )
 
-    def latest_active(self):
+    def latest_active(self, run_store):
         """Return the newest Session that still points at an unfinished Run."""
 
         files = [path for path in self.root.glob("*.json") if not path.is_symlink()]
@@ -112,5 +112,11 @@ class SessionStore:
         for path in files:
             session = self.load(path.stem)
             if session.active_run_id:
+                _log, projection = run_store.load_run(session.active_run_id)
+                if projection.session_id != session.id:
+                    raise ValueError("active Run does not belong to this Session")
+                if projection.terminal:
+                    session.set_active_run("")
+                    continue
                 return path.stem
         return None

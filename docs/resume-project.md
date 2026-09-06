@@ -20,7 +20,7 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 
 ## 工具安全
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每个结构化修改路径只保存第一次修改前的 preimage，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置可以省略无法可信生成的 final_diff 后受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每次结构化修改保存匹配 before revision 的事务前像，Run 保留首次前像用于最终 Diff，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置可以省略无法可信生成的 final_diff 后受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
 
 文件读取、搜索和文本修改不设固定的整文件大小门槛；读取保留行数与输出字节预算，搜索保留时间、结果数与输出预算，截断会明确反馈。读取按块扫描并计算全文 revision，因此读取少量行仍有全文扫描成本。Preimage 从源文件分块复制原始字节，沿用已有 Artifact 描述与完整性校验，备份未成功不进入修改；不会反复将全文解码、编码来保存备份。文本替换与 Diff 仍处理完整文本，大文件的内存和耗时是已知边界，不宣称恒定内存或任意规模都能快速完成。
 
@@ -34,13 +34,13 @@ Parent 使用单个 `delegate` 创建一个 Explore 或 Implement Child，再用
 
 ## 评测与审计
 
-结构化 verifier 绑定 command identity、最后一次 workspace mutation sequence 与 changed-path states；freshness 使用时派生，不持久化可变标签。相同代码状态换了验证命令也必须重新执行。Completion Gate 在无净变化时要求成功 Observation；有净变化且 Contract 要求时运行 Verification。`A -> B -> A` 不算净变化。失败验证、未知副作用或尚未显式集成的 Implement Child 不能被报告为成功。Completion 证明证据充分且新鲜，不声称证明任意业务语义。
+结构化 verifier 绑定 command identity、最后一次 workspace mutation sequence 与 changed-path states，用于核对本次执行结果。每次需要验证的完成提交都实际执行 verifier，包括恢复后的提交；历史通过记录不替代新验证。Completion 不以观察次数或非空 Diff 判断成功；有净变化且 Contract 要求时运行 Verification，已追踪的 partial 始终要求当前状态验证。`A -> B -> A` 不算净变化。失败验证、未知副作用或尚未显式集成的 Implement Child 不能被报告为成功。Completion 证明证据充分且新鲜，不声称证明任意业务语义。
 
 ## 对象与调用边界
 
 当前结构重构将身份、TaskContract、WorkingState 和终态字段直接归入 RunProjection，移除
-TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 负责校验、落盘、推进
-同一个 Projection；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
+TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 负责转换验证、落盘、发布
+已验证的 Projection 状态；调用方不再手动组合 append 与 apply。Summary 中的 identity/task 分组
 是展示格式，不是额外的运行时对象。
 
 每个工具只在一处声明 Schema、权限、校验、Runner 与 effects。单次与批次共用参数准备、
@@ -48,13 +48,13 @@ Runner 调用和结果归类；批次保留整批准入与按原序记账。Prom
 预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
 派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。
 
-本轮不解决审查记录中的跨源凭据转发、暂存重命名、多个 Child 顺序集成、中断后补丁自动
-判定、多写者与资源优化问题，不作生产就绪承诺。
+跨源凭据转发、暂存重命名、多个 Child 顺序集成与中断应用确认已由全链路修复覆盖。
+单 Run Log 仍采用单写者模型；没有引入通用多写者或硬实时执行框架。
 
 工具表、单次与批量准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
 不存在“Config 已更新但消费者仍用初始化副本”的行为。验证额外变更进入持久 Evidence，
 不能靠再次提交绕过。Git 交付按命令禁用 hooks；Child Git 操作使用 Parent 剩余时间。
-Provider 保留 urllib 的代理与重定向处理，连接后以同一请求 deadline 限制响应头和响应体，
+Provider 保留 urllib 代理与同源重定向，拒绝跨源跳转，连接后以同一请求 deadline 限制响应头和响应体，
 持续小块返回不再无限延长请求。DNS、连接/TLS 由系统及套接字超时控制，普通 Python 计算
 仍是协作式停止，不声称整条链路是硬实时系统。
 

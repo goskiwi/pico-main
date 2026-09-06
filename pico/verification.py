@@ -66,10 +66,13 @@ def _untracked_path_state(path):
         if path.is_symlink():
             return ("symlink", os.readlink(path))
         if stat.S_ISREG(metadata.st_mode):
+            revision = Workspace.path_state(path)
+            if revision == "unavailable":
+                raise RepositorySnapshotError(f"cannot observe file contents: {path}")
             return (
                 "file",
                 metadata.st_mode & 0o7777,
-                Workspace.path_state(path),
+                revision,
             )
         return (
             "other",
@@ -80,7 +83,7 @@ def _untracked_path_state(path):
             metadata.st_ctime_ns,
         )
     except OSError as exc:
-        return ("unavailable", type(exc).__name__)
+        raise RepositorySnapshotError(f"cannot observe path: {path}") from exc
 
 
 def _git_repository_state(root):
@@ -176,22 +179,27 @@ def _capture_bounded_filesystem_state(root):
     snapshot = {}
     pending = deque([(root, Path())])
     observed = 0
-    while pending and observed < VERIFICATION_SNAPSHOT_MAX_ENTRIES:
+    while pending:
         directory, relative_directory = pending.popleft()
         try:
             with os.scandir(directory) as iterator:
                 entries = sorted(iterator, key=lambda item: item.name)
-        except OSError:
-            continue
+        except OSError as exc:
+            raise RepositorySnapshotError(f"cannot observe directory: {directory}") from exc
         for entry in entries:
             if entry.name in IGNORED_PATH_NAMES:
                 continue
+            if observed >= VERIFICATION_SNAPSHOT_MAX_ENTRIES:
+                raise RepositorySnapshotError(
+                    "bounded filesystem observation exceeded "
+                    f"{VERIFICATION_SNAPSHOT_MAX_ENTRIES} entries"
+                )
             relative = relative_directory / entry.name
             logical = relative.as_posix()
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError as exc:
-                snapshot[logical] = ("unavailable", type(exc).__name__)
+                raise RepositorySnapshotError(f"cannot observe path: {logical}") from exc
             else:
                 kind = stat.S_IFMT(metadata.st_mode)
                 if stat.S_ISDIR(metadata.st_mode):
@@ -206,13 +214,6 @@ def _capture_bounded_filesystem_state(root):
                         metadata.st_ctime_ns,
                     )
             observed += 1
-            if observed >= VERIFICATION_SNAPSHOT_MAX_ENTRIES:
-                break
-    if pending:
-        raise RepositorySnapshotError(
-            "bounded filesystem observation exceeded "
-            f"{VERIFICATION_SNAPSHOT_MAX_ENTRIES} entries"
-        )
     return snapshot
 
 

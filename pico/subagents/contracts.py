@@ -93,13 +93,11 @@ class ChildRecord:
     def completed(self):
         if not isinstance(self.result, ChildSuccess):
             raise TypeError(f"Child is not completed: {self.child_id}")
-        if self.spec.role == "implement":
-            if not self.base_sha or self.result.patch is None:
-                raise ValueError(
-                    f"Implement Child requires base and patch: {self.child_id}"
-                )
-        elif self.result.patch is not None:
-            raise ValueError(f"Explore Child cannot contain a patch: {self.child_id}")
+        if self.result.patch is not None:
+            if self.spec.role != "implement":
+                raise ValueError(f"Explore Child cannot contain a patch: {self.child_id}")
+            if not self.base_sha:
+                raise ValueError(f"Child patch requires a base: {self.child_id}")
         return self.result
 
     def mark_integrated(self):
@@ -145,7 +143,7 @@ class ChildState:
             raise ValueError("invalid completed Child receipt")
         patch = None
         base = ""
-        if spec.role == "implement":
+        if spec.role == "implement" and "patch" in receipt:
             raw = receipt["patch"]
             base = raw["base_sha"]
             paths = raw["changed_paths"]
@@ -169,7 +167,10 @@ class ChildState:
     def check_result(self, call, outcome):
         if call.name == "delegate":
             self._delegate_record(call, outcome)
-        elif call.name == "integrate_child" and outcome["status"] == "success":
+        elif call.name == "integrate_child" and (
+            outcome["status"] == "success"
+            or outcome["structured"].get("status") == "integrated"
+        ):
             child_id = call.args["child_id"]
             if (
                 set(call.args) != {"child_id"}
@@ -177,15 +178,24 @@ class ChildState:
             ):
                 raise ValueError("invalid persisted integration receipt")
             record = self.record(child_id)
-            if record.completed().patch is None:
+            patch = record.completed().patch
+            if patch is None:
                 raise ValueError("Child has no patch")
+            receipt = outcome["structured"]
+            if (
+                receipt.get("status") != "integrated"
+                or receipt.get("base_sha") != record.base_sha
+                or receipt.get("changed_paths") != list(patch.changed_paths)
+                or outcome["status"] not in {"success", "partial_success"}
+            ):
+                raise ValueError("integration receipt does not match the Child patch")
 
     def apply_result(self, call, outcome):
         if call.name == "delegate":
             record = self._delegate_record(call, outcome)
             if record is not None:
                 self.records[record.child_id] = record
-        elif call.name == "integrate_child" and outcome["status"] == "success":
+        elif call.name == "integrate_child" and outcome["structured"].get("status") == "integrated":
             self.record(call.args["child_id"]).mark_integrated()
 
     def completion_issue(self):

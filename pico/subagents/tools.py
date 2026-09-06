@@ -59,22 +59,27 @@ def _integrate(manager, args):
         for path in paths
     }
     result = manager.integrate_child(args["child_id"])
+    after = {
+        path: manager.parent.workspace.path_state(
+            manager.parent.workspace.resolve_tool_path(path)
+        )
+        for path in paths
+    }
+    changed = tuple(path for path in paths if before[path] != after[path])
     result["path_transitions"] = [
         {
             "path": path,
             "before_state": before[path],
-            "after_state": manager.parent.workspace.path_state(
-                manager.parent.workspace.resolve_tool_path(path)
-            ),
+            "after_state": after[path],
             "before_artifact_id": "",
         }
-        for path in paths
+        for path in changed
     ]
     return ToolRunnerResult(
         content=f"integrated Child {result['child_id']}",
         structured=dict(result),
-        affected_paths=paths,
-        effect_scope="workspace" if paths else "none",
+        affected_paths=changed,
+        effect_scope="workspace" if changed else "none",
     )
 
 

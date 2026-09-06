@@ -148,6 +148,11 @@ own causal Events and are not duplicated into per-turn telemetry.
 
 Replaceable snapshots and Workspace mutations use same-directory temporary files plus atomic replace. `write_file` only creates an absent file; `edit_file` only changes an existing file and stages/fsyncs the complete payload before revalidating its expected revision at the `os.replace` commit point. A stale Revision preserves external content and returns expected/actual revisions plus ready-to-call `read_file` arguments. Missing text returns a bounded closest current excerpt when one is useful; ambiguous text returns bounded exact line ranges. These are facts on the existing ToolOutcome, not additional Tools or recovery state.
 
+Create-only artifact and patch writes also stage and fsync complete bytes in the destination
+directory, then publish with a hard link that cannot replace an existing name. Partial staging
+writes never occupy the final artifact name; existing artifact collisions remain errors. A failed
+Final Diff content or descriptor write can therefore be retried by Resume or Reset.
+
 ## Tool recovery
 
 Before execution, `tool_started` records:
@@ -155,7 +160,10 @@ Before execution, `tool_started` records:
 - stable call ID bound to the persisted `assistant_tool_call`;
 - effect scope;
 - exact potential paths;
-- each path's before state/revision.
+- each path's before state/revision and matching transaction preimage.
+
+Tool identities are scoped to the current transaction. Recovery reads started records only after
+that transaction's call event; Provider IDs reused by later completed transactions do not alias it.
 
 After execution, `tool_result` records the canonical ToolOutcome. On resume:
 
@@ -176,7 +184,7 @@ ToolOutcome keeps three explicit state dimensions for direct inspection:
 - `execution_state`: whether the Tool Runner was not started, returned normally, or failed/interrupted;
 - `side_effect_state`: whether effects are absent, changed, partial, or unknown.
 
-Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. The repeat cache is only a process-local aid against immediately replaying a matching `partial/unknown` call; durable mutation safety remains owned by create-only writes, revisions, atomic stores and Patch state. Ask mode only permits observation tools; mutations require an active Run and exact persisted Pending Call. The effective parent write scope is the intersection of the persisted TaskContract and current Runtime policy: Implement delegation declarations and planned Patch integration paths are both checked against it before Approval or execution.
+Tool Runners return machine-readable facts plus `FailureInfo` through `ToolRunnerResult`. The durable failure stores one recovery condition (`retry_after_change`, `retry_after_wait`, `user_action_required`, or `no_retry`); Runtime derives the model-facing correction action instead of persisting a second decision. Each new Tool call is checked against current state through create-only writes, revisions, atomic stores and Patch state; a past failure does not permanently blacklist its arguments. Recovery never automatically replays a pending mutation. Ask mode only permits observation tools; mutations require an active Run and exact persisted Pending Call. The effective parent write scope is the intersection of the persisted TaskContract and current Runtime policy: Implement delegation declarations and planned Patch integration paths are both checked against it before Approval or execution.
 
 ## Context and compaction
 
@@ -261,8 +269,10 @@ second consecutive overflow propagates. Other `RuntimeError` values never enter 
 ## Resume
 
 RunLog constructs event identity, sequence and timestamp, validates payload/protocol order,
-then passes the complete RunEvent to the private storage append primitive. RunStore serializes,
-flushes and fsyncs it; only after success does RunLog advance its accepted events and protocol.
+then constructs a candidate using the same reducer as replay, including WorkingState and
+RunEvidence constraints. Only a valid candidate reaches the storage append primitive. RunStore
+serializes, flushes and fsyncs it; RunLog then publishes the already-validated state while preserving
+the top-level Projection identity. A rejected transition never poisons the durable log.
 There is no `protocol_checked` switch or independent Store-level event-construction route.
 `load_run` reads once and restores protocol plus Projection in one replay; Runtime installs those
 returned objects directly. Store retains its last successfully read/written cursor for recovery.
@@ -289,7 +299,7 @@ or an unknown observation enter RunEvidence as an uncertain workspace effect and
 A later passing verifier cannot erase that effect. Ordinary assertion failures without side
 effects remain retryable.
 
-`CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; unrepaired `unknown/partial` effects; the persisted maximum capability and no-change Observation requirement; external Workspace drift; change-triggered/current verification; and effects that remain unresolved after verification. A zero-change completion needs at least one successful Observation. A repaired Workspace partial must receive a passing verifier for the current mutation/path state. Completion establishes evidence sufficiency and freshness, not arbitrary business-semantic correctness. `RunEvidence` only answers factual relationship queries; it does not return a completion decision.
+`CompletionController` is the only completion-policy owner. It checks, in order: an unintegrated implement Child; unknown or untracked effects; the persisted maximum capability; external Workspace drift; required current-state verification; and any unknown effects produced by verification. Completion does not require an observation-tool count or a non-empty Diff. A tracked Workspace partial always requires a passing verifier for the current mutation/path state, even if later edits restore the original content or the task did not request verification. It does not require another successful mutation: content that is already correct can be verified as-is, and multi-file changes can be repaired separately. The interrupted Tool result remains a historical partial after successful completion. Missing path transitions, missing preimages, Workspace drift and unknown effects retain their existing protections. Completion establishes evidence sufficiency and freshness, not arbitrary business-semantic correctness. `RunEvidence` exposes effects and tracked state; it does not infer repair from subsequent edits or decide completion.
 
 Completion returns one tagged `CompletionDecision(status, content)`: `allowed` carries the final
 answer; a blocker status carries repair guidance. A successful terminal event requires
@@ -317,25 +327,35 @@ There is no batch request, dependency graph, background queue, or worker-pool sc
 
 An explore Child uses Ask-mode Tools against the Parent Workspace and does not create a Worktree.
 An implement Child must declare non-empty allowed write paths and always runs in a dedicated Git
-Worktree rooted at the delegation base. Child Tool surfaces exclude `delegate`, so delegation cannot
+Worktree rooted at the Parent origin commit. If the Parent already has accepted Run changes, they
+are copied to a private Child input commit so the Child patch contains only its new edits. The Parent
+HEAD and index are not committed or staged by this preparation. Child Tool surfaces exclude `delegate`, so delegation cannot
 recurse. The Parent receives a compact result plus a receipt; Child Tool history remains in the
 Child Run Log.
 
 `ChildRecord.result` is `None` while running, `ChildSuccess` on completion, or `ChildFailure` on
-failure. Only a successful implementation carries a `ChildPatch`; Explore and failure receipts do
-not emit empty Patch fields. Failed receipts retain a Child Run ID when execution started.
+failure. Only a successful implementation with actual changes carries a `ChildPatch`; a successful
+no-change implementation, Explore and failure receipts omit Patch fields. RunChangeSet determines the actual changed paths, including explicitly recorded gitignored files.
+Patch construction includes these paths through intent-to-add in the temporary Worktree index and
+checks that Git represents the full Run change set; the Parent index is untouched. No-change
+worktrees are cleaned up. Failed implementation worktrees are retained with their path in the
+failure message; failed receipts also retain a Child Run ID when execution started.
 
-Implementation completion never mutates the Parent automatically. `integrate_child` revalidates the
-recorded base, applies the Patch in a temporary integration Worktree, runs the Runtime-configured
-Verification there, and only then writes the verified result into the Parent Workspace. A base
-change, path-scope mismatch, Patch failure, or failed Verification rejects integration without
-claiming success.
+Implementation completion never mutates the Parent automatically. Integration checks the origin
+HEAD, the untouched user index and every accepted Parent revision, and rejects extra unrecorded
+changes. A temporary candidate starts with the Parent's accepted changes; Git three-way application
+combines the new Child patch with them. Scope checks and the configured verifier run against the
+combined candidate. Only its incremental delta is published through revision-checked file writes.
+Conflicts never reach the Parent. Disjoint changes and mergeable edits to the same file can be
+integrated sequentially, including delegate/integrate/delegate workflows.
 
-Completed implementation receipts and their integration state are projected from the Parent Run
-Log, so a restarted Parent can continue `integrate_child`. A Child that was still running at process
-exit is not resumed or automatically dispatched again.
+Lost integration results and explicit retries share transaction reconstruction. Per-transaction
+preimages rebuild the actual input, and recorded before/after facts confirm whether the Child change
+was applied. Later accepted edits do not erase that historical application. Current Parent state is
+still validated and verified. Missing results are recorded as partial with confirmed delivery metadata;
+no mutation is blindly rerun. Incomplete/conflicting application is never declared integrated.
 
-Child Agent turns and Integration verification inherit the Parent ExecutionContext's absolute Turn deadline; they never receive a fresh full timeout. Explore and Implement Children also have smaller Agent/Tool ceilings. A zero-change result needs a successful Observation. Each path stores one initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but a stopped receipt omits `final_diff` when no trustworthy Diff can be produced. Verification freshness is derived from command identity, mutation sequence and changed-path states rather than stored as a mutable label.
+Child Agent turns and Integration verification inherit the Parent ExecutionContext's absolute Turn deadline; they never receive a fresh full timeout. Explore and Implement Children also have smaller Agent/Tool ceilings. Each mutation stores its transaction preimage and each Run path retains its initial preimage, so `A -> B -> A` is touched but not a net change; successful settlement persists the actual final Unified Diff Artifact. External drift blocks successful completion. A user cancellation or reset can still terminalize safely, but a stopped receipt omits `final_diff` when no trustworthy Diff can be produced. Every submission requiring verification executes the verifier anew, including after Resume. Historical verification records never replace that execution. Command identity, mutation sequence and changed-path states check this invocation; they do not establish that all dependencies or the environment stayed unchanged since a previous invocation.
 
 ### Local verification trust boundary
 
@@ -352,6 +372,11 @@ Tools; they do not constrain diagnostic or verifier system calls, filesystem acc
 or network access. Pico is therefore suitable only for repositories the user already trusts. Unknown
 repositories and pull requests require an external CI runner, VM, or container boundary.
 
+Command timeout and cancellation send SIGTERM, then SIGKILL if needed, with at most one second
+of output-drain grace for each signal. If detached descendants keep the pipes open, the runner
+closes its read ends and returns the output already collected; it does not wait indefinitely for
+EOF. Processes that have left the original process group may survive this cleanup.
+
 ### Repository-visible freshness design
 
 `run_command` and final Verification share one transient Repository snapshot. In Git repositories it
@@ -363,6 +388,28 @@ preview.
 
 Git-ignored files, `.git` metadata other than HEAD/ref, Workspace-external files, network effects and
 background processes after command return are outside this observation contract. Non-Git
-workspaces use a bounded metadata snapshot. A missing pre-execution baseline prevents command
+workspaces use a bounded metadata snapshot. Exceeding the entry limit, failing to enumerate a
+directory, or failing to stat an entry raises RepositorySnapshotError. An exact-limit scan succeeds
+only after every entry has been observed. A missing pre-execution baseline prevents command
 execution; a missing post-execution snapshot cannot establish `none`. Stale structured writes remain
 protected separately by expected-revision checks at their file commit point.
+
+## Current input and retrieval contracts
+
+WorkingState is required current context and is included in full; the remaining budget goes to
+bounded workspace/RepoMap and history sections. It is never clipped to a separate fixed 300-token
+cap. An input that cannot hold the mandatory state fails explicitly without deleting that state.
+RepoMap uses iterative AST traversal and can skip failed files. Search uses only ripgrep, observes
+the active request deadline/cancellation, and reports missing dependencies or truncation explicitly.
+Artifact pages require at least four bytes and advance across complete UTF-8 characters.
+
+Tool limits apply separately to each ask/resume request. The Run's cumulative metrics are retained
+for reporting; single calls, batches and model tool surfaces consume one shared remaining request
+budget. latest Session selection checks the associated Run's terminal state, and run show/events
+resolve the same workspace root as normal startup.
+
+Internal paths, revisions and IDs remain exact machine facts. Only display/free-text copies are
+redacted; the same rules apply to tool results and verification events. Provider redirects are
+restricted to the same scheme/host/effective port. Non-completed Responses and SSE streams lacking
+a terminal event never produce executable actions. Git automatic delivery reads NUL-delimited
+name-status records, including both endpoints of renames and copies.

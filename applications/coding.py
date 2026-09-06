@@ -50,13 +50,16 @@ def _nul_paths(result):
 
 
 def _dirty_paths(root):
-    return set().union(
-        _nul_paths(_git(root, "diff", "--name-only", "-z", "--")),
-        _nul_paths(_git(root, "diff", "--cached", "--name-only", "-z", "--")),
-        _nul_paths(
-            _git(root, "ls-files", "--others", "--exclude-standard", "-z")
-        ),
-    )
+    paths = _nul_paths(_git(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    for options in ((), ("--cached",)):
+        fields = iter(_git(root, "diff", *options, "--name-status", "-z", "--").stdout.split("\0"))
+        for status in fields:
+            if not status:
+                continue
+            paths.add(next(fields))
+            if status[0] in {"R", "C"}:
+                paths.add(next(fields))
+    return paths
 
 
 def _default_commit_message(request):

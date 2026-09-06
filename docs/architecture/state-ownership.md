@@ -7,7 +7,7 @@ Terminology in this document is strict:
 - A **Fact** is an accepted Run Event persisted in `events.jsonl`.
 - A **Projection** is rebuildable state reduced from Facts; it is never an additional source of truth.
 - **Evidence** is the `RunEvidence` projection derived from Tool Result and Verification Facts; it
-  exposes factual repair, effect and verification relationships but no completion decision.
+  exposes historical effects, current tracked changes and verification records but no completion decision.
 - **Completion** is the ordered policy decision made only by `CompletionController`; terminal ownership begins only
   when `RunLifecycle` appends `assistant_final` or `run_stopped`.
 - **Tool runtime** is the `ToolRuntime` public boundary backed by private tool-execution helpers,
@@ -43,6 +43,7 @@ Invariants:
 - TaskContract, incremental WorkingState, terminal fields, Evidence and Metrics can be rebuilt from the Run Log.
 - Terminal events persist only the final Diff receipt, not a second copy of task status or evidence.
 - Session `active_run_id` is an index pointer; Run Log terminal state is authoritative.
-- Tool protocol events form one strict single-Call transaction or one ordered, indivisible pure-Observation Batch. Every Call ID receives exactly one Result.
+- Tool protocol events form one strict single-Call transaction or one ordered, indivisible pure-Observation Batch. Each call within its transaction receives exactly one Result. Event positions distinguish reused Provider call IDs across completed transactions.
+- Integration receipts describe confirmed patch application; an interrupted Tool can remain partial while its patch is confirmed applied and awaits current-state verification.
 - Child delegation and integration are synchronous; there is no DAG/background scheduler. Completed Implement receipts and integration state replay from the Parent Run Log, but running Child execution is not resumed across processes.
 - Old persistence formats are rejected; no compatibility or migration branch exists.

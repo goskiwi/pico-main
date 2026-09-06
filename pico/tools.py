@@ -6,14 +6,10 @@
 
 import hashlib
 import os
-import re
 import selectors
 import shutil
-import stat
 import subprocess
 import time
-from collections import deque
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,7 +31,6 @@ from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
 READ_FILE_MAX_LINES = 2000
-SEARCH_MAX_FILES = 5000
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
@@ -59,7 +54,7 @@ class ReadFileArgs(ToolArgs):
 class ReadArtifactArgs(ToolArgs):
     artifact_id: str = Field(pattern=TOOL_ARTIFACT_ID_PATTERN)
     offset: int = Field(default=0, ge=0)
-    max_bytes: int = Field(default=8192, ge=1, le=8192)
+    max_bytes: int = Field(default=8192, ge=4, le=8192)
 
 
 class SearchArgs(ToolArgs):
@@ -343,15 +338,13 @@ def tool_read_artifact(context, args):
     )
 
 
-def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded process lifecycle
+def _bounded_rg_search(root, relative_path, pattern, executable, execution):  # noqa: C901 - bounded process lifecycle
     process = subprocess.Popen(
         [
-            "rg",
+            executable,
             "-n",
             "--with-filename",
             "--smart-case",
-            "--max-columns",
-            "2000",
             "--",
             pattern,
             relative_path,
@@ -365,10 +358,16 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
     for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
         selector.register(stream, selectors.EVENT_READ, name)
     deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
+    if execution is not None:
+        deadline = min(deadline, execution.deadline)
     limited = False
     timed_out = False
+    cancelled = False
     try:
         while selector.get_map():
+            if execution is not None and execution.token.requested:
+                cancelled = True
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -392,10 +391,13 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
                     break
             if limited:
                 break
-        if limited or timed_out:
+        if limited or timed_out or cancelled:
             process.kill()
         process.wait(timeout=2)
     finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
         selector.close()
         for stream in (process.stdout, process.stderr):
             if stream is not None:
@@ -406,7 +408,10 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
     stderr = buffers["stderr"].decode("utf-8", errors="replace").strip()
     truncated = bool(limited or match_limited)
     failure = None
-    if timed_out:
+    if cancelled:
+        lines.append("[search cancelled]")
+        failure = FailureInfo("operation_interrupted", "search cancelled", "retry_after_wait")
+    elif timed_out:
         lines.append("[search timed out]")
         failure = FailureInfo(
             "search_timeout",
@@ -436,127 +441,18 @@ def _bounded_rg_search(root, relative_path, pattern):  # noqa: C901 - bounded pr
     )
 
 
-def _fallback_search_files(path, deadline):
-    if path.is_file():
-        return [path], False
-    files = []
-    pending = deque([path])
-    limited = False
-    while pending:
-        if time.monotonic() >= deadline or len(files) >= SEARCH_MAX_FILES:
-            limited = True
-            break
-        directory = pending.popleft()
-        try:
-            with os.scandir(directory) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name.lower())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.name in IGNORED_PATH_NAMES:
-                continue
-            try:
-                metadata = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if stat.S_ISLNK(metadata.st_mode):
-                continue
-            candidate = Path(entry.path)
-            if stat.S_ISDIR(metadata.st_mode):
-                pending.append(candidate)
-            elif stat.S_ISREG(metadata.st_mode):
-                files.append(candidate)
-                if len(files) >= SEARCH_MAX_FILES:
-                    limited = True
-                    break
-    return files, limited
-
-
-def _fallback_search(context, path, pattern):
-    deadline = time.monotonic() + SEARCH_TIMEOUT_SECONDS
-    flags = 0 if any(character.isupper() for character in pattern) else re.IGNORECASE
-    try:
-        expression = re.compile(pattern, flags)
-    except re.error as exc:
-        return ToolRunnerResult(
-            f"invalid search pattern: {exc}",
-            structured={
-                "engine": "python_regex",
-                "match_count": 0,
-                "truncated": False,
-                "timed_out": False,
-            },
-            failure=FailureInfo(
-                "invalid_search_pattern",
-                str(exc),
-                "retry_after_change",
-            ),
-        )
-    files, limited = _fallback_search_files(path, deadline)
-    matches = []
-    output_bytes = 0
-    timed_out = False
-    for file_path in files:
-        if time.monotonic() >= deadline:
-            timed_out = True
-            break
-        try:
-            with file_path.open("r", encoding="utf-8", errors="replace") as handle:
-                for number, line in enumerate(handle, start=1):
-                    if time.monotonic() >= deadline:
-                        timed_out = True
-                        break
-                    if expression.search(line):
-                        line = line.removesuffix("\n").removesuffix("\r")
-                        result = f"{file_path.relative_to(context.workspace_root)}:{number}:{line}"
-                        encoded = result.encode("utf-8")
-                        available = max(0, SEARCH_MAX_OUTPUT_BYTES - output_bytes - 1)
-                        matches.append(
-                            encoded[:available].decode("utf-8", errors="ignore")
-                        )
-                        output_bytes += min(len(encoded), available) + 1
-                        if (
-                            len(matches) >= SEARCH_MAX_MATCHES
-                            or len(encoded) > available
-                        ):
-                            limited = True
-                            break
-        except OSError:
-            continue
-        if limited or timed_out:
-            break
-    if timed_out:
-        matches.append("[search timed out]")
-    elif limited:
-        matches.append("[search result limit reached]")
-    return ToolRunnerResult(
-        "\n".join(matches) or "(no matches)",
-        structured={
-            "engine": "python_regex",
-            "match_count": len(matches) - int(limited or timed_out),
-            "truncated": bool(limited),
-            "timed_out": timed_out,
-        },
-        failure=(
-            FailureInfo(
-                "search_timeout",
-                "search timed out",
-                "retry_after_change",
-            )
-            if timed_out
-            else None
-        ),
-    )
-
-
 def tool_search(context, args):
     pattern = str(args.get("pattern", "")).strip()
     path = context.path(args.get("path", "."))
 
-    if shutil.which("rg"):
-        relative_path = path.relative_to(context.workspace_root).as_posix() or "."
-        return _bounded_rg_search(context.workspace_root, relative_path, pattern)
-    return _fallback_search(context, path, pattern)
+    executable = shutil.which("rg")
+    if executable is None:
+        return ToolRunnerResult(
+            "Search requires ripgrep (rg); install it and retry.",
+            failure=FailureInfo("search_unavailable", "ripgrep is not installed", "user_action_required"),
+        )
+    relative_path = path.relative_to(context.workspace_root).as_posix() or "."
+    return _bounded_rg_search(context.workspace_root, relative_path, pattern, executable, context.execution_context)
 
 
 def tool_write_file(context, args):
@@ -753,7 +649,7 @@ def build_tool_registry():
             "risky": False,
             "manual_observation": True,
             "batchable_observation": True,
-            "description": "Search the workspace with rg or a simple fallback.",
+            "description": "Search the workspace with ripgrep (rg must be installed).",
             "validate": _validate_search,
             "run": tool_search,
         },

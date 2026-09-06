@@ -1,6 +1,8 @@
 import json
 from unittest.mock import patch
 
+import pytest
+
 from pico import ModelAction
 from pico.providers.clients import OpenAICompatibleModelClient
 
@@ -39,7 +41,9 @@ def client():
 def batch_response():
     return Response(
         {
+            "status": "completed",
             "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "synthetic"},
                 {
                     "type": "function_call",
                     "name": "read_file",
@@ -60,6 +64,7 @@ def batch_response():
 def final_response():
     return Response(
         {
+            "status": "completed",
             "output": [
                 {
                     "type": "function_call",
@@ -120,6 +125,7 @@ def test_provider_returns_all_batch_results_in_one_continuation():
         )
 
     assert final == ModelAction.final("done")
+    assert requests[1]["input"][1:4] == json.loads(batch_response().payload)["output"]
     outputs = [
         item
         for item in requests[1]["input"]
@@ -152,6 +158,7 @@ def test_provider_refuses_partial_batch_results():
 def test_provider_returns_correction_for_missing_batch_call_name():
     malformed = Response(
         {
+            "status": "completed",
             "output": [
                 {
                     "type": "function_call",
@@ -183,6 +190,7 @@ def test_provider_returns_correction_for_missing_batch_call_name():
 def test_provider_rejects_unknown_call_anywhere_in_batch():
     malformed = Response(
         {
+            "status": "completed",
             "output": [
                 {
                     "type": "function_call",
@@ -209,3 +217,58 @@ def test_provider_rejects_unknown_call_anywhere_in_batch():
 
     assert action.kind == "invalid"
     assert action.content == "unknown function call: undeclared_tool"
+
+
+@pytest.mark.parametrize("status", [None, "queued", "in_progress", "cancelled"])
+def test_nonterminal_responses_cannot_produce_actions(status):
+    instance = client()
+    response = {"output": [{"type": "function_call", "name": "read_file",
+                            "call_id": "unsafe", "arguments": '{"path":"a.py"}'}]}
+    if status is not None:
+        response["status"] = status
+    with patch("pico.providers.clients._open_response", return_value=Response(response)):
+        action = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+    assert action.kind == "invalid"
+    assert not action.tool_calls
+    assert instance._pending_call_ids == ()
+
+
+def test_sse_without_a_terminal_event_is_rejected():
+    data = {"type": "response.in_progress", "response": {"status": "in_progress", "output": [
+        {"type": "function_call", "name": "read_file", "call_id": "unsafe", "arguments": "{}"},
+    ]}}
+    with pytest.raises(RuntimeError, match="SSE"):
+        client()._decode_response("data: " + json.dumps(data) + "\n\n", "text/event-stream")
+
+
+def test_sse_terminal_event_cannot_override_a_cancelled_resource():
+    data = {"type": "response.completed", "response": {"status": "cancelled", "output": []}}
+    with pytest.raises(RuntimeError, match="inconsistent_response_status"):
+        client()._decode_response("data: " + json.dumps(data) + "\n\n", "text/event-stream")
+
+
+@pytest.mark.parametrize("status", ["completed", "incomplete", "in_progress"])
+def test_invalid_response_cannot_poison_the_next_request_history(status):
+    instance = client()
+    requests = []
+    # The real child run rejected history with missing text after a no-call
+    # response. This fixture reproduces how rejected output poisons replay.
+    malformed = Response({"status": status, "output": [{
+        "type": "message", "role": "assistant", "content": [{"type": "output_text"}],
+    }]})
+
+    def urlopen(request, timeout):
+        requests.append(json.loads(request.data))
+        return malformed if len(requests) == 1 else final_response()
+
+    with patch("pico.providers.clients._open_response", urlopen):
+        invalid = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+        assert invalid.kind == "invalid"
+        instance.record_action_results((invalid.content,))
+        final = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+
+    assert final == ModelAction.final("done")
+    assert requests[1]["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": invalid.content}]},
+    ]

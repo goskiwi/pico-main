@@ -1,5 +1,8 @@
+import shlex
 import subprocess
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -11,10 +14,11 @@ from pico import (
     SessionStore,
     Workspace,
 )
-from pico.command_runner import CommandResult
+from pico.command_runner import CommandResult, CommandRunner
 from pico.completion_controller import CompletionController
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext, ExecutionDeadlineExceeded
+from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.subagents.contracts import (
     ChildFailure,
@@ -23,7 +27,11 @@ from pico.subagents.contracts import (
     ChildSpec,
     ChildSuccess,
 )
-from pico.subagents.worktree import GitWorktreeError, _git, require_clean_repository
+from pico.subagents.worktree import (
+    GitWorktree,
+    GitWorktreeError,
+    _git,
+)
 from pico.task_state import TaskContract
 
 CHILD_SUCCESS_FIELDS = {
@@ -55,15 +63,15 @@ def test_child_git_consumes_parent_remaining_time(tmp_path, monkeypatch):
 
 
 def test_child_repository_error_preserves_git_failure(tmp_path, monkeypatch):
+    parent, _ = build_parent(repository(tmp_path), lambda _spec: implement_client())
+
     def fail(*_args, **_kwargs):
         raise GitWorktreeError("Permission denied while reading .git")
 
-    monkeypatch.setattr("pico.subagents.worktree._git", fail)
-
-    with pytest.raises(GitWorktreeError) as caught:
-        require_clean_repository(tmp_path)
-
-    assert "Permission denied while reading .git" in str(caught.value)
+    monkeypatch.setattr("pico.subagents.runner._git", fail)
+    receipt = parent.dependencies.subagents.delegate("implement", "Create feature.py", ("feature.py",))
+    assert receipt["status"] == "failed"
+    assert "Permission denied while reading .git" in receipt["error"]
 
 
 def git(root, *args):
@@ -361,7 +369,7 @@ def test_implement_requires_verifier_and_clean_git(tmp_path):
     receipt = delegate_implementation(dirty)
 
     assert receipt["status"] == "failed"
-    assert "clean working tree" in receipt["error"]
+    assert "unrecorded workspace changes" in receipt["error"]
     assert "patch" not in receipt
     assert "result" not in receipt
     assert calls == []
@@ -519,3 +527,320 @@ def test_completion_blocks_unintegrated_implementation(tmp_path):
     assert assessment.status == "subtasks_incomplete"
     assert receipt["child_id"] in assessment.content
     assert not (root / "feature.py").exists()
+
+
+def test_implement_child_can_complete_without_a_patch(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(root, lambda _spec: FakeModelClient([
+        ModelAction.tool("read_file", {"path": "README.md"}),
+        ModelAction.final("README already contains demo; no changes needed."),
+    ]))
+    result = run_active(parent, ToolCall("delegate", {
+        "role": "implement", "task": "Ensure README contains demo; keep it if already correct",
+        "allowed_write_paths": ["README.md"],
+    }))
+    assert result.status == "success"
+    assert set(result.structured) == CHILD_SUCCESS_FIELDS
+    record = parent.run.projection.children.record(result.structured["child_id"])
+    assert record.completed().patch is None
+    assert parent.dependencies.subagents._worktrees == {}
+    assert git(root, "status", "--porcelain") == ""
+    replayed = parent.dependencies.run_store.replay(parent.run.projection.run_id)
+    assert replayed.children.record(record.child_id).completed().patch is None
+    assert CompletionController(parent).assess("Already correct.").allowed
+
+
+@pytest.mark.parametrize("phase", [
+    "before_apply", "applied", "content_conflict", "head_changed", "staged",
+    "unrelated_change", "mode_changed", "verification_failed", "recovery_record_failure",
+])
+def test_real_child_integration_recovers_only_confirmed_application(tmp_path, phase):
+    root = repository(tmp_path)
+    check = "from pathlib import Path; assert Path('feature.py').read_text() == 'feature\\n'"
+    command = shlex.join([sys.executable, "-B", "-c", check])
+    factory = lambda _spec: implement_client()
+    parent, _ = build_parent(root, factory, verification_command=command,
+                             runner_factory=CommandRunner)
+    parent.session.set_active_run(parent.run.projection.run_id)
+    receipt = delegate_implementation(parent)
+    assert receipt["status"] == "completed"
+    child_id = receipt["child_id"]
+    log = parent.run.run_log
+    call = ToolCall("integrate_child", {"child_id": child_id}, "interrupted_integration")
+    log.append_tool_call(call)
+    if phase == "before_apply":
+        with (
+            patch("pico.subagents.integration.PatchIntegrator._publish", side_effect=SystemExit("crash")),
+            pytest.raises(SystemExit),
+        ):
+            parent.tools.execute_pending(call.call_id)
+        assert not (root / "feature.py").exists()
+    else:
+        with (
+            patch.object(log, "append_tool_result", side_effect=OSError("crash before result")),
+            pytest.raises(OSError),
+        ):
+            parent.tools.execute_pending(call.call_id)
+        assert (root / "feature.py").read_text() == "feature\n"
+    if phase == "content_conflict":
+        (root / "feature.py").write_text("external change\n")
+    elif phase == "head_changed":
+        git(root, "commit", "--quiet", "--allow-empty", "-m", "new base")
+    elif phase == "staged":
+        git(root, "add", "feature.py")
+    elif phase == "unrelated_change":
+        (root / "other.txt").write_text("external change\n")
+    elif phase == "mode_changed":
+        (root / "feature.py").chmod(0o755)
+    elif phase == "verification_failed":
+        command = shlex.join([sys.executable, "-B", "-c", "assert False"])
+    before_resume = git(root, "status", "--porcelain")
+    actions = [ModelAction.final("Implemented.") for _ in range(3)]
+    if phase == "before_apply":
+        actions.insert(0, ModelAction.tool("integrate_child", {"child_id": child_id}))
+    resumed = Pico(
+        FakeModelClient(actions), Workspace.build(root),
+        config=PicoConfig(mode="auto", verification_command=command),
+        session=parent.session.store.load(parent.session.id),
+        subagent_model_client_factory=factory if phase == "before_apply" else None,
+    )
+    if phase == "recovery_record_failure":
+        with (
+            patch.object(resumed.run.run_log, "append_tool_result", side_effect=OSError("recovery crash")),
+            pytest.raises(OSError, match="recovery crash"),
+        ):
+            resumed.ask("Continue")
+        assert resumed.run.run_log.pending_tool_calls()
+        resumed = Pico(
+            FakeModelClient(actions), Workspace.build(root), config=resumed.config,
+            session=parent.session.store.load(parent.session.id),
+        )
+    outcome = resumed.ask("Continue")
+    confirmed = phase in {"before_apply", "applied", "verification_failed", "recovery_record_failure"}
+    assert resumed.run.projection.children.record(child_id).completed().patch.integrated is confirmed
+    assert outcome.status == ("completed" if confirmed and phase != "verification_failed" else "stopped")
+    recovered = [e for e in resumed.run.run_log.events if e.payload.get("recovered_from_interruption")]
+    assert len(recovered) == 1
+    assert recovered[0].side_effect_state == ("none" if phase == "before_apply" else "partial")
+    if phase != "before_apply":
+        assert git(root, "status", "--porcelain") == before_resume
+        starts = [e for e in resumed.run.run_log.events if e.kind == "tool_started"
+                  and e.payload["tool_name"] == "integrate_child"]
+        assert len(starts) == 1
+    replayed = resumed.dependencies.run_store.replay(outcome.run_id)
+    assert replayed.children.record(child_id).completed().patch.integrated is confirmed
+    if phase in {"applied", "recovery_record_failure"}:
+        assert [v["status"] for v in replayed.evidence.verifications] == ["passed"]
+        assert replayed.evidence.partial_workspace_effects()
+    elif phase == "verification_failed":
+        assert all(v["status"] == "failed" for v in replayed.evidence.verifications)
+        assert replayed.evidence.verifications
+    parent.dependencies.subagents.cleanup()
+
+
+def test_explicit_integration_retry_confirms_already_applied_patch(tmp_path):
+    root = repository(tmp_path)
+    check = "from pathlib import Path; assert Path('feature.py').read_text() == 'feature\\n'"
+    parent, _ = build_parent(
+        root, lambda _spec: implement_client(),
+        verification_command=shlex.join([sys.executable, "-B", "-c", check]),
+        runner_factory=CommandRunner,
+    )
+    receipt = delegate_implementation(parent)
+    tool = parent.tools.registry["integrate_child"]
+    runner = tool["run"]
+
+    def fail_after_apply(context, args):
+        runner(context, args)
+        raise RuntimeError("injected failure after applying patch")
+
+    with patch.dict(tool, run=fail_after_apply):
+        failed = run_active(parent, ToolCall("integrate_child", {
+            "child_id": receipt["child_id"],
+        }, "first"))
+    assert failed.side_effect_state == "partial"
+    with patch("pico.subagents.integration.PatchIntegrator._publish", side_effect=AssertionError("must not reapply")):
+        retried = run_active(parent, ToolCall("integrate_child", {
+            "child_id": receipt["child_id"],
+        }, "retry"))
+    assert retried.status == "success"
+    assert retried.side_effect_state == "none"
+    assert retried.structured["path_transitions"] == []
+    assert parent.run.projection.children.record(receipt["child_id"]).completed().patch.integrated
+    assert CompletionController(parent).assess("done").allowed
+    assert [v["status"] for v in parent.run.evidence.verifications] == ["passed"]
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_child_delivers_recorded_gitignored_changes(tmp_path, mixed, interrupted):
+    root = repository(tmp_path)
+    (root / ".gitignore").write_text(".pico/\nignored.txt\n")
+    git(root, "add", ".gitignore")
+    git(root, "commit", "--quiet", "-m", "ignore local output")
+    paths = ["ignored.txt", "normal.txt"] if mixed else ["ignored.txt"]
+    check = f"from pathlib import Path; assert all(Path(p).read_text() == 'required' for p in {paths!r})"
+    actions = [ModelAction.tool("write_file", {"path": path, "content": "required"}) for path in paths]
+    actions.append(ModelAction.final("Files created."))
+    parent, _ = build_parent(
+        root, lambda _spec: FakeModelClient(actions),
+        verification_command=shlex.join([sys.executable, "-B", "-c", check]),
+        runner_factory=CommandRunner,
+    )
+    parent.session.set_active_run(parent.run.projection.run_id)
+    delegated = run_active(parent, ToolCall("delegate", {
+        "role": "implement", "task": "Create the required files", "allowed_write_paths": paths,
+    }))
+    assert delegated.status == "success"
+    receipt = delegated.structured
+    assert receipt["patch"]["changed_paths"] == paths
+    record = parent.run.projection.children.record(receipt["child_id"])
+    child = parent.dependencies.subagents._child_projection(parent.run.projection.run_id, record)
+    assert child.evidence.changed_paths == paths
+    call = ToolCall("integrate_child", {"child_id": record.child_id}, "integrate")
+    if interrupted:
+        parent.run.run_log.append_tool_call(call)
+        with (
+            patch.object(parent.run.run_log, "append_tool_result", side_effect=OSError("crash")),
+            pytest.raises(OSError),
+        ):
+            parent.tools.execute_pending(call.call_id)
+        parent = Pico(
+            FakeModelClient([ModelAction.final("Files delivered.")]), Workspace.build(root),
+            config=parent.config, session=parent.session.store.load(parent.session.id),
+        )
+        assert parent.ask("Continue").status == "completed"
+    else:
+        assert run_active(parent, call).status == "success"
+        assert CompletionController(parent).assess("Files delivered.").allowed
+    assert parent.run.evidence.changed_paths == paths
+    assert parent.run.projection.children.record(record.child_id).completed().patch.integrated
+    assert all((root / path).read_text() == "required" for path in paths)
+    assert git(root, "ls-files", "--", "ignored.txt") == ""
+
+
+def test_child_packaging_failure_retains_worktree_and_reports_its_path(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(root, lambda _spec: implement_client())
+    retained = []
+
+    def fail_packaging(handle, destination, changed_paths):
+        retained.append(handle)
+        raise OSError("cannot write delivery patch")
+
+    with patch.object(GitWorktree, "write_patch", fail_packaging):
+        receipt = delegate_implementation(parent)
+    handle = retained[0]
+    try:
+        parent.dependencies.subagents.cleanup()
+        assert receipt["status"] == "failed"
+        assert str(handle.path) in receipt["error"]
+        assert (handle.path / "feature.py").read_text() == "feature\n"
+        assert not (root / "feature.py").exists()
+    finally:
+        handle.cleanup()
+
+
+def test_two_disjoint_child_patches_can_be_delivered_sequentially(tmp_path):
+    root = repository(tmp_path)
+    parent, _ = build_parent(root, lambda spec: implement_client(spec.allowed_write_paths[0]))
+    first = delegate_implementation(parent, "first.py")
+    second = delegate_implementation(parent, "second.py")
+    for receipt in (first, second):
+        result = run_active(parent, ToolCall("integrate_child", {"child_id": receipt["child_id"]}))
+        assert result.status == "success", result.content
+    assert parent.run.evidence.changed_paths == ["first.py", "second.py"]
+    assert CompletionController(parent).assess("done").allowed
+
+
+@pytest.mark.parametrize("phase", ["normal", "conflict", "before_publish", "after_publish", "later_edit", "sequential_delegation"])
+def test_combined_child_delivery_and_recovery_use_transaction_state(tmp_path, phase):
+    root = repository(tmp_path)
+    source = "def a():\n    return 0\n" + "\n" * 20 + "def b():\n    return 0\n"
+    (root / "common.py").write_text(source)
+    git(root, "add", "common.py")
+    git(root, "commit", "--quiet", "-m", "shared source")
+
+    def child_client(spec):
+        name = "a" if spec.task == "first" or phase == "conflict" else "b"
+        value = 1 if spec.task == "first" else 2
+        return FakeModelClient([
+            ModelAction.tool("read_file", {"path": "common.py"}),
+            ModelAction.tool("edit_file", {
+                "path": "common.py", "old_text": f"def {name}():\n    return 0",
+                "new_text": f"def {name}():\n    return {value}", "expected_revision": file_revision(root / "common.py"),
+            }), ModelAction.final("done"),
+        ])
+
+    check = (
+        "from pathlib import Path; scope={}; exec(Path('common.py').read_text(), scope); "
+        "assert scope['a']() >= 0 and scope['b']() >= 0"
+    )
+    parent, _ = build_parent(root, child_client, runner_factory=CommandRunner,
+        verification_command=shlex.join([sys.executable, "-B", "-c", check]))
+    parent.session.set_active_run(parent.run.projection.run_id)
+    receipts = []
+    for task in ("first", "second"):
+        result = run_active(parent, ToolCall("delegate", {
+            "role": "implement", "task": task, "allowed_write_paths": ["common.py"],
+        }))
+        assert result.status == "success", result.content
+        receipts.append(result.structured)
+        if phase == "sequential_delegation" and task == "first":
+            assert run_active(parent, ToolCall("integrate_child", {"child_id": receipts[0]["child_id"]})).status == "success"
+    if phase != "sequential_delegation":
+        assert run_active(parent, ToolCall("integrate_child", {"child_id": receipts[0]["child_id"]})).status == "success"
+    before_second = (root / "common.py").read_text()
+    second = ToolCall("integrate_child", {"child_id": receipts[1]["child_id"]}, "second")
+    if phase == "before_publish":
+        with (
+            patch("pico.subagents.integration.PatchIntegrator._publish", side_effect=SystemExit("crash")),
+            pytest.raises(SystemExit),
+        ):
+            run_active(parent, second)
+    elif phase == "after_publish":
+        with (
+            patch.object(parent.run.run_log, "append_tool_result", side_effect=OSError("crash")),
+            pytest.raises(OSError),
+        ):
+            run_active(parent, second)
+    elif phase == "later_edit":
+        tool = parent.tools.registry["integrate_child"]
+        runner = tool["run"]
+
+        def fail_after_apply(context, args):
+            runner(context, args)
+            raise RuntimeError("interrupted after application")
+
+        with patch.dict(tool, run=fail_after_apply):
+            assert run_active(parent, second).side_effect_state == "partial"
+        edited = run_active(parent, ToolCall("edit_file", {
+            "path": "common.py", "old_text": "def b():\n    return 2",
+            "new_text": "def b():\n    return 3", "expected_revision": file_revision(root / "common.py"),
+        }))
+        assert edited.status == "success"
+        assert run_active(parent, ToolCall("integrate_child", second.args, "retry")).side_effect_state == "none"
+    else:
+        result = run_active(parent, second)
+        if phase == "conflict":
+            assert result.status == "error"
+            assert (root / "common.py").read_text() == before_second
+            assert CompletionController(parent).assess("done").status == "subtasks_incomplete"
+            parent.dependencies.subagents.cleanup()
+            return
+        assert result.status == "success", result.content
+    if phase in {"before_publish", "after_publish"}:
+        actions = [ModelAction.final("done")]
+        if phase == "before_publish":
+            actions.insert(0, ModelAction.tool("integrate_child", second.args))
+        parent = Pico(FakeModelClient(actions), Workspace.build(root), config=parent.config,
+            session=parent.session.store.load(parent.session.id),
+            subagent_model_client_factory=child_client if phase == "before_publish" else None)
+        assert parent.ask("Continue").status == "completed"
+    else:
+        assert CompletionController(parent).assess("done").allowed
+    content = (root / "common.py").read_text()
+    assert "def a():\n    return 1" in content
+    assert f"def b():\n    return {3 if phase == 'later_edit' else 2}" in content
+    assert parent.run.projection.children.record(receipts[1]["child_id"]).completed().patch.integrated
+    assert git(root, "diff", "--cached", "--name-only") == ""

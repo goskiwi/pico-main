@@ -48,6 +48,7 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 程序入口先准备对象，再交给 Pico：`SessionStore.create(workspace.root)` 新建会话，
 `SessionStore.load(session_id)` 恢复会话，两者都直接返回 `Session`。
+普通启动直接新建会话；只有显式传入 `--resume <session_id>` 或 `--resume latest` 时，才选择旧会话恢复。
 `Pico(model_client, workspace, session, config=...)` 不再包装会话字典；会话通过
 `session.id`、`session.active_run_id` 访问。`PicoConfig(...)` 构造时即完成校验与规范化，
 修改使用 `dataclasses.replace(config, ...)`，不存在第二次 `build/normalized` 加工。
@@ -88,7 +89,7 @@ Day 7 是只使用 Core Tool transaction 的 Capstone。
 | 7 | `AgentLoop._handle_tool_turn` | 执行前先原子持久化一个 `assistant_tool_call` 或完整 `assistant_tool_batch` Fact |
 | 8 | `ToolRuntime.execute_pending / execute_pending_batch` | 单 Call 走完整准入、Approval、影响路径与 Preimage；Batch 先整体验证，只让纯 Observation Runner 并行，Result 仍按原顺序落盘；无 Run 的人工观察走 `execute_manual` |
 | 9 | `ToolContext -> tools.tool_edit_file -> mutations` | Runner 只获得受限能力；Revision 在提交点复验后原子替换；失败用相近代码、匹配行号和建议读取参数驱动重读修正 |
-| 10 | `RunLog.append -> check_event -> 存储追加 -> _advance_event` | 同一个新 Fact 如何在持久化后推进 Pending、Metrics、WorkingState 和 Evidence |
+| 10 | `RunLog.append -> apply_event 验证待提交状态 -> 存储追加 -> 发布状态` | 同一个新 Fact 如何在写盘前验证全部投影、持久化后发布 Pending、Metrics、WorkingState 和 Evidence |
 | 11 | `CompletionController -> Verification -> RunLifecycle.finish_success` | TaskContract、净变化和当前验证如何决定完成，写入 `final_diff` 与 `assistant_final`，再从终态 Projection 返回非持久化 `RunOutcome` |
 
 恢复是步骤 3 的侧支，建议理解一次正常 Tool 事务后再读。构造期只加载并安装 dormant
@@ -111,8 +112,8 @@ Pico.ask
 
 `load_run` 从同一次持久化读取返回已恢复的 RunLog 与 Projection；事件从 `log.events` 读取。
 `RunStore.replay` 是只返回 Projection 的委托，Runtime 直接安装加载得到的两个对象，不再重建和重复校验。
-实时调用 `RunLog.append`，内部依次执行 `RunProjection.check_event`、存储追加和
-`RunProjection._advance_event`；回放通过 `RunProjection.apply_event` 复用同一套检查与转换。
+实时调用 `RunLog.append`，先通过 `RunProjection.apply_event` 构造并验证待提交状态，
+存储成功后发布该状态；回放使用相同的转换。非法事实不会先落盘再报错。
 
 ## 五层知识结构
 
@@ -211,8 +212,9 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
 - 先运行 `completion_experiment`：Evidence 只展示净变化和当前 Verification，是否允许完成只
   由 CompletionController 决定。
 - 再运行真实 `recovery_experiment`：构造期安装 dormant ActiveRunState，下一次 `ask()` 才
-  reconcile、修复 Partial、验证并返回 RunOutcome；Run 的创建与恢复都走生产 RunLifecycle，
-  只有硬崩溃点的 Call/Started 与已观察文件副作用是合成夹具，原 Tool Call 不盲目重放。
+  reconcile、读取当前文件、运行真实验证并返回 RunOutcome，已经正确的内容无需再次修改。
+  Run 的创建与恢复都走生产 RunLifecycle；只有硬崩溃点的 Call/Started 与已观察文件副作用
+  是合成夹具，原 Tool Call 不盲目重放，历史 Partial 在完成后仍保留。
 - `active_reset_experiment` 展示 active Runner 先落 `tool_result`，随后才写 `run_stopped` 并
   清理状态。
 - 最后的 `child_delegation_experiment` 属于 **Orchestration Appendix**：先运行只读 Explore，

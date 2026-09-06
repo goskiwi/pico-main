@@ -79,15 +79,15 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
 持久 Run ID 由 `RunStore.load_run` 单次读取并返回已恢复的 RunLog + Projection；
 `RunStore.replay` 只是 Projection-only 委托。实时调用 `RunLog.append`，内部依次执行
-`RunProjection.check_event`、存储追加和 `RunProjection._advance_event`；回放通过
-`RunProjection.apply_event` 复用同一套检查与转换。
+`RunProjection.apply_event` 验证待提交状态、存储追加和发布状态；回放使用同一套转换。
 
 ### 2:30～3:00：完成权
 
 打开 `pico/completion_controller.py`：模型提交 `final` 后，Runtime 依次检查尚未集成的
-Implement Child、TaskContract、未修复 partial/unknown、副作用后的 Workspace drift、当前
-Verification command + mutation sequence + changed-path states，以及验证后仍未解决的 Effect。这个顺序避免在副作用仍不确定时运行无意义的
-verifier。每条路径只保存第一次 preimage，终态只写最终 `final_diff` receipt。
+Implement Child、未知或未追踪的 Effect、TaskContract、副作用后的 Workspace drift、当前
+Verification command + mutation sequence + changed-path states，以及验证新增的未知 Effect。
+范围明确且已追踪的 partial 必须验证当前状态，但不要求再次修改文件；内容已正确时可以
+直接验证通过，历史中断记录仍保留。每次修改保存对应事务的 preimage，最终 Diff 使用 Run 的首次前像，终态只写最终 `final_diff` receipt。
 
 ## 5 分钟现场 Demo `[Core]`
 

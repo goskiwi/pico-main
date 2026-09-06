@@ -22,6 +22,28 @@ from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
 from pico.task_state import TaskContract
 
+
+def test_complete_working_state_is_visible_after_resume(tmp_path):
+    agent = build_agent(tmp_path)
+    RunLifecycle(agent).initialize("Keep current task state")
+    constraints = [f"constraint {i}: " + "retain this requirement " * 18 for i in range(6)]
+    call = ToolCall("update_working_state", {
+        "add_constraints": constraints, "add_next_steps": ["NEXT_STEP_MUST_SURVIVE"],
+    }, "state")
+    agent.run.run_log.append_tool_call(call)
+    assert agent.tools.execute_pending(call.call_id).status == "success"
+    resumed = Pico(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
+                   session=agent.session.store.load(agent.session.id))
+    prompt, metadata = resumed.prompt.build("Continue")
+    assert "NEXT_STEP_MUST_SURVIVE" in prompt.input_text
+    assert all(item.strip() in prompt.input_text for item in constraints)
+    assert metadata["sections"]["working_state"]["budget_tokens"] is None
+    assert "working_state" not in metadata["budget_allocation"]["clipped_sections"]
+    manager = prompt_for_budget(resumed, total_budget=500)
+    with pytest.raises(ContextBudgetExceeded):
+        manager.build("Continue")
+    assert resumed.run.projection.working.next_steps == ("NEXT_STEP_MUST_SURVIVE",)
+
 READ_TASK = {
     "allows_workspace_mutation": False,
     "verify_changes": False,

@@ -1,7 +1,5 @@
 """Pure value helpers used by :mod:`pico.tool_runtime`."""
 
-import json
-
 DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
 
 
@@ -46,34 +44,6 @@ def intersect_write_scopes(contract_paths, policy_paths):
         return contract_paths
     policy = set(policy_paths)
     return tuple(path for path in contract_paths if path in policy)
-
-
-def redact_structured(value, redactor):
-    if isinstance(value, str):
-        return redactor(value)
-    if isinstance(value, dict):
-        return {
-            str(key): redact_structured(item, redactor)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [redact_structured(item, redactor) for item in value]
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return redactor(str(value))
-
-
-def repeat_key(run_id, name, args):
-    try:
-        args_signature = json.dumps(
-            dict(args),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    except (TypeError, ValueError):
-        return None
-    return str(run_id), str(name), args_signature
 
 
 def tracked_workspace_drift(states, effect_scope, tracked_files):

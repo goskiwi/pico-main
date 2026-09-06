@@ -57,3 +57,28 @@ def redact_value(value, key=None, env=None, secret_env_names=None):
     if isinstance(value, str):
         return redact_text(value, env=env, secret_env_names=secret_env_names)
     return value
+
+
+def redact_facts(value, redactor, key=""):
+    # These values are machine identities consumed by replay and mutation logic.
+    if key in {
+        "path", "affected_paths", "changed_paths", "repository_changes", "revision",
+        "expected_revision", "actual_revision", "before_revision", "after_revision",
+        "before_state", "after_state", "before_artifact_id", "artifact_id",
+        "child_id", "child_run_id", "base_sha", "sha256", "status", "role",
+        "started_changed_path_states", "finished_changed_path_states",
+        "workspace_root", "workspace_changes", "run_id", "task_id", "session_id",
+    }:
+        return value
+    if isinstance(value, str):
+        return redactor(value)
+    if isinstance(value, dict):
+        return {
+            str(item_key): redact_facts(item, redactor, str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_facts(item, redactor, key) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redactor(str(value))

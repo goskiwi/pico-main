@@ -1,7 +1,9 @@
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -98,7 +100,7 @@ def test_verification_side_effect_survives_resubmission_and_replay(tmp_path):
     assert outcome.status == "stopped"
     assert len(agent.run.evidence.verifications) == 1
     replayed = agent.dependencies.run_store.replay(outcome.run_id)
-    effects = replayed.evidence.unrepaired_uncertain_effects()
+    effects = replayed.evidence.unverifiable_effects()
     assert any("generated.txt" in effect["affected_paths"] for effect in effects)
 
 
@@ -181,12 +183,9 @@ def test_read_long_unicode_line_bounds_output_and_keeps_full_revision(tmp_path):
     assert not last.structured["truncated"]
 
 
-@pytest.mark.parametrize("engine", ["rg", "python"])
-def test_search_includes_large_files(tmp_path, monkeypatch, engine):
-    if engine == "rg" and not shutil.which("rg"):
+def test_search_includes_large_files(tmp_path):
+    if not shutil.which("rg"):
         pytest.skip("rg is not installed")
-    if engine == "python":
-        monkeypatch.setattr(tools_module.shutil, "which", lambda _name: None)
     (tmp_path / "large.txt").write_text("padding\n" * 400_000 + "UNIQUE_NEEDLE\n")
     agent = build_agent(tmp_path)
     result = agent.tools.execute_manual("search", {"path": ".", "pattern": "UNIQUE_NEEDLE"})
@@ -194,13 +193,13 @@ def test_search_includes_large_files(tmp_path, monkeypatch, engine):
     assert "UNIQUE_NEEDLE" in result.content
 
 
-def test_fallback_search_bounds_long_matching_output(tmp_path, monkeypatch):
+def test_search_reports_missing_rg_without_running_a_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_module.shutil, "which", lambda _name: None)
-    (tmp_path / "large.txt").write_text("needle" + "x" * 3_000_000)
     agent = build_agent(tmp_path)
-    result = agent.tools.registry["search"]["run"](agent.tools.context(call_id="probe"), {"path": ".", "pattern": "needle"})
-    assert result.structured["truncated"]
-    assert len(result.content.encode()) < tools_module.SEARCH_MAX_OUTPUT_BYTES + 128
+    result = agent.tools.execute_manual("search", {"path": ".", "pattern": "needle"})
+    assert result.status == "error"
+    assert result.failure.code == "search_unavailable"
+    assert "ripgrep" in result.content
 
 
 def test_preimage_copies_bytes_in_chunks_and_is_immutable(tmp_path, monkeypatch):
@@ -586,7 +585,7 @@ def test_missing_final_diff_blocks_replay_but_not_event_listing(tmp_path, capsys
     assert listed == [event.to_dict() for event in agent.run.run_log.events]
 
 
-def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path):
+def test_each_mutation_saves_its_preimage_and_retains_the_run_original(tmp_path):
     target = tmp_path / "subject.txt"
     target.write_text("alpha\n", encoding="utf-8")
     agent = build_agent(tmp_path)
@@ -621,7 +620,9 @@ def test_existing_file_preimage_is_saved_only_on_first_runtime_mutation(tmp_path
     first_artifact = first.structured["path_transitions"][0]["before_artifact_id"]
     second_artifact = second.structured["path_transitions"][0]["before_artifact_id"]
     assert first_artifact.startswith("preimage_")
-    assert second_artifact == ""
+    assert second_artifact.startswith("preimage_")
+    assert agent.dependencies.artifacts.read_internal_text("run_tool_test", second_artifact) == "beta\n"
+    assert agent.run.evidence.change_set.files["subject.txt"].first_before_artifact_id == first_artifact
     assert agent.dependencies.artifacts.read_internal_text(
         "run_tool_test", first_artifact
     ) == "alpha\n"
@@ -663,7 +664,7 @@ def test_partial_side_effect_blocks_blind_identical_replay(tmp_path):
     assert first.status == "partial_success"
     assert first.side_effect_state == "partial"
     assert repeated.status == "rejected"
-    assert "inspect state" in repeated.failure.detail
+    assert repeated.failure.code == "existing_file_requires_edit"
     assert len(executions) == 1
 
 
@@ -1011,3 +1012,174 @@ def test_observation_batch_preserves_reported_side_effects(
         outcome.failure.code == "observation_reported_side_effect"
         for outcome in outcomes
     )
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_retry_after_restoring_file_depends_on_current_revision(tmp_path, restart):
+    agent = build_agent(tmp_path)
+    RunLifecycle(agent).initialize("Change A to B")
+    target = tmp_path / "sample.txt"
+    target.write_text("A")
+    args = {
+        "path": "sample.txt", "old_text": "A", "new_text": "B",
+        "expected_revision": file_revision(target),
+    }
+    runner = agent.tools.registry["edit_file"]["run"]
+
+    def fail_after_write(context, params):
+        runner(context, params)
+        raise RuntimeError("injected failure after write")
+
+    with patch.dict(agent.tools.registry["edit_file"], run=fail_after_write):
+        first = run_active(agent, ToolCall("edit_file", args, "first"))
+    assert first.side_effect_state == "partial"
+    stale = run_active(agent, ToolCall("edit_file", args, "stale_retry"))
+    assert stale.failure.code == "revision_conflict"
+    restored = run_active(agent, ToolCall("edit_file", {
+        "path": "sample.txt", "old_text": "B", "new_text": "A",
+        "expected_revision": file_revision(target),
+    }, "restore"))
+    assert restored.status == "success"
+    assert run_active(agent, ToolCall("read_file", {"path": "sample.txt"}, "read")).status == "success"
+    if restart:
+        agent = Pico(
+            FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
+            session=agent.session.store.load(agent.session.id),
+        )
+        RunLifecycle(agent).initialize("Continue")
+    result = run_active(agent, ToolCall("edit_file", args, "current_retry"))
+    assert result.status == "success"
+    assert target.read_text() == "B"
+
+
+def test_successful_command_can_finish_without_an_unrelated_observation(tmp_path):
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, mode="code")
+    agent.model_client.outputs = [
+        ModelAction.tool("run_command", {
+            "command": shlex.join([sys.executable, "-B", "-c", "print(2 + 2)"]),
+        }),
+        ModelAction.final("Python returned 4."),
+    ]
+    with patch("builtins.input", return_value="yes"):
+        result = agent.ask("Run Python to calculate 2 + 2 and report the output")
+    assert result.status == "completed"
+    calls = [e.name for e in agent.run.run_log.events if e.kind == "assistant_tool_call"]
+    assert calls == ["run_command"]
+    assert agent.run.evidence.successful_observation_count == 0
+
+
+def test_redaction_preserves_machine_paths_and_replay(tmp_path, monkeypatch):
+    monkeypatch.setenv("DB_PASSWORD", "admin")
+    agent = build_agent(tmp_path)
+    result = run_active(agent, ToolCall("write_file", {
+        "path": "admin.py", "content": "admin\n",
+    }, "write"))
+    assert result.status == "success"
+    assert result.affected_paths == ("admin.py",)
+    assert result.structured["path_transitions"][0]["path"] == "admin.py"
+    assert "admin" not in result.content
+    assert "<redacted>" in result.content
+    restored = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    assert restored.evidence.changed_paths == ["admin.py"]
+    revision = file_revision(tmp_path / "admin.py")
+    secret = revision[-4:]
+    monkeypatch.setenv("DB_PASSWORD", secret)
+    entry = agent.emit_event("verification_result", {
+        "status": "passed", "command": "verify", "output": "password=" + secret,
+        "started_workspace_mutation_sequence": 1, "finished_workspace_mutation_sequence": 1,
+        "started_changed_path_states": {"admin.py": revision},
+        "finished_changed_path_states": {"admin.py": revision}, "workspace_changes": [],
+    })
+    assert entry.payload["finished_changed_path_states"] == {"admin.py": revision}
+    assert entry.payload["output"] == "password=<redacted>"
+
+
+def test_invalid_result_cannot_poison_the_durable_log(tmp_path):
+    agent = build_agent(tmp_path)
+    log = start_run(agent)
+    call = ToolCall("write_file", {"path": "a.txt", "content": "a"}, "write")
+    log.append_tool_call(call)
+    log.append_tool_started(call, effect_scope="workspace", potential_effects=[])
+    before = agent.dependencies.run_store.events_path(log.run_id).read_bytes()
+    invalid = ToolOutcome("write", "write_file", "success", "completed", "changed", "written",
+                          affected_paths=("a.txt",), effect_scope="workspace")
+    with pytest.raises(ValueError, match="path transitions"):
+        log.append_tool_result(invalid)
+    assert agent.dependencies.run_store.events_path(log.run_id).read_bytes() == before
+    restored = agent.dependencies.run_store.replay(log.run_id)
+    assert restored.pending_call_ids == ("write",)
+    assert not restored.evidence.changed_paths
+
+
+def test_preimage_and_commit_revision_cannot_disagree(tmp_path):
+    agent = build_agent(tmp_path)
+    target = tmp_path / "target.txt"
+    target.write_text("B\n")
+    read = run_active(agent, ToolCall("read_file", {"path": "target.txt"}, "read"))
+    target.write_text("A\n")
+    capture = agent.tools._preimage_artifacts
+
+    def external_editor_interleaving(*args):
+        try:
+            return capture(*args)
+        finally:
+            target.write_text("B\n")
+
+    with patch.object(agent.tools, "_preimage_artifacts", external_editor_interleaving):
+        result = run_active(agent, ToolCall("edit_file", {
+            "path": "target.txt", "old_text": "B", "new_text": "C",
+            "expected_revision": read.structured["revision"],
+        }, "edit"))
+    assert result.failure.code == "revision_conflict"
+    assert target.read_text() == "B\n"
+    assert not agent.run.evidence.changed_paths
+
+
+def test_rg_search_handles_later_files_and_backtracking_patterns(tmp_path):
+    if not shutil.which("rg"):
+        pytest.skip("rg is not installed")
+    (tmp_path / "a.txt").write_text("a" * 10000 + "!")
+    (tmp_path / "b.txt").write_text("needle\n")
+    agent = build_agent(tmp_path)
+    result = agent.tools.execute_manual("search", {"pattern": "needle"})
+    assert result.status == "success" and "b.txt:1:needle" in result.content
+    started = time.monotonic()
+    result = agent.tools.execute_manual("search", {"pattern": "(a+)+$"})
+    assert result.status == "success"
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_search_consumes_request_deadline_and_cancellation(tmp_path, cancel):
+    executable = tmp_path / "slow-rg"
+    executable.write_text(f"#!{sys.executable}\nimport time\nprint('a.txt:1:needle', flush=True)\ntime.sleep(2)\n")
+    executable.chmod(0o755)
+    execution = ExecutionContext.root(max_seconds=10 if cancel else 0.15)
+    timer = threading.Timer(0.15, lambda: execution.request_stop("user_cancelled"))
+    if cancel:
+        timer.start()
+    try:
+        started = time.monotonic()
+        result = tools_module._bounded_rg_search(tmp_path, ".", "needle", str(executable), execution)
+        assert time.monotonic() - started < 1.5
+        assert result.failure.code == ("operation_interrupted" if cancel else "search_timeout")
+    finally:
+        timer.cancel()
+
+
+def test_utf8_artifact_pages_advance_or_reject_small_capacity(tmp_path):
+    agent = build_agent(tmp_path)
+    log = start_run(agent)
+    text = "中文🙂abc"
+    descriptor = agent.dependencies.artifacts.write_tool_output(log.run_id, "output", text)
+    store = agent.dependencies.artifacts
+    with pytest.raises(ValueError, match="at least 4"):
+        store.read_slice(log.run_id, descriptor["artifact_id"], 0, 1)
+    offset, chunks = 0, []
+    while offset < len(text.encode()):
+        page = store.read_slice(log.run_id, descriptor["artifact_id"], offset, 4)
+        assert page["end_offset"] > offset
+        offset = page["end_offset"]
+        chunks.append(page["content"])
+    assert "".join(chunks) == text

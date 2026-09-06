@@ -1,0 +1,16 @@
+{"case": "redirect_auth", "result": {"cross_origin_authorization_forwarded": true, "external_network_used": false}}
+{"case": "nonterminal_response", "result": [{"provider_status": "in_progress", "file_written": true, "run": "completed"}, {"provider_status": "cancelled", "file_written": true, "run": "completed"}, {"provider_status": "queued", "file_written": true, "run": "completed"}]}
+{"case": "redaction_journal", "result": {"file_written": true, "append_error": "workspace effect lacks path transitions: admin.py", "replay_error": "workspace effect lacks path transitions: admin.py", "path_fact": "<redacted>.py", "affected_path": "admin.py"}}
+{"case": "working_state_clip", "result": {"persisted_next_steps": ["NEXT_STEP_MUST_SURVIVE"], "present_in_prompt": false, "unused_input_tokens": 270247, "clipped_sections": ["working_state"]}}
+{"case": "deep_repo_map", "result": {"error": "RecursionError", "model_requests": 0}}
+{"case": "fallback_scan", "result": {"collected_file_limit": 2, "needle_in_second_file": true, "match_count": 0, "truncated": true}}
+{"case": "fallback_regex_deadline", "result": {"search_timeout_seconds": 0.01, "elapsed_seconds": 0.672, "status": "success", "timed_out": false}}
+{"case": "duplicate_call_id", "result": {"duplicate_call_accepted": true, "second_call_never_started": true, "recovery_error": "executed tool_result requires tool_started"}}
+{"case": "preimage_race", "result": {"before_revision_matches_B": true, "preimage": "A\n", "final_diff": "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-A\n+C\n"}}
+{"case": "latest_session", "result": {"unfinished_older_run_exists": true, "selected_terminal_session": true, "resumed_goal": null}}
+{"case": "artifact_page_progress", "result": {"max_bytes": 1, "status": "success", "offset": 0, "end_offset": 0, "has_more": true}}
+{"case": "two_children", "result": {"first_integration": "success", "second_integration": "error: tool integrate_child failed: parent workspace changed after Child delegation: implementation subtasks require a clean working tree before delegation", "completion": "subtasks_incomplete"}}
+{"case": "staged_rename_delivery", "result": {"dirty_before": ["renamed.txt"], "delivery": "committed", "commit_files": "subject.txt", "index_after": "A\trenamed.txt"}}
+{"case": "unreadable_git_snapshot", "result": {"file_unreadable_during_both_snapshots": true, "file_modified": true, "status": "passed", "workspace_changes": []}}
+{"case": "tool_budget_resume", "result": {"configured_per_request_limit": 1, "resumed_surface": ["submit_final"], "run_status": "stopped", "stop_reason": "tool_execution_limit", "total_tools": 1}}
+{"case": "run_cli_subdirectory", "result": {"runtime_found_repo_root": true, "run_exists": true, "show_error": "Run Log not found for run_20260906-055928-e15a39"}}

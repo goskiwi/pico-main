@@ -62,7 +62,7 @@ User request + Ask/Code/Auto -> TaskContract
 面试主线只需要六点：
 
 1. **单一事实源**：每个 Run 只有一个 Run Log。实时调用 `RunLog.append`，内部依次执行
-   `check_event`、存储追加和 `_advance_event`；回放通过 `RunProjection.apply_event` 复用同一套检查与转换。
+   `apply_event` 构造并验证待提交状态、存储追加、发布已验证状态；回放使用同一套转换。
 2. **可恢复工具事务**：单调用使用 `assistant_tool_call`；多个纯 Observation 原子写成
    `assistant_tool_batch`。每个 Call 都有 Started/Result，崩溃后逐 Call 闭合且不盲目重放。
 3. **副作用感知调度**：`list_files/read_file/search/read_artifact` 可组成最多四个调用的并行 Batch；
@@ -86,7 +86,7 @@ CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskCont
 
 程序化 `Pico(..., check_runner=...)` 可选安装 `run_check`：在明确配置的隔离执行器中
 运行临时 Python／pytest 复现，Code／Auto 可用，Ask 不暴露。普通 CLI 默认不安装此工具。
-评测中的 Docker 实现与使用边界见 [复现检查说明](docs/review-pack/isolated-checks.md)。
+执行器由调用方提供，接口与信任边界见 [复现检查说明](docs/review-pack/isolated-checks.md)。
 
 前四个只读工具可组成 Observation Batch；其余工具必须单独调用。Mixed Batch 在执行前整批
 拒绝，但仍为每个 Call ID 写入一个 `rejected/not_started` Result。
@@ -116,10 +116,11 @@ WorkingState。
 `delegate`，不能嵌套委派。这里没有 DAG、批量请求、后台队列或并行 worker。
 
 - Explore 直接读取 Parent Workspace，但工具表面只读，不创建 Worktree。
-- Implement 要求 Git 仓库根、clean Parent、可解析的 HEAD、非空 `allowed_write_paths` 和固定
-  Verification 命令；它始终在独立 Worktree 中运行，只返回摘要和不可变 Patch receipt。
-- Implement 不自动 merge。Parent 必须调用 `integrate_child(child_id)`；Runtime 复验 base，
-  在临时 Worktree 应用 Patch并运行 Verification，确认 Patch 与 changed paths 未漂移后才写回。
+- Implement 要求 Git 仓库根、无未归属变更的 Parent、可解析的 HEAD、非空 `allowed_write_paths` 和固定
+  Verification 命令；它始终在独立 Worktree 中运行，返回摘要，有实际修改时才附带不可变 Patch receipt。
+  修改范围来自 RunChangeSet，包含明确修改的 Git 忽略文件；交付失败会保留 Worktree 并报告路径。
+- Implement 不自动 merge。Parent 调用 `integrate_child(child_id)`；Runtime 在临时 Worktree 组合已接纳的父修改和新 Patch，
+  使用 Git 三方应用并验证组合结果，确认父状态未漂移后再按 revision 写回本次差异。
 - 未集成的 Implement Child 会阻止 Parent 完成。
 
 Child Run Log、Session、Artifact 和 Patch 位于 Parent Run 的 `subagents/<child_id>/` 下。
@@ -165,22 +166,14 @@ uv run pytest -q
 uv run ruff check pico applications tests scripts
 ```
 
-测试保留 Runtime 主链、恢复、工具安全、上下文与 RepoMap、Child 集成、Git 交付和评测正确性。
-历史 JSON 成绩断言、演示提示词／样例内容断言及仅固定内部对象结构的测试已移除。
+测试按面试主线保留 Runtime 主链、恢复、工具安全、Provider 协议、上下文与 RepoMap、Child 集成和 Git 交付。
+Day 1–7 与真实 LLM 场景用于演示和核实这些行为；压缩报告的断言用于保证面试证据准确。
+外部仓库题库、Docker 判分、成绩统计及旧审查复现脚本已移除。
 默认回归不调用 LLM，也不代表当前代码通过真实模型验收；历史报告保留为运行记录。
-Docker 集成测试需准备对应镜像后显式运行：
-
-```bash
-PICO_TEST_DOCKER=1 uv run pytest -q tests/test_checks_docker.py
-```
 
 ## Scope
 
-新增的 [12 任务真实仓库对照](benchmarks/repo_eval/README.md) 使用 SWE-bench Verified 的
-人工子集，分离模型作答与 Docker 中的独立判分，用于测量 RepoMap 开关的局部收益。
-候选任务、环境验证、真实模型运行和最终成绩是不同阶段，不能把任务清单当成通过报告。
-最新的[五题真实评测](docs/review-pack/repo-eval-five-2026-09-05.md)已完成：2 个试次通过独立验收，
-另有修复不完整、预算耗尽、模型调用异常各 1 个；本轮仅运行 RepoMap 开启组。
-
 Pico 不做 Project Memory、Triage、全量 OSS 排行榜评测、多 Provider、XML 工具协议、Skills、
 MCP、多租户、远程 Worker、分布式调度或旧状态迁移。这些外围实现不在当前面试分支中。
+
+搜索工具依赖系统安装的 ripgrep（`rg`），没有 Python 正则回退。缺少 rg 时仅搜索返回明确的能力错误。

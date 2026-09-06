@@ -34,17 +34,21 @@ def atomic_replace_bytes(path, payload, *, mode=0o600, commit_guard=None):
 
 
 def write_once_bytes(path, payload, *, mode=0o600):
+    """Publish complete bytes atomically without replacing an existing file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with path.open("xb") as handle:
-            handle.write(bytes(payload))
-            handle.flush()
-            os.fsync(handle.fileno())
-        path.chmod(int(mode))
-        return True
-    except FileExistsError:
-        return False
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp",
+    ) as staged:
+        staged.write(bytes(payload))
+        staged.flush()
+        os.fchmod(staged.fileno(), int(mode))
+        os.fsync(staged.fileno())
+        try:
+            os.link(staged.name, path)
+        except FileExistsError:
+            return False
+    return True
 
 
 def atomic_write_json(path, payload):
