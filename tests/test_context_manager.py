@@ -263,7 +263,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
 def test_wire_places_current_working_state_after_history(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent, "Inspect")
-    run_log.append_model_instruction("test_instruction", "OLD-HISTORY")
+    run_log.append_model_instruction("OLD-HISTORY")
 
     call = ToolCall(
         "update_working_state",
@@ -622,7 +622,6 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
     agent = build_agent(tmp_path)
     run_log = activate(agent)
     instruction = agent.append_model_instruction(
-        "revision_conflict",
         "Read the current revision and repair the rejected edit.",
         evidence="UNTRUSTED-VERIFIER-OUTPUT",
     )
@@ -630,7 +629,6 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
     prompt, metadata = agent.prompt.build("continue")
 
     assert named_json(prompt.input_text, "runtime_instruction") == {
-        "code": "revision_conflict",
         "instruction": "Read the current revision and repair the rejected edit.",
     }
     assert prompt.input_text.count("Read the current revision") == 1
@@ -645,13 +643,13 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
         "runtime_instruction",
         "untrusted_context",
     ]
-    assert agent.run.projection.pending_runtime_instruction_event_id == (
+    assert agent.run.projection.runtime_feedback.event_id == (
         instruction.event_id
     )
-    assert agent.run.projection.pending_runtime_evidence.startswith(
+    assert agent.run.projection.runtime_feedback.evidence.startswith(
         "UNTRUSTED-VERIFIER-OUTPUT"
     )
-    assert agent.run.projection.pending_runtime_evidence_artifact_id
+    assert agent.run.projection.runtime_feedback.evidence_artifact_id
 
     call = ToolCall("read_file", {"path": "a.py"}, "read_after_instruction")
     run_log.append_tool_calls((call,))
@@ -669,7 +667,7 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
     next_prompt, _metadata = agent.prompt.build("continue")
 
     assert "runtime_instruction:" not in next_prompt.input_text
-    assert agent.run.projection.pending_runtime_instruction == ""
+    assert agent.run.projection.runtime_feedback is None
 
 
 def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
@@ -856,7 +854,7 @@ def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_p
     assert metadata["committed"] is False
     assert "bounded fallback" in history
     assert history_metadata["retained_tokens"] <= 180
-    assert "[tool receipt]" in history
+    assert "older events omitted" in history
 
 
 def test_fallback_history_and_metadata_can_be_consumed_by_a_new_builder(tmp_path):

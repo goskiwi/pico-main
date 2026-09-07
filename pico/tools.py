@@ -27,7 +27,7 @@ from .verification import (
     repository_state_changes,
 )
 from .working_state import normalize_working_update
-from .workspace import IGNORED_PATH_NAMES, clip
+from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
 READ_FILE_MAX_LINES = 2000
@@ -35,53 +35,6 @@ SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
 RUN_COMMAND_TIMEOUT_SECONDS = 120
-
-
-def history_projection(*, arg_fields, result_fields):
-    """Build one tool-owned compact History projection."""
-
-    arg_fields = tuple(arg_fields)
-    result_fields = tuple(result_fields)
-
-    def project(args, outcome):
-        projected = {
-            "args": {
-                field: args[field]
-                for field in arg_fields
-                if field in args
-            },
-            "outcome": {
-                "status": outcome.status,
-                "execution_state": outcome.execution_state,
-                "side_effect_state": outcome.side_effect_state,
-            },
-        }
-        structured = {
-            field: outcome.structured[field]
-            for field in result_fields
-            if field in outcome.structured
-        }
-        if structured:
-            projected["outcome"]["structured"] = structured
-        if outcome.failure is not None:
-            projected["outcome"]["failure"] = {
-                "code": outcome.failure.code,
-                "detail": clip(outcome.failure.detail, 1000),
-                "recovery": outcome.failure.recovery,
-            }
-        if outcome.affected_paths:
-            projected["outcome"]["affected_paths"] = list(outcome.affected_paths)
-        if outcome.effect_scope != "none":
-            projected["outcome"]["effect_scope"] = outcome.effect_scope
-        if outcome.artifact_id:
-            projected["outcome"]["artifact_id"] = outcome.artifact_id
-        if outcome.model_artifact_id:
-            projected["outcome"]["model_artifact_id"] = (
-                outcome.model_artifact_id
-            )
-        return projected
-
-    return project
 
 
 class ToolArgs(BaseModel):
@@ -672,10 +625,6 @@ def build_tool_registry():
             "description": "List files in the workspace.",
             "validate": _validate_list_files,
             "run": tool_list_files,
-            "history_projection": history_projection(
-                arg_fields=("path",),
-                result_fields=("path", "returned_count", "has_more"),
-            ),
         },
         "read_file": {
             "args_schema": ReadFileArgs,
@@ -685,18 +634,6 @@ def build_tool_registry():
             "description": "Read a UTF-8 file by line range.",
             "validate": _validate_read_file,
             "run": tool_read_file,
-            "history_projection": history_projection(
-                arg_fields=("path", "start_line", "end_line"),
-                result_fields=(
-                    "path",
-                    "start_line",
-                    "end_line",
-                    "total_lines",
-                    "has_more",
-                    "truncated",
-                    "revision",
-                ),
-            ),
         },
         "read_artifact": {
             "args_schema": ReadArtifactArgs,
@@ -706,16 +643,6 @@ def build_tool_registry():
             "description": "Read up to 8 KiB from a truncated tool-output artifact in the current run.",
             "validate": _validate_read_artifact,
             "run": tool_read_artifact,
-            "history_projection": history_projection(
-                arg_fields=("artifact_id", "offset", "max_bytes"),
-                result_fields=(
-                    "artifact_id",
-                    "offset",
-                    "end_offset",
-                    "total_bytes",
-                    "has_more",
-                ),
-            ),
         },
         "search": {
             "args_schema": SearchArgs,
@@ -725,10 +652,6 @@ def build_tool_registry():
             "description": "Search the workspace with ripgrep (rg must be installed).",
             "validate": _validate_search,
             "run": tool_search,
-            "history_projection": history_projection(
-                arg_fields=("pattern", "path"),
-                result_fields=("engine", "match_count", "truncated", "timed_out"),
-            ),
         },
         "run_command": {
             "args_schema": RunCommandArgs,
@@ -737,16 +660,6 @@ def build_tool_registry():
             "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
             "validate": _validate_run_command,
             "run": tool_run_command,
-            "history_projection": history_projection(
-                arg_fields=("command",),
-                result_fields=(
-                    "command",
-                    "exit_code",
-                    "stop_reason",
-                    "output_limited",
-                    "repository_changes",
-                ),
-            ),
         },
         "write_file": {
             "args_schema": WriteFileArgs,
@@ -757,17 +670,6 @@ def build_tool_registry():
             "validate": _validate_write_file,
             "run": tool_write_file,
             "potential_effects": _workspace_file_effects,
-            "history_projection": history_projection(
-                arg_fields=("path",),
-                result_fields=(
-                    "path",
-                    "changed",
-                    "before_revision",
-                    "after_revision",
-                    "diff_bytes",
-                    "path_transitions",
-                ),
-            ),
         },
         "edit_file": {
             "args_schema": EditFileArgs,
@@ -778,18 +680,6 @@ def build_tool_registry():
             "validate": _validate_edit_file,
             "run": tool_edit_file,
             "potential_effects": _workspace_file_effects,
-            "history_projection": history_projection(
-                arg_fields=("path", "expected_revision"),
-                result_fields=(
-                    "path",
-                    "changed",
-                    "replacement_count",
-                    "before_revision",
-                    "after_revision",
-                    "diff_bytes",
-                    "path_transitions",
-                ),
-            ),
         },
         "update_working_state": {
             "args_schema": UpdateWorkingStateArgs,
@@ -797,16 +687,5 @@ def build_tool_registry():
             "description": "Incrementally update the current Run's constraints, evidence-backed decisions, and next steps. The Runtime owns the immutable goal. Do not store current file contents, transient command output, guesses, or cross-task project knowledge here.",
             "validate": _validate_working_state,
             "run": tool_update_working_state,
-            "history_projection": history_projection(
-                arg_fields=(
-                    "add_constraints",
-                    "remove_constraints",
-                    "add_decisions",
-                    "remove_decisions",
-                    "add_next_steps",
-                    "remove_next_steps",
-                ),
-                result_fields=(),
-            ),
         },
     }

@@ -111,7 +111,7 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 | Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
 | Task contract | First `user_message.contract` | Goal, maximum write capability, write scope and change-verification requirement |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
-| Pending Runtime instruction | Latest structured `model_instruction` until the next accepted model action | Trusted code/instruction plus bounded untrusted evidence preview and Artifact |
+| Pending Runtime feedback | Latest structured `model_instruction` until the next accepted model action | Trusted instruction plus bounded untrusted evidence preview and Artifact |
 | Large redacted output | Content Artifact and complete model-envelope Artifact | Bounded ToolOutcome audit receipt plus Run Log references; verbose fields are not duplicated |
 | Child receipts | Child Run Logs and Patch files | One explicit Child receipt and integration state |
 
@@ -198,7 +198,7 @@ Responses `instructions`. The first request of a Provider action session sends a
 dedicated `repository_instructions` block. They are project instructions rather than system policy
 or ordinary repository data: the current user request wins on conflict, and ToolRuntime remains the
 permission boundary. An untrusted-context envelope is added only when at least one bounded
-projection is non-empty, a pending Runtime instruction's code/control text is inserted as trusted
+projection is non-empty, a pending Runtime feedback instruction is inserted as trusted
 mandatory input, its evidence remains inside the untrusted envelope, and
 a differing latest request is added only on Resume. The envelope can
 include minimal Workspace facts, RepoMap, History and WorkingState. RepoMap is

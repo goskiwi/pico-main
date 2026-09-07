@@ -23,6 +23,14 @@ class RunCursor:
         return {"sequence": self.sequence, "event_id": self.event_id}
 
 
+@dataclass(frozen=True)
+class RuntimeFeedback:
+    instruction: str
+    evidence: str = ""
+    evidence_artifact_id: str = ""
+    event_id: str = ""
+
+
 @dataclass
 class RunMetrics:
     turn_duration_ms: int = 0
@@ -82,11 +90,7 @@ class RunProjection:
     final_answer: str = ""
     pending_calls: tuple[ToolCall, ...] = ()
     pending_group_id: str = ""
-    pending_runtime_instruction: str = ""
-    pending_runtime_instruction_event_id: str = ""
-    pending_runtime_instruction_code: str = ""
-    pending_runtime_evidence: str = ""
-    pending_runtime_evidence_artifact_id: str = ""
+    runtime_feedback: RuntimeFeedback | None = None
     started_call_ids: set[str] = field(default_factory=set)
     last_started_ordinal: int = -1
     start_phase_result_count: int = 0
@@ -228,11 +232,7 @@ class RunProjection:
                 self.pending_calls[self.result_count], event.payload["outcome"]
             )
         if event.kind == "assistant_tool_calls":
-            self.pending_runtime_instruction = ""
-            self.pending_runtime_instruction_event_id = ""
-            self.pending_runtime_instruction_code = ""
-            self.pending_runtime_evidence = ""
-            self.pending_runtime_evidence_artifact_id = ""
+            self.runtime_feedback = None
             self._begin_calls(event.tool_calls, event.event_id)
         elif event.kind == "tool_started":
             if self.result_count > self.last_started_ordinal:
@@ -246,19 +246,14 @@ class RunProjection:
             if self.result_count == len(self.pending_calls):
                 self._begin_calls(())
         elif event.kind == "model_instruction":
-            self.pending_runtime_instruction = str(event.payload["instruction"])
-            self.pending_runtime_instruction_event_id = event.event_id
-            self.pending_runtime_instruction_code = str(event.payload["code"])
-            self.pending_runtime_evidence = str(event.payload["evidence"])
-            self.pending_runtime_evidence_artifact_id = str(
-                event.payload["evidence_artifact_id"]
+            self.runtime_feedback = RuntimeFeedback(
+                instruction=str(event.payload["instruction"]),
+                evidence=str(event.payload["evidence"]),
+                evidence_artifact_id=str(event.payload["evidence_artifact_id"]),
+                event_id=event.event_id,
             )
         elif event.kind in {"assistant_final", "run_stopped"}:
-            self.pending_runtime_instruction = ""
-            self.pending_runtime_instruction_event_id = ""
-            self.pending_runtime_instruction_code = ""
-            self.pending_runtime_evidence = ""
-            self.pending_runtime_evidence_artifact_id = ""
+            self.runtime_feedback = None
             self.status = "completed" if event.kind == "assistant_final" else "stopped"
             self.stop_reason = event.payload["stop_reason"]
             self.final_answer = str(event.payload.get("content", ""))
@@ -287,14 +282,16 @@ class RunProjection:
             },
             "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
-            "runtime_instruction": {
-                "code": self.pending_runtime_instruction_code,
-                "instruction": self.pending_runtime_instruction,
-                "evidence": self.pending_runtime_evidence,
-                "evidence_artifact_id": (
-                    self.pending_runtime_evidence_artifact_id
-                ),
-            },
+            "runtime_feedback": (
+                {
+                    "instruction": self.runtime_feedback.instruction,
+                    "evidence": self.runtime_feedback.evidence,
+                    "evidence_artifact_id": self.runtime_feedback.evidence_artifact_id,
+                    "event_id": self.runtime_feedback.event_id,
+                }
+                if self.runtime_feedback is not None
+                else None
+            ),
             "pending_call_ids": list(self.pending_call_ids),
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "run_cursor": self.last_cursor.to_dict(),

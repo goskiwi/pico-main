@@ -369,10 +369,7 @@ class PromptBuilder:
     def _history(self):
         run_log = self.runtime.run.run_log
         return (
-            RunHistory(
-                run_log.events,
-                history_projectors=self.runtime.tools.history_projectors(),
-            )
+            RunHistory(run_log.events)
             if run_log is not None
             else None
         )
@@ -398,6 +395,7 @@ class PromptBuilder:
         latest = history.latest_user_guidance() if history is not None else ""
         working = projection.working if contract is not None else WorkingState()
         working_text = context.render_working_state(working)
+        feedback = projection.runtime_feedback
         mode, paths = self.runtime.tools.effective_policy()
         return {
             "runtime_policy": context.render_runtime_policy(contract, mode, paths),
@@ -412,30 +410,27 @@ class PromptBuilder:
                 "runtime_instruction:\n"
                 + json.dumps(
                     {
-                        "code": projection.pending_runtime_instruction_code,
-                        "instruction": projection.pending_runtime_instruction,
+                        "instruction": feedback.instruction,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
                 )
-                if projection.pending_runtime_instruction
+                if feedback is not None
                 else ""
             ),
             "runtime_evidence": (
                 "runtime_evidence:\n"
                 + json.dumps(
                     {
-                        "content": projection.pending_runtime_evidence,
-                        "artifact_id": (
-                            projection.pending_runtime_evidence_artifact_id
-                        ),
+                        "content": feedback.evidence,
+                        "artifact_id": feedback.evidence_artifact_id,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
                 )
                 if (
-                    projection.pending_runtime_evidence
-                    or projection.pending_runtime_evidence_artifact_id
+                    feedback is not None
+                    and (feedback.evidence or feedback.evidence_artifact_id)
                 )
                 else ""
             ),

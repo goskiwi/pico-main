@@ -92,3 +92,16 @@ def test_replaced_config_is_used_by_context_budget(tmp_path):
     assert agent.config.provider_context_limit_tokens == 8000
     with pytest.raises(ContextBudgetExceeded):
         agent.prompt.build("example " * 10000)
+
+
+def test_explicit_optional_tool_requires_its_executor(tmp_path):
+    workspace = Workspace.build(tmp_path)
+    session = SessionStore(tmp_path / "sessions").create(workspace.root)
+
+    with pytest.raises(ValueError, match="executor is unavailable: run_check"):
+        Pico(
+            FakeModelClient([]),
+            workspace,
+            session,
+            config=PicoConfig(allowed_tools=("run_check",)),
+        )

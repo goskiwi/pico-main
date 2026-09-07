@@ -412,12 +412,8 @@ def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
         "affected_paths",
         "effect_scope",
         "artifact_id",
-        "model_output",
-        "model_artifact_id",
     }
     assert outcome.artifact_id == ""
-    assert outcome.model_output == ""
-    assert outcome.model_artifact_id == ""
     assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
 
 
@@ -446,12 +442,11 @@ def test_complete_model_outcome_is_bounded_and_artifacted(tmp_path):
         },
     )
 
-    assert outcome.artifact_id == ""
-    assert outcome.model_artifact_id.startswith("tool_")
+    assert outcome.artifact_id.startswith("tool_")
     assert len(outcome.render_for_model().encode("utf-8")) <= 12 * 1024
     full = agent.dependencies.artifacts.read_slice(
         "manual",
-        outcome.model_artifact_id,
+        outcome.artifact_id,
         0,
         8192,
     )
@@ -523,7 +518,7 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
     assert secret not in failed.content
     assert secret not in failed.failure.detail
     assert "secret" not in large.structured
-    assert large.model_artifact_id
+    assert large.artifact_id
     assert secret not in artifact_content
     assert "<redacted>" in provider_result
     assert "<redacted>" in persisted

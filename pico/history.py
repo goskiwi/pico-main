@@ -28,9 +28,8 @@ class _ProjectedFact:
 
 
 class RunHistory:
-    def __init__(self, events, *, history_projectors=None):
+    def __init__(self, events):
         self._events = tuple(events)
-        self._history_projectors = dict(history_projectors or {})
 
     def latest_user_guidance(self):
         entry = next(
@@ -195,26 +194,6 @@ class RunHistory:
         content = str(fact.payload.get("content", ""))
         return f"[{fact.kind}] {content}"
 
-    def _render_tool_projection(self, unit):
-        if len(unit) == 2 and unit[0].kind == "tool_call":
-            call, result = unit
-            outcome = ToolOutcome.from_dict(result.payload["outcome"])
-            projector = self._history_projectors.get(call.payload["name"])
-            if projector is None:
-                return None
-            projection = projector(call.payload["args"], outcome)
-            return "[tool receipt] " + json.dumps(
-                {
-                    "call_id": call.payload["call_id"],
-                    "name": call.payload["name"],
-                    **projection,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        return None
-
     @staticmethod
     def _source_ids(units):
         return {
@@ -231,13 +210,6 @@ class RunHistory:
             full_render = render(full)
             if full_render[1] <= limit:
                 selected = full
-                continue
-            if self._render_tool_projection(unit) is None:
-                break
-            compact = [(unit, True), *selected]
-            compact_render = render(compact)
-            if compact_render[1] <= limit:
-                selected = compact
                 continue
             break
         return selected
@@ -373,13 +345,10 @@ class RunHistory:
             omitted = len(self._source_ids(recent) - self._source_ids(selected_units))
             lines = ["Current run events:"]
             lines.extend(self._render_fact(unit[0]) for unit in summaries)
-            if omitted or any(compact for _unit, compact in selected):
+            if omitted:
                 lines.append(COMPACTED_HISTORY_OMITTED)
-            for unit, compact in selected:
-                if compact:
-                    lines.append(self._render_tool_projection(unit))
-                else:
-                    lines.extend(self._render_fact(fact) for fact in unit)
+            for unit, _compact in selected:
+                lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)
             return text, token_counter(text)
 
@@ -414,18 +383,10 @@ class RunHistory:
         def render(selected):
             selected_units = [unit for unit, _compact in selected]
             omitted = len(self._source_ids(units) - self._source_ids(selected_units))
-            receipts = sum(compact for _unit, compact in selected)
             lines = ["Current run events (bounded fallback):"]
             lines.append(f"- {omitted} older events omitted")
-            if receipts:
-                lines.append(
-                    f"- {receipts} retained tool results use typed projections"
-                )
-            for unit, compact in selected:
-                if compact:
-                    lines.append(self._render_tool_projection(unit))
-                else:
-                    lines.extend(self._render_fact(fact) for fact in unit)
+            for unit, _compact in selected:
+                lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)
             return text, token_counter(text)
 

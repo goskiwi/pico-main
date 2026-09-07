@@ -224,7 +224,7 @@ def effective_recovery_context(agent, summary):
 def fallback_entry_headers(history):
     headers = []
     for line in str(history).splitlines():
-        if line.startswith(("[assistant/tool]", "[tool receipt]")):
+        if line.startswith("[assistant/tool]"):
             headers.append(line)
         elif line.startswith("[tool/"):
             headers.append(line.split("]", 1)[0] + "]")
@@ -330,7 +330,6 @@ def bounded_fallback_experiment(root):
     context = untrusted_context(prompt.input_text)
     history, history_metadata = history_override
     headers = fallback_entry_headers(history)
-    receipt_count = sum(line.startswith("[tool receipt]") for line in headers)
     physical_counts = durable_kind_counts(physical_events)
 
     assert compaction["mode"] == "runtime_recent_transactions"
@@ -338,7 +337,6 @@ def bounded_fallback_experiment(root):
     assert compaction["committed"] is False
     assert compaction["failure_code"] == "semantic_summary_unavailable"
     assert compaction["retained_tokens"] <= agent.config.compaction_keep_recent_tokens
-    assert receipt_count >= 1
     assert headers[-2].startswith("[assistant/tool]")
     assert headers[-1].startswith("[tool/read_file/success/none]")
     assert "tool_started" not in history
@@ -368,8 +366,7 @@ def bounded_fallback_experiment(root):
             },
             "compaction": compaction,
             "model_visible_history_view": {
-                "retained_call_facts": receipt_count + 1,
-                "receipt_count": receipt_count,
+                "retained_call_facts": 1,
                 "entries": headers,
             },
             "physical_log": {

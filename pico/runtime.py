@@ -106,7 +106,7 @@ class Pico:
         entry = run_log.append(event_type, payload)
         return entry
 
-    def append_model_instruction(self, code, instruction, *, evidence=""):
+    def append_model_instruction(self, instruction, *, evidence=""):
         run_log = self.run.run_log
         if run_log is None:
             raise RuntimeError("Runtime instruction requires an active RunLog")
@@ -126,7 +126,6 @@ class Pico:
                 + ". Use read_artifact to inspect it.]"
             )
         return run_log.append_model_instruction(
-            code,
             instruction,
             evidence=evidence,
             evidence_artifact_id=str(descriptor.get("artifact_id", "")),

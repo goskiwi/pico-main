@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import tools as toolkit
@@ -25,11 +25,47 @@ from .tool_execution import (
     classify_runner_result,
     effect_diff,
     intersect_write_scopes,
-    model_tool_output,
     path_transitions,
     tracked_workspace_drift,
 )
 from .workspace import clip
+
+AUDIT_STRUCTURED_KEYS = frozenset(
+    {
+        "artifact_id",
+        "base_sha",
+        "before_revision",
+        "changed",
+        "changed_paths",
+        "child_id",
+        "child_run_id",
+        "diff_bytes",
+        "end_line",
+        "end_offset",
+        "engine",
+        "error",
+        "exit_code",
+        "has_more",
+        "kind",
+        "match_count",
+        "offset",
+        "output_limited",
+        "patch",
+        "path",
+        "path_transitions",
+        "replacement_count",
+        "repository_changes",
+        "role",
+        "start_line",
+        "status",
+        "stop_reason",
+        "timed_out",
+        "total_bytes",
+        "total_lines",
+        "truncated",
+        "verification",
+    }
+)
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -93,6 +129,16 @@ class ToolRuntime:
         unknown = [name for name in allowed_tools if name not in tools]
         if unknown:
             raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
+        unavailable = [
+            name
+            for name in allowed_tools
+            if not tools[name].get("available", True)
+        ]
+        if unavailable:
+            raise ValueError(
+                "configured tool executor is unavailable: "
+                + ", ".join(unavailable)
+            )
         allowed = set(allowed_tools)
         return {name: tool for name, tool in tools.items() if name in allowed}
 
@@ -153,12 +199,6 @@ class ToolRuntime:
 
     def model_action_tools(self):
         return toolkit.build_action_tools(self._surface(self.effective_policy()))
-
-    def history_projectors(self):
-        return {
-            name: tool["history_projection"]
-            for name, tool in self.registry.items()
-        }
 
     def remaining_budget(self):
         limit = self.runtime.config.max_tool_executions
@@ -710,45 +750,32 @@ class ToolRuntime:
                 self.runtime.redact_text(failure.detail),
                 failure.recovery,
             )
-        descriptor = {}
-        if len(safe_content.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
-            descriptor = self.runtime.dependencies.artifacts.write_tool_output(
-                _run_id(self.runtime), call.call_id, safe_content
-            )
         outcome = ToolOutcome(
             tool_call_id=call.call_id,
             tool_name=call.name,
             status=status,
             execution_state=execution_state,
             side_effect_state=side_effect_state,
-            content=model_tool_output(safe_content, descriptor),
+            content=safe_content,
             structured=safe_structured,
             failure=failure,
             affected_paths=tuple(affected_paths),
             effect_scope=effect_scope if side_effect_state != "none" else "none",
-            artifact_id=str(descriptor.get("artifact_id", "")),
         )
-        full_model_output = json.dumps(
+        full_output = json.dumps(
             outcome.model_payload(),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
-        if len(full_model_output.encode("utf-8")) <= DEFAULT_TOOL_PREVIEW_BYTES:
+        if len(full_output.encode("utf-8")) <= DEFAULT_TOOL_PREVIEW_BYTES:
             return outcome
 
-        model_descriptor = self.runtime.dependencies.artifacts.write_tool_output(
+        descriptor = self.runtime.dependencies.artifacts.write_tool_output(
             _run_id(self.runtime),
-            call.call_id + "_model",
-            full_model_output,
+            call.call_id,
+            full_output,
         )
-        outcome = replace(
-            outcome,
-            model_artifact_id=model_descriptor["artifact_id"],
-        )
-        projector = self.registry[call.name]["history_projection"]
-        preview = projector(call.args, outcome)
-        preview["outcome"]["content_preview"] = clip(safe_content, 2000)
         bounded_failure = (
             FailureInfo(
                 failure.code,
@@ -758,39 +785,26 @@ class ToolRuntime:
             if failure is not None
             else None
         )
-        outcome = replace(
-            outcome,
-            content=clip(safe_content, 2000),
-            structured=dict(preview["outcome"].get("structured", {})),
+        bounded_structured = {
+            key: value
+            for key, value in safe_structured.items()
+            if key in AUDIT_STRUCTURED_KEYS
+        }
+        return ToolOutcome(
+            tool_call_id=call.call_id,
+            tool_name=call.name,
+            status=status,
+            execution_state=execution_state,
+            side_effect_state=side_effect_state,
+            content=(
+                clip(safe_content, 2000)
+                + "\n[Full tool result: artifact_id="
+                + descriptor["artifact_id"]
+                + ". Use read_artifact to inspect it.]"
+            ),
+            structured=bounded_structured,
             failure=bounded_failure,
+            affected_paths=tuple(affected_paths),
+            effect_scope=effect_scope if side_effect_state != "none" else "none",
+            artifact_id=descriptor["artifact_id"],
         )
-        model_output = json.dumps(
-            {
-                "tool_call_id": call.call_id,
-                "tool_name": call.name,
-                **preview,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        if len(model_output.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
-            model_output = json.dumps(
-                {
-                    "tool_call_id": call.call_id,
-                    "tool_name": call.name,
-                    "status": outcome.status,
-                    "execution_state": outcome.execution_state,
-                    "side_effect_state": outcome.side_effect_state,
-                    "affected_paths": list(outcome.affected_paths),
-                    "failure_code": (
-                        outcome.failure.code if outcome.failure else ""
-                    ),
-                    "model_artifact_id": outcome.model_artifact_id,
-                    "projection_omitted": True,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        return replace(outcome, model_output=model_output)

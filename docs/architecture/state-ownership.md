@@ -21,7 +21,7 @@ Terminology in this document is strict:
 | Resume guidance | Append-only `user_guidance` Events | Latest guidance is projected once as the mandatory latest request; older guidance remains History |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
 | Runtime correction | Latest structured `model_instruction` until an accepted Tool or terminal action | Mandatory trusted control plus untrusted evidence across Provider resets |
-| Large output | Content Artifact or complete ToolOutcome model-envelope Artifact | Bounded model preview plus Run Log references |
+| Large output | One complete ToolOutcome Artifact | One bounded audit receipt plus a Run Log reference |
 | Child delegation | Child Run Logs and Patch files | One receipt per Child plus explicit integration state |
 
 ## Ownership across the three current paths

@@ -276,7 +276,6 @@ class AgentLoop:
             "use submit_final now with the available evidence."
         )
         agent.append_model_instruction(
-            "tool_execution_limit",
             budget_instruction,
         )
         return budget_instruction
@@ -284,7 +283,6 @@ class AgentLoop:
     def _handle_invalid_output(self, loop_state, turn):
         loop_state.invalid_output_count += 1
         self.agent.append_model_instruction(
-            "invalid_model_output",
             turn.action.content,
         )
         self._continue_provider(loop_state, turn, (turn.action.content,))
@@ -314,7 +312,6 @@ class AgentLoop:
         evidence,
     ):
         self.agent.append_model_instruction(
-            status,
             instruction,
             evidence=evidence,
         )

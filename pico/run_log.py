@@ -47,10 +47,8 @@ def _validate_model_instruction_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"code", "instruction", "evidence", "evidence_artifact_id"},
+        {"instruction", "evidence", "evidence_artifact_id"},
     )
-    if not isinstance(payload["code"], str) or not payload["code"].strip():
-        raise ValueError("model_instruction requires a code")
     if (
         not isinstance(payload["instruction"], str)
         or not payload["instruction"].strip()
@@ -349,10 +347,7 @@ class RunEvent:
     @property
     def artifact_id(self):
         outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(
-            outcome.get("model_artifact_id")
-            or outcome.get("artifact_id", "")
-        )
+        return str(outcome.get("artifact_id", ""))
 
     @property
     def covered_event_ids(self):
@@ -494,7 +489,6 @@ class RunLog:
 
     def append_model_instruction(
         self,
-        code,
         instruction,
         *,
         evidence="",
@@ -504,7 +498,6 @@ class RunLog:
         return self.append(
             "model_instruction",
             {
-                "code": str(code),
                 "instruction": str(instruction),
                 "evidence": str(evidence),
                 "evidence_artifact_id": str(evidence_artifact_id),

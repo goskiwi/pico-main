@@ -11,7 +11,6 @@ from pico.run_log import RunEvent, RunLog, replay_events
 from pico.run_projection import RunOutcome, RunProjection
 from pico.run_store import RunStore
 from pico.task_state import TaskContract
-from pico.tools import build_tool_registry
 
 READ_TASK = {
     "allows_workspace_mutation": False,
@@ -361,7 +360,7 @@ def test_tool_group_rejects_out_of_order_results(tmp_path):
             )
         )
     with pytest.raises(RuntimeError, match="pending tool calls"):
-        log.append_model_instruction("test_instruction", "cannot interleave")
+        log.append_model_instruction("cannot interleave")
 
 
 def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
@@ -526,7 +525,7 @@ def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
         "final_diff",
     }
     with pytest.raises(ValueError, match="after a terminal event"):
-        log.append_model_instruction("test_instruction", "late")
+        log.append_model_instruction("late")
 
 
 def test_stopped_run_may_omit_an_unavailable_final_diff(tmp_path):
@@ -574,7 +573,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_model_instruction("test_instruction", "historical fact that must be summarized")
+    log.append_model_instruction("historical fact that must be summarized")
     call = ToolCall(
         "update_working_state",
         {"add_next_steps": ["read"]},
@@ -592,7 +591,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
             "accepted",
         )
     )
-    log.append_model_instruction("test_instruction", "recent")
+    log.append_model_instruction("recent")
     seen = []
 
     def summarize(events):
@@ -616,9 +615,9 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     log.append_user(task_contract())
-    log.append_model_instruction("test_instruction", "historical " * 30)
-    recent_one = log.append_model_instruction("test_instruction", "recent one")
-    recent_two = log.append_model_instruction("test_instruction", "recent two")
+    log.append_model_instruction("historical " * 30)
+    recent_one = log.append_model_instruction("recent one")
+    recent_two = log.append_model_instruction("recent two")
 
     def wire_tokens(text):
         return 100 + len(text)
@@ -653,14 +652,14 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("test_instruction", "old")
-    recent = log.append_model_instruction("test_instruction", "recent")
+    old = log.append_model_instruction("old")
+    recent = log.append_model_instruction("recent")
 
     first = log.append_compaction(
         "first summary",
         [user.event_id, old.event_id],
     )
-    later = log.append_model_instruction("test_instruction", "later")
+    later = log.append_model_instruction("later")
     assert [event.event_id for event in RunHistory(log.events).active_events()] == [
         first.event_id,
         recent.event_id,
@@ -682,7 +681,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("test_instruction", "old")
+    old = log.append_model_instruction("old")
     calls = []
     for index in range(2):
         call = ToolCall("read_file", {"path": f"f{index}.py"}, f"call_{index}")
@@ -723,7 +722,7 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     log = RunLog("run", "task", "session", store)
     user = log.append_user(task_contract())
-    old = log.append_model_instruction("test_instruction", "old")
+    old = log.append_model_instruction("old")
     calls = (
         ToolCall("read_file", {"path": "a.py"}, "call_a"),
         ToolCall("read_file", {"path": "b.py"}, "call_b"),
@@ -743,14 +742,7 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
             )
         )
 
-    projectors = {
-        name: tool["history_projection"]
-        for name, tool in build_tool_registry().items()
-    }
-    rendered, _metadata = RunHistory(
-        log.events,
-        history_projectors=projectors,
-    ).render_recent_projection(
+    rendered, _metadata = RunHistory(log.events).render_recent_projection(
         retain_tokens=320,
         token_counter=len,
     )
@@ -763,74 +755,3 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
             "invalid boundary",
             [user.event_id, old.event_id, group.event_id],
         )
-
-
-def test_compact_tool_history_preserves_tool_owned_recovery_fields(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
-    log = RunLog("run", "task", "session", store)
-    log.append_user(task_contract())
-    calls = (
-        ToolCall(
-            "search",
-            {"pattern": "SECOND_NEEDLE", "path": "tests"},
-            "search_call",
-        ),
-        ToolCall(
-            "read_file",
-            {"path": "subject.py", "start_line": 40, "end_line": 80},
-            "read_call",
-        ),
-    )
-    log.append_tool_calls(calls)
-    outcomes = (
-        ToolOutcome(
-            "search_call",
-            "search",
-            "success",
-            "completed",
-            "none",
-            "x" * 2000,
-            structured={
-                "engine": "rg",
-                "match_count": 20,
-                "truncated": True,
-                "timed_out": False,
-            },
-        ),
-        ToolOutcome(
-            "read_call",
-            "read_file",
-            "success",
-            "completed",
-            "none",
-            "y" * 2000,
-            structured={
-                "path": "subject.py",
-                "start_line": 40,
-                "end_line": 80,
-                "total_lines": 200,
-                "has_more": True,
-                "truncated": False,
-                "revision": "sha256:" + "a" * 64,
-            },
-        ),
-    )
-    for call, outcome in zip(calls, outcomes):
-        log.append_tool_started(call, effect_scope="none", potential_effects=[])
-        log.append_tool_result(outcome)
-    projectors = {
-        name: tool["history_projection"]
-        for name, tool in build_tool_registry().items()
-    }
-
-    rendered, metadata = RunHistory(
-        log.events,
-        history_projectors=projectors,
-    ).render_recent_projection(retain_tokens=1000, token_counter=len)
-
-    assert metadata["retained_tokens"] <= 1000
-    assert "[tool receipt]" in rendered
-    assert "SECOND_NEEDLE" in rendered
-    assert '"start_line":40' in rendered
-    assert '"has_more":true' in rendered
-    assert "sha256:" + "a" * 64 in rendered

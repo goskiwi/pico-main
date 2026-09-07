@@ -288,9 +288,10 @@ def test_restored_child_constraints_do_not_require_an_execution_factory(tmp_path
         FakeModelClient([]), Workspace.build(root), parent.session, config=parent.config
     )
     assert resumed.dependencies.subagents is None
-    assert {"delegate", "integrate_child"} <= set(
-        resumed.tools.history_projectors()
-    )
+    assert {"delegate", "integrate_child"} <= set(resumed.tools.registry)
+    visible = {tool["name"] for tool in resumed.tools.model_action_tools()}
+    assert "delegate" not in visible
+    assert "integrate_child" not in visible
     record = resumed.run.projection.children.record(receipt["child_id"])
     assert record.completed().patch.integrated is False
     assert CompletionController(resumed).assess("done").status == "subtasks_incomplete"
