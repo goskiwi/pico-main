@@ -4,7 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from pico import ModelAction
-from pico.providers.clients import OpenAICompatibleModelClient
+from pico.providers.clients import OpenAICompatibleModelClient, ProviderHTTPError
 
 TOOLS = [
     {"name": "read_file"},
@@ -237,8 +237,9 @@ def test_sse_without_a_terminal_event_is_rejected():
     data = {"type": "response.in_progress", "response": {"status": "in_progress", "output": [
         {"type": "function_call", "name": "read_file", "call_id": "unsafe", "arguments": "{}"},
     ]}}
-    with pytest.raises(RuntimeError, match="SSE"):
+    with pytest.raises(ProviderHTTPError, match="SSE") as caught:
         client()._decode_response("data: " + json.dumps(data) + "\n\n", "text/event-stream")
+    assert caught.value.transient
 
 
 def test_sse_terminal_event_cannot_override_a_cancelled_resource():

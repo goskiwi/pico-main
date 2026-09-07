@@ -852,8 +852,10 @@ class OpenAICompatibleModelClient:
         if _is_sse_response(body_text, content_type):
             response_data = _extract_openai_response_from_sse(body_text)
             if response_data is None:
-                raise RuntimeError(
-                    "OpenAI-compatible error: SSE did not contain a response object"
+                raise ProviderHTTPError(
+                    "OpenAI-compatible error: SSE ended without a terminal "
+                    "response object",
+                    transient=True,
                 )
         else:
             try:
