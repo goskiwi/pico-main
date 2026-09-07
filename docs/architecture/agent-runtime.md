@@ -111,8 +111,8 @@ An active `reset()` first requests `user_reset` on the existing ExecutionContext
 | Active Run pointer | Session `active_run_id` | The installed `ActiveRunState`; `resumable` is derived from Task + RunLog + terminal/execution state |
 | Task contract | First `user_message.contract` | Goal, maximum write capability, write scope and change-verification requirement |
 | Current task working state | Successful `update_working_state` Tool transactions | Constraints, decisions and next steps prompt section |
-| Pending Runtime instruction | Latest structured `model_instruction` until the next accepted model action | Trusted code/instruction plus untrusted evidence projection |
-| Large redacted output | Content Artifact and complete model-envelope Artifact | Bounded ToolOutcome preview plus Run Log references |
+| Pending Runtime instruction | Latest structured `model_instruction` until the next accepted model action | Trusted code/instruction plus bounded untrusted evidence preview and Artifact |
+| Large redacted output | Content Artifact and complete model-envelope Artifact | Bounded ToolOutcome audit receipt plus Run Log references; verbose fields are not duplicated |
 | Child receipts | Child Run Logs and Patch files | One explicit Child receipt and integration state |
 
 `task_state.json`, `context.jsonl` and Checkpoint snapshots do not exist.

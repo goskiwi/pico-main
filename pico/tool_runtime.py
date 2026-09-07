@@ -69,19 +69,21 @@ class ToolRuntime:
         return {
             name: tool
             for name, tool in self._apply_allowlist(self.registry).items()
+            if tool.get("available", True)
             if self._tool_allowed_by_mode(name, policy[0])
         }
 
     def _build_registry(self):
         tools = toolkit.build_tool_registry()
-        if self.runtime.dependencies.check_runner is not None:
-            from .checks import build_tool_registry
+        from .checks import build_tool_registry as build_check_registry
+        from .subagents.tools import build_tool_registry as build_subagent_registry
 
-            tools.update(build_tool_registry())
-        if self.runtime.dependencies.subagents is not None:
-            from .subagents.tools import build_tool_registry
-
-            tools.update(build_tool_registry(self.runtime.dependencies.subagents))
+        tools.update(
+            build_check_registry(
+                available=self.runtime.dependencies.check_runner is not None
+            )
+        )
+        tools.update(build_subagent_registry(self.runtime.dependencies.subagents))
         return tools
 
     def _apply_allowlist(self, tools):
@@ -153,18 +155,10 @@ class ToolRuntime:
         return toolkit.build_action_tools(self._surface(self.effective_policy()))
 
     def history_projectors(self):
-        projectors = {
+        return {
             name: tool["history_projection"]
             for name, tool in self.registry.items()
         }
-        from .checks import HISTORY_PROJECTORS as CHECK_HISTORY_PROJECTORS
-        from .subagents.tools import (
-            HISTORY_PROJECTORS as SUBAGENT_HISTORY_PROJECTORS,
-        )
-
-        projectors.update(CHECK_HISTORY_PROJECTORS)
-        projectors.update(SUBAGENT_HISTORY_PROJECTORS)
-        return projectors
 
     def remaining_budget(self):
         limit = self.runtime.config.max_tool_executions
@@ -755,6 +749,21 @@ class ToolRuntime:
         projector = self.registry[call.name]["history_projection"]
         preview = projector(call.args, outcome)
         preview["outcome"]["content_preview"] = clip(safe_content, 2000)
+        bounded_failure = (
+            FailureInfo(
+                failure.code,
+                clip(failure.detail, 1000),
+                failure.recovery,
+            )
+            if failure is not None
+            else None
+        )
+        outcome = replace(
+            outcome,
+            content=clip(safe_content, 2000),
+            structured=dict(preview["outcome"].get("structured", {})),
+            failure=bounded_failure,
+        )
         model_output = json.dumps(
             {
                 "tool_call_id": call.call_id,

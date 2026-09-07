@@ -111,11 +111,12 @@ def _integrate(manager, args):
     )
 
 
-def build_tool_registry(manager):
+def build_tool_registry(manager=None):
     return {
         "delegate": {
             "args_schema": DelegateArgs,
             "risky": False,
+            "available": manager is not None,
             "description": (
                 "Run one synchronous Explore or Implement Child. Explore shares the "
                 "parent workspace read-only. Implement requires exact allowed write paths, "
@@ -128,6 +129,7 @@ def build_tool_registry(manager):
         "integrate_child": {
             "args_schema": IntegrateChildArgs,
             "risky": True,
+            "available": manager is not None,
             "workspace_mutating": True,
             "state_mutating": True,
             "potential_effects": lambda context, args: _integration_effects(manager, args),

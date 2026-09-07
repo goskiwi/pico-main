@@ -648,9 +648,10 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
     assert agent.run.projection.pending_runtime_instruction_event_id == (
         instruction.event_id
     )
-    assert agent.run.projection.pending_runtime_evidence == (
+    assert agent.run.projection.pending_runtime_evidence.startswith(
         "UNTRUSTED-VERIFIER-OUTPUT"
     )
+    assert agent.run.projection.pending_runtime_evidence_artifact_id
 
     call = ToolCall("read_file", {"path": "a.py"}, "read_after_instruction")
     run_log.append_tool_calls((call,))

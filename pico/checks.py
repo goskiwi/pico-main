@@ -1,6 +1,5 @@
 """Optional diagnostic checks supplied by a trusted isolated execution backend."""
 
-import hashlib
 from typing import Literal
 
 from pydantic import Field
@@ -18,16 +17,19 @@ class RunCheckArgs(ToolArgs):
 
 _BASE_RUN_CHECK_HISTORY_PROJECTION = history_projection(
     arg_fields=("kind", "timeout_seconds"),
-    result_fields=("kind", "exit_code", "stop_reason", "output_limited"),
+    result_fields=(
+        "purpose",
+        "code_preview",
+        "kind",
+        "exit_code",
+        "stop_reason",
+        "output_limited",
+    ),
 )
 
 
 def _run_check_history_projection(args, outcome):
-    projected = _BASE_RUN_CHECK_HISTORY_PROJECTION(args, outcome)
-    projected["args"]["code_sha256"] = hashlib.sha256(
-        str(args["code"]).encode("utf-8")
-    ).hexdigest()
-    return projected
+    return _BASE_RUN_CHECK_HISTORY_PROJECTION(args, outcome)
 
 
 HISTORY_PROJECTORS = {"run_check": _run_check_history_projection}
@@ -58,16 +60,19 @@ def _run(context, args):
                               "retry_after_change")
     return ToolRunnerResult(
         "\n".join(filter(None, [result.stdout, result.stderr])) or "Check produced no output.",
-        structured={"kind": args["kind"], "exit_code": result.returncode,
+        structured={"purpose": "Isolated diagnostic requested by the model",
+                    "code_preview": str(args["code"])[:1000],
+                    "kind": args["kind"], "exit_code": result.returncode,
                     "stop_reason": result.stop_reason, "output_limited": result.output_limited},
         failure=failure,
     )
 
 
-def build_tool_registry():
+def build_tool_registry(*, available=True):
     return {"run_check": {
         "args_schema": RunCheckArgs,
         "risky": False,
+        "available": bool(available),
         "description": (
             "Run a small Python or pytest diagnostic against current code in a fresh isolated "
             "container. Use it to test hypotheses and edge cases before submit_final, including "

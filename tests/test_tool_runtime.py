@@ -522,12 +522,12 @@ def test_tool_outputs_and_failures_are_redacted_before_leaving_executor(tmp_path
     assert secret not in persisted
     assert secret not in failed.content
     assert secret not in failed.failure.detail
-    assert secret not in large.structured["secret"]
+    assert "secret" not in large.structured
+    assert large.model_artifact_id
     assert secret not in artifact_content
     assert "<redacted>" in provider_result
     assert "<redacted>" in persisted
     assert "<redacted>" in artifact_content
-    assert large.structured["secret"] == "<redacted>"
 
 
 def test_large_tool_output_keeps_full_artifact_and_bounded_outcome(tmp_path):

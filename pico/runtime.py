@@ -19,9 +19,9 @@ from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
-from .tool_execution import DEFAULT_TOOL_PREVIEW_BYTES, model_tool_output
 from .tool_runtime import ToolRuntime
 from .verification import run_verification
+from .workspace import clip
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
@@ -113,13 +113,18 @@ class Pico:
         instruction = self.redact_text(str(instruction))
         evidence = self.redact_text(str(evidence))
         descriptor = {}
-        if len(evidence.encode("utf-8")) > DEFAULT_TOOL_PREVIEW_BYTES:
+        if evidence:
             descriptor = self.dependencies.artifacts.write_tool_output(
                 self.run.projection.run_id,
                 f"runtime_instruction_{len(run_log.events) + 1}",
                 evidence,
             )
-            evidence = model_tool_output(evidence, descriptor)
+            evidence = (
+                clip(evidence, 2000)
+                + "\n[Full untrusted evidence: artifact_id="
+                + descriptor["artifact_id"]
+                + ". Use read_artifact to inspect it.]"
+            )
         return run_log.append_model_instruction(
             code,
             instruction,
