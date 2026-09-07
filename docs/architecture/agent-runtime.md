@@ -225,7 +225,7 @@ session and rebuilds from RunLog before the next request. Changing only the requ
 existing continuation is not treated as a reliable capability boundary.
 
 AgentLoop caches only `(ModelPrompt, tool_names)` for continuation. Prompt build diagnostics
-(section budgets, token estimates and history projection details) remain available to the teaching
+(section budgets, token estimates and history-selection details) remain available to the teaching
 scripts and tests, but are not copied into the loop's cached state.
 
 After a complete Action transaction, the Provider client builds the actual next
@@ -248,7 +248,7 @@ that two-section summary plus coverage metadata; it never contains a seven-part 
 TaskContract, WorkingState and RunEvidence keep their existing owners. A Summary is
 committed only when replacing the covered prefix reduces the final escaped History Wire. Invalid,
 failed or non-shrinking summaries commit no event and use a bounded suffix of complete Tool
-Call/Result transactions. Each Tool Registry entry owns the compact fields needed to recover its
+Call/Result transactions. Each bounded ToolOutcome retains the machine fields needed to recover its
 operation; successful WorkingState updates remain in their canonical projection. A pending Runtime
 instruction keeps only Runtime-owned control text outside History, while verifier and Child evidence
 remain untrusted. Semantic Summary uses one strict request; any failure takes that existing
@@ -289,7 +289,7 @@ There is no `protocol_checked` switch or independent Store-level event-construct
 `load_run` reads once and restores protocol plus Projection in one replay; Runtime installs those
 returned objects directly. Store retains its last successfully read/written cursor for recovery.
 
-`RunHistory(events, history_projectors=...)` owns read-only history selection, rendering and compaction planning.
+`RunHistory(events)` owns read-only history selection, rendering and compaction planning.
 It neither appends events nor owns a second durable state. Read `PromptBuilder.build` for the
 complete path from current Runtime inputs through history selection and budgeting to ModelPrompt
 and diagnostics. `PromptBuilder.plan_compaction` directly owns the corresponding planning flow;

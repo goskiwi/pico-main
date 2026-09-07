@@ -38,7 +38,7 @@ SUMMARY_TOOL = {
 
 
 class SemanticCompactionError(RuntimeError):
-    """Semantic compaction could not produce an acceptable history projection."""
+    """Semantic compaction could not produce an acceptable history summary."""
 
 
 def _text_list(value, field_name):

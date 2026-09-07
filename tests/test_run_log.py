@@ -410,6 +410,11 @@ def test_run_log_repairs_only_incomplete_tail(tmp_path):
 
 
 def test_rejects_legacy_payload_shapes():
+    legacy_outcome = read_outcome().to_dict()
+    legacy_outcome.update({"model_output": "old", "model_artifact_id": ""})
+    with pytest.raises(ValueError, match="invalid ToolOutcome"):
+        ToolOutcome.from_dict(legacy_outcome)
+
     with pytest.raises(ValueError, match="unsupported Run Log kind"):
         RunEvent(
             "legacy",
@@ -435,6 +440,23 @@ def test_rejects_legacy_payload_shapes():
             "model_instruction",
             "now",
             {"content": "legacy"},
+        )
+
+    with pytest.raises(ValueError, match="invalid model_instruction payload"):
+        RunEvent(
+            "instruction",
+            2,
+            "run",
+            "task",
+            "session",
+            "model_instruction",
+            "now",
+            {
+                "code": "completion_blocked",
+                "instruction": "retry",
+                "evidence": "",
+                "evidence_artifact_id": "",
+            },
         )
 
     with pytest.raises(ValueError, match="unsupported Run Log kind"):
