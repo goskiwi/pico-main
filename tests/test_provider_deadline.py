@@ -285,3 +285,19 @@ def test_response_level_permanent_error_is_not_retried(monkeypatch):
         client._request_response({}, request_timeout=10)
 
     assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": "invalid_response_event_sequence"},
+        {"type": "upstream_error"},
+    ],
+)
+def test_incomplete_upstream_response_identifiers_are_transient(error):
+    body = json.dumps({"error": error})
+
+    with pytest.raises(ProviderHTTPError) as caught:
+        OpenAICompatibleModelClient._decode_response(body, "application/json")
+
+    assert caught.value.transient

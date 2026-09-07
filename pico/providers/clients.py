@@ -84,6 +84,7 @@ _CONTEXT_OVERFLOW_MESSAGE = (
 _HTTP_CONTEXT_MESSAGE_STATUSES = {400, 413, 414, 422}
 _TRANSIENT_PROVIDER_ERROR_CODES = {
     "internal_server_error",
+    "invalid_response_event_sequence",
     "overload",
     "overloaded",
     "rate_limit_error",
@@ -92,6 +93,7 @@ _TRANSIENT_PROVIDER_ERROR_CODES = {
     "service_unavailable",
     "temporarily_unavailable",
     "too_many_requests",
+    "upstream_error",
 }
 
 
