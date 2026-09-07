@@ -188,7 +188,7 @@ uv run pytest -q
 uv run ruff check pico applications tests scripts
 ```
 
-精简回归只保留 147 项面试 Core：AgentLoop、Completion、Context/Compaction、Provider
+精简回归只保留 148 项面试 Core：AgentLoop、Completion、Context/Compaction、Provider
 传输与协议、RunLog/Projection，以及路径安全。CLI 包装、评测脚本、自动 Git 交付、Child
 附录和重复生产边界矩阵不再维护独立测试；Day 1–7 与保留的真实 LLM 报告用于演示这些外围路径。
 外部仓库题库、Docker 判分、成绩统计及旧审查复现脚本已移除。

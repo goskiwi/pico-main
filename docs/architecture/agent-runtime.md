@@ -305,9 +305,11 @@ reset, Compaction attempt and retry; a second consecutive overflow propagates.
 
 Prompt construction is read-only. Before a fresh build, AgentLoop may explicitly prepare
 Compaction: an isolated Provider session summarizes historical facts into exactly two semantic
-sections, `Progress` and `Critical Context`. Its input is escaped compact JSON; Tool Results use
-the same bounded model serializer, with Call identity and Artifact references. The summarizer
-does not reload oversized structured facts into its context. The persisted Compaction Fact contains
+sections, `Progress` and `Critical Context`. Its input is a separate semantic projection over the
+durable facts: completed Tool bookkeeping such as Call IDs, read revisions and pagination statistics
+stays in RunLog, while the summarizer receives tool arguments, actual result content, failures,
+affected paths and Artifact references. Successful effect-free results omit redundant status fields.
+The persisted Compaction Fact contains
 that two-section summary plus coverage metadata; it never contains a seven-part generated summary.
 TaskContract, WorkingState and RunEvidence keep their existing owners. A Summary is
 committed only when replacing the covered prefix reduces the final escaped History Wire. Invalid,

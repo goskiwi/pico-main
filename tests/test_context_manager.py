@@ -1009,6 +1009,72 @@ def test_compaction_propagates_execution_cancellation(tmp_path):
     assert not any(event.kind == "compaction" for event in run_log.events)
 
 
+def test_compaction_source_separates_semantics_from_transaction_metadata():
+    outcome = ToolOutcome(
+        tool_call_id="call_transport_noise",
+        tool_name="read_file",
+        status="success",
+        execution_state="completed",
+        side_effect_state="none",
+        content=(
+            "# evidence/segment_03.md\n"
+            "revision: sha256:transport-only\n"
+            "3: Critical fact: Every run of internal whitespace must become "
+            "one ASCII hyphen."
+        ),
+        structured={
+            "path": "evidence/segment_03.md",
+            "revision": "sha256:transport-only",
+            "start_line": 1,
+            "end_line": 79,
+            "total_lines": 79,
+        },
+    )
+    source = CompactionSummarizer._source(
+        [
+            SimpleNamespace(
+                kind="tool_call",
+                payload={
+                    "name": "read_file",
+                    "args": {
+                        "path": "evidence/segment_03.md",
+                        "start_line": 1,
+                        "end_line": 200,
+                    },
+                    "call_id": "call_transport_noise",
+                },
+            ),
+            SimpleNamespace(
+                kind="tool_result",
+                payload={"outcome": outcome.to_dict()},
+            ),
+        ]
+    )
+    records = json.loads(source)
+
+    assert records[0] == {
+        "kind": "tool_call",
+        "tool": "read_file",
+        "arguments": {
+            "path": "evidence/segment_03.md",
+            "start_line": 1,
+            "end_line": 200,
+        },
+    }
+    assert records[1] == {
+        "kind": "tool_result",
+        "tool": "read_file",
+        "content": (
+            "# evidence/segment_03.md\n"
+            "3: Critical fact: Every run of internal whitespace must become "
+            "one ASCII hyphen."
+        ),
+    }
+    assert "call_transport_noise" not in source
+    assert "sha256:transport-only" not in source
+    assert "total_lines" not in source
+
+
 def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)

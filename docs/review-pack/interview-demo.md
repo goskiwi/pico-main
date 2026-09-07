@@ -138,6 +138,8 @@ Prompt build 只读；Compaction 在 build 前准备，独立 LLM 的输出与�
 TaskContract Goal、WorkingState Constraints/Decisions/Next Steps、这两段 Summary 与
 RunEvidence 组合成七类 Effective Recovery Context。七类只是逐项标来源的教学/观测视图，
 不是七段 LLM 输出，不是第二状态，也不参与 Completion Gate。
+摘要输入不是 RunLog 的原样序列化：完成事务的 Call ID、revision 和分页统计留在机器事实中，
+模型只看工具参数、实际结果内容、失败、受影响路径和 Artifact 引用。
 Summary 是当前预算允许时优先保留的派生历史，不是恢复硬依赖；更小预算可以省略它并保留
 近期完整事务。取消和 deadline 也不会被包装成摘要失败。
 

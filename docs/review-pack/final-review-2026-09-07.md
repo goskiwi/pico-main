@@ -40,6 +40,55 @@ output 计量）和合法 message preamble 回放均有正式测试。
 7 个 Core 测试文件、**147 项测试**，8.88 秒全部通过。裁剪不删除或弱化对应实现；历史章节中
 出现的旧测试名只记录当时的修复证据，不表示它仍属于当前精简套件。
 
+对同一当前 commit 再运行一次 Compaction 后，模型恢复了多调用分组，但 Summary 仍只复述
+call_id、read revision、行数与状态，连续第二次遗漏已覆盖 `segment_03` 中的 ASCII hyphen
+事实。这把问题从单次模型轨迹收敛为输入投影缺陷：Compaction 把机器执行账本和任务语义混在
+同一摘要源中，而 Prompt 又要求保留 identifiers。
+
+修复没有增加摘要重试或状态：`CompactionSummarizer._source()` 改为独立语义投影。RunLog 与
+ToolOutcome 继续保存完整 Call ID、revision、structured 分页字段；摘要输入删除这些已完成事务
+的传输账本，只保留工具参数、实际结果内容、失败、受影响路径和 Artifact 引用。真实失败 Run
+重放确认 hyphen 原文仍在新输入中，而 call_id、SHA 和 `total_lines` 不再出现。
+
+修复后的干净临时快照 `7ca204a44026840c328f86bcb3d6aa347b3dff5a` 使用同一
+`gpt-5.6-luna`、endpoint、temperature 和场景重新验收：6 次模型请求、1 次 Tool Call group、
+1 次 Compaction、1 次 Provider reset、12 份证据按序各读一次、WorkingState 保留、单次修改，
+Runtime 与隐藏验证全部通过；Summary 明确保留 ASCII hyphen 事实。工件位于
+`/tmp/pico-compaction-semantic-20260907.AcJns2/artifacts/real-compaction.json`。
+
+当前精简套件新增一项语义投影回归，共 **148 passed，8.53 秒**；Ruff、compileall 与
+`git diff --check` 通过。
+
+## 最终外部仓库长任务
+
+最终测试选择真实开源仓库
+[more-itertools](https://github.com/more-itertools/more-itertools) 的 v10.3.0 commit
+`7e46c39ea5d73b80f36ef2faf266e10108029b02`，实现历史
+[Issue #889](https://github.com/more-itertools/more-itertools/issues/889)：将
+`triplewise()` 的嵌套 `pairwise()` 实现替换为三个错位 `tee()` 迭代器并直接 `zip()`，保持
+公开 API、惰性、顺序、短输入行为、文档示例和类型契约。
+
+基线实际运行上游 **801 tests passed，1 skipped**；行为测试本来通过，但 Issue #889 实现检查
+失败，确认不是已修复仓库。任务使用 18k 受控 Context window，要求先检查项目配置、测试说明、
+实现、类型声明、API 文档和版本历史，再记录 WorkingState、修改并由 Runtime 验证。
+
+首次配置了 24 个工具执行上限，模型恰好把全部额度用于探索，因此该次结果不计入验收。移除
+这个人为上限后，同一 Run 完成 34 个工具结果和 3 次 Compaction；随后 Provider 在传输约
+4 MB 时 `IncompleteRead`。Pico 保留未完成 Run，新的 Runtime 从同一 Run resume，没有从头
+创建任务。最终累计结果：
+
+- 12 次模型请求，38 个工具结果，6 个多调用 Tool group；
+- 3 次 Compaction、3 次 Provider session reset、1 次 `run_resumed`；
+- 一个非法 Search pattern 和第一次 Edit `text_not_found` 均无副作用，模型随后修正；
+- 只修改 `more_itertools/recipes.py`，补丁与上游 Issue 目标等价；
+- Runtime Verification passed，独立完整上游 **801 tests passed，1 skipped**；
+- Issue #889 的结构与行为检查通过，Run 最终 `completed/final_answer_returned`。
+
+完整 Run Log 位于
+`/tmp/pico-longtask-more-itertools.MFXhqa/repo/.pico/runs/run_20260907-142656-3448ef/events.jsonl`，
+测试仓库 Diff 保留在 `/tmp/pico-longtask-more-itertools.MFXhqa/repo`。Provider Key 未复制到
+仓库、Run Log 或报告。
+
 ## 修复后的复审与同类项目对照
 
 复审重跑了 331 项测试（40.96 秒）和七个演示，全部通过；随后对相邻路径作针对性复现，确认以下遗漏。修改前的新回归为 15 failed、4 passed，正常对照保持通过。

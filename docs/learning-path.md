@@ -204,7 +204,8 @@ Subagent 实现。
    完整 Call/Result；`tool_started` 仍只存在于 durable log。
 3. **Context Pressure / Semantic Success**：注入确定性 Summarizer，比较物理原 Events、
    Compaction Fact 与模型可见的 RunLog History View；Summary 始终只有 `Progress` 与
-   `Critical Context`，它不是第二个 `RunProjection`。
+   `Critical Context`，它不是第二个 `RunProjection`。摘要输入使用独立语义投影：RunLog 继续
+   保存 Call ID、revision 和分页统计，Summarizer 只接收继续任务所需的实际结果内容与失败／副作用。
 
 第三段最后会额外打印七类 **Effective Recovery Context**：Goal、Constraints & Preferences、
 Progress、Key Decisions、Next Steps、Critical Context、Execution Evidence，并逐项标明来自
