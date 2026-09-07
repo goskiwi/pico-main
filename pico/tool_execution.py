@@ -1,42 +1,5 @@
 """Pure value helpers used by :mod:`pico.tool_runtime`."""
 
-DEFAULT_TOOL_PREVIEW_BYTES = 12 * 1024
-
-
-def _complete_lines_within_budget(lines, budget):
-    selected = []
-    used = 0
-    for line in lines:
-        encoded_size = len(line.encode("utf-8")) + (1 if selected else 0)
-        if used + encoded_size > budget:
-            break
-        selected.append(line)
-        used += encoded_size
-    return selected
-
-
-def model_tool_output(content, descriptor):
-    content = str(content)
-    total_bytes = len(content.encode("utf-8"))
-    limit = DEFAULT_TOOL_PREVIEW_BYTES
-    if total_bytes <= limit:
-        return content
-    if not descriptor.get("artifact_id"):
-        raise RuntimeError("truncated tool output requires an artifact")
-    lines = content.splitlines()
-    selected = _complete_lines_within_budget(lines, limit - 512)
-    start_line = 1
-    end_line = len(selected)
-    preview = "\n".join(selected)
-    notice = (
-        f"[Output truncated: showing lines {start_line}-{end_line} of {len(lines)}; "
-        f"full_bytes={total_bytes}; artifact_id={descriptor['artifact_id']}. "
-        "Use read_artifact with this artifact_id and offset=0 to inspect the full "
-        "output in 8 KiB pages.]"
-    )
-    return "\n".join(part for part in (preview, notice) if part)
-
-
 def intersect_write_scopes(contract_paths, policy_paths):
     if contract_paths is None:
         return policy_paths

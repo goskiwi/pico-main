@@ -102,21 +102,39 @@ class SessionStore:
         )
 
     def latest_active(self, run_store):
-        """Return the newest Session that still points at an unfinished Run."""
+        """Return the Session with the newest pointed or orphaned unfinished Run."""
 
         files = [path for path in self.root.glob("*.json") if not path.is_symlink()]
-        files.sort(
-            key=lambda path: (path.stat().st_mtime_ns, path.name),
-            reverse=True,
-        )
+        candidates = []
         for path in files:
             session = self.load(path.stem)
+            run_log = None
             if session.active_run_id:
-                _log, projection = run_store.load_run(session.active_run_id)
-                if projection.session_id != session.id:
+                run_log = run_store.load_run(session.active_run_id)
+                if run_log.projection.session_id != session.id:
                     raise ValueError("active Run does not belong to this Session")
-                if projection.terminal:
+                if run_log.projection.terminal:
                     session.set_active_run("")
-                    continue
-                return path.stem
-        return None
+                    run_log = run_store.find_active_run(session.id)
+            else:
+                run_log = run_store.find_active_run(session.id)
+            if run_log is None:
+                continue
+            candidates.append(
+                (
+                    run_log.events[-1].timestamp,
+                    run_log.run_id,
+                    session.id,
+                    session,
+                    run_log,
+                )
+            )
+        if not candidates:
+            return None
+        _timestamp, _run_id, _session_id, session, run_log = max(
+            candidates,
+            key=lambda item: item[:3],
+        )
+        if session.active_run_id != run_log.run_id:
+            session.set_active_run(run_log.run_id)
+        return session.id

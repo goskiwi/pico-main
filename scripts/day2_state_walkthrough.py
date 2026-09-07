@@ -88,7 +88,8 @@ def fact_projection_experiment(root):
     )
     run_id = outcome.run_id
     store = agent.dependencies.run_store
-    log, loaded = store.load_run(run_id)
+    log = store.load_run(run_id)
+    loaded = log.projection
     events = log.events
     replayed = store.replay(run_id)
 
@@ -169,7 +170,7 @@ def fact_projection_experiment(root):
         },
     )
     print_section(
-        "A2. Live、load_run 与 replay 得到同一 Projection",
+        "A2. Live、load_run 与 replay 得到相同 Projection 状态",
         {
             "all_summaries_equal": True,
             "run_cursor": replayed.last_cursor.to_dict(),
@@ -261,6 +262,7 @@ def tool_group_prefix_experiment(root):
                 call,
                 effect_scope="none",
                 potential_effects=[],
+                operation={},
             )
     for call in calls:
         agent.run.run_log.append_tool_result(
@@ -306,6 +308,7 @@ def interrupted_read_experiment(root):
             call,
             effect_scope="none",
             potential_effects=[],
+            operation={},
         )
     session_id = original.session.id
     loaded_session = SessionStore(root / ".pico" / "sessions").load(session_id)
@@ -344,7 +347,8 @@ def interrupted_read_experiment(root):
     assert outcome.run_id == run_id
     assert outcome.status == "completed"
 
-    log, projection = resumed.dependencies.run_store.load_run(run_id)
+    log = resumed.dependencies.run_store.load_run(run_id)
+    projection = log.projection
     events = log.events
     recovered_result = next(
         event

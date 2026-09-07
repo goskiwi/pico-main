@@ -6,6 +6,7 @@
 """
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -14,6 +15,7 @@ import textwrap
 from pathlib import Path
 
 from .config import load_project_env, provider_env
+from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .run_store import RunStore
 from .runtime import Pico, PicoConfig, SessionStore
@@ -70,6 +72,16 @@ def detect_verification_command(repo_root):
 def resolve_verification_command(repo_root, explicit_command):
     explicit = str(explicit_command or "").strip()
     return explicit or detect_verification_command(repo_root)
+
+
+def _terminal_approval(name, args):
+    try:
+        answer = input(
+            f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
+        )
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
 
 
 def _effective_model(args):
@@ -144,6 +156,10 @@ def build_welcome(agent, model):
         right = cell(right_label, right_value, right_width)
         return f"| {left}{' ' * gap}{right} |"
 
+    observation = agent.workspace.observe(
+        command_runner=agent.dependencies.command_runner,
+        execution_context=ExecutionContext.root(max_seconds=5),
+    )
     line = divider("=")
     rows = [center(text) for text in WELCOME_ART]
     rows.extend(
@@ -157,7 +173,7 @@ def build_welcome(agent, model):
                 "WORKSPACE  "
                 + middle(agent.workspace.cwd, inner - 11)
             ),
-            pair("MODEL", model, "BRANCH", agent.workspace.current_branch()),
+            pair("MODEL", model, "HEAD", observation.head),
             pair(
                 "MODE",
                 agent.config.mode,
@@ -226,6 +242,7 @@ def build_agent(args):
         workspace=workspace,
         config=config,
         subagent_model_client_factory=child_model_client_factory,
+        approval_handler=_terminal_approval,
         session=session,
     )
 

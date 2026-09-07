@@ -5,12 +5,13 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import ToolFailureError
-from .persistence import atomic_replace_bytes
+from .persistence import atomic_replace_bytes, write_once_bytes
 
 ABSENT_REVISION = "absent"
 MAX_DIAGNOSTIC_LOCATIONS = 8
@@ -35,12 +36,14 @@ def content_revision(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def file_revision(path: Path) -> str:
+def file_revision(path: Path, *, execution_context=None) -> str:
     if not path.is_file():
         return ABSENT_REVISION
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if execution_context is not None:
+                execution_context.check_active()
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
 
@@ -263,11 +266,12 @@ class WorkspaceMutationService:
         logical_path = target.relative_to(self.root)
         payload = str(content).encode("utf-8")
         with self._lock:
-            actual = file_revision(target)
-            if actual != ABSENT_REVISION:
-                raise ExistingFileRequiresEdit(logical_path, actual)
+            if not write_once_bytes(target, payload, mode=0o644):
+                raise ExistingFileRequiresEdit(
+                    logical_path,
+                    file_revision(target),
+                )
             after = content_revision(payload)
-            self._commit(target, logical_path, payload, ABSENT_REVISION)
         return MutationReceipt(
             before_revision=ABSENT_REVISION,
             after_revision=after,
@@ -290,22 +294,32 @@ class WorkspaceMutationService:
             if actual != expected_revision:
                 raise RevisionConflict(logical_path, expected_revision, actual)
             text = raw.decode("utf-8")
-            count = text.count(str(old_text))
-            if count == 0:
+            # read_file presents LF text. Match those logical line breaks against
+            # the original bytes, without normalizing the entire file on write.
+            old_text = str(old_text).replace("\r\n", "\n")
+            new_text = str(new_text).replace("\r\n", "\n")
+            pattern = re.compile(r"\r?\n".join(re.escape(line) for line in old_text.split("\n")))
+            match = pattern.search(text)
+            if match is None:
                 raise TextNotFound(
                     logical_path,
                     actual,
-                    current_text=text,
+                    current_text=text.replace("\r\n", "\n"),
                     old_text=old_text,
                 )
-            if count > 1:
+            if pattern.search(text, match.end()) is not None:
                 raise AmbiguousTextMatch(
                     logical_path,
                     actual,
-                    current_text=text,
+                    current_text=text.replace("\r\n", "\n"),
                     old_text=old_text,
                 )
-            payload = text.replace(str(old_text), str(new_text), 1).encode("utf-8")
+            payload = raw
+            if old_text != new_text:
+                ending = re.search(r"\r?\n", text[match.start():]) or re.search(r"\r?\n", text)
+                newline = ending.group() if ending is not None else "\n"
+                replacement = new_text.replace("\n", newline)
+                payload = (text[:match.start()] + replacement + text[match.end():]).encode("utf-8")
             after = content_revision(payload)
             if actual != after:
                 self._commit(target, logical_path, payload, expected_revision)

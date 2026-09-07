@@ -12,15 +12,17 @@
 
 Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话历史。恢复输入先作为 `user_guidance` Fact 持久化。Active Run 只按 call ID 取回 Run Log 中的原始 ToolCall；副作用前 fsync `tool_started`，记录精确潜在影响路径及 before revision；完成后 fsync `tool_result`。恢复时分析 Run Log tail，对未完成工具按路径 revision 生成 not-started、error、partial 或 unknown 结果，绝不盲目重放非幂等副作用。
 
-首个 User Event 保存 Runtime-owned TaskContract。用户显式选择 Ask、Code 或 Auto；Runtime 不调用隐藏分类模型。Contract 保存 Goal、创建时的最大写能力、写入范围和变更验证要求。Resume 可以收窄但不能扩大原 Contract；Auto Approval 必须由本次启动明确选择。WorkingState 继续使用原有 add/remove 增量协议。
+首个 User Event 保存 Runtime-owned TaskContract。用户显式选择 Ask、Code 或 Auto；Runtime 不调用隐藏分类模型。Contract 保存 Goal、创建时的最大写能力、写入范围和最低变更验证要求。Resume 可以收窄写能力但不能扩大原 Contract；当前启动配置的 Verification 可以收紧完成要求，但缺失的命令不能解除 Contract 已保存的要求。Prompt 通过同一个纯解析规则展示当前验证要求；每次 final submission 再冻结一个 `ResolvedVerificationPolicy` 供这次验证和完成判断使用。Auto Approval 必须由本次启动明确选择。WorkingState 继续使用原有 add/remove 增量协议。
 
 ## 长上下文治理
 
 稳定角色、执行、工具、WorkingState 与完成规则进入 Responses `instructions`；首轮动态 `input` 依次包含 Runtime task policy、root→CWD 的独立 `repository_instructions`、Task Request 和非空的有界不可信 Context。AGENTS.md 属于可覆盖的项目指令，不是 system policy，也不参加 History Compaction；当前用户请求冲突时优先。恢复输入从物理 Run Log 中最新的 `user_guidance` Fact 投影为最后的 latest request，因此该事件被 Compaction 覆盖后仍不会丢失；RepoMap 由 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径共同排序，History 位于当前 WorkingState 之前。空 Repository Instructions、RepoMap、WorkingState 和 History 不渲染，Function Schema 只进入原生 `tools`；每轮直接发送当前 TaskContract 与工具预算允许的 Schema，final-only 边界缩成 `submit_final` 并重建 Provider Session，不维护 Host capability、Prompt Cache Key 或动态 Provider Overhead。Prompt build 保持只读。Compaction 的持久覆盖不切开一次模型响应，模型可见 History 则按每个完成的 Call/Result 独立投影和计入预算；独立模型 Session 与持久 Summary 始终只包含历史 Progress 与 Critical Context。Summary 失败、无法缩短或最终 Wire 编码放不下时不提交事件，使用严格受预算约束的近期 Call 事实或精简执行收据继续。
 
+Workspace Context 来自当前 `WorkspaceObservation`：区分 Git、普通目录和 Git 不可用，表达 branch/detached/unborn、dirty 分类计数、总 Diff 行数以及带显式截断标志的路径列表；不预加载普通项目文档和 commit 历史。普通 Tool continuation 复用已发送的 Prompt snapshot。
+
 ## 工具安全
 
-建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每次结构化修改保存匹配 before revision 的事务前像，Run 保留首次前像用于最终 Diff，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置可以省略无法可信生成的 final_diff 后受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
+建立 Registry、Surface、Schema、Policy、Approval 五阶段准入；`write_file` 通过 hard-link 原子发布且只创建新文件，`edit_file` 使用 expected revision 修改已有文件。提交点再次复验 revision，冲突驱动模型重新读取和修复；未找到返回相近当前代码，多处匹配返回行号，三类失败都给出下一次 `read_file` 参数。ToolRuntime 对可枚举路径统一观察 before/after 并生成 transition，成功 Runner 不再自报 Workspace Effect。`run_command` 只在 Code 模式用于用户审批的本机诊断；Auto 不暴露通用 Shell。它和 CLI 自动发现或显式覆盖的 Runtime Verification 共用 HEAD、staged/unstaged diff、非忽略 untracked revision 组成的 Repository 净状态观察。Git 子进程通过同一个 `CommandRunner` 保留原始字节，非 Git 遍历和文件 revision 也检查同一个 `ExecutionContext`，因此整段观察服从父 Turn 的取消信号和绝对 deadline。Git 可见变化因缺少可信 Run-start preimage 而形成 `unknown` 并阻止完成；ignored、Workspace 外、网络与后台副作用不在保证内。每次结构化修改保存匹配 before revision 的事务前像，Run 保留首次前像用于最终 Diff，成功终态生成真实净 Unified Diff；若外部漂移，成功提交被阻止，而取消/重置可以省略无法可信生成的 final_diff 后受控收尾。命令执行仅适用于可信仓库，不可信代码必须使用外部 CI、VM 或容器隔离。
 
 文件读取、搜索和文本修改不设固定的整文件大小门槛；读取保留行数与输出字节预算，搜索保留时间、结果数与输出预算，截断会明确反馈。读取按块扫描并计算全文 revision，因此读取少量行仍有全文扫描成本。Preimage 从源文件分块复制原始字节，沿用已有 Artifact 描述与完整性校验，备份未成功不进入修改；不会反复将全文解码、编码来保存备份。文本替换与 Diff 仍处理完整文本，大文件的内存和耗时是已知边界，不宣称恒定内存或任意规模都能快速完成。
 
@@ -30,7 +32,7 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 
 ## 多 Agent
 
-Parent 使用单个 `delegate` 创建一个 Explore 或 Implement Child，再用 `integrate_child` 按 Child ID 显式集成。Explore 只读且不创建 Worktree；Implement 必须声明精确写路径并始终在独立 Git Worktree 中运行。Child 具有独立 Session、Run Log 与 Artifact namespace，且不能嵌套委派。Implement 不自动 merge；集成时复验 Parent base，在临时 Worktree 应用 Patch 并运行固定 Verification，全部通过后才写回 Parent。
+Parent 使用单个 `delegate` 创建一个 Explore 或 Implement Child，再用 `integrate_child` 按 Child ID 显式集成。ToolRuntime 在 Runner 前把 `ChildLaunch` 写入 Parent `tool_started.operation`，因此 Child ID、base、固定 verifier 和计划 Worktree 路径先于资源存在。Explore 只读且不创建 Worktree；Implement 必须声明精确写路径并始终在独立 Git Worktree 中运行。Child 具有独立 Session、Run Log 与 Artifact namespace，且不能嵌套委派。Implement 不自动 merge；集成时复验 Parent base，在临时 Worktree 应用 Patch 并运行固定 Verification，全部通过后才写回 Parent。Parent 在 delegate Result 前中断时，恢复以同一个 ID 记录 `child_interrupted`，清理计划 Worktree，并明确丢弃而不是接纳或重跑这次同步 Child；Patch 持久化后正常 Child Worktree 即被清理。
 
 ## 评测与审计
 
@@ -44,7 +46,7 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 是展示格式，不是额外的运行时对象。
 
 每个工具只在一处声明 Schema、权限、校验、Runner、effects、concurrency 与 availability；可选工具始终进入
-完整 Registry，执行器是否安装只影响当前 Tool Surface。History 直接渲染持久化的有界 ToolOutcome。工具默认独占，
+完整 Registry，执行器是否安装只影响当前 Tool Surface。History 使用 ToolOutcome 唯一的有界模型输出方法；持久化的结构化恢复事实保持精确。工具默认独占，
 明确标记的读取工具可以并行；同一响应按连续并行段和独占屏障调度，每个调用独立准入并按原序记账。PromptBuilder 是唯一 Prompt 对象，
 预算／组装使用无独立状态的函数，压缩计划由 RunLifecycle 提交。ChildState 从 Parent 事件
 派生，Completion 不再依赖 Child 执行器是否安装；Runner 仅保留执行与 Worktree 资源。
@@ -52,8 +54,9 @@ TaskState、TaskLifecycle、RunIdentity 及独立的协议状态副本。RunLog 
 跨源凭据转发、暂存重命名、多个 Child 顺序集成与中断应用确认已由全链路修复覆盖。
 单 Run Log 仍采用单写者模型；没有引入通用多写者或硬实时执行框架。
 
-工具表、单次与分组调用准入从当前 Config 派生，Context 的默认预算同样读取当前 Config，
-不存在“Config 已更新但消费者仍用初始化副本”的行为。验证额外变更进入持久 Evidence，
+每个模型轮从当前 Config、Contract、已安装执行器和预算解析一个 ResolvedToolSurface；Provider
+Policy 文本、Schema 预算、响应解析与分组执行共享该对象；PromptBuilder 不重新读取 Tool policy。
+验证额外变更进入持久 Evidence，
 不能靠再次提交绕过。Git 交付按命令禁用 hooks；Child Git 操作使用 Parent 剩余时间。
 Provider 保留 urllib 代理与同源重定向，拒绝跨源跳转，请求、SSE/JSON 解码和临时错误重试共享同一 deadline；
 HTTP 200 响应中的 `server_error/overloaded` 与 HTTP 429/5xx 使用同一分类，永久请求错误与 Context Overflow 不重试。

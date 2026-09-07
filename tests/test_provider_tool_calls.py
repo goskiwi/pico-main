@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 from pico import ModelAction
+from pico.execution import ExecutionContext
 from pico.providers.clients import OpenAICompatibleModelClient, ProviderHTTPError
 
 TOOLS = [
@@ -35,6 +36,20 @@ def client():
         "secret",
         None,
         3,
+    )
+
+
+def execution_context():
+    return ExecutionContext.root(max_seconds=30)
+
+
+def complete_action(instance, input_text="inspect"):
+    return instance.complete_action(
+        input_text,
+        64,
+        instructions="rules",
+        action_tools=TOOLS,
+        execution_context=execution_context(),
     )
 
 
@@ -80,17 +95,13 @@ def final_response():
 def test_provider_parses_ordered_multi_call_response():
     captured = {}
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
         captured.update(json.loads(request.data))
         return multi_call_response()
 
     with patch("pico.providers.clients._open_response", urlopen):
-        action = client().complete_action(
-            "inspect",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        action = complete_action(client())
 
     assert action.kind == "tool"
     assert [(call.call_id, call.name) for call in action.tool_calls] == [
@@ -104,28 +115,33 @@ def test_provider_returns_all_group_results_in_one_continuation():
     instance = client()
     requests = []
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
         requests.append(json.loads(request.data))
         return multi_call_response() if len(requests) == 1 else final_response()
 
     with patch("pico.providers.clients._open_response", urlopen):
-        action = instance.complete_action(
-            "inspect",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        action = complete_action(instance)
         assert len(action.tool_calls) == 2
         instance.record_action_results(("result-a", "result-b"))
-        final = instance.complete_action(
-            "replacement ignored",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        final = complete_action(instance, "replacement ignored")
 
     assert final == ModelAction.final("done")
-    assert requests[1]["input"][1:4] == json.loads(multi_call_response().payload)["output"]
+    assert requests[1]["input"][1:4] == [
+        {"type": "reasoning", "summary": [], "encrypted_content": "synthetic"},
+        {
+            "type": "function_call",
+            "call_id": "call_a",
+            "name": "read_file",
+            "arguments": '{"path":"a.py"}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_b",
+            "name": "search",
+            "arguments": '{"path":".","pattern":"needle"}',
+        },
+    ]
     outputs = [
         item
         for item in requests[1]["input"]
@@ -137,15 +153,69 @@ def test_provider_returns_all_group_results_in_one_continuation():
     ]
 
 
+def test_provider_normalizes_assistant_preamble_before_tool_replay():
+    instance = client()
+    requests = []
+    response = Response({
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_preamble",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "I will inspect the file.",
+                    "logprobs": [],
+                }],
+                "provider_metadata": {"ignored": True},
+            },
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_read",
+                "arguments": '{"path":"README.md"}',
+            },
+        ],
+    })
+
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
+        requests.append(json.loads(request.data))
+        return response if len(requests) == 1 else final_response()
+
+    with patch("pico.providers.clients._open_response", urlopen):
+        action = complete_action(instance)
+        instance.record_action_results(("observed",))
+        assert complete_action(instance) == ModelAction.final("done")
+
+    assert action.kind == "tool"
+    assert requests[1]["input"][1:3] == [
+        {
+            "type": "message",
+            "id": "msg_preamble",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "I will inspect the file.",
+                "annotations": [],
+            }],
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_read",
+            "name": "read_file",
+            "arguments": '{"path":"README.md"}',
+        },
+    ]
+
+
 def test_provider_refuses_partial_group_results():
     instance = client()
     with patch("pico.providers.clients._open_response", return_value=multi_call_response()):
-        instance.complete_action(
-            "inspect",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        complete_action(instance)
 
     try:
         instance.record_action_results(("only-one-result",))
@@ -176,12 +246,7 @@ def test_provider_returns_correction_for_missing_group_call_name():
         }
     )
     with patch("pico.providers.clients._open_response", return_value=malformed):
-        action = client().complete_action(
-            "inspect",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        action = complete_action(client())
 
     assert action.kind == "invalid"
     assert action.content == "function call is missing a name"
@@ -208,12 +273,7 @@ def test_provider_rejects_unknown_call_anywhere_in_group():
         }
     )
     with patch("pico.providers.clients._open_response", return_value=malformed):
-        action = client().complete_action(
-            "inspect",
-            64,
-            instructions="rules",
-            action_tools=TOOLS,
-        )
+        action = complete_action(client())
 
     assert action.kind == "invalid"
     assert action.content == "unknown function call: undeclared_tool"
@@ -227,7 +287,7 @@ def test_nonterminal_responses_cannot_produce_actions(status):
     if status is not None:
         response["status"] = status
     with patch("pico.providers.clients._open_response", return_value=Response(response)):
-        action = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+        action = complete_action(instance)
     assert action.kind == "invalid"
     assert not action.tool_calls
     assert instance._pending_call_ids == ()
@@ -254,22 +314,106 @@ def test_invalid_response_cannot_poison_the_next_request_history(status):
     requests = []
     # The real child run rejected history with missing text after a no-call
     # response. This fixture reproduces how rejected output poisons replay.
-    malformed = Response({"status": status, "output": [{
-        "type": "message", "role": "assistant", "content": [{"type": "output_text"}],
-    }]})
+    malformed = Response({"status": status, "output": [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text"}],
+        },
+        {
+            "type": "function_call",
+            "name": "read_file",
+            "call_id": "call_looks_valid",
+            "arguments": '{"path":"a.py"}',
+        },
+    ]})
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
         requests.append(json.loads(request.data))
         return malformed if len(requests) == 1 else final_response()
 
     with patch("pico.providers.clients._open_response", urlopen):
-        invalid = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+        invalid = complete_action(instance)
         assert invalid.kind == "invalid"
         instance.record_action_results((invalid.content,))
-        final = instance.complete_action("inspect", 64, instructions="rules", action_tools=TOOLS)
+        final = complete_action(instance)
 
     assert final == ModelAction.final("done")
     assert requests[1]["input"] == [
         {"role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
         {"role": "user", "content": [{"type": "input_text", "text": invalid.content}]},
+    ]
+
+
+def test_rejected_output_tokens_do_not_enter_context_projection():
+    instance = client()
+    response = Response({
+        "status": "completed",
+        "usage": {"input_tokens": 100, "output_tokens": 60},
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text"}],
+        }],
+    })
+
+    with patch("pico.providers.clients._open_response", return_value=response):
+        action = complete_action(instance)
+
+    assert action.kind == "invalid"
+    assert instance.projected_context_tokens(
+        (action.content,),
+        instructions="rules",
+        action_tools=TOOLS,
+        token_counter=lambda _text: 1,
+        provider_input_tokens=100,
+    ) == 101
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        [
+            {
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_read",
+                "arguments": '{"path":"README.md"}',
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_final",
+                "arguments": '{"answer":"too early"}',
+            },
+        ],
+        [
+            {
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_final_a",
+                "arguments": '{"answer":"first"}',
+            },
+            {
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_final_b",
+                "arguments": '{"answer":"second"}',
+            },
+        ],
+    ],
+)
+def test_submit_final_groups_are_rejected_before_replay(calls):
+    instance = client()
+    response = Response({"status": "completed", "output": calls})
+
+    with patch("pico.providers.clients._open_response", return_value=response):
+        action = complete_action(instance)
+
+    assert action.kind == "invalid"
+    assert action.content == "submit_final must be the only call in its model response"
+    assert instance._pending_call_ids == ()
+    assert instance._action_input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "inspect"}]}
     ]

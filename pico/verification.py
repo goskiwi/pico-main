@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from .command_runner import shell_argv
+from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
+from .task_state import TaskContract
 from .workspace import IGNORED_PATH_NAMES, Workspace, normalize_relative_file
 
 VERIFICATION_SNAPSHOT_MAX_ENTRIES = 20_000
@@ -19,32 +21,61 @@ class RepositorySnapshotError(RuntimeError):
     """The Runtime could not establish one trustworthy repository baseline."""
 
 
-def capture_changed_path_states(root, changed_paths):
+@dataclass(frozen=True)
+class ResolvedVerificationPolicy:
+    """One completion attempt's immutable verification requirement and command."""
+
+    command: str
+    verify_net_changes: bool
+
+    @classmethod
+    def resolve(cls, contract: TaskContract, command):
+        command = str(command or "").strip()
+        return cls(
+            command=command,
+            verify_net_changes=bool(contract.verify_changes or command),
+        )
+
+
+def capture_changed_path_states(root, changed_paths, *, execution_context):
     root = Path(root).resolve()
-    return {
-        relative: Workspace.path_state(root / relative)
-        for relative in sorted(
-            {normalize_relative_file(path) for path in changed_paths}
+    states = {}
+    for relative in sorted(
+        {normalize_relative_file(path) for path in changed_paths}
+    ):
+        execution_context.check_active()
+        states[relative] = Workspace.path_state(
+            root / relative,
+            execution_context=execution_context,
         )
-    }
+    return states
 
 
-def _run_git(root, args, *, text=False, allow_failure=False):
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=root,
-            capture_output=True,
-            text=text,
-            timeout=GIT_SNAPSHOT_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+def _run_git(
+    root,
+    args,
+    *,
+    command_runner,
+    execution_context,
+    allow_failure=False,
+):
+    result = command_runner.run_bytes(
+        ("git", "--no-optional-locks", *args),
+        cwd=root,
+        timeout=GIT_SNAPSHOT_TIMEOUT_SECONDS,
+        env={},
+        execution_context=execution_context,
+    )
+    if result.stop_reason:
+        execution_context.check_active()
+        raise RepositorySnapshotError("Git repository observation timed out")
+    if result.infrastructure_error:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
         raise RepositorySnapshotError(
-            f"Git repository observation failed: {type(exc).__name__}: {exc}"
-        ) from exc
+            "Git repository observation failed: " + detail
+        )
     if result.returncode and not allow_failure:
-        detail = result.stderr if text else result.stderr.decode("utf-8", errors="replace")
+        detail = result.stderr.decode("utf-8", errors="replace")
         raise RepositorySnapshotError(
             "Git repository observation failed: " + detail.strip()
         )
@@ -59,14 +90,18 @@ def _nul_paths(payload):
     )
 
 
-def _untracked_path_state(path):
+def _untracked_path_state(path, *, execution_context):
     path = Path(path)
+    execution_context.check_active()
     try:
         metadata = path.lstat()
         if path.is_symlink():
             return ("symlink", os.readlink(path))
         if stat.S_ISREG(metadata.st_mode):
-            revision = Workspace.path_state(path)
+            revision = Workspace.path_state(
+                path,
+                execution_context=execution_context,
+            )
             if revision == "unavailable":
                 raise RepositorySnapshotError(f"cannot observe file contents: {path}")
             return (
@@ -86,20 +121,22 @@ def _untracked_path_state(path):
         raise RepositorySnapshotError(f"cannot observe path: {path}") from exc
 
 
-def _git_repository_state(root):
+def _git_repository_state(root, *, command_runner, execution_context):
     probe = _run_git(
         root,
         ("rev-parse", "--is-inside-work-tree"),
-        text=True,
+        command_runner=command_runner,
+        execution_context=execution_context,
         allow_failure=True,
     )
-    if probe.returncode != 0 or probe.stdout.strip() != "true":
+    if probe.returncode != 0 or probe.stdout.strip() != b"true":
         return None
 
     head = _run_git(
         root,
         ("rev-parse", "--verify", "HEAD"),
-        text=True,
+        command_runner=command_runner,
+        execution_context=execution_context,
         allow_failure=True,
     )
     if head.returncode != 0:
@@ -109,7 +146,8 @@ def _git_repository_state(root):
     head_ref = _run_git(
         root,
         ("symbolic-ref", "-q", "HEAD"),
-        text=True,
+        command_runner=command_runner,
+        execution_context=execution_context,
         allow_failure=True,
     )
     pathspec = (
@@ -122,16 +160,22 @@ def _git_repository_state(root):
     total_diff = _run_git(
         root,
         ("diff", *common_diff, "HEAD", *pathspec),
+        command_runner=command_runner,
+        execution_context=execution_context,
     ).stdout
     total_paths = _nul_paths(
         _run_git(
             root,
             ("diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD", *pathspec),
+            command_runner=command_runner,
+            execution_context=execution_context,
         ).stdout
     )
     staged_diff = _run_git(
         root,
         ("diff", *common_diff, "--cached", "HEAD", *pathspec),
+        command_runner=command_runner,
+        execution_context=execution_context,
     ).stdout
     staged_paths = _nul_paths(
         _run_git(
@@ -146,6 +190,8 @@ def _git_repository_state(root):
                 "HEAD",
                 *pathspec,
             ),
+            command_runner=command_runner,
+            execution_context=execution_context,
         ).stdout
     )
     untracked_paths = _nul_paths(
@@ -158,28 +204,39 @@ def _git_repository_state(root):
                 "-z",
                 *pathspec,
             ),
+            command_runner=command_runner,
+            execution_context=execution_context,
         ).stdout
     )
+    untracked = {}
+    for relative in untracked_paths:
+        execution_context.check_active()
+        untracked[relative] = _untracked_path_state(
+            root / relative,
+            execution_context=execution_context,
+        )
     return {
-        "head_oid": head.stdout.strip(),
-        "head_ref": head_ref.stdout.strip() if head_ref.returncode == 0 else "",
+        "head_oid": head.stdout.strip().decode("utf-8", errors="replace"),
+        "head_ref": (
+            head_ref.stdout.strip().decode("utf-8", errors="replace")
+            if head_ref.returncode == 0
+            else ""
+        ),
         "total_diff": total_diff,
         "total_paths": total_paths,
         "staged_diff": staged_diff,
         "staged_paths": staged_paths,
-        "untracked": {
-            relative: _untracked_path_state(root / relative)
-            for relative in untracked_paths
-        },
+        "untracked": untracked,
     }
 
 
-def _capture_bounded_filesystem_state(root):
+def _capture_bounded_filesystem_state(root, *, execution_context):
     root = Path(root).resolve()
     snapshot = {}
     pending = deque([(root, Path())])
     observed = 0
     while pending:
+        execution_context.check_active()
         directory, relative_directory = pending.popleft()
         try:
             with os.scandir(directory) as iterator:
@@ -187,6 +244,7 @@ def _capture_bounded_filesystem_state(root):
         except OSError as exc:
             raise RepositorySnapshotError(f"cannot observe directory: {directory}") from exc
         for entry in entries:
+            execution_context.check_active()
             if entry.name in IGNORED_PATH_NAMES:
                 continue
             if observed >= VERIFICATION_SNAPSHOT_MAX_ENTRIES:
@@ -217,14 +275,22 @@ def _capture_bounded_filesystem_state(root):
     return snapshot
 
 
-def capture_repository_state(root):
+def capture_repository_state(root, *, command_runner, execution_context):
     """Capture repository-visible state without persisting the fingerprint."""
 
     root = Path(root).resolve()
-    git_state = _git_repository_state(root)
+    execution_context.check_active()
+    git_state = _git_repository_state(
+        root,
+        command_runner=command_runner,
+        execution_context=execution_context,
+    )
     if git_state is not None:
         return "git", git_state
-    return "stat", _capture_bounded_filesystem_state(root)
+    return "stat", _capture_bounded_filesystem_state(
+        root,
+        execution_context=execution_context,
+    )
 
 
 def repository_state_changes(before, after):
@@ -270,7 +336,7 @@ def verify_workspace(
     mutation_sequence_provider,
     started_workspace_mutation_sequence,
     changed_paths,
-    execution_context=None,
+    execution_context,
 ):
     command = str(command or "").strip()
     if not command:
@@ -278,20 +344,37 @@ def verify_workspace(
     root = Path(root).resolve()
     changed_paths = tuple(changed_paths)
     before = int(started_workspace_mutation_sequence)
-    started_changed_path_states = capture_changed_path_states(root, changed_paths)
     record = {
         "command": command,
         "status": "infrastructure_error",
         "started_workspace_mutation_sequence": before,
         "finished_workspace_mutation_sequence": before,
-        "started_changed_path_states": started_changed_path_states,
-        "finished_changed_path_states": dict(started_changed_path_states),
+        "started_changed_path_states": {},
+        "finished_changed_path_states": {},
         "exit_code": None,
         "output": "",
         "workspace_changes": [],
     }
     try:
-        started_workspace_state = capture_repository_state(root)
+        started_changed_path_states = capture_changed_path_states(
+            root,
+            changed_paths,
+            execution_context=execution_context,
+        )
+        record["started_changed_path_states"] = started_changed_path_states
+        record["finished_changed_path_states"] = dict(
+            started_changed_path_states
+        )
+        started_workspace_state = capture_repository_state(
+            root,
+            command_runner=command_runner,
+            execution_context=execution_context,
+        )
+    except (ExecutionCancelled, ExecutionDeadlineExceeded) as exc:
+        record["status"] = "failed"
+        record["workspace_changes"] = None
+        record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
+        return record
     except RepositorySnapshotError as exc:
         record["output"] = redact_text(str(exc))[:4000]
         return record
@@ -315,12 +398,33 @@ def verify_workspace(
                 if result.returncode == 0 and not result.stop_reason
                 else "failed"
             )
+    except (ExecutionCancelled, ExecutionDeadlineExceeded) as exc:
+        record["status"] = "failed"
+        record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
         record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     after = int(mutation_sequence_provider())
-    finished_changed_path_states = capture_changed_path_states(root, changed_paths)
     try:
-        finished_workspace_state = capture_repository_state(root)
+        finished_changed_path_states = capture_changed_path_states(
+            root,
+            changed_paths,
+            execution_context=execution_context,
+        )
+        finished_workspace_state = capture_repository_state(
+            root,
+            command_runner=command_runner,
+            execution_context=execution_context,
+        )
+    except (ExecutionCancelled, ExecutionDeadlineExceeded) as exc:
+        record["status"] = "failed"
+        record["workspace_changes"] = None
+        record["finished_workspace_mutation_sequence"] = after
+        record["output"] = redact_text(
+            "\n".join(
+                [f"{type(exc).__name__}: {exc}", record["output"]]
+            ).strip()
+        )[:4000]
+        return record
     except RepositorySnapshotError as exc:
         finished_workspace_state = None
         record["status"] = "infrastructure_error"
@@ -364,15 +468,17 @@ def verify_workspace(
     return record
 
 
-def run_verification(agent, started_workspace_mutation_sequence):
-    execution_context = (
-        agent.run.execution_context.child()
-        if agent.run.execution_context
-        else None
-    )
+def run_verification(
+    agent,
+    started_workspace_mutation_sequence,
+    policy: ResolvedVerificationPolicy,
+):
+    if agent.run.execution_context is None:
+        raise RuntimeError("verification requires an active ExecutionContext")
+    execution_context = agent.run.execution_context.child()
     return verify_workspace(
         root=agent.workspace.root,
-        command=agent.config.verification_command,
+        command=policy.command,
         command_runner=agent.dependencies.command_runner,
         timeout_seconds=agent.config.turn_timeout_seconds,
         redact_text=agent.redact_text,

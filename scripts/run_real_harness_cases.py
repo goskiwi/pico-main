@@ -6,9 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,12 +68,13 @@ def _git(root, *args):
 
 
 def prepare_workspace(workspace, files):
-    """Create a fresh committed repository containing only ``files``."""
+    """Create a new fixture repository; never replace an existing directory."""
 
-    workspace = Path(workspace).resolve()
-    if workspace.exists():
-        shutil.rmtree(workspace)
-    workspace.mkdir(parents=True)
+    if workspace is None:
+        workspace = Path(tempfile.mkdtemp(prefix="pico-evaluation-")).resolve()
+    else:
+        workspace = Path(workspace).resolve()
+        workspace.mkdir(parents=True)
     (workspace / ".gitignore").write_text(".pico/\n", encoding="utf-8")
     for logical, content in files.items():
         path = workspace / logical
@@ -166,6 +167,7 @@ def _tool_results(events):
 def _event_analysis(agent, outcome):
     events = agent.dependencies.run_store.read_events(outcome.run_id)
     return events, {
+        "workspace_root": str(agent.workspace.root),
         "event_kinds": [event.kind for event in events],
         "model_request_count": outcome.metrics["model_request_count"],
         "executed_tool_count": outcome.metrics["executed_tool_count"],
@@ -232,20 +234,22 @@ def run_ask(args, runtime, workspace):
         mode="ask",
         allowed_tools=tuple(sorted(ASK_TOOLS - {"submit_final"})),
     )
-    surface = {tool["name"] for tool in agent.tools.model_action_tools()}
+    surface = {
+        tool["name"] for tool in agent.tools.resolve_surface().action_tools
+    }
     outcome = agent.ask(build_prompt("ask"))
-    _events, analysis = _event_analysis(agent, outcome)
-    calls = analysis["requested_calls"]
+    events, analysis = _event_analysis(agent, outcome)
     changed_paths = _git(workspace, "diff", "--name-only", "HEAD").splitlines()
     checks = {
         "completed": outcome.status == "completed",
+        "answer_correct": outcome.answer.strip() == "ORBIT-7",
         "ask_surface_exact": surface == ASK_TOOLS,
-        "observation_used": any(
-            call["name"] in {"list_files", "read_file", "search"} for call in calls
-        ),
         "readme_read": any(
-            call["name"] == "read_file" and call["args"].get("path") == "README.md"
-            for call in calls
+            event.kind == "tool_result" and event.name == "read_file"
+            and event.outcome_status == "success"
+            and event.payload["outcome"]["structured"].get("path") == "README.md"
+            and "ORBIT-7" in event.content
+            for event in events
         ),
         "no_workspace_change": not changed_paths and not outcome.changed_paths,
         "bounded_turns": analysis["model_request_count"] <= 6,
@@ -263,7 +267,7 @@ def run_approval(args, runtime, workspace):
         _client(args),
         workspace,
         mode="code",
-        allowed_tools=("list_files", "read_file", "write_file", "update_working_state"),
+        allowed_tools=("list_files", "read_file", "read_artifact", "write_file", "update_working_state"),
         allowed_paths=("requested.txt",),
     )
 
@@ -271,7 +275,7 @@ def run_approval(args, runtime, workspace):
         approvals.append({"name": name, "args": dict(tool_args)})
         return False
 
-    agent.tools.approve = deny
+    agent.dependencies.approval_handler = deny
     outcome = agent.ask(build_prompt("approval"))
     events, analysis = _event_analysis(agent, outcome)
     denied = [
@@ -346,7 +350,7 @@ def run_revision(args, runtime, workspace):
         client,
         workspace,
         mode="auto",
-        allowed_tools=("read_file", "edit_file", "update_working_state"),
+        allowed_tools=("read_file", "read_artifact", "edit_file", "update_working_state"),
         allowed_paths=("subject.txt",),
         verifier=verifier,
     )
@@ -399,7 +403,7 @@ def run_resume(args, runtime, workspace):
         FakeModelClient([]),
         workspace,
         mode="auto",
-        allowed_tools=("read_file", "edit_file", "update_working_state"),
+        allowed_tools=("read_file", "read_artifact", "edit_file", "update_working_state"),
         allowed_paths=("recovery.txt",),
         verifier=verifier,
     )
@@ -429,6 +433,7 @@ def run_resume(args, runtime, workspace):
                     "before_artifact_id": preimage["artifact_id"],
                 }
             ],
+            operation={},
         )
     target.write_text("partial\n", encoding="utf-8")
     original.run.execution_context = None
@@ -438,7 +443,7 @@ def run_resume(args, runtime, workspace):
         _client(args),
         workspace,
         mode="auto",
-        allowed_tools=("read_file", "edit_file", "update_working_state"),
+        allowed_tools=("read_file", "read_artifact", "edit_file", "update_working_state"),
         allowed_paths=("recovery.txt",),
         verifier=verifier,
         session=session,
@@ -507,7 +512,7 @@ def main(argv=None):
     parser.add_argument(
         "--workspace-root",
         type=Path,
-        default=ROOT / "artifacts" / "real-harness-workspaces",
+        help="Create new case directories here; omit for fresh temporary workspaces.",
     )
     args = parser.parse_args(argv)
 
@@ -524,7 +529,7 @@ def main(argv=None):
     selected = tuple(ARTIFACT_PATHS) if args.case == "all" else (args.case,)
     results = []
     for case in selected:
-        workspace = args.workspace_root / case
+        workspace = args.workspace_root / case if args.workspace_root else None
         if case == "ask":
             result = run_ask(args, runtime, workspace)
             patch = None

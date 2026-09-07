@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .completion_controller import CompletionController
+from .context_manager import render_runtime_feedback
 from .providers import ProviderContextOverflow
 from .run_lifecycle import RunLifecycle, reload_current_run
 from .run_projection import RunOutcome
@@ -19,20 +19,16 @@ if TYPE_CHECKING:
 class ModelTurn:
     action: Any
     provider_input_tokens: int | None
-    provider_output_tokens: int | None
     instructions: str
-    action_tools: tuple[dict[str, Any], ...]
+    tool_surface: Any
 
 
-@dataclass(frozen=True)
-class ActionToolSurface:
-    """One turn's model-visible and Runtime-allowed tool surface."""
+@dataclass(slots=True)
+class LoopDirective:
+    """One internal decision returned to the sole Agent loop orchestrator."""
 
-    tools: tuple[dict[str, Any], ...]
-
-    @property
-    def names(self):
-        return tuple(str(tool["name"]) for tool in self.tools)
+    kind: Literal["continue", "complete", "stop"]
+    detail: str = ""
 
 
 class AgentLoop:
@@ -48,56 +44,73 @@ class AgentLoop:
         loop_state = self.lifecycle.initialize(
             user_message,
         )
+        directive = LoopDirective("continue")
         try:
-            while True:
-                loop_state.execution_stop = self.lifecycle.execution_stop()
-                if loop_state.execution_stop:
+            while directive.kind == "continue":
+                stop_reason = self.lifecycle.execution_stop()
+                if stop_reason:
+                    directive = LoopDirective("stop", stop_reason)
                     break
                 if (
                     self.agent.run.metrics.model_request_count
                     - loop_state.starting_model_request_count
                     >= self.agent.config.max_agent_turns
                 ):
-                    loop_state.execution_stop = "agent_turn_limit"
+                    directive = LoopDirective("stop", "agent_turn_limit")
                     break
 
                 try:
                     turn = self._next_model_turn(loop_state)
+                    stop_reason = self.lifecycle.execution_stop()
+                    if stop_reason:
+                        directive = LoopDirective("stop", stop_reason)
+                    elif turn.action.kind == "tool":
+                        directive = self._handle_tool_turn(
+                            loop_state, turn
+                        )
+                    elif turn.action.kind == "invalid":
+                        directive = self._handle_invalid_output(
+                            loop_state, turn
+                        )
+                    else:
+                        directive = self._handle_final_action(loop_state, turn)
                 except ProviderContextOverflow:
                     if self._recover_context_overflow(loop_state):
                         continue
                     raise
                 except BaseException:
-                    loop_state.execution_stop = self.lifecycle.execution_stop()
-                    if loop_state.execution_stop:
-                        break
-                    raise
-                loop_state.execution_stop = self.lifecycle.execution_stop()
-                if loop_state.execution_stop:
-                    break
-                if turn.action.kind == "tool":
-                    loop_state.execution_stop = self._handle_tool_turn(
-                        loop_state, turn
-                    )
-                elif turn.action.kind == "invalid":
-                    loop_state.execution_stop = self._handle_invalid_output(
-                        loop_state, turn
-                    )
-                else:
-                    final = self._handle_final_action(loop_state, turn)
-                    if final is not None:
-                        return self.lifecycle.finish_success(loop_state, final)
-                if loop_state.execution_stop:
-                    break
-            return self.lifecycle.finish_stopped(loop_state)
+                    stop_reason = self.lifecycle.execution_stop()
+                    if not stop_reason:
+                        raise
+                    directive = LoopDirective("stop", stop_reason)
+            return self._settle(loop_state, directive)
         except BaseException:
             self.agent.run.execution_context = None
             reload_current_run(self.agent)
             raise
 
+    def _settle(self, loop_state, directive):
+        if directive.kind == "complete":
+            try:
+                return self.lifecycle.finish_success(
+                    directive.detail,
+                    run_started_at=loop_state.run_started_at,
+                )
+            except BaseException:
+                stop_reason = self.lifecycle.execution_stop()
+                if not stop_reason:
+                    raise
+                directive = LoopDirective("stop", stop_reason)
+        if directive.kind == "stop":
+            return self.lifecycle.finish_stopped(
+                directive.detail,
+                run_started_at=loop_state.run_started_at,
+            )
+        raise RuntimeError("Agent loop exited without a terminal directive")
+
     def _next_model_turn(self, loop_state):
         agent = self.agent
-        tool_surface = self._resolve_action_tool_surface()
+        tool_surface = agent.tools.resolve_surface()
         prompt = self._prepare_prompt(loop_state, tool_surface)
         agent.emit_event("model_requested")
         action, completion_metadata = self._request_action(
@@ -110,22 +123,9 @@ class AgentLoop:
         return ModelTurn(
             action=action,
             provider_input_tokens=provider_input_tokens,
-            provider_output_tokens=completion_metadata.get("output_tokens"),
             instructions=prompt.instructions,
-            action_tools=tool_surface.tools,
+            tool_surface=tool_surface,
         )
-
-    def _resolve_action_tool_surface(self):
-        agent = self.agent
-        tools = tuple(agent.tools.model_action_tools())
-        if (
-            agent.tools.remaining_budget() is not None
-            and agent.tools.remaining_budget() == 0
-        ):
-            tools = tuple(
-                tool for tool in tools if tool["name"] == "submit_final"
-            )
-        return ActionToolSurface(tools=tools)
 
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
@@ -145,15 +145,15 @@ class AgentLoop:
         if loop_state.prompt_snapshot is None:
             compaction_metadata, history_override = self.lifecycle.prepare_compaction(
                 loop_state.user_message,
+                tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
-                action_tools=tool_surface.tools,
             )
             prompt, _metadata = agent.prompt.build(
                 loop_state.user_message,
+                tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 compaction_metadata=compaction_metadata,
                 history_override=history_override,
-                action_tools=tool_surface.tools,
             )
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, tool_surface.names)
@@ -172,8 +172,8 @@ class AgentLoop:
             prompt.input_text,
             agent.config.max_new_tokens,
             instructions=prompt.instructions,
-            action_tools=tool_surface.tools,
-            request_timeout=agent.run.execution_context.bounded_timeout(),
+            action_tools=tool_surface.action_tools,
+            execution_context=agent.run.execution_context,
         )
         completion_metadata = dict(
             getattr(agent.model_client, "last_completion_metadata", {}) or {}
@@ -200,10 +200,9 @@ class AgentLoop:
         projected_tokens = agent.model_client.projected_context_tokens(
             provider_results,
             instructions=turn.instructions,
-            action_tools=turn.action_tools,
+            action_tools=turn.tool_surface.action_tools,
             token_counter=agent.prompt.count_tokens,
             provider_input_tokens=turn.provider_input_tokens,
-            provider_output_tokens=turn.provider_output_tokens,
         )
         if projected_tokens >= self._provider_high_watermark():
             threshold_tokens = self._provider_high_watermark()
@@ -240,16 +239,14 @@ class AgentLoop:
     def _handle_tool_turn(self, loop_state, turn):
         agent = self.agent
         calls = turn.action.tool_calls
-        budget_exhausted = (
-            agent.tools.remaining_budget() is not None
-            and agent.tools.remaining_budget() == 0
-        )
-        if budget_exhausted and len(calls) == 1:
-            return "tool_execution_limit"
+        budget_exhausted = turn.tool_surface.tool_budget_exhausted
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
         group = agent.run.run_log.append_tool_calls(calls)
-        outcomes = agent.tools.execute_pending_group(group.event_id)
+        outcomes = agent.tools.execute_pending_group(
+            group.event_id,
+            turn.tool_surface,
+        )
 
         model_instruction = self._append_budget_instruction(loop_state)
         provider_results = [outcome.render_for_model() for outcome in outcomes]
@@ -262,7 +259,9 @@ class AgentLoop:
             turn,
             provider_results,
         )
-        return "tool_execution_limit" if budget_exhausted else ""
+        if budget_exhausted:
+            return LoopDirective("stop", "tool_execution_limit")
+        return LoopDirective("continue")
 
     def _append_budget_instruction(self, loop_state):
         agent = self.agent
@@ -287,14 +286,22 @@ class AgentLoop:
         )
         self._continue_provider(loop_state, turn, (turn.action.content,))
         if loop_state.invalid_output_count >= 8:
-            return "invalid_output_limit"
-        return ""
+            return LoopDirective("stop", "invalid_output_limit")
+        return LoopDirective("continue")
 
     def _handle_final_action(self, loop_state, turn):
-        assessment = self.completion.assess(turn.action.content.strip())
+        final = turn.action.content.strip()
+        verification_policy = self.completion.resolve_verification_policy()
+        assessment = self.completion.assess(final, verification_policy)
+        if assessment.verification_required:
+            self.lifecycle.run_completion_verification(verification_policy)
+            assessment = self.completion.assess_verification(
+                final,
+                verification_policy,
+            )
         if assessment.allowed:
-            return assessment.instruction
-        self._block_completion(
+            return LoopDirective("complete", assessment.instruction)
+        return self._block_completion(
             loop_state,
             turn,
             assessment.status,
@@ -325,17 +332,10 @@ class AgentLoop:
         )
         loop_state.completion_block_count += 1
         if loop_state.completion_block_count >= 3:
-            loop_state.execution_stop = "completion_block_limit"
-            return
-        feedback = {
-            "runtime_instruction": {
-                "code": status,
-                "instruction": instruction,
-            },
-            "untrusted_evidence": evidence,
-        }
+            return LoopDirective("stop", "completion_block_limit")
         self._continue_provider(
             loop_state,
             turn,
-            (json.dumps(feedback, ensure_ascii=False, sort_keys=True),),
+            (render_runtime_feedback(self.agent.run.projection.runtime_feedback),),
         )
+        return LoopDirective("continue")

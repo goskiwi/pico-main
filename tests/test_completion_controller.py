@@ -8,6 +8,7 @@ from pico.completion_controller import CompletionController, CompletionDecision
 from pico.contracts import FailureInfo, ToolCall, ToolOutcome
 from pico.execution import ExecutionContext
 from pico.mutations import content_revision, file_revision
+from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunEvent, RunLog
 from pico.task_state import TaskContract
 from pico.verification import capture_changed_path_states
@@ -54,7 +55,6 @@ def active_agent(tmp_path, requirements, verification_command=""):
     contract = TaskContract("task", **requirements)
     log = RunLog("run", "task", agent.session.id, agent.dependencies.run_store)
     log.append_user(contract)
-    agent.run.projection = log.projection
     agent.run.run_log = log
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return agent
@@ -123,6 +123,7 @@ def verification_payload(agent, sequence, status="passed", output=""):
     states = capture_changed_path_states(
         agent.workspace.root,
         agent.run.evidence.changed_paths,
+        execution_context=agent.run.execution_context,
     )
     return {
         "workspace_changes": [],
@@ -136,16 +137,31 @@ def verification_payload(agent, sequence, status="passed", output=""):
     }
 
 
+def run_completion(agent, final="done"):
+    controller = CompletionController(agent)
+    policy = controller.resolve_verification_policy()
+    decision = controller.assess(final, policy)
+    if not decision.verification_required:
+        return decision
+    RunLifecycle(agent).run_completion_verification(policy)
+    return controller.assess_verification(final, policy)
+
+
+def assess(agent, final="done"):
+    controller = CompletionController(agent)
+    return controller.assess(final, controller.resolve_verification_policy())
+
+
 def test_ask_mode_can_answer_without_unrelated_file_access(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
-    assert CompletionController(agent).assess("done").allowed
+    assert assess(agent).allowed
 
 
 def test_reverted_change_can_complete_without_an_extra_observation(tmp_path):
     agent = active_agent(tmp_path, MODIFY_TASK)
     add_change(agent, "README.md", "a", "b", 1)
     add_change(agent, "README.md", "b", "a", 2)
-    assessment = CompletionController(agent).assess("done")
+    assessment = assess(agent)
     assert assessment.allowed
     assert agent.run.evidence.touched_paths == ["README.md"]
     assert agent.run.evidence.changed_paths == []
@@ -154,9 +170,46 @@ def test_reverted_change_can_complete_without_an_extra_observation(tmp_path):
 def test_required_verification_fails_closed_without_command(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK)
     add_change(agent, "README.md", "a", "b", 1)
-    assessment = CompletionController(agent).assess("done")
+    assessment = assess(agent)
     assert assessment.status == "verification_failed"
     assert "verification command" in assessment.instruction
+
+
+def test_current_runtime_verifier_strengthens_an_unverified_run(tmp_path):
+    agent = active_agent(tmp_path, NO_CHANGE_TASK)
+    add_change(agent, "README.md", "a", "b", 1)
+    agent.config = replace(agent.config, verification_command="verify-now")
+    calls = []
+
+    def verify(sequence, policy):
+        calls.append((sequence, policy.command))
+        return verification_payload(agent, sequence)
+
+    agent.run_verification = verify
+
+    assert run_completion(agent).allowed
+    assert calls == [(1, "verify-now")]
+
+
+def test_one_completion_attempt_keeps_its_resolved_verifier(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK, "verify-a")
+    add_change(agent, "README.md", "a", "b", 1)
+    controller = CompletionController(agent)
+    policy = controller.resolve_verification_policy()
+    agent.config = replace(agent.config, verification_command="verify-b")
+    calls = []
+
+    def verify(sequence, received_policy):
+        calls.append(received_policy.command)
+        payload = verification_payload(agent, sequence)
+        payload["command"] = received_policy.command
+        return payload
+
+    agent.run_verification = verify
+    assert controller.assess("done", policy).verification_required
+    RunLifecycle(agent).run_completion_verification(policy)
+    assert controller.assess_verification("done", policy).allowed
+    assert calls == ["verify-a"]
 
 
 @pytest.mark.parametrize("side", ["changed", "partial"])
@@ -169,12 +222,12 @@ def test_external_change_blocks_completion_before_verification(tmp_path, side):
     target.write_text("external\n", encoding="utf-8")
     calls = []
 
-    def verify(sequence):
+    def verify(sequence, _policy):
         calls.append(sequence)
         return verification_payload(agent, sequence)
 
     agent.run_verification = verify
-    assessment = CompletionController(agent).assess("done")
+    assessment = assess(agent)
     assert assessment.allowed is False
     assert assessment.status == "workspace_drift"
     assert calls == []
@@ -186,13 +239,17 @@ def test_failed_verification_can_retry_on_same_state(tmp_path):
     results = ["failed", "passed"]
     calls = []
 
-    def verify(sequence):
+    def verify(sequence, _policy):
         calls.append(sequence)
         return verification_payload(agent, sequence, results.pop(0), "failed")
 
     agent.run_verification = verify
-    assert not CompletionController(agent).assess("done").allowed
-    assert CompletionController(agent).assess("done").allowed
+    pending = assess(agent)
+    assert pending.verification_required
+    assert calls == []
+    assert agent.run.evidence.verifications == []
+    assert not run_completion(agent).allowed
+    assert run_completion(agent).allowed
     assert calls == [1, 1]
 
 
@@ -206,13 +263,13 @@ def test_verification_command_change_invalidates_passing_result(tmp_path):
     )
     calls = []
 
-    def verify(sequence):
+    def verify(sequence, _policy):
         calls.append(sequence)
         return verification_payload(agent, sequence)
 
     agent.run_verification = verify
 
-    assert CompletionController(agent).assess("done").allowed
+    assert run_completion(agent).allowed
     assert calls == [1]
     assert [record["command"] for record in agent.run.evidence.verifications] == [
         "verify-a",
@@ -226,14 +283,14 @@ def test_infrastructure_error_can_retry_after_environment_recovers(tmp_path):
     statuses = ["infrastructure_error", "passed"]
     calls = []
 
-    def verify(sequence):
+    def verify(sequence, _policy):
         calls.append(sequence)
         return verification_payload(agent, sequence, statuses.pop(0), "offline")
 
     agent.run_verification = verify
     with pytest.raises(RuntimeError, match="offline"):
-        CompletionController(agent).assess("done")
-    assert CompletionController(agent).assess("done").allowed
+        run_completion(agent)
+    assert run_completion(agent).allowed
     assert calls == [1, 1]
 
 
@@ -241,11 +298,11 @@ def test_unknown_effect_cannot_be_cleared_by_verification(tmp_path):
     agent = active_agent(tmp_path, VERIFIED_TASK, "verify")
     add_change(agent, "README.md", "a", "b", 1, status="error", side="unknown")
     agent.run.evidence.verifications.append(verification_payload(agent, 1))
-    agent.run_verification = lambda _sequence: (_ for _ in ()).throw(
+    agent.run_verification = lambda _sequence, _policy: (_ for _ in ()).throw(
         AssertionError("unknown effects must block before verification")
     )
 
-    assessment = CompletionController(agent).assess("done")
+    assessment = assess(agent)
 
     assert assessment.allowed is False
     assert assessment.status == "partial"
@@ -259,16 +316,18 @@ def test_partial_requires_current_verification_even_without_net_change(tmp_path,
         add_change(agent, "README.md", "b", after, 2)
     call = ToolCall("read_file", {"path": "README.md"}, "read")
     group = agent.run.run_log.append_tool_calls((call,))
-    assert agent.tools.execute_pending_group(group.event_id)[0].status == "success"
+    assert agent.tools.execute_pending_group(
+        group.event_id, agent.tools.resolve_surface()
+    )[0].status == "success"
     calls = []
 
-    def verify(sequence):
+    def verify(sequence, _policy):
         calls.append(sequence)
         return verification_payload(agent, sequence)
 
     agent.run_verification = verify
 
-    assert CompletionController(agent).assess("done").allowed
+    assert run_completion(agent).allowed
     assert calls == [1 if after is None else 2]
     assert agent.run.evidence.partial_workspace_effects()[0]["side_effect_state"] == "partial"
 
@@ -276,7 +335,7 @@ def test_partial_requires_current_verification_even_without_net_change(tmp_path,
 def test_partial_requires_verifier_even_if_task_did_not_request_one(tmp_path):
     agent = active_agent(tmp_path, NO_CHANGE_TASK)
     add_change(agent, "README.md", "a", "b", status="error", side="partial")
-    decision = CompletionController(agent).assess("done")
+    decision = assess(agent)
     assert decision.status == "verification_failed"
     assert "verification command" in decision.instruction
 
@@ -287,7 +346,7 @@ def test_subagent_blocker_precedes_task_contract_blocker(tmp_path):
         completion_issue=lambda: "child task is still running"
     )
 
-    assessment = CompletionController(agent).assess("done")
+    assessment = assess(agent)
 
     assert assessment.status == "subtasks_incomplete"
     assert "child task is still running" in assessment.evidence

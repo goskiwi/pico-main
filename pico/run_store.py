@@ -114,13 +114,13 @@ class RunStore:
         self._cursors[entry.run_id] = RunCursor(entry.sequence, entry.event_id)
 
     def load_run(self, run_id):
-        """Load a ready RunLog and projection from the same validated snapshot."""
+        """Load one ready RunLog whose Projection comes from the same snapshot."""
 
         run_id = _run_id(run_id)
         events = self._read_events(run_id)
-        log, projection = RunLog._from_events(events, self, expected_run_id=run_id)
+        log = RunLog._from_events(events, self, expected_run_id=run_id)
         self._remember_cursor(run_id, log.events)
-        final_diff = projection.final_diff
+        final_diff = log.projection.final_diff
         if final_diff is not None and final_diff.artifact_id:
             descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
                 run_id,
@@ -129,38 +129,36 @@ class RunStore:
             )
             if int(descriptor["size_bytes"]) != final_diff.size_bytes:
                 raise ValueError("terminal final Diff descriptor size mismatch")
-        return log, projection
+        return log
 
     def replay(self, run_id):
-        _log, projection = self.load_run(run_id)
-        return projection
+        return self.load_run(run_id).projection
 
     def find_active_run(self, session_id):
         if not self.root.exists():
-            return None, None
+            return None
         candidates = []
         for directory in self.root.iterdir():
             if directory.is_symlink() or not directory.is_dir():
                 continue
             try:
-                log, projection = self.load_run(directory.name)
+                log = self.load_run(directory.name)
             except (OSError, ValueError):
                 continue
             if log.session_id != str(session_id):
                 continue
-            if not projection.terminal:
+            if not log.projection.terminal:
                 candidates.append(
                     (
                         log.events[-1].timestamp,
                         directory.name,
                         log,
-                        projection,
                     )
                 )
         if candidates:
-            _timestamp, _run_id, log, projection = max(
+            _timestamp, _run_id, log = max(
                 candidates,
                 key=lambda item: (item[0], item[1]),
             )
-            return log, projection
-        return None, None
+            return log
+        return None

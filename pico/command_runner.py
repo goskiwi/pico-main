@@ -36,6 +36,17 @@ class CommandResult:
     infrastructure_error: bool = False
 
 
+@dataclass(frozen=True)
+class RawCommandResult:
+    """Unmodified process output for Runtime observers that need exact bytes."""
+
+    returncode: int | None
+    stdout: bytes = b""
+    stderr: bytes = b""
+    stop_reason: str = ""
+    infrastructure_error: bool = False
+
+
 class CommandRunner:
     """Run a trusted command locally with deadline and process-group cleanup.
 
@@ -66,11 +77,50 @@ class CommandRunner:
         timeout,
         env=None,
         execution_context=None,
+        input_bytes=None,
     ):
+        raw = self.run_bytes(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            env=env,
+            execution_context=execution_context,
+            input_bytes=input_bytes,
+        )
+        rendered_stdout, rendered_stderr, limited = self._truncate_output(
+            raw.stdout,
+            raw.stderr,
+        )
+        return CommandResult(
+            returncode=raw.returncode,
+            stdout=rendered_stdout,
+            stderr=rendered_stderr,
+            stop_reason=raw.stop_reason,
+            output_limited=limited,
+            infrastructure_error=raw.infrastructure_error,
+        )
+
+    def run_bytes(
+        self,
+        argv,
+        *,
+        cwd,
+        timeout,
+        env=None,
+        execution_context=None,
+        input_bytes=None,
+    ):
+        """Run one process while preserving stdout and stderr as exact bytes."""
+
         argv = tuple(str(item) for item in argv)
         if not argv or any(not item for item in argv):
             raise ValueError("command argv must contain a non-empty executable")
         cwd = self._contained_cwd(cwd)
+        if input_bytes is not None and not isinstance(
+            input_bytes, (bytes, bytearray)
+        ):
+            raise TypeError("command input must be bytes or null")
+        input_bytes = None if input_bytes is None else bytes(input_bytes)
         context = execution_context or ExecutionContext.standalone(
             max_seconds=timeout
         )
@@ -86,18 +136,22 @@ class CommandRunner:
                 env=self._environment(cwd, env or {}),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=(subprocess.PIPE if input_bytes is not None else None),
                 start_new_session=True,
             )
         except OSError as exc:
-            return CommandResult(
+            return RawCommandResult(
                 returncode=None,
-                stderr=f"{type(exc).__name__}: {exc}",
+                stderr=f"{type(exc).__name__}: {exc}".encode(
+                    "utf-8", errors="replace"
+                ),
                 infrastructure_error=True,
             )
 
         stop_reason = ""
         stdout = b""
         stderr = b""
+        pending_input = input_bytes
         try:
             while True:
                 if context.token.requested:
@@ -109,10 +163,13 @@ class CommandRunner:
                     break
                 try:
                     stdout, stderr = process.communicate(
+                        input=pending_input,
                         timeout=min(COMMAND_POLL_SECONDS, remaining)
                     )
+                    pending_input = None
                     break
                 except subprocess.TimeoutExpired:
+                    pending_input = None
                     continue
         except BaseException:
             self._terminate_process_group(process)
@@ -120,23 +177,17 @@ class CommandRunner:
 
         if stop_reason:
             stdout, stderr = self._terminate_process_group(process)
-        rendered_stdout, rendered_stderr, limited = self._truncate_output(
-            stdout,
-            stderr,
-        )
         if not stop_reason:
-            return CommandResult(
+            return RawCommandResult(
                 returncode=int(process.returncode or 0),
-                stdout=rendered_stdout,
-                stderr=rendered_stderr,
-                output_limited=limited,
+                stdout=bytes(stdout or b""),
+                stderr=bytes(stderr or b""),
             )
-        return CommandResult(
+        return RawCommandResult(
             returncode=None,
-            stdout=rendered_stdout,
-            stderr=rendered_stderr,
+            stdout=bytes(stdout or b""),
+            stderr=bytes(stderr or b""),
             stop_reason=stop_reason,
-            output_limited=limited,
         )
 
     def _contained_cwd(self, cwd):
@@ -188,7 +239,11 @@ class CommandRunner:
             except OSError:
                 pass
             try:
-                return process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
+                stdout, stderr = process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
+                # EOF and the leader's exit do not mean its process group exited.
+                # Finish the signal sequence even when descendants closed the pipes.
+                if sig == signal.SIGKILL:
+                    return stdout, stderr
             except subprocess.TimeoutExpired as exc:
                 stdout, stderr = exc.output or b"", exc.stderr or b""
         # Descendants may have detached while retaining our pipes. Stop reading

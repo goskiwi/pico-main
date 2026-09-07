@@ -55,18 +55,24 @@ assistant_tool_calls（一个或多个有序 Call）
 -> ToolContext-bound Tool Runner
 -> tool_result + side-effect state
 
--> 每个 Call 独立完成 Surface / Budget / Schema / Approval 准入
+-> Provider、Parser 与执行器共享本轮 ResolvedToolSurface
+-> 每个 Call 独立完成 Budget / Schema / Approval 准入
 -> 连续 parallel-safe 调用组成并行段，其他调用形成独占屏障
 -> 并行段受 max_parallel_tools 限制，超过时自动分波
 -> 主线程按序写每个 tool_result，并一次性续接 Provider
 ```
 
-强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界。AgentLoop 接受并持久化
-完整 Tool Call sequence 后，只把持久标识交给 ToolRuntime；ToolRuntime 取回完整调用并负责参数校验、
-Approval、preimage 以及执行事务的 `tool_started/tool_result`。一个调用被拒绝不取消合法兄弟调用；工具默认独占，只有明确标记的读取工具并行。纯值计算下沉到私有
-`tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的受限能力。
+强调 `ToolRuntime` 是模型可见工具的唯一公开执行边界。模型请求前，它一次性解析
+`ResolvedToolSurface`；Prompt policy、Schema 预算、Provider Schema、响应解析和本地执行共享该对象。
+PromptBuilder 不能重新解析 policy 或 Surface。AgentLoop 接受并持久化
+完整 Tool Call sequence 后，把持久标识和该 Surface 交给 ToolRuntime；ToolRuntime 取回完整调用并负责参数校验、
+Approval、preimage 以及执行事务的 `tool_started/tool_result`。CLI 提供终端 Approval handler，Core
+不读取 stdin。一个调用被拒绝不取消合法兄弟调用；工具默认独占，只有明确标记的读取工具并行。纯值计算下沉到私有
+`tool_execution.py`，具体 Runner 只获得 `ToolContext` 中的显式能力；Parent-only Child 工具也从
+本次 Context 获取 Subagent Service，Registry 不捕获 Parent Runtime。
 
-`write_file` 只创建新文件；已有文件必须用带 `read_file` Revision 的 `edit_file`。内容先在同目录暂存并 fsync，atomic replace 提交点再次复验 Revision。外部编辑会形成显式冲突，不会被覆盖。失败反馈不靠增加 Patch 工具：未找到时返回相近当前代码和建议读取范围，多处匹配时返回行号，Revision 冲突时返回新 Revision 和可直接调用的 `read_file` 参数。
+`write_file` 将完整内容暂存并 fsync，再用 hard-link 原子发布；并发创建者获胜时保留其文件。
+已有文件必须用带 `read_file` Revision 的 `edit_file`。编辑内容先在同目录暂存并 fsync，替换前再次复验 Revision；检测到冲突就保留当前内容并要求重读。这是提交前的冲突检查，不是跨进程原子 compare-and-swap。读取和编辑使用相同的 LF/CRLF 换行语义，编辑仍要求唯一文本块，块外字节不变。对于已声明路径的工具，ToolRuntime 在 Runner 后再次观察并生成 authoritative transition，Runner 漏报不会产生空 Diff。失败时返回相近当前代码、匹配行号或新 Revision，并提供下一次 `read_file` 参数。
 
 ### 1:45～2:30：恢复与状态投影
 
@@ -75,7 +81,7 @@ Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话�
 `unknown` ToolOutcome。每次 Resume 输入先写 `user_guidance` Fact，因此二次崩溃后仍能
 重建当时交给模型的约束。Goal 属于首个 User Event 的 TaskContract；WorkingState 只保存
 Constraints、Decisions 和 Next Steps，并继续使用 add/remove 增量 Tool 事务。
-持久 Run ID 由 `RunStore.load_run` 单次读取并返回已恢复的 RunLog + Projection；
+持久 Run ID 由 `RunStore.load_run` 单次读取并返回拥有已恢复 Projection 的 RunLog；
 `RunStore.replay` 只是 Projection-only 委托。实时调用 `RunLog.append`，内部依次执行
 `RunProjection.apply_event` 验证待提交状态、存储追加和发布状态；回放使用同一套转换。
 
@@ -92,6 +98,9 @@ Verification command + mutation sequence + changed-path states，以及验证新
 ```bash
 uv run python scripts/day7_runtime_capstone.py
 ```
+
+开场说明：模型动作由 FakeModelClient 预设；文件修改、pytest 和 RunLog 回放实际执行。
+演示先运行原测试并确认失败，再由 Runtime 在完成提交时运行同一测试并确认通过。
 
 指出输出中的：
 
@@ -116,7 +125,7 @@ Session 指针、Workspace 内容和 Artifact 各有独立且明确的所有权�
 ### 2. Context 治理 `[Context Pressure]`
 
 固定角色、执行、Tool 协议、WorkingState 和完成规则进入 `instructions`。首轮动态 `input`
-按 Runtime task policy、root→CWD 的独立 repository instructions、Task Request、非空有界 Context 排列；仅 Resume 且请求改变时
+按 Runtime task policy、root→CWD 的独立 repository instructions、Task Request、非空有界 Context 排列；Resume 时
 才在最后追加 latest request。RepoMap 用 Goal、当前请求、WorkingState 和本 Run 已观察/修改路径排序；
 History 位于当前 WorkingState 之前，避免旧摘要覆盖当前状态。空 RepoMap/WorkingState/History
 不渲染，普通 Function Call 续接只追加 Call/Output。原生 Function Schema 只在 `tools`；每轮
@@ -129,6 +138,8 @@ Prompt build 只读；Compaction 在 build 前准备，独立 LLM 的输出与�
 TaskContract Goal、WorkingState Constraints/Decisions/Next Steps、这两段 Summary 与
 RunEvidence 组合成七类 Effective Recovery Context。七类只是逐项标来源的教学/观测视图，
 不是七段 LLM 输出，不是第二状态，也不参与 Completion Gate。
+Summary 是当前预算允许时优先保留的派生历史，不是恢复硬依赖；更小预算可以省略它并保留
+近期完整事务。取消和 deadline 也不会被包装成摘要失败。
 
 Provider Context Overflow 由 Adapter 归一化为一个类型；AgentLoop 只允许一次重建重试，不通过厂商错误字符串猜测控制流。
 

@@ -29,3 +29,4 @@ class RuntimeDependencies:
     subagents: SubagentRunner | None = None
     parent_execution_context: ExecutionContext | None = None
     check_runner: Callable | None = None
+    approval_handler: Callable[[str, dict], bool] | None = None

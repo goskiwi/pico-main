@@ -101,13 +101,16 @@ def _validate_tool_started_payload(kind, payload):
             "tool_name",
             "effect_scope",
             "potential_effects",
+            "operation",
         },
     )
     if not str(payload["tool_call_id"]) or not str(payload["tool_name"]):
         raise ValueError("tool_started requires call and tool names")
     if payload["effect_scope"] not in EFFECT_SCOPES:
         raise ValueError("tool_started has invalid effect scope")
-    if not isinstance(payload["potential_effects"], list):
+    if not isinstance(payload["potential_effects"], list) or not isinstance(
+        payload["operation"], dict
+    ):
         raise TypeError("tool_started has invalid field types")
     for effect in payload["potential_effects"]:
         if not isinstance(effect, dict) or set(effect) != {
@@ -381,7 +384,7 @@ class RunLog:
 
     @classmethod
     def _from_events(cls, events, store, *, expected_run_id):
-        """Restore the writer and projection from one storage snapshot."""
+        """Restore the writer and its Projection from one storage snapshot."""
         events = tuple(events)
         if not events:
             raise ValueError("active Run Log is missing or empty")
@@ -390,7 +393,7 @@ class RunLog:
         log = cls(first.run_id, first.task_id, first.session_id, store)
         log._events = list(events)
         log.projection = projection
-        return log, projection
+        return log
 
     @property
     def events(self):
@@ -460,6 +463,7 @@ class RunLog:
         *,
         effect_scope,
         potential_effects,
+        operation,
     ):
         return self.append(
             "tool_started",
@@ -468,6 +472,7 @@ class RunLog:
                 "tool_name": call.name,
                 "effect_scope": str(effect_scope),
                 "potential_effects": list(potential_effects),
+                "operation": dict(operation),
             },
         )
 

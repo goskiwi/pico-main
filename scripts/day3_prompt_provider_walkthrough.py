@@ -21,6 +21,7 @@ from pico import (
     SessionStore,
     Workspace,
 )
+from pico.execution import ExecutionContext
 from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
 
@@ -56,6 +57,10 @@ def new_client():
         temperature=None,
         timeout=5,
     )
+
+
+def execution_context():
+    return ExecutionContext.root(max_seconds=30)
 
 
 def function_call(name, call_id, arguments):
@@ -117,10 +122,11 @@ def build_prompt_fixture(root):
     RunLifecycle(bootstrap).initialize(
         "Read README.md"
     )
-    action_tools = tuple(bootstrap.tools.model_action_tools())
+    tool_surface = bootstrap.tools.resolve_surface()
+    action_tools = tool_surface.action_tools
     prompt, metadata = bootstrap.prompt.build(
         "Read README.md",
-        action_tools=action_tools,
+        tool_surface=tool_surface,
     )
     names = {tool["name"] for tool in action_tools}
     expected_tool_tokens = client.estimate_action_tool_tokens(
@@ -152,7 +158,8 @@ def experiment_channels_and_pending(
     requests = []
     pending_timeline = [{"moment": "请求前", "pending_call_ids": []}]
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
         requests.append(
             {
                 "timeout": timeout,
@@ -187,6 +194,7 @@ def experiment_channels_and_pending(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            execution_context=execution_context(),
         )
         pending_timeline.append(
             {
@@ -208,6 +216,7 @@ def experiment_channels_and_pending(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            execution_context=execution_context(),
         )
 
     first_payload = requests[0]["payload"]
@@ -330,6 +339,7 @@ def experiment_tool_group(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            execution_context=execution_context(),
         )
         pending_before = list(client._pending_call_ids)
         client.record_action_results(("README result", "search result"))
@@ -388,7 +398,8 @@ def experiment_incomplete_is_rejected(
         ],
     }
 
-    def urlopen(request, timeout):
+    def urlopen(request, timeout, execution_context):
+        execution_context.check_active()
         requests.append(json.loads(request.data.decode("utf-8")))
         if len(requests) == 1:
             return Response(incomplete)
@@ -404,6 +415,7 @@ def experiment_incomplete_is_rejected(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            execution_context=execution_context(),
         )
         pending_after_incomplete = client._pending_call_ids
         retained_after_incomplete = [
@@ -417,6 +429,7 @@ def experiment_incomplete_is_rejected(
             96,
             instructions=prompt.instructions,
             action_tools=action_tools,
+            execution_context=execution_context(),
         )
 
     correction_item = requests[1]["input"][-1]
@@ -476,7 +489,8 @@ def experiment_context_overflow(root):
     success_client = new_client()
     success_requests = []
 
-    def overflow_once(request, timeout):
+    def overflow_once(request, timeout, execution_context):
+        execution_context.check_active()
         success_requests.append(json.loads(request.data.decode("utf-8")))
         if len(success_requests) == 1:
             raise context_overflow_http_error()
@@ -532,7 +546,8 @@ def experiment_context_overflow(root):
     failure_client = new_client()
     failure_requests = []
 
-    def always_overflow(request, timeout):
+    def always_overflow(request, timeout, execution_context):
+        execution_context.check_active()
         failure_requests.append(json.loads(request.data.decode("utf-8")))
         raise context_overflow_http_error()
 

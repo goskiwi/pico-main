@@ -28,18 +28,34 @@ from pico.verification import capture_changed_path_states
 
 
 class SequenceCommandRunner:
-    def __init__(self, results):
+    def __init__(self, root, results):
         self.results = list(results)
         self.calls = []
+        from pico.command_runner import CommandRunner
+
+        self.observer = CommandRunner(root)
 
     def run(self, argv, **kwargs):
         self.calls.append({"argv": list(argv), "kwargs": sorted(kwargs)})
         return self.results.pop(0)
 
+    def run_bytes(self, argv, **kwargs):
+        return self.observer.run_bytes(argv, **kwargs)
+
 
 def print_section(title, value):
     print(f"\n=== {title} ===")
     print(json.dumps(value, indent=2, ensure_ascii=False))
+
+
+def assess_completion(agent, final):
+    controller = CompletionController(agent)
+    policy = controller.resolve_verification_policy()
+    decision = controller.assess(final, policy)
+    if not decision.verification_required:
+        return decision
+    RunLifecycle(agent).run_completion_verification(policy)
+    return controller.assess_verification(final, policy)
 
 
 def activate(
@@ -65,7 +81,6 @@ def activate(
     )
     agent.run.run_log = run_log
     run_log.append_user(contract)
-    agent.run.projection = run_log.projection
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return agent.run.projection, run_log
 
@@ -82,14 +97,16 @@ def apply_edit(agent, call_id, old_text, new_text):
         },
         call_id,
     )
+    surface = agent.tools.resolve_surface()
     group = agent.run.run_log.append_tool_calls((call,))
-    return agent.tools.execute_pending_group(group.event_id)[0]
+    return agent.tools.execute_pending_group(group.event_id, surface)[0]
 
 
 def completion_experiment(root):
     target = root / "subject.py"
     target.write_text("def value():\n    return 1\n", encoding="utf-8")
     command_runner = SequenceCommandRunner(
+        root,
         [
             CommandResult(returncode=0, stdout="1 passed\n"),
             CommandResult(returncode=1, stdout="1 failed\n"),
@@ -120,12 +137,14 @@ def completion_experiment(root):
     # Evidence first records facts for A -> B and a passing verification.
     first_edit = apply_edit(agent, "call_edit_first", "return 1", "return 2")
     first_cursor = agent.run.evidence.last_workspace_mutation_sequence
-    first_verification = agent.run_verification(first_cursor)
+    policy = CompletionController(agent).resolve_verification_policy()
+    first_verification = agent.run_verification(first_cursor, policy)
     assert first_verification is not None
     agent.emit_event("verification_result", first_verification)
     first_states = capture_changed_path_states(
         agent.workspace.root,
         agent.run.evidence.changed_paths,
+        execution_context=agent.run.execution_context,
     )
     first_current = agent.run.evidence.latest_verification_for_state(
         first_cursor,
@@ -141,6 +160,7 @@ def completion_experiment(root):
     revert_states = capture_changed_path_states(
         agent.workspace.root,
         agent.run.evidence.changed_paths,
+        execution_context=agent.run.execution_context,
     )
     current_after_revert = agent.run.evidence.latest_verification_for_state(
         revert_cursor,
@@ -148,7 +168,7 @@ def completion_experiment(root):
         agent.config.verification_command,
     )
     net_change_after_revert = agent.run.evidence.has_net_workspace_change
-    revert_assessment = CompletionController(agent).assess("final after revert")
+    revert_assessment = assess_completion(agent, "final after revert")
 
     # A -> C restores a net change. The first completion attempt runs a failing
     # verifier; a second attempt on the same state retries it and passes.
@@ -157,6 +177,7 @@ def completion_experiment(root):
     final_states = capture_changed_path_states(
         agent.workspace.root,
         agent.run.evidence.changed_paths,
+        execution_context=agent.run.execution_context,
     )
     old_verification_for_final_state = (
         agent.run.evidence.latest_verification_for_state(
@@ -165,8 +186,8 @@ def completion_experiment(root):
             agent.config.verification_command,
         )
     )
-    failed_assessment = CompletionController(agent).assess("final after C")
-    passed_assessment = CompletionController(agent).assess("final after C")
+    failed_assessment = assess_completion(agent, "final after C")
+    passed_assessment = assess_completion(agent, "final after C")
 
     assert first_edit.status == "success"
     assert first_current is not None
@@ -260,6 +281,7 @@ def recovery_experiment(root):
                     "before_artifact_id": "",
                 }
             ],
+            operation={},
         )
     (root / "interrupted.txt").write_text(
         "side effect happened\n",
@@ -422,7 +444,7 @@ def active_reset_experiment(root):
     thread.join(timeout=3)
 
     assert not thread.is_alive()
-    assert "error" not in result
+    assert "error" not in result, repr(result.get("error"))
     run_outcome = result["outcome"]
     events = agent.dependencies.run_store.read_events(run_id)
     assert reset_reason == "user_reset"
@@ -463,16 +485,18 @@ def _git(root, *args):
     return result.stdout.strip()
 
 
-def _passing_runner(_root):
+def _passing_runner(root):
     return SequenceCommandRunner(
+        root,
         [CommandResult(returncode=0, stdout="verification passed\n")]
     )
 
 
 def _execute_parent_tool(parent, name, args, call_id):
     call = ToolCall(name, args, call_id)
+    surface = parent.tools.resolve_surface()
     group = parent.run.run_log.append_tool_calls((call,))
-    return parent.tools.execute_pending_group(group.event_id)[0]
+    return parent.tools.execute_pending_group(group.event_id, surface)[0]
 
 
 def child_delegation_experiment(root):
@@ -567,7 +591,7 @@ def child_delegation_experiment(root):
     )
     child_id = implement.structured["child_id"]
     parent_before_integration = target.read_text(encoding="utf-8")
-    blocked = CompletionController(parent).assess("done before integration")
+    blocked = assess_completion(parent, "done before integration")
 
     integrated = _execute_parent_tool(
         parent,
@@ -576,7 +600,7 @@ def child_delegation_experiment(root):
         "call_integrate_child",
     )
     parent_after_integration = target.read_text(encoding="utf-8")
-    completed = CompletionController(parent).assess("done after integration")
+    completed = assess_completion(parent, "done after integration")
 
     assert explore.status == "success"
     assert explore.structured["role"] == "explore"

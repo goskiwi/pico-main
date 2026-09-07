@@ -143,6 +143,7 @@ class RunProjection:
                 raise ValueError(
                     "tool_started cannot cross an unfinished execution barrier"
                 )
+            self.children.check_started(call, payload, self.run_id)
         elif kind == "tool_result":
             outcome = ToolOutcome.from_dict(payload["outcome"])
             call_id = outcome.tool_call_id
@@ -235,6 +236,8 @@ class RunProjection:
             self.runtime_feedback = None
             self._begin_calls(event.tool_calls, event.event_id)
         elif event.kind == "tool_started":
+            call = self._pending_call(event.call_id)
+            self.children.apply_started(call, event.payload, self.run_id)
             if self.result_count > self.last_started_ordinal:
                 self.start_phase_result_count = self.result_count
             self.started_call_ids.add(event.call_id)

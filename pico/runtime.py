@@ -8,11 +8,10 @@ from datetime import datetime, timezone
 from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
-from .delivery import build_stopped_final_diff
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
-from .run_lifecycle import load_resumable_run, reconcile_interrupted, reload_current_run
+from .run_lifecycle import RunLifecycle, load_resumable_run
 from .run_projection import RunOutcome
 from .run_store import RunStore
 from .runtime_config import PicoConfig
@@ -42,6 +41,7 @@ class Pico:
         subagent_model_client_factory=None,
         parent_execution_context=None,
         check_runner=None,
+        approval_handler=None,
     ):
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
@@ -69,6 +69,7 @@ class Pico:
             repo_map=RepoMap(self.workspace.root),
             parent_execution_context=parent_execution_context,
             check_runner=check_runner,
+            approval_handler=approval_handler,
         )
         if subagent_model_client_factory is not None:
             from .subagents.runner import SubagentRunner
@@ -131,8 +132,12 @@ class Pico:
             evidence_artifact_id=str(descriptor.get("artifact_id", "")),
         )
 
-    def run_verification(self, started_workspace_mutation_sequence):
-        return run_verification(self, started_workspace_mutation_sequence)
+    def run_verification(self, started_workspace_mutation_sequence, policy):
+        return run_verification(
+            self,
+            started_workspace_mutation_sequence,
+            policy,
+        )
 
     def read_run_events(self, run_id):
         return self.dependencies.run_store.read_events(run_id)
@@ -166,17 +171,9 @@ class Pico:
             execution.request_stop("user_reset")
             return
         run_log = self.run.run_log
-        try:
-            if run_log is not None and not self.run.projection.terminal:
-                reconcile_interrupted(self)
-                run_log.append_stopped(
-                        "Session reset by user.",
-                        "user_reset",
-                        build_stopped_final_diff(self),
-                    )
-        except BaseException:
-            reload_current_run(self)
-            raise
+        if run_log is not None and not self.run.projection.terminal:
+            RunLifecycle(self).reset_dormant()
+            return
         self.session.set_active_run("")
         self.run = ActiveRunState()
         self.model_client.reset_action_session()

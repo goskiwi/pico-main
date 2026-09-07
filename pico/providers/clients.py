@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import (
@@ -20,6 +21,7 @@ from http.client import (
 from urllib.parse import urlsplit
 
 from ..contracts import ModelAction, ToolCall
+from ..execution import ExecutionContext
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1.0"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
@@ -109,27 +111,54 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _shutdown_transport(transport):
+    try:
+        transport.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _watch_transport_cancellation(execution_context, transport, finished):
+    while not finished.wait(0.02):
+        if execution_context.token.requested:
+            _shutdown_transport(transport)
+            return
+
+
+def _arm_response_transport(execution_context, transport, deadline, finished):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        _shutdown_transport(transport)
+        raise TimeoutError("provider request deadline exceeded")
+    timer = threading.Timer(remaining, _shutdown_transport, args=(transport,))
+    timer.daemon = True
+    timer.start()
+    watcher = threading.Thread(
+        target=_watch_transport_cancellation,
+        args=(execution_context, transport, finished),
+        daemon=True,
+    )
+    watcher.start()
+    return timer, watcher
+
+
 @contextmanager
-def _open_response(request, timeout):
-    """Keep urllib proxy/redirect behavior, but bound headers and body together."""
+def _open_response(
+    request, timeout, execution_context: ExecutionContext
+):
+    """Open one response whose socket follows both timeout and cancellation."""
+    execution_context.check_active()
     deadline = time.monotonic() + timeout
     timers = []
+    watchers = []
+    finished = threading.Event()
 
     def arm(transport):
-        def expire():
-            try:
-                transport.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            expire()
-            raise TimeoutError("provider request deadline exceeded")
-        timer = threading.Timer(remaining, expire)
-        timer.daemon = True
+        timer, watcher = _arm_response_transport(
+            execution_context, transport, deadline, finished
+        )
         timers.append(timer)
-        timer.start()
+        watchers.append(watcher)
 
     class DeadlineHTTPConnection(HTTPConnection):
         def connect(self):
@@ -157,6 +186,7 @@ def _open_response(request, timeout):
         except urllib.error.HTTPError as exc:
             with exc:
                 body = exc.read()
+            execution_context.check_active()
             if time.monotonic() >= deadline:
                 raise TimeoutError("provider request deadline exceeded") from None
             raise urllib.error.HTTPError(
@@ -164,12 +194,16 @@ def _open_response(request, timeout):
             ) from None
         with response:
             yield response
+        execution_context.check_active()
         if time.monotonic() >= deadline:
             raise TimeoutError("provider request deadline exceeded")
     finally:
+        finished.set()
         for timer in timers:
             timer.cancel()
             timer.join()
+        for watcher in watchers:
+            watcher.join()
 
 
 
@@ -310,14 +344,16 @@ def _retry_after_seconds(headers):
         return max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
 
 
-def _retry_delay(deadline, attempt, headers=None):
+def _retry_delay(
+    deadline, attempt, execution_context: ExecutionContext, headers=None
+):
     delay = max(
         0.5 * (attempt + 1),
         _retry_after_seconds(headers) or 0.0,
     )
     if deadline - time.monotonic() <= delay:
         return False
-    time.sleep(delay)
+    execution_context.wait(delay)
     return True
 
 
@@ -375,10 +411,10 @@ def _projected_context_tokens(
     action_tools,
     token_counter,
     provider_input_tokens,
-    provider_output_tokens,
+    replay_output_tokens,
 ):
     if isinstance(provider_input_tokens, int) and isinstance(
-        provider_output_tokens, int
+        replay_output_tokens, int
     ):
         delta = json.dumps(
             result_items,
@@ -386,7 +422,7 @@ def _projected_context_tokens(
             sort_keys=True,
             separators=(",", ":"),
         )
-        return provider_input_tokens + provider_output_tokens + token_counter(delta)
+        return provider_input_tokens + replay_output_tokens + token_counter(delta)
     projected = {
         "instructions": str(instructions),
         "tools": list(action_tools),
@@ -400,6 +436,13 @@ def _projected_context_tokens(
             separators=(",", ":"),
         )
     )
+
+
+def _replay_output_tokens(turn):
+    if not turn.accepted:
+        return 0
+    output_tokens = turn.usage.get("output_tokens")
+    return output_tokens if isinstance(output_tokens, int) else None
 
 
 class FakeModelClient:
@@ -418,6 +461,7 @@ class FakeModelClient:
         self.recorded_action_result_groups = []
         self._action_input = []
         self._pending_call_ids = ()
+        self._last_replay_output_tokens = None
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
@@ -429,6 +473,7 @@ class FakeModelClient:
         self.recorded_action_results.extend(group)
         self._action_input.extend(self._result_items(group))
         self._pending_call_ids = ()
+        self._last_replay_output_tokens = None
 
     def _result_items(self, results):
         return _action_result_items(self._pending_call_ids, results)
@@ -441,7 +486,6 @@ class FakeModelClient:
         action_tools,
         token_counter,
         provider_input_tokens=None,
-        provider_output_tokens=None,
     ):
         return _projected_context_tokens(
             self._action_input,
@@ -450,7 +494,7 @@ class FakeModelClient:
             action_tools=action_tools,
             token_counter=token_counter,
             provider_input_tokens=provider_input_tokens,
-            provider_output_tokens=provider_output_tokens,
+            replay_output_tokens=self._last_replay_output_tokens,
         )
 
     def complete(self, prompt, max_new_tokens, **kwargs):
@@ -468,43 +512,49 @@ class FakeModelClient:
         *,
         instructions,
         action_tools,
-        **kwargs,
+        execution_context,
     ):
+        execution_context.check_active()
         if not self._action_input:
             self._action_input.append(
                 {
                     "role": "user",
                     "content": [{"type": "input_text", "text": str(input_text)}],
                 }
-            )
+        )
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
         self.instruction_prompts.append(str(instructions))
-        output = self.complete(input_text, max_new_tokens, **kwargs)
+        output = self.complete(
+            input_text,
+            max_new_tokens,
+            execution_context=execution_context,
+        )
         if isinstance(output, ModelAction):
-            action = output
+            replay_items = ()
+            pending_call_ids = ()
+            if output.kind == "tool":
+                replay_items = tuple(
+                    _function_call_replay_item(call)
+                    for call in output.tool_calls
+                )
+                pending_call_ids = tuple(
+                    call.call_id for call in output.tool_calls
+                )
+            turn = _ParsedProviderTurn(
+                output,
+                replay_items=replay_items,
+                pending_call_ids=pending_call_ids,
+            )
         elif isinstance(output, dict):
-            action = _action_from_response(output, action_tools)
+            turn = _parse_provider_turn(output, action_tools)
         else:
             raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
-        if action.kind == "tool":
-            self._action_input.extend(
-                {
-                    "type": "function_call",
-                    "call_id": call.call_id,
-                    "name": call.name,
-                    "arguments": json.dumps(
-                        call.args,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                }
-                for call in action.tool_calls
-            )
-            self._pending_call_ids = tuple(
-                call.call_id for call in action.tool_calls
-            )
-        return action
+        self.last_completion_metadata = dict(turn.usage)
+        self._last_replay_output_tokens = _replay_output_tokens(turn)
+        if turn.accepted:
+            self._action_input.extend(turn.replay_items)
+            self._pending_call_ids = turn.pending_call_ids
+        return turn.action
 
 
 def _normalize_versioned_base_url(base_url):
@@ -604,62 +654,210 @@ def _tool_call_from_response(call):
     return ToolCall(name, arguments, call_id), ""
 
 
-def _action_from_response(data, action_tools):
+@dataclass(frozen=True)
+class _ParsedProviderTurn:
+    """One fully interpreted response and the exact items safe to replay."""
+
+    action: ModelAction
+    replay_items: tuple[dict, ...] = ()
+    pending_call_ids: tuple[str, ...] = ()
+    usage: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.action.kind == "invalid" and (
+            self.replay_items or self.pending_call_ids
+        ):
+            raise ValueError("invalid provider turns cannot carry replay state")
+        if self.action.kind == "tool" and self.pending_call_ids != tuple(
+            call.call_id for call in self.action.tool_calls
+        ):
+            raise ValueError("provider turn call ids do not match its action")
+
+    @classmethod
+    def invalid(cls, message, usage=None):
+        return cls(ModelAction.invalid(message), usage=dict(usage or {}))
+
+    @property
+    def accepted(self):
+        return self.action.kind != "invalid"
+
+
+def _reasoning_replay_item(item):
+    encrypted = item.get("encrypted_content")
+    if not isinstance(encrypted, str) or not encrypted:
+        return None, "reasoning output is missing encrypted_content"
+    replay = {"type": "reasoning", "encrypted_content": encrypted}
+    if "id" in item:
+        if not isinstance(item["id"], str) or not item["id"]:
+            return None, "reasoning output has an invalid id"
+        replay["id"] = item["id"]
+    if "summary" in item:
+        summary = item["summary"]
+        if not isinstance(summary, list) or any(
+            not isinstance(part, dict) for part in summary
+        ):
+            return None, "reasoning output has a malformed summary"
+        replay["summary"] = summary
+    return replay, ""
+
+
+def _message_replay_item(item):
+    if item.get("status") != "completed":
+        return None, "assistant message output is not completed"
+    if item.get("role") != "assistant":
+        return None, "message output must have the assistant role"
+    message_id = item.get("id")
+    if message_id is not None and (
+        not isinstance(message_id, str) or not message_id
+    ):
+        return None, "assistant message output has an invalid id"
+    content = item.get("content")
+    if not isinstance(content, list) or not content:
+        return None, "assistant message output has malformed content"
+    normalized = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "output_text":
+            return None, "assistant message output contains unsupported content"
+        text = part.get("text")
+        annotations = part.get("annotations", [])
+        if not isinstance(text, str) or not isinstance(annotations, list):
+            return None, "assistant message output has malformed output_text"
+        if annotations:
+            return None, "assistant message output annotations are not supported"
+        normalized.append(
+            {"type": "output_text", "text": text, "annotations": []}
+        )
+    replay = {
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": normalized,
+    }
+    if message_id is not None:
+        replay["id"] = message_id
+    return replay, ""
+
+
+def _function_call_replay_item(call):
+    return {
+        "type": "function_call",
+        "call_id": call.call_id,
+        "name": call.name,
+        "arguments": json.dumps(
+            call.args,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+
+
+def _provider_turn_status_error(data):
     if data.get("status") == "incomplete":
         details = data.get("incomplete_details") or {}
         reason = str(details.get("reason", ""))
         if reason == "max_output_tokens":
-            return ModelAction.invalid(
+            return (
                 "The model response reached max_output_tokens before "
                 "producing complete function calls. Return one concise "
                 "action or an independent tool-call group."
             )
-        return ModelAction.invalid(
+        return (
             "The provider returned an incomplete response. Return exactly "
             "one complete action or tool-call group."
         )
     if data.get("status") != "completed":
-        return ModelAction.invalid("Only a completed provider response can produce actions.")
-    output = data.get("output")
+        return "Only a completed provider response can produce actions."
+    return ""
+
+
+def _parse_provider_output(output, declared):
     if not isinstance(output, list) or any(
         not isinstance(item, dict) for item in output
     ):
-        return ModelAction.invalid(
-            "provider returned malformed response output"
-        )
-    declared = {str(item["name"]) for item in action_tools}
-    calls = [
-        item for item in output if item.get("type") == "function_call"
-    ]
-    if not calls:
-        return ModelAction.invalid(
-            "expected at least one function call, received 0"
-    )
-    parsed = []
-    for call in calls:
-        parsed_call, error = _tool_call_from_response(call)
+        return (), (), "provider returned malformed response output"
+    parsed_calls = []
+    replay_items = []
+    for item in output:
+        item_type = item.get("type")
+        if item_type == "reasoning":
+            replay, error = _reasoning_replay_item(item)
+            if error:
+                return (), (), error
+            replay_items.append(replay)
+            continue
+        if item_type == "message":
+            replay, error = _message_replay_item(item)
+            if error:
+                return (), (), error
+            replay_items.append(replay)
+            continue
+        if item_type != "function_call":
+            return (
+                (),
+                (),
+                f"unsupported provider output item type: {item_type or 'missing'}",
+            )
+        parsed_call, error = _tool_call_from_response(item)
         if error:
-            return ModelAction.invalid(error)
+            return (), (), error
         if parsed_call.name not in declared:
-            return ModelAction.invalid(
-                f"unknown function call: {parsed_call.name}"
+            return (), (), f"unknown function call: {parsed_call.name}"
+        parsed_calls.append(parsed_call)
+        replay_items.append(_function_call_replay_item(parsed_call))
+    return tuple(replay_items), tuple(parsed_calls), ""
+
+
+def _parse_provider_turn(data, action_tools):
+    usage = _extract_usage(data)
+    error = _provider_turn_status_error(data)
+    if error:
+        return _ParsedProviderTurn.invalid(error, usage)
+    declared = {str(item["name"]) for item in action_tools}
+    replay_items, parsed_calls, error = _parse_provider_output(
+        data.get("output"), declared
+    )
+    if error:
+        return _ParsedProviderTurn.invalid(error, usage)
+    if not parsed_calls:
+        return _ParsedProviderTurn.invalid(
+            "expected at least one function call, received 0", usage
+        )
+
+    final_calls = [call for call in parsed_calls if call.name == "submit_final"]
+    if final_calls:
+        if len(parsed_calls) != 1:
+            return _ParsedProviderTurn.invalid(
+                "submit_final must be the only call in its model response", usage
             )
-        parsed.append(parsed_call)
-    if len(parsed) > 1:
+        call = final_calls[0]
+        answer = call.args.get("answer")
+        if (
+            set(call.args) != {"answer"}
+            or not isinstance(answer, str)
+            or not answer.strip()
+        ):
+            return _ParsedProviderTurn.invalid(
+                "submit_final requires one non-empty string answer", usage
+            )
+        action = ModelAction.final(answer)
+    elif len(parsed_calls) > 1:
         try:
-            return ModelAction.tools(parsed)
+            action = ModelAction.tools(parsed_calls)
         except ValueError as exc:
-            return ModelAction.invalid(str(exc))
-    call = parsed[0]
-    if call.name == "submit_final":
-        arguments = call.args
-        answer = arguments.get("answer")
-        if set(arguments) != {"answer"} or not isinstance(answer, str) or not answer.strip():
-            return ModelAction.invalid(
-                "submit_final requires one non-empty string answer"
-            )
-        return ModelAction.final(answer)
-    return ModelAction("tool", tool_calls=(call,))
+            return _ParsedProviderTurn.invalid(str(exc), usage)
+    else:
+        action = ModelAction.tool(
+            parsed_calls[0].name,
+            parsed_calls[0].args,
+            call_id=parsed_calls[0].call_id,
+        )
+    return _ParsedProviderTurn(
+        action=action,
+        replay_items=replay_items,
+        pending_call_ids=tuple(call.call_id for call in parsed_calls),
+        usage=usage,
+    )
 
 
 class OpenAICompatibleModelClient:
@@ -677,6 +875,7 @@ class OpenAICompatibleModelClient:
     def reset_action_session(self):
         self._action_input = []
         self._pending_call_ids = ()
+        self._last_replay_output_tokens = None
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
@@ -703,6 +902,7 @@ class OpenAICompatibleModelClient:
     def record_action_results(self, results):
         self._action_input.extend(self._result_items(results))
         self._pending_call_ids = ()
+        self._last_replay_output_tokens = None
 
     def projected_context_tokens(
         self,
@@ -712,7 +912,6 @@ class OpenAICompatibleModelClient:
         action_tools,
         token_counter,
         provider_input_tokens=None,
-        provider_output_tokens=None,
     ):
         return _projected_context_tokens(
             self._action_input,
@@ -721,7 +920,7 @@ class OpenAICompatibleModelClient:
             action_tools=action_tools,
             token_counter=token_counter,
             provider_input_tokens=provider_input_tokens,
-            provider_output_tokens=provider_output_tokens,
+            replay_output_tokens=self._last_replay_output_tokens,
         )
 
     def _build_payload(
@@ -761,7 +960,10 @@ class OpenAICompatibleModelClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def _request_response(self, payload, request_timeout):
+    def _request_response(
+        self, payload, execution_context: ExecutionContext
+    ):
+        execution_context.check_active()
         request = urllib.request.Request(
             self.base_url + "/responses",
             data=json.dumps(payload).encode("utf-8"),
@@ -769,12 +971,11 @@ class OpenAICompatibleModelClient:
             method="POST",
         )
         attempts = 3
-        total_timeout = float(self.timeout)
-        if request_timeout is not None:
-            total_timeout = min(total_timeout, float(request_timeout))
+        total_timeout = execution_context.bounded_timeout(self.timeout)
         deadline = time.monotonic() + max(0.001, total_timeout)
 
         for attempt in range(attempts):
+            execution_context.check_active()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 cause = TimeoutError(
@@ -785,14 +986,21 @@ class OpenAICompatibleModelClient:
                     f"Backend: {self.base_url}\n"
                     f"Model: {self.model}"
                 ) from cause
-            effective_timeout = min(float(self.timeout), remaining)
+            effective_timeout = execution_context.bounded_timeout(
+                min(float(self.timeout), remaining)
+            )
             http_failure = None
             transport_failure = None
             response_headers = {}
             try:
-                with _open_response(request, timeout=effective_timeout) as response:
+                with _open_response(
+                    request,
+                    timeout=effective_timeout,
+                    execution_context=execution_context,
+                ) as response:
                     body_text = response.read().decode("utf-8")
                     response_headers = getattr(response, "headers", {}) or {}
+                execution_context.check_active()
                 try:
                     return self._decode_response(
                         body_text,
@@ -802,7 +1010,12 @@ class OpenAICompatibleModelClient:
                     if (
                         exc.transient
                         and attempt < attempts - 1
-                        and _retry_delay(deadline, attempt, response_headers)
+                        and _retry_delay(
+                            deadline,
+                            attempt,
+                            execution_context,
+                            response_headers,
+                        )
                     ):
                         continue
                     raise
@@ -818,6 +1031,7 @@ class OpenAICompatibleModelClient:
             ) as exc:
                 transport_failure = exc
 
+            execution_context.check_active()
             if http_failure is not None:
                 status, error_body, error_headers, context_overflow = http_failure
                 transient = status in {408, 429} or status >= 500
@@ -826,7 +1040,12 @@ class OpenAICompatibleModelClient:
                 if (
                     transient
                     and attempt < attempts - 1
-                    and _retry_delay(deadline, attempt, error_headers)
+                    and _retry_delay(
+                        deadline,
+                        attempt,
+                        execution_context,
+                        error_headers,
+                    )
                 ):
                     continue
                 detail = _http_error_detail(error_body)
@@ -837,7 +1056,9 @@ class OpenAICompatibleModelClient:
                     transient=transient,
                 )
             if transport_failure is not None:
-                if attempt < attempts - 1 and _retry_delay(deadline, attempt):
+                if attempt < attempts - 1 and _retry_delay(
+                    deadline, attempt, execution_context
+                ):
                     continue
                 raise ProviderTransportError(
                     "OpenAI-compatible transport failed after "
@@ -893,8 +1114,9 @@ class OpenAICompatibleModelClient:
 
     def complete_action(
         self, input_text, max_new_tokens, *, instructions, action_tools,
-        request_timeout=None,
+        execution_context: ExecutionContext,
     ):
+        execution_context.check_active()
         if not self._action_input:
             self._action_input.append(
                 {
@@ -911,16 +1133,11 @@ class OpenAICompatibleModelClient:
             action_tools=action_tools,
             input_items=self._action_input,
         )
-        response_data = self._request_response(payload, request_timeout)
-        self.last_completion_metadata = _extract_usage(response_data)
-        action = _action_from_response(response_data, action_tools)
-        output = response_data["output"]
-        function_calls = [
-            item for item in output if item.get("type") == "function_call"
-        ]
-        if action.kind != "invalid":
-            self._action_input.extend(output)
-            self._pending_call_ids = tuple(
-                str(call.get("call_id") or "") for call in function_calls
-            )
-        return action
+        response_data = self._request_response(payload, execution_context)
+        turn = _parse_provider_turn(response_data, action_tools)
+        self.last_completion_metadata = dict(turn.usage)
+        self._last_replay_output_tokens = _replay_output_tokens(turn)
+        if turn.accepted:
+            self._action_input.extend(turn.replay_items)
+            self._pending_call_ids = turn.pending_call_ids
+        return turn.action

@@ -1,6 +1,8 @@
 """Day 7: run one complete coding task across Pico's core runtime."""
 
 import json
+import shlex
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,29 +15,8 @@ from pico import (
     ToolCall,
     Workspace,
 )
-from pico.command_runner import CommandResult
+from pico.command_runner import CommandRunner, shell_argv
 from pico.mutations import file_revision
-
-
-class RecordingVerificationCommandRunner:
-    def __init__(self, target):
-        self.target = Path(target)
-        self.calls = []
-
-    def run(self, argv, **kwargs):
-        content = self.target.read_text(encoding="utf-8")
-        passed = "return left + right" in content
-        self.calls.append(
-            {
-                "argv": list(argv),
-                "workspace_contains_fix": passed,
-                "timeout": kwargs.get("timeout"),
-            }
-        )
-        return CommandResult(
-            returncode=0 if passed else 1,
-            stdout="1 passed\n" if passed else "1 failed\n",
-        )
 
 
 def print_section(title, value):
@@ -44,6 +25,7 @@ def print_section(title, value):
 
 
 def main():
+    print("Day 7：模型使用预设动作；文件修改、pytest 验证和 RunLog 回放实际执行。")
     with tempfile.TemporaryDirectory(prefix="pico-day7-") as directory:
         root = Path(directory)
         target = root / "calculator.py"
@@ -60,8 +42,11 @@ def main():
             encoding="utf-8",
         )
         initial_revision = file_revision(target)
-        verify_command = "python -m pytest -q"
-        command_runner = RecordingVerificationCommandRunner(target)
+        verify_command = shlex.join([sys.executable, "-m", "pytest", "-q"])
+        command_runner = CommandRunner(root)
+        initial = command_runner.run(shell_argv(verify_command), cwd=root, timeout=30)
+        assert initial.returncode == 1 and not initial.infrastructure_error
+        assert "1 failed" in initial.stdout
         model = FakeModelClient(
             [
                 ModelAction.tool(
@@ -191,7 +176,10 @@ def main():
             verification_events[-1]["finished_changed_path_states"],
             verification_events[-1]["command"],
         ) is not None
-        assert len(command_runner.calls) == 1
+        assert len(verification_events) == 1
+        assert verification_events[0]["status"] == "passed"
+        assert verification_events[0]["exit_code"] == 0
+        assert "1 passed" in verification_events[0]["output"]
         call_events = [
             event for event in events if event.kind == "assistant_tool_calls"
         ]
@@ -223,9 +211,8 @@ def main():
             {
                 "transactions": transactions,
                 "verification_events": verification_events,
-                "command_runner_calls": command_runner.calls,
-                "verification_was_run_once_by_completion_gate": len(command_runner.calls)
-                == 1,
+                "initial_verification": {"exit_code": initial.returncode, "output": initial.stdout},
+                "verification_was_run_once_by_runtime": len(verification_events) == 1,
             },
         )
         print_section(

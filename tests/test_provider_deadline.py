@@ -7,11 +7,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from pico.execution import (
+    ExecutionCancelled,
+    ExecutionContext,
+    ExecutionDeadlineExceeded,
+)
 from pico.providers.clients import (
     OpenAICompatibleModelClient,
     ProviderHTTPError,
     ProviderTransportError,
 )
+
+
+def execution_context(seconds=30):
+    return ExecutionContext.root(max_seconds=seconds)
 
 
 def test_streaming_only_provider_returns_completed_tool_call_over_http():
@@ -52,7 +61,11 @@ def test_streaming_only_provider_returns_completed_tool_call_over_http():
             "test", f"http://127.0.0.1:{server.server_port}", "", None, 2,
         )
         action = client.complete_action(
-            "inspect", 64, instructions="rules", action_tools=[{"name": "read_file"}],
+            "inspect",
+            64,
+            instructions="rules",
+            action_tools=[{"name": "read_file"}],
+            execution_context=execution_context(),
         )
         assert action.kind == "tool"
         assert [(call.call_id, call.args) for call in action.tool_calls] == [("call_read", {"path": "a.py"})]
@@ -92,7 +105,7 @@ def test_deadline_transport_preserves_http_redirects():
             None,
             2,
         )
-        response = client._request_response({}, request_timeout=1)
+        response = client._request_response({}, execution_context(1))
         assert response == {"status": "completed", "output": []}
     finally:
         server.shutdown()
@@ -133,7 +146,9 @@ def test_cross_origin_redirect_does_not_receive_credentials_or_body():
         client = OpenAICompatibleModelClient("test", f"http://127.0.0.1:{origin.server_port}",
                                              "synthetic-token", None, 2)
         with pytest.raises(ProviderTransportError, match="cross-origin"):
-            client._request_response({"input": "private request body"}, 2)
+            client._request_response(
+                {"input": "private request body"}, execution_context(2)
+            )
         assert received == []
     finally:
         for server in servers:
@@ -180,8 +195,8 @@ def test_provider_total_deadline_interrupts_continuous_slow_response(phase):
     )
     try:
         started = time.monotonic()
-        with pytest.raises(RuntimeError):
-            client._request_response({}, request_timeout=0.15)
+        with pytest.raises(ExecutionDeadlineExceeded):
+            client._request_response({}, execution_context(0.15))
         assert time.monotonic() - started < 0.7
     finally:
         server.shutdown()
@@ -189,21 +204,114 @@ def test_provider_total_deadline_interrupts_continuous_slow_response(phase):
         thread.join()
 
 
+def test_provider_request_is_interrupted_by_execution_cancellation():
+    request_received = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            request_received.set()
+            time.sleep(1)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"completed","output":[]}')
+            except OSError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    client = OpenAICompatibleModelClient(
+        "test", f"http://127.0.0.1:{server.server_port}", "", None, 10
+    )
+    context = execution_context(10)
+    errors = []
+
+    def request():
+        try:
+            client._request_response({}, context)
+        except ExecutionCancelled as exc:
+            errors.append(exc)
+
+    request_thread = threading.Thread(target=request)
+    request_thread.start()
+    try:
+        assert request_received.wait(1)
+        cancelled_at = time.monotonic()
+        context.request_stop("user_cancelled")
+        request_thread.join(0.5)
+
+        assert not request_thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], ExecutionCancelled)
+        assert time.monotonic() - cancelled_at < 0.5
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join()
+        request_thread.join(1)
+
+
+def test_provider_retry_wait_is_interrupted_by_execution_cancellation(monkeypatch):
+    attempted = threading.Event()
+    attempts = []
+
+    @contextmanager
+    def failed_open(_request, timeout, execution_context):
+        assert timeout > 0
+        execution_context.check_active()
+        attempts.append(1)
+        attempted.set()
+        raise urllib.error.URLError("temporary outage")
+        yield
+
+    monkeypatch.setattr("pico.providers.clients._open_response", failed_open)
+    client = OpenAICompatibleModelClient(
+        "test", "https://example.test/v1", "", None, 10
+    )
+    context = execution_context(10)
+    errors = []
+
+    def request():
+        try:
+            client._request_response({}, context)
+        except ExecutionCancelled as exc:
+            errors.append(exc)
+
+    request_thread = threading.Thread(target=request)
+    request_thread.start()
+    assert attempted.wait(1)
+    context.request_stop("user_cancelled")
+    request_thread.join(0.5)
+
+    assert not request_thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ExecutionCancelled)
+    assert attempts == [1]
+
+
 def test_provider_transport_error_preserves_cause_and_attempt_count(monkeypatch):
     @contextmanager
-    def failed_open(_request, timeout):
+    def failed_open(_request, timeout, execution_context):
         del timeout
+        execution_context.check_active()
         raise urllib.error.URLError("DNS lookup failed")
         yield
 
     monkeypatch.setattr("pico.providers.clients._open_response", failed_open)
-    monkeypatch.setattr("pico.providers.clients.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(ExecutionContext, "wait", lambda _self, _seconds: None)
     client = OpenAICompatibleModelClient(
         "test", "https://example.test/v1", "", None, 10
     )
 
     with pytest.raises(ProviderTransportError) as caught:
-        client._request_response({}, request_timeout=10)
+        client._request_response({}, execution_context(10))
 
     assert "3 attempts" in str(caught.value)
     assert "URLError: <urlopen error DNS lookup failed>" in str(caught.value)
@@ -240,20 +348,22 @@ def test_response_level_transient_error_retries_inside_one_deadline(monkeypatch)
             return next(bodies)
 
     @contextmanager
-    def open_response(_request, timeout):
+    def open_response(_request, timeout, execution_context):
         assert timeout > 0
+        execution_context.check_active()
         yield Response()
 
     monkeypatch.setattr("pico.providers.clients._open_response", open_response)
     monkeypatch.setattr(
-        "pico.providers.clients.time.sleep",
-        lambda seconds: delays.append(seconds),
+        ExecutionContext,
+        "wait",
+        lambda _self, seconds: delays.append(seconds),
     )
     client = OpenAICompatibleModelClient(
         "test", "https://example.test/v1", "", None, 10
     )
 
-    response = client._request_response({}, request_timeout=10)
+    response = client._request_response({}, execution_context(10))
 
     assert response == {"status": "completed", "output": []}
     assert len(attempts) == 3
@@ -272,8 +382,9 @@ def test_response_level_permanent_error_is_not_retried(monkeypatch):
             return b'{"error":{"code":"unsupported_parameter","message":"bad"}}'
 
     @contextmanager
-    def open_response(_request, timeout):
+    def open_response(_request, timeout, execution_context):
         assert timeout > 0
+        execution_context.check_active()
         yield Response()
 
     monkeypatch.setattr("pico.providers.clients._open_response", open_response)
@@ -282,7 +393,7 @@ def test_response_level_permanent_error_is_not_retried(monkeypatch):
     )
 
     with pytest.raises(ProviderHTTPError, match="unsupported_parameter"):
-        client._request_response({}, request_timeout=10)
+        client._request_response({}, execution_context(10))
 
     assert len(attempts) == 1
 

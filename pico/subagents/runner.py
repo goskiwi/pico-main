@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import atexit
 import uuid
-from dataclasses import replace
+from copy import deepcopy
+from pathlib import Path
 
+from ..contracts import FailureInfo, ToolExecutionPlan, ToolOutcome
 from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import Workspace
-from .contracts import ChildFailure, ChildPatch, ChildRecord, ChildSpec, ChildSuccess
+from .contracts import (
+    ChildFailure,
+    ChildLaunch,
+    ChildPatch,
+    ChildRecord,
+    ChildSpec,
+    ChildSuccess,
+    planned_worktree_path,
+)
 from .integration import PatchIntegrator
-from .worktree import GitWorktree, _git
+from .worktree import GitClient, GitWorktree
 
 EXPLORE_HANDOFF = """
 
@@ -45,12 +55,53 @@ EXPLORE_TOOLS = (
 )
 IMPLEMENT_TOOLS = (
     "read_file",
+    "read_artifact",
     "write_file",
     "edit_file",
     "update_working_state",
 )
 CHILD_MAX_TOOL_EXECUTIONS = 12
 CHILD_MAX_AGENT_TURNS = 16
+
+
+def _cleanup_recovered_worktree(runtime, record):
+    if record.spec.role != "implement" or not record.worktree_path:
+        return
+    GitWorktree(
+        runtime.workspace.root,
+        record.base_sha,
+        record.child_id,
+        runtime.dependencies.command_runner_factory,
+        runtime.run.execution_context,
+        planned_path=Path(record.worktree_path),
+    ).cleanup()
+
+
+def recover_delegate(runtime, call):
+    """Fail one interrupted synchronous Child without replay or adoption."""
+
+    record = runtime.run.projection.children.record_for_call(call.call_id)
+    if record is None:
+        raise ValueError("interrupted delegate is missing its Child launch")
+    try:
+        detail = "synchronous Child execution was interrupted and was not resumed"
+        return ToolOutcome(
+            call.call_id,
+            call.name,
+            "error",
+            "failed",
+            "none",
+            detail,
+            structured={
+                "child_id": record.child_id,
+                "role": record.spec.role,
+                "status": "failed",
+                "error": detail,
+            },
+            failure=FailureInfo("child_interrupted", detail, "retry_after_change"),
+        )
+    finally:
+        _cleanup_recovered_worktree(runtime, record)
 
 
 class SubagentRunner:
@@ -69,13 +120,6 @@ class SubagentRunner:
     def _run_root(self, run_id):
         return self.parent.dependencies.run_store.run_dir(run_id) / "subagents"
 
-
-    def _new_child_id(self, run_id):
-        records = self.parent.run.projection.children.records
-        while True:
-            child_id = "child_" + uuid.uuid4().hex[:12]
-            if child_id not in records:
-                return child_id
 
     def _task_root(self, run_id, child_id):
         root = self._run_root(run_id) / child_id
@@ -99,10 +143,9 @@ class SubagentRunner:
         child_run_id = result.child_run_id if result is not None else ""
         if not child_run_id:
             raise ValueError(f"child has no Run receipt: {record.child_id}")
-        _log, projection = self._child_run_store(run_id, record).load_run(
+        return self._child_run_store(run_id, record).load_run(
             child_run_id
-        )
-        return projection
+        ).projection
 
     def _receipt(self, run_id, record):
         result = record.result
@@ -135,7 +178,9 @@ class SubagentRunner:
             self.parent.workspace.root,
             record.base_sha,
             record.child_id,
-            execution_context=self.parent.run.execution_context,
+            self.parent.dependencies.command_runner_factory,
+            self.parent.run.execution_context,
+            planned_path=Path(record.worktree_path),
         )
         handle.create()
         self._worktrees[(run_id, record.child_id)] = handle
@@ -178,7 +223,7 @@ class SubagentRunner:
             verification_command=(
                 ""
                 if record.spec.role == "explore"
-                else self.parent.config.verification_command
+                else record.verification_command
             ),
         )
         return Pico(
@@ -203,7 +248,7 @@ class SubagentRunner:
             prompt += (
                 IMPLEMENT_HANDOFF
                 + "\nConfigured verification command:\n"
-                + str(self.parent.config.verification_command).strip()
+                + record.verification_command
             )
         try:
             child = self._build_child(run_id, record)
@@ -231,37 +276,72 @@ class SubagentRunner:
                 if changed_paths:
                     patch_path = self._task_root(run_id, record.child_id) / "patch.diff"
                     patch = ChildPatch(changed_paths, handle.write_patch(patch_path, changed_paths))
-            record.result = ChildSuccess(child_run_id, patch)
+            return ChildSuccess(child_run_id, patch)
         except Exception as exc:  # noqa: BLE001 - preserve Child receipt on failure
             if child is not None and child.run.projection.contract is not None:
                 child_run_id = child.run.projection.run_id
-            record.result = ChildFailure(
+            return ChildFailure(
                 self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
                 child_run_id,
             )
 
-    def delegate(self, role, task, allowed_write_paths=()):
-        spec = ChildSpec(
-            role=role,
-            task=task,
-            allowed_write_paths=allowed_write_paths,
-        )
+    def plan_delegate(self, call_id, role, task, allowed_write_paths=()):
+        spec = ChildSpec(role=role, task=task, allowed_write_paths=allowed_write_paths)
+        run_id = self._parent_run_id()
+        records = self.parent.run.projection.children.records
+        while True:
+            child_id = "child_" + uuid.uuid4().hex[:12]
+            if child_id not in records:
+                break
+        base_sha = ""
+        verification_command = ""
+        worktree_path = ""
         if spec.role == "implement" and not str(
             self.parent.config.verification_command or ""
         ).strip():
             raise ValueError("implement children require a verification command")
+        if spec.role == "implement":
+            verification_command = str(
+                self.parent.config.verification_command
+            ).strip()
+            base_sha = GitClient(
+                self.parent.workspace.root,
+                self.parent.dependencies.command_runner_factory,
+                self.parent.run.execution_context,
+            ).run("rev-parse", "HEAD").decode().strip()
+            worktree_path = planned_worktree_path(run_id, child_id)
+            record = ChildRecord(
+                child_id,
+                call_id,
+                spec,
+                base_sha,
+                verification_command,
+                worktree_path,
+            )
+            self.integration._parent_changes(record)
+        launch = ChildLaunch(
+            child_id,
+            base_sha,
+            verification_command,
+            worktree_path,
+        ).validate_for(spec, run_id)
+        return ToolExecutionPlan("none", operation=launch.to_dict())
+
+    def delegate(self, plan, role, task, allowed_write_paths=()):
+        if not isinstance(plan, ToolExecutionPlan):
+            raise TypeError("delegate requires its persisted ToolExecutionPlan")
+        spec = ChildSpec(role=role, task=task, allowed_write_paths=allowed_write_paths)
         run_id = self._parent_run_id()
-        child_id = self._new_child_id(run_id)
-        record = ChildRecord(child_id=child_id, spec=spec)
+        launch = ChildLaunch.from_dict(plan.operation).validate_for(spec, run_id)
+        projected = self.parent.run.projection.children.record(launch.child_id)
+        if projected.parent_call_id == "" or projected.spec != spec:
+            raise ValueError("persisted Child launch does not match delegate")
+        record = deepcopy(projected)
         try:
             if spec.role == "implement":
-                record.base_sha = _git(
-                    self.parent.workspace.root, "rev-parse", "HEAD",
-                    execution_context=self.parent.run.execution_context,
-                ).decode().strip()
                 self.integration._parent_changes(record)
                 self._prepare_implement_worktree(run_id, record)
-            self._run_child(run_id, record)
+            record.result = self._run_child(run_id, record)
         except Exception as exc:  # noqa: BLE001 - Child failure is receipt state
             child_run_id = (
                 record.result.child_run_id
@@ -272,19 +352,24 @@ class SubagentRunner:
                 self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
                 child_run_id,
             )
-        if isinstance(record.result, ChildFailure):
-            handle = self._release_worktree(run_id, child_id)
-            if handle is not None:
-                record.result = replace(
-                    record.result,
-                    error=record.result.error + f"; retained worktree: {handle.path}",
-                )
-        elif record.result.patch is None:
-            self._discard_worktree(run_id, child_id)
-        return self._receipt(run_id, record)
+        try:
+            receipt = self._receipt(run_id, record)
+        except Exception as exc:  # noqa: BLE001 - launched Child needs one receipt
+            child_run_id = (
+                record.result.child_run_id
+                if record.result is not None
+                else ""
+            )
+            record.result = ChildFailure(
+                self.parent.redact_text(f"{type(exc).__name__}: {exc}"),
+                child_run_id,
+            )
+            receipt = self._receipt(run_id, record)
+        self._discard_worktree(run_id, launch.child_id)
+        return receipt
 
-    def integrate_child(self, child_id):
-        result = self.integration.integrate_child(str(child_id))
+    def integrate_child(self, child_id, plan):
+        result = self.integration.integrate_child(str(child_id), plan)
         self._discard_worktree(self._parent_run_id(), str(child_id))
         return result
 

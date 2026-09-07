@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .contracts import FailureInfo, ToolOutcome
 from .delivery import (
     build_final_diff,
     build_stopped_final_diff,
@@ -32,17 +30,17 @@ class AgentLoopState:
     overflow_recovery_attempted: bool = False
     invalid_output_count: int = 0
     completion_block_count: int = 0
-    execution_stop: str = ""
     starting_model_request_count: int = 0
 
 
-def _state_from_snapshot(runtime: Pico, run_log, projection):
+def _state_from_snapshot(runtime: Pico, run_log):
+    projection = run_log.projection
     session_id = str(runtime.session.id)
     if not run_log.events:
         raise ValueError("active Run Log is missing or empty")
     if projection.run_id != run_log.run_id or projection.session_id != session_id:
         raise ValueError("active Run does not belong to this Session")
-    return ActiveRunState(projection=projection, run_log=run_log)
+    return ActiveRunState(run_log=run_log)
 
 
 def load_resumable_run(runtime: Pico):
@@ -59,13 +57,14 @@ def load_resumable_run(runtime: Pico):
 
     pointed_run_id = str(runtime.session.active_run_id)
     if pointed_run_id:
-        run_log, projection = runtime.dependencies.run_store.load_run(pointed_run_id)
+        run_log = runtime.dependencies.run_store.load_run(pointed_run_id)
     else:
-        run_log, projection = runtime.dependencies.run_store.find_active_run(session_id)
+        run_log = runtime.dependencies.run_store.find_active_run(session_id)
     if run_log is None:
         return runtime.run
 
-    state = _state_from_snapshot(runtime, run_log, projection)
+    projection = run_log.projection
+    state = _state_from_snapshot(runtime, run_log)
     if projection.terminal:
         if pointed_run_id:
             runtime.session.set_active_run("")
@@ -84,8 +83,9 @@ def reload_current_run(runtime: Pico):
     run_id = str(runtime.run.projection.run_id)
     if not run_id:
         return load_resumable_run(runtime)
-    run_log, projection = runtime.dependencies.run_store.load_run(run_id)
-    runtime.run = _state_from_snapshot(runtime, run_log, projection)
+    run_log = runtime.dependencies.run_store.load_run(run_id)
+    projection = run_log.projection
+    runtime.run = _state_from_snapshot(runtime, run_log)
     pointed_run_id = str(runtime.session.active_run_id)
     expected_pointer = "" if projection.terminal else run_id
     if pointed_run_id != expected_pointer:
@@ -110,101 +110,21 @@ def _reload_if_snapshot_is_stale(runtime: Pico):
     return run
 
 
-def reconcile_interrupted(runtime):
-    run_log = runtime.run.run_log
-    if run_log is None:
-        return ()
-    pending_calls = run_log.pending_tool_calls()
-    if not pending_calls:
-        return ()
-    started_by_id = run_log.pending_tool_starts()
-    reconciled = []
-    for call in pending_calls:
-        started = started_by_id.get(call.call_id)
-        if started is None:
-            detail = "tool call was persisted but never entered execution"
-            outcome = ToolOutcome(
-                tool_call_id=call.call_id,
-                tool_name=call.name,
-                status="error",
-                execution_state="not_started",
-                side_effect_state="none",
-                content=detail,
-                failure=FailureInfo(
-                    "operation_not_started",
-                    detail,
-                    "retry_after_wait",
-                ),
-            )
-        else:
-            potential = list(started.payload.get("potential_effects", []))
-            changed = []
-            transitions = []
-            for effect in potential:
-                logical = str(effect.get("path", ""))
-                if not logical:
-                    continue
-                path = Path(logical)
-                if not path.is_absolute():
-                    path = runtime.workspace.resolve_path(logical)
-                before = str(effect.get("before_state", ""))
-                before_artifact_id = str(effect.get("before_artifact_id", ""))
-                after = runtime.workspace.path_state(path)
-                if before != after:
-                    changed.append(logical)
-                    transitions.append(
-                        {
-                            "path": logical,
-                            "before_state": before,
-                            "after_state": after,
-                            "before_artifact_id": before_artifact_id,
-                        }
-                    )
-            effect_scope = str(started.payload.get("effect_scope", "none"))
-            unknown = effect_scope == "workspace" and not potential
-            uncertain = bool(changed or unknown)
-            detail = "tool execution was interrupted before a durable result"
-            outcome = ToolOutcome(
-                tool_call_id=call.call_id,
-                tool_name=call.name,
-                status="partial_success" if uncertain else "error",
-                execution_state="failed",
-                side_effect_state=(
-                    "partial" if changed else ("unknown" if unknown else "none")
-                ),
-                content=detail,
-                failure=FailureInfo(
-                    "operation_interrupted",
-                    detail,
-                    "no_retry" if uncertain else "retry_after_wait",
-                ),
-                affected_paths=tuple(changed),
-                effect_scope=effect_scope if changed or unknown else "none",
-                structured={"path_transitions": transitions},
-            )
-        if started is not None and call.name == "integrate_child":
-            from .subagents.integration import PatchIntegrator
-
-            outcome = PatchIntegrator(runtime).recover_applied(call, started, outcome)
-        entry = run_log.append_tool_result(
-            outcome,
-            recovered_from_interruption=True,
-        )
-        reconciled.append((outcome, entry))
-    return tuple(reconciled)
-
-
 class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
     def prepare_compaction(
-        self, user_message, *, provider_context_tokens=None, action_tools=None
+        self,
+        user_message,
+        *,
+        tool_surface,
+        provider_context_tokens=None,
     ):
         plan, metadata, history = self.runtime.prompt.plan_compaction(
             user_message,
+            tool_surface=tool_surface,
             provider_context_tokens=provider_context_tokens,
-            action_tools=action_tools,
         )
         if plan is not None:
             self.runtime.run.run_log.append_compaction(*plan)
@@ -225,7 +145,7 @@ class RunLifecycle:
             raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
         try:
-            reconcile_interrupted(runtime)
+            runtime.tools.reconcile_interrupted()
             runtime.run.request_tool_start = runtime.run.metrics.executed_tool_count
             if resumed:
                 run_log.append_user_guidance(user_message)
@@ -280,12 +200,11 @@ class RunLifecycle:
         )
         try:
             run_log.append_user(contract)
-            projection = run_log.projection
         except BaseException:
             runtime.run = ActiveRunState()
             load_resumable_run(runtime)
             raise
-        runtime.run = ActiveRunState(projection=projection, run_log=run_log)
+        runtime.run = ActiveRunState(run_log=run_log)
         runtime.session.set_active_run(run_id)
         return False
 
@@ -326,13 +245,27 @@ class RunLifecycle:
             return str(exc) or "user_cancelled"
         return ""
 
-    def finish_success(self, loop_state, final) -> RunOutcome:
+    def run_completion_verification(self, policy):
+        """Execute and persist one completion verification attempt."""
+
+        runtime = self.runtime
+        sequence = runtime.run.evidence.last_workspace_mutation_sequence
+        current = runtime.run_verification(sequence, policy)
+        if current is not None:
+            runtime.emit_event("verification_result", current)
+        # Preserve verifier facts before a stop requested while it was running.
+        if runtime.run.execution_context is not None:
+            runtime.run.execution_context.check_active()
+        return current
+
+    def finish_success(self, final, *, run_started_at) -> RunOutcome:
         runtime = self.runtime
         final_diff = build_final_diff(runtime)
+        runtime.run.execution_context.check_active()
         runtime.run.run_log.append_final(
             final,
             final_diff,
-            turn_duration_ms=int((time.monotonic() - loop_state.run_started_at) * 1000),
+            turn_duration_ms=int((time.monotonic() - run_started_at) * 1000),
         )
         outcome = RunOutcome(runtime.run.projection)
         try:
@@ -343,14 +276,18 @@ class RunLifecycle:
                 runtime.run.execution_context = None
         return outcome
 
-    def finish_stopped(self, loop_state) -> RunOutcome:
-        final, stop_reason = self._stopped_result(loop_state.execution_stop)
+    def finish_stopped(self, stop_reason, *, run_started_at=None) -> RunOutcome:
+        final, stop_reason = self._stopped_result(stop_reason)
         final_diff = build_stopped_final_diff(self.runtime)
         self.runtime.run.run_log.append_stopped(
             final,
             stop_reason,
             final_diff,
-            turn_duration_ms=int((time.monotonic() - loop_state.run_started_at) * 1000),
+            turn_duration_ms=(
+                0
+                if run_started_at is None
+                else int((time.monotonic() - run_started_at) * 1000)
+            ),
         )
         runtime = self.runtime
         outcome = RunOutcome(runtime.run.projection)
@@ -362,6 +299,16 @@ class RunLifecycle:
             runtime.run = ActiveRunState()
             runtime.model_client.reset_action_session()
         return outcome
+
+    def reset_dormant(self) -> RunOutcome:
+        """Settle one unfinished dormant Run through the normal terminal path."""
+
+        try:
+            self.runtime.tools.reconcile_interrupted()
+            return self.finish_stopped("user_reset")
+        except BaseException:
+            reload_current_run(self.runtime)
+            raise
 
     @staticmethod
     def _stopped_result(stop):

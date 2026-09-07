@@ -40,7 +40,7 @@ def append(store, run_id, kind, payload=None):
         payload = {
             "contract": task_contract(payload.pop("content")).to_dict()
         }
-    log = (store.load_run(run_id)[0] if store.has_events(run_id)
+    log = (store.load_run(run_id) if store.has_events(run_id)
            else RunLog(run_id, "task", "session", store))
     return log.append(kind, payload)
 
@@ -74,6 +74,7 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
             "tool_name": "read_file",
             "effect_scope": "none",
             "potential_effects": [],
+            "operation": {},
         },
     )
     append(
@@ -125,7 +126,8 @@ def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):
     append(store, "run", "user_message", {"content": "inspect"})
     append(store, "run", "run_started", {"task_id": "task", "workspace_root": "/w"})
 
-    log, loaded = store.load_run("run")
+    log = store.load_run("run")
+    loaded = log.projection
     events = log.events
     replayed = store.replay("run")
 
@@ -155,13 +157,16 @@ def test_load_run_reads_once_and_checks_protocol_once_per_event(tmp_path, monkey
 
     monkeypatch.setattr(store, "_read_events", read)
     monkeypatch.setattr(RunProjection, "check_event", check)
-    restored, projection = store.load_run("run")
+    restored = store.load_run("run")
+    projection = restored.projection
     assert reads == ["run"]
     assert checks == ["user_message", "assistant_tool_calls"]
     assert restored.pending_tool_calls() == (call,)
     assert projection.pending_call_id == call.call_id
 
-    started = restored.append_tool_started(call, effect_scope="none", potential_effects=[])
+    started = restored.append_tool_started(
+        call, effect_scope="none", potential_effects=[], operation={}
+    )
     assert started.sequence == 3
     assert started.event_id == "run:event:000003"
     assert checks == ["user_message", "assistant_tool_calls", "tool_started"]
@@ -239,7 +244,9 @@ def test_tool_group_round_trips_in_original_order(tmp_path):
     assert store.replay("run").pending_call_id is None
 
     for call in calls:
-        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_started(
+            call, effect_scope="none", potential_effects=[], operation={}
+        )
     for call in calls:
         log.append_tool_result(
             ToolOutcome(
@@ -282,7 +289,9 @@ def test_grouped_working_state_updates_project_in_result_order(tmp_path):
     )
     log.append_tool_calls(calls)
     for call in calls:
-        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_started(
+            call, effect_scope="none", potential_effects=[], operation={}
+        )
         log.append_tool_result(
             ToolOutcome(
                 call.call_id,
@@ -346,7 +355,9 @@ def test_tool_group_rejects_out_of_order_results(tmp_path):
     )
     log.append_tool_calls(calls)
     for call in calls:
-        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_started(
+            call, effect_scope="none", potential_effects=[], operation={}
+        )
 
     with pytest.raises(ValueError, match="preserve group order"):
         log.append_tool_result(
@@ -372,14 +383,20 @@ def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
         for name in ("a", "b", "c")
     )
     log.append_tool_calls(calls)
-    log.append_tool_started(calls[0], effect_scope="none", potential_effects=[])
-    log.append_tool_started(calls[1], effect_scope="none", potential_effects=[])
+    log.append_tool_started(
+        calls[0], effect_scope="none", potential_effects=[], operation={}
+    )
+    log.append_tool_started(
+        calls[1], effect_scope="none", potential_effects=[], operation={}
+    )
     log.append_tool_result(
         ToolOutcome("call_a", "read_file", "success", "completed", "none", "a")
     )
 
     with pytest.raises(ValueError, match="unfinished execution barrier"):
-        log.append_tool_started(calls[2], effect_scope="none", potential_effects=[])
+        log.append_tool_started(
+            calls[2], effect_scope="none", potential_effects=[], operation={}
+        )
 
     assert log.pending_tool_calls() == calls[1:]
 
@@ -585,7 +602,8 @@ def test_find_active_run_uses_last_event_time(tmp_path):
     store = RunStore(tmp_path / ".pico/runs")
     append(store, "run_z", "user_message", {"content": "old"})
     append(store, "run_a", "user_message", {"content": "new"})
-    log, projection = store.find_active_run("session")
+    log = store.find_active_run("session")
+    projection = log.projection
     assert log.run_id == "run_a"
     assert log.events[0].content == "new"
     assert projection.contract.goal == "new"
@@ -602,7 +620,9 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
         "state",
     )
     log.append_tool_calls((call,))
-    log.append_tool_started(call, effect_scope="none", potential_effects=[])
+    log.append_tool_started(
+        call, effect_scope="none", potential_effects=[], operation={}
+    )
     log.append_tool_result(
         ToolOutcome(
             "state",
@@ -695,7 +715,7 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
     expected = [second.event_id, later.event_id]
 
     assert [event.event_id for event in RunHistory(log.events).active_events()] == expected
-    restored, _projection = store.load_run("run")
+    restored = store.load_run("run")
     assert [event.event_id for event in RunHistory(restored.events).active_events()] == expected
 
 
@@ -713,6 +733,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
             call,
             effect_scope="none",
             potential_effects=[],
+            operation={},
         )
         log.append_tool_result(
             ToolOutcome(
@@ -736,7 +757,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
     assert rendered.count("[assistant/tool]") == 1
     assert "f1.py" in rendered
     assert "f0.py" not in rendered
-    assert "recent events omitted by History budget" in rendered
+    assert "older events omitted by History budget" in rendered
     assert metadata["projection_mode"] == "compacted_call_transactions"
 
 
@@ -751,7 +772,9 @@ def test_tool_group_history_is_bounded_per_call(tmp_path):
     )
     group = log.append_tool_calls(calls)
     for call in calls:
-        log.append_tool_started(call, effect_scope="none", potential_effects=[])
+        log.append_tool_started(
+            call, effect_scope="none", potential_effects=[], operation={}
+        )
     for call in calls:
         log.append_tool_result(
             ToolOutcome(

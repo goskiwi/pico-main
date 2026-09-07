@@ -171,7 +171,7 @@ def main():
                 runtime_workspace.root
             ),
         )
-        denied.tools.approve = lambda *_args, **_kwargs: False
+        denied.dependencies.approval_handler = lambda *_args, **_kwargs: False
         denied_run_outcome = denied.ask(
             "Attempt to create created.txt only if policy permits it; otherwise report the denial.",
         )

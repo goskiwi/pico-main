@@ -214,6 +214,31 @@ def _history_token_counter(raw, context, *, count_tokens):
     )
 
 
+def runtime_feedback_sections(feedback):
+    if feedback is None:
+        return {"runtime_instruction": "", "runtime_evidence": ""}
+    return {
+        "runtime_instruction": "runtime_instruction:\n" + json.dumps(
+            {"instruction": feedback.instruction}, ensure_ascii=False, sort_keys=True,
+        ),
+        "runtime_evidence": (
+            "runtime_evidence:\n" + json.dumps(
+                {"content": feedback.evidence, "artifact_id": feedback.evidence_artifact_id},
+                ensure_ascii=False, sort_keys=True,
+            )
+            if feedback.evidence or feedback.evidence_artifact_id else ""
+        ),
+    }
+
+
+def render_runtime_feedback(feedback):
+    sections = runtime_feedback_sections(feedback)
+    parts = [sections["runtime_instruction"]]
+    if sections["runtime_evidence"]:
+        parts.append(_untrusted_envelope({"runtime_evidence": sections["runtime_evidence"]}))
+    return "\n\n".join(parts)
+
+
 def _assemble_input(raw, context):
     parts = [raw["runtime_policy"]]
     if raw["repository_instructions"]:
@@ -228,7 +253,7 @@ def _assemble_input(raw, context):
     return "\n\n".join(parts)
 
 
-def render_runtime_policy(contract, mode, paths):
+def render_runtime_policy(contract, mode, paths, verify_changes):
     if contract is None:
         policy = {
             "mode": "unavailable",
@@ -244,7 +269,7 @@ def render_runtime_policy(contract, mode, paths):
             write_scope = {"mode": "paths", "paths": list(paths)}
         policy = {
             "mode": mode,
-            "verify_changes": contract.verify_changes,
+            "verify_changes": bool(verify_changes),
             "write_scope": write_scope,
         }
     return "runtime_policy:\n" + json.dumps(

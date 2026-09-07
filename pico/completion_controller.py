@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .evidence import verification_is_current
-from .verification import capture_changed_path_states
+from .verification import (
+    ResolvedVerificationPolicy,
+    capture_changed_path_states,
+)
 
 if TYPE_CHECKING:
     from .runtime import Pico
@@ -26,12 +28,29 @@ class CompletionDecision:
     def allowed(self):
         return self.status == "allowed"
 
+    @property
+    def verification_required(self):
+        return self.status == "verification_required"
+
 
 class CompletionController:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def assess(self, final: str) -> CompletionDecision:
+    def resolve_verification_policy(self):
+        contract = self.runtime.run.projection.contract
+        if contract is None:
+            raise RuntimeError("verification policy requires an active TaskContract")
+        return ResolvedVerificationPolicy.resolve(
+            contract,
+            self.runtime.config.verification_command,
+        )
+
+    def assess(
+        self,
+        final: str,
+        policy: ResolvedVerificationPolicy,
+    ) -> CompletionDecision:
         blocker = (
             self._static_blocker()
             or self._effect_blocker()
@@ -40,11 +59,65 @@ class CompletionController:
         )
         if blocker:
             return CompletionDecision(*blocker)
+        if not self._verification_required(policy):
+            return CompletionDecision("allowed", final)
+        if not policy.command:
+            return CompletionDecision(
+                "verification_failed",
+                "Configure the required Runtime verification command before "
+                "submitting completion.",
+            )
+        return CompletionDecision(
+            "verification_required",
+            "Run the configured Runtime verification before completion.",
+        )
 
-        guidance = self._ensure_verification()
-        if guidance:
-            instruction, evidence = guidance
-            return CompletionDecision("verification_failed", instruction, evidence)
+    def assess_verification(
+        self,
+        final: str,
+        policy: ResolvedVerificationPolicy,
+    ) -> CompletionDecision:
+        """Assess the latest persisted verification without executing one."""
+
+        blocker = (
+            self._static_blocker()
+            or self._effect_blocker()
+            or self._task_requirement_blocker()
+            or self._workspace_drift_blocker()
+        )
+        if blocker:
+            return CompletionDecision(*blocker)
+        if not self._verification_required(policy):
+            return CompletionDecision("allowed", final)
+        runtime = self.runtime
+        states = capture_changed_path_states(
+            runtime.workspace.root,
+            runtime.run.evidence.changed_paths,
+            execution_context=runtime.run.execution_context,
+        )
+        current = runtime.run.evidence.latest_verification_for_state(
+            runtime.run.evidence.last_workspace_mutation_sequence,
+            states,
+            policy.command,
+        )
+        if current is None:
+            return CompletionDecision(
+                "verification_failed",
+                "The workspace changed during Runtime verification; submit "
+                "again to run verification against the current state.",
+            )
+        if current.get("status") == "infrastructure_error":
+            raise RuntimeError(
+                "Runtime verification infrastructure error: "
+                + str(current.get("output") or "verification unavailable")
+            )
+        if current.get("status") != "passed":
+            return CompletionDecision(
+                "verification_failed",
+                "Runtime verification failed; inspect the untrusted evidence, "
+                "repair the code, and submit again.",
+                str(current.get("output") or "verification unavailable"),
+            )
         blocker = self._effect_blocker()
         if blocker:
             return CompletionDecision(*blocker)
@@ -115,58 +188,12 @@ class CompletionController:
             )
         return None
 
-    def _ensure_verification(self):
+    def _verification_required(self, policy: ResolvedVerificationPolicy):
         runtime = self.runtime
-        task = runtime.run.projection
         required = bool(
-            task.contract is not None
-            and task.contract.verify_changes
+            policy.verify_net_changes
             and runtime.run.evidence.has_net_workspace_change
         )
         # A failed tool is historical fact. Verify its current tracked effects,
         # including changes later reverted, without requiring another mutation.
-        if not (required or runtime.run.evidence.partial_workspace_effects()):
-            return None
-        if not runtime.config.verification_command:
-            return (
-                (
-                    "Configure the required Runtime verification command before "
-                    "submitting completion."
-                ),
-                "",
-            )
-
-        sequence = runtime.run.evidence.last_workspace_mutation_sequence
-        # Changed-path revisions cannot establish whether dependencies or the
-        # execution environment changed. Each submission runs its own verifier.
-        current = runtime.run_verification(sequence)
-        if current is not None:
-            runtime.emit_event("verification_result", current)
-        if current and current.get("status") == "infrastructure_error":
-            raise RuntimeError(
-                "Runtime verification infrastructure error: "
-                + str(current.get("output") or "verification unavailable")
-            )
-        states = capture_changed_path_states(
-            runtime.workspace.root, runtime.run.evidence.changed_paths,
-        )
-        if current is None or not verification_is_current(
-            current, runtime.run.evidence.last_workspace_mutation_sequence,
-            states, runtime.config.verification_command,
-        ):
-            return (
-                (
-                    "The workspace changed during Runtime verification; submit "
-                    "again to run verification against the current state."
-                ),
-                "",
-            )
-        if current.get("status") != "passed":
-            return (
-                (
-                    "Runtime verification failed; inspect the untrusted evidence, "
-                    "repair the code, and submit again."
-                ),
-                str(current.get("output") or "verification unavailable"),
-            )
-        return None
+        return bool(required or runtime.run.evidence.partial_workspace_effects())

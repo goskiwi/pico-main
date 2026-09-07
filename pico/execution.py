@@ -43,6 +43,17 @@ class CancellationToken:
         """Return a token cancelled by its parent but independently stoppable."""
         return CancellationToken(parent=self)
 
+    def wait(self, timeout):
+        """Wait until cancellation, including cancellation inherited from a parent."""
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        while not self.requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self._event.wait(min(remaining, 0.05))
+        return True
+
 
 @dataclass
 class ExecutionContext:
@@ -88,6 +99,15 @@ class ExecutionContext:
             raise ExecutionCancelled(self.token.reason or "execution cancelled")
         if self.remaining_seconds() <= 0:
             raise ExecutionDeadlineExceeded("execution deadline exceeded")
+
+    def wait(self, seconds):
+        """Wait within this execution, waking for cancellation or its deadline."""
+        self.check_active()
+        duration = max(0.0, float(seconds))
+        remaining = self.remaining_seconds()
+        if self.token.wait(min(duration, remaining)):
+            raise ExecutionCancelled(self.token.reason or "execution cancelled")
+        self.check_active()
 
     def request_stop(self, reason="user_cancelled"):
         self.token.request(reason)

@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import json
 import os
 import selectors
 import shutil
@@ -17,8 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from .command_runner import shell_argv
 from .contracts import (
     TOOL_ARTIFACT_ID_PATTERN,
+    TOOL_OUTPUT_MAX_BYTES,
     FailureInfo,
+    ToolExecutionPlan,
     ToolFailureError,
+    ToolOutcome,
     ToolRunnerResult,
 )
 from .verification import (
@@ -316,26 +320,45 @@ def tool_read_artifact(context, args):
         args["offset"],
         args["max_bytes"],
     )
-    header = (
-        f"# artifact {args['artifact_id']}\n"
-        f"bytes {page['offset']}-{page['end_offset']} of {page['total_bytes']}\n"
-    )
-    continuation = ""
-    if page["end_offset"] < page["total_bytes"]:
-        continuation = (
-            "\n[More output available; call read_artifact with "
-            f"offset={page['end_offset']}.]"
+    def result_for(characters):
+        content = page["content"][:characters]
+        end = page["offset"] + len(content.encode("utf-8"))
+        has_more = end < page["total_bytes"]
+        text = (
+            f"# artifact {args['artifact_id']}\n"
+            f"bytes {page['offset']}-{end} of {page['total_bytes']}\n"
+            + content
         )
-    return ToolRunnerResult(
-        header + page["content"] + continuation,
-        structured={
-            "artifact_id": str(args["artifact_id"]),
-            "offset": page["offset"],
-            "end_offset": page["end_offset"],
-            "total_bytes": page["total_bytes"],
-            "has_more": page["end_offset"] < page["total_bytes"],
-        },
-    )
+        if has_more:
+            text += f"\n[More output available; call read_artifact with offset={end}.]"
+        return ToolRunnerResult(
+            context.redact_text(text),
+            structured={
+                "artifact_id": str(args["artifact_id"]),
+                "offset": page["offset"],
+                "end_offset": end,
+                "total_bytes": page["total_bytes"],
+                "has_more": has_more,
+            },
+        )
+
+    # Fit the delivered JSON, including escaping, redaction and page metadata.
+    # end_offset advances only over source bytes actually included in this page.
+    low, high = 0, len(page["content"])
+    while low < high:
+        middle = (low + high + 1) // 2
+        result = result_for(middle)
+        payload = ToolOutcome(
+            context.tool_call_id or "manual", "read_artifact", "success",
+            "completed", "none", result.content, structured=result.structured,
+        ).model_payload()
+        size = len(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8"))
+        if size <= TOOL_OUTPUT_MAX_BYTES:
+            low = middle
+        else:
+            high = middle - 1
+    return result_for(low)
 
 
 def _bounded_rg_search(root, relative_path, pattern, executable, execution):  # noqa: C901 - bounded process lifecycle
@@ -474,16 +497,7 @@ def tool_write_file(context, args):
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
             "diff_bytes": len(receipt.diff.encode("utf-8")),
-            "path_transitions": [
-                {
-                    "path": relative,
-                    "before_state": receipt.before_revision,
-                    "after_state": receipt.after_revision,
-                }
-            ],
         },
-        affected_paths=(relative,) if changed else (),
-        effect_scope="workspace" if changed else "none",
     )
 
 
@@ -509,16 +523,7 @@ def tool_edit_file(context, args):
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
             "diff_bytes": len(receipt.diff.encode("utf-8")),
-            "path_transitions": [
-                {
-                    "path": relative,
-                    "before_state": receipt.before_revision,
-                    "after_state": receipt.after_revision,
-                }
-            ],
         },
-        affected_paths=(relative,) if changed else (),
-        effect_scope="workspace" if changed else "none",
     )
 
 
@@ -529,7 +534,11 @@ def tool_update_working_state(_context, _args):
 def tool_run_command(context, args):
     command = str(args["command"])
     try:
-        before = capture_repository_state(context.workspace_root)
+        before = capture_repository_state(
+            context.workspace_root,
+            command_runner=context.command_runner,
+            execution_context=context.execution_context,
+        )
     except RepositorySnapshotError as exc:
         return ToolRunnerResult(
             f"command not started: {exc}",
@@ -549,7 +558,11 @@ def tool_run_command(context, args):
     )
     snapshot_failure = None
     try:
-        after = capture_repository_state(context.workspace_root)
+        after = capture_repository_state(
+            context.workspace_root,
+            command_runner=context.command_runner,
+            execution_context=context.execution_context,
+        )
         changes = repository_state_changes(before, after)
     except RepositorySnapshotError as exc:
         changes = ()
@@ -608,10 +621,10 @@ def tool_run_command(context, args):
     )
 
 
-def _workspace_file_effects(context, args):
+def _workspace_file_plan(context, args):
     path = context.path(args["path"])
     logical = path.relative_to(context.workspace_root).as_posix()
-    return "workspace", ((logical, path),)
+    return ToolExecutionPlan("workspace", ((logical, path),))
 
 
 def build_tool_registry():
@@ -631,7 +644,7 @@ def build_tool_registry():
             "risky": False,
             "manual_observation": True,
             "concurrency": "parallel",
-            "description": "Read a UTF-8 file by line range.",
+            "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
             "validate": _validate_read_file,
             "run": tool_read_file,
         },
@@ -669,17 +682,17 @@ def build_tool_registry():
             "description": "Create a new UTF-8 text file. The target must not already exist; read and use edit_file for every change to an existing file.",
             "validate": _validate_write_file,
             "run": tool_write_file,
-            "potential_effects": _workspace_file_effects,
+            "plan": _workspace_file_plan,
         },
         "edit_file": {
             "args_schema": EditFileArgs,
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "description": "Replace one exact, unique text block in a file. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's file/revision headers and line-number prefixes.",
+            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's file/revision headers and line-number prefixes.",
             "validate": _validate_edit_file,
             "run": tool_edit_file,
-            "potential_effects": _workspace_file_effects,
+            "plan": _workspace_file_plan,
         },
         "update_working_state": {
             "args_schema": UpdateWorkingStateArgs,

@@ -10,6 +10,7 @@ class ToolContext:
     workspace_root: Path
     path_resolver: Callable[[str], Path]
     artifact_store: object | None = None
+    redact_text: Callable[[str], str] = str
     run_id: str = "manual"
     tool_call_id: str = ""
     working_state: object | None = None
@@ -17,6 +18,8 @@ class ToolContext:
     mutation_service: object | None = None
     command_runner: object | None = None
     check_runner: Callable | None = None
+    subagent_service: object | None = None
+    execution_plan: object | None = None
 
     def path(self, raw_path):
         return self.path_resolver(str(raw_path))

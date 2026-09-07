@@ -47,7 +47,7 @@ def run_resume_accepted(args, runtime, workspace):
         "assert Path('recovery.txt').read_text() == 'recovered\\n'"
     )
     options = {
-        "mode": "auto", "allowed_tools": ("read_file", "edit_file", "update_working_state"),
+        "mode": "auto", "allowed_tools": ("read_file", "read_artifact", "edit_file", "update_working_state"),
         "allowed_paths": ("recovery.txt",), "verifier": verifier,
     }
     original = _agent(_client(args), workspace, **options)
@@ -64,7 +64,7 @@ def run_resume_accepted(args, runtime, workspace):
     original.run.run_log.append_tool_started(call, effect_scope="workspace", potential_effects=[{
         "path": "recovery.txt", "before_state": file_revision(target),
         "before_artifact_id": preimage["artifact_id"],
-    }])
+    }], operation={})
     # Emulate process loss after the intended bytes reached disk, before a receipt.
     target.write_text("recovered\n", encoding="utf-8")
     original.run.execution_context = None
@@ -114,7 +114,7 @@ def run_sequential_children(args, runtime, workspace):
     parent = Pico(
         model_client=_client(args), workspace=runtime_workspace,
         config=PicoConfig(
-            mode="auto", allowed_tools=("read_file", "delegate", "integrate_child", "update_working_state"),
+            mode="auto", allowed_tools=("read_file", "read_artifact", "delegate", "integrate_child", "update_working_state"),
             allowed_write_paths=("common.py",), verification_command=verifier,
             max_tool_executions=20, max_agent_turns=20, turn_timeout_seconds=900,
         ),
@@ -188,7 +188,7 @@ def main(argv=None):
     args.base_url = args.base_url or provider_env("PICO_OPENAI_API_BASE", DEFAULT_OPENAI_BASE_URL)
     args.output.mkdir(parents=True, exist_ok=True)
     runner = run_resume_accepted if args.case == "resume-accepted" else run_sequential_children
-    report, patch = runner(args, runtime, args.output / "workspaces" / args.case)
+    report, patch = runner(args, runtime, None)
     (args.output / f"{args.case}.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     (args.output / f"{args.case}.patch").write_text(patch + "\n")
     print(json.dumps({"case": args.case, "passed": report["passed"], "checks": report["checks"]}, indent=2))

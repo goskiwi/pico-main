@@ -6,28 +6,57 @@ import hashlib
 from contextlib import contextmanager
 from dataclasses import replace
 
-from ..contracts import ToolOutcome
+from ..contracts import ToolExecutionPlan, ToolOutcome
 from ..mutations import ABSENT_REVISION, content_revision, file_revision
 from ..persistence import atomic_replace_bytes
 from ..run_log import replay_events
 from ..run_store import RunStore
 from ..verification import verify_workspace
 from ..workspace import clip
-from .worktree import GitWorktree, GitWorktreeError, _git, repository_changed_paths
+from .contracts import ChildIntegration
+from .worktree import (
+    GitClient,
+    GitWorktree,
+    GitWorktreeError,
+    repository_changed_paths,
+)
 
 
 class PatchIntegrator:
     def __init__(self, parent):
         self.parent = parent
 
+    def _git(self, root, *args, input_bytes=None, execution_context=None):
+        execution = execution_context or self.parent.run.execution_context
+        if execution is None:
+            raise RuntimeError("Git operation requires an active execution context")
+        return GitClient(
+            root,
+            self.parent.dependencies.command_runner_factory,
+            execution,
+        ).run(*args, input_bytes=input_bytes)
+
+    def _cleanup_planned_worktree(self, record, operation):
+        path = str(operation.get("worktree_path", ""))
+        if not path:
+            return
+        GitWorktree(
+            self.parent.workspace.root,
+            record.base_sha,
+            "integration-" + record.child_id,
+            self.parent.dependencies.command_runner_factory,
+            self.parent.run.execution_context,
+            planned_path=path,
+        ).cleanup()
+
     def _verified_patch(self, run_id, record):
         task_root = (
             self.parent.dependencies.run_store.run_dir(run_id)
             / "subagents" / record.child_id
         )
-        _log, projection = RunStore(task_root / "runs").load_run(
+        projection = RunStore(task_root / "runs").load_run(
             record.completed().child_run_id
-        )
+        ).projection
         if projection.status != "completed":
             raise ValueError(f"Child Run did not complete: {record.child_id}")
         patch_receipt = record.completed().patch
@@ -42,8 +71,8 @@ class PatchIntegrator:
             raise ValueError(f"Child patch digest is invalid: {record.child_id}")
         return patch
 
-    def _verify_integration(self, worktree):
-        command = str(self.parent.config.verification_command or "").strip()
+    def _verify_integration(self, worktree, command):
+        command = str(command or "").strip()
         if not command:
             raise ValueError("Child integration requires a verification command")
         parent_execution = self.parent.run.execution_context
@@ -88,15 +117,32 @@ class PatchIntegrator:
     def _parent_changes(self, record, observed=None):
         root = self.parent.workspace.root
         execution = self.parent.run.execution_context
-        head = _git(root, "rev-parse", "HEAD", execution_context=execution).decode().strip()
+        head = self._git(
+            root, "rev-parse", "HEAD", execution_context=execution
+        ).decode().strip()
         if head != record.base_sha:
             raise ValueError("parent base changed after Child delegation")
-        if _git(root, "diff", "--cached", "--name-only", "-z", execution_context=execution):
+        if self._git(
+            root,
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            execution_context=execution,
+        ):
             raise ValueError("parent index changed after Child delegation")
         evidence = self.parent.run.evidence
         observed = observed or {}
         allowed = set(evidence.changed_paths) | set(observed)
-        extra = set(repository_changed_paths(root, execution_context=execution)) - allowed
+        extra = set(
+            repository_changed_paths(
+                GitClient(
+                    root,
+                    self.parent.dependencies.command_runner_factory,
+                    execution,
+                )
+            )
+        ) - allowed
         if extra:
             raise ValueError("parent has unrecorded workspace changes: " + ", ".join(sorted(extra)))
         changes = {}
@@ -109,8 +155,7 @@ class PatchIntegrator:
                 changes[path] = current
         return changes
 
-    @staticmethod
-    def _copy_changes(tree, changes):
+    def _copy_changes(self, tree, changes):
         for path, (data, mode) in changes.items():
             target = tree.path / path
             if data is None:
@@ -118,12 +163,27 @@ class PatchIntegrator:
             else:
                 atomic_replace_bytes(target, data, mode=mode)
         if changes:
-            tracked = set(_git(tree.path, "ls-files", "-z", "--", *changes,
-                               execution_context=tree.execution_context).decode().split("\0"))
+            tracked = set(
+                self._git(
+                    tree.path,
+                    "ls-files",
+                    "-z",
+                    "--",
+                    *changes,
+                    execution_context=tree.execution_context,
+                ).decode().split("\0")
+            )
             paths = [p for p in changes if (tree.path / p).exists() or p in tracked]
             if paths:
-                _git(tree.path, "add", "-A", "--force", "--", *paths,
-                     execution_context=tree.execution_context)
+                self._git(
+                    tree.path,
+                    "add",
+                    "-A",
+                    "--force",
+                    "--",
+                    *paths,
+                    execution_context=tree.execution_context,
+                )
 
     def prepare_child_input(self, tree, record):
         changes = self._parent_changes(record)
@@ -132,17 +192,32 @@ class PatchIntegrator:
         self._copy_changes(tree, changes)
         # Give the isolated Child a Git input commit so its patch contains only
         # its own changes. The Parent HEAD/index are never committed or staged.
-        _git(tree.path, "-c", "user.name=Pico", "-c", "user.email=pico@example.invalid",
-             "commit", "--quiet", "--allow-empty", "-m", "Pico Child input",
-             execution_context=tree.execution_context)
+        self._git(
+            tree.path,
+            "-c",
+            "user.name=Pico",
+            "-c",
+            "user.email=pico@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Pico Child input",
+            execution_context=tree.execution_context,
+        )
         if self._parent_changes(record) != changes:
             raise ValueError("parent changed while preparing Child input")
 
     @contextmanager
-    def _candidate(self, record, patch, changes, before):
-        tree = GitWorktree(self.parent.workspace.root, record.base_sha,
-                           "integration-" + record.child_id,
-                           execution_context=self.parent.run.execution_context)
+    def _candidate(self, record, patch, changes, before, worktree_path):
+        tree = GitWorktree(
+            self.parent.workspace.root,
+            record.base_sha,
+            "integration-" + record.child_id,
+            self.parent.dependencies.command_runner_factory,
+            self.parent.run.execution_context,
+            planned_path=worktree_path,
+        )
         try:
             tree.create()
             for path, state in before.items():
@@ -154,9 +229,20 @@ class PatchIntegrator:
                 if mode != expected_mode:
                     raise ValueError("parent file mode changed outside this Run: " + path)
             self._copy_changes(tree, changes)
-            before_tree = _git(tree.path, "write-tree", execution_context=tree.execution_context).decode().strip()
-            _git(tree.path, "apply", "--3way", "--whitespace=nowarn", "-",
-                 input_bytes=patch, execution_context=tree.execution_context)
+            before_tree = self._git(
+                tree.path,
+                "write-tree",
+                execution_context=tree.execution_context,
+            ).decode().strip()
+            self._git(
+                tree.path,
+                "apply",
+                "--3way",
+                "--whitespace=nowarn",
+                "-",
+                input_bytes=patch,
+                execution_context=tree.execution_context,
+            )
             delta, paths = self._delta(tree, before_tree)
             if set(paths) - set(record.completed().patch.changed_paths):
                 raise ValueError("integration changed paths outside the Child receipt")
@@ -164,18 +250,32 @@ class PatchIntegrator:
         finally:
             tree.cleanup()
 
-    @staticmethod
-    def _delta(tree, before_tree):
+    def _delta(self, tree, before_tree):
         common = ("--no-renames", "--no-ext-diff", "--no-textconv")
-        delta = _git(tree.path, "diff", "--binary", *common, before_tree,
-                     execution_context=tree.execution_context)
-        paths = _git(tree.path, "diff", "--name-only", "-z", *common, before_tree,
-                     execution_context=tree.execution_context).decode().split("\0")
+        delta = self._git(
+            tree.path,
+            "diff",
+            "--binary",
+            *common,
+            before_tree,
+            execution_context=tree.execution_context,
+        )
+        paths = self._git(
+            tree.path,
+            "diff",
+            "--name-only",
+            "-z",
+            *common,
+            before_tree,
+            execution_context=tree.execution_context,
+        ).decode().split("\0")
         return delta, tuple(sorted(p for p in paths if p))
 
     def recover_applied(self, call, started, outcome):
         record = self.parent.run.projection.children.records.get(call.args.get("child_id"))
         if record is None or outcome.side_effect_state != "partial":
+            if record is not None:
+                self._cleanup_planned_worktree(record, started.payload["operation"])
             return outcome
         receipt = record.completed().patch
         if receipt is None:
@@ -188,6 +288,7 @@ class PatchIntegrator:
                  for item in outcome.structured.get("path_transitions", ())}
         pending = self.parent.run.run_log.pending_tool_starts().get(call.call_id) == started
         try:
+            self._cleanup_planned_worktree(record, started.payload["operation"])
             self._parent_changes(record, after if pending else None)
             prior = replay_events(e for e in self.parent.run.run_log.events if e.sequence < started.sequence)
             changes = {}
@@ -206,7 +307,13 @@ class PatchIntegrator:
                     changes[path] = (data, mode)
             # Base files supply untouched before-images. Previously modified paths
             # use this transaction's persisted preimage, not today's file contents.
-            with self._candidate(record, patch, changes, before) as (tree, _base, _delta, _paths):
+            with self._candidate(
+                record,
+                patch,
+                changes,
+                before,
+                started.payload["operation"]["worktree_path"],
+            ) as (tree, _base, _delta, _paths):
                 for path in receipt.changed_paths:
                     expected = file_revision(tree.path / path)
                     if expected != after.get(path, before[path]):
@@ -222,23 +329,23 @@ class PatchIntegrator:
         }, content=outcome.content + "; Child application confirmed; current-state verification is required")
 
     def _applied_receipt_from_history(self, child_id):
-        call = started = None
+        calls = {}
+        starts = {}
         for event in self.parent.run.run_log.events:
             if event.kind == "assistant_tool_calls":
-                calls = event.tool_calls
-                call = next(
-                    (
-                        candidate
-                        for candidate in calls
-                        if candidate.name == "integrate_child"
-                        and candidate.args.get("child_id") == child_id
-                    ),
-                    None,
-                )
-                started = None
-            elif call is not None and event.kind == "tool_started" and event.call_id == call.call_id:
-                started = event
-            elif call is not None and started is not None and event.kind == "tool_result":
+                calls = {
+                    call.call_id: call for call in event.tool_calls
+                    if call.name == "integrate_child"
+                    and call.args.get("child_id") == child_id
+                }
+                starts = {}
+            elif event.kind == "tool_started" and event.call_id in calls:
+                starts[event.call_id] = event
+            elif event.kind == "tool_result":
+                call = calls.pop(event.call_id, None)
+                started = starts.pop(event.call_id, None)
+                if call is None or started is None:
+                    continue
                 outcome = ToolOutcome.from_dict(event.payload["outcome"])
                 confirmed = self.recover_applied(call, started, outcome)
                 if confirmed.structured.get("status") == "integrated":
@@ -260,8 +367,14 @@ class PatchIntegrator:
                 else:
                     mutations._commit(target, path, data, before[path])
 
-    def integrate_child(self, child_id):
+    def integrate_child(self, child_id, plan):
+        if not isinstance(plan, ToolExecutionPlan):
+            raise TypeError("Child integration requires its persisted execution plan")
         record = self.parent.run.projection.children.record(child_id)
+        operation = ChildIntegration.from_dict(plan.operation).validate_for(
+            record,
+            self.parent.run.projection.run_id,
+        )
         receipt = record.completed().patch
         if record.spec.role != "implement" or receipt is None:
             raise ValueError(f"Child has no implementation patch: {child_id}")
@@ -280,8 +393,17 @@ class PatchIntegrator:
                     item["path"]: item["before_state"] for item in started.payload["potential_effects"]
                 }:
                     raise ValueError("parent changed after integration started")
-        with self._candidate(record, patch, changes, before) as (tree, base, delta, paths):
-            verification = self._verify_integration(tree)
+        with self._candidate(
+            record,
+            patch,
+            changes,
+            before,
+            operation.worktree_path,
+        ) as (tree, base, delta, paths):
+            verification = self._verify_integration(
+                tree,
+                operation.verification_command,
+            )
             if self._delta(tree, base) != (delta, paths):
                 raise ValueError("verification changed the combined Child result")
             if self._parent_changes(record) != changes:

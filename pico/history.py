@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .contracts import ToolOutcome
 
-COMPACTED_HISTORY_OMITTED = "- recent events omitted by History budget"
+HISTORY_OMITTED = "- older events omitted by History budget"
 CONTEXT_KINDS = frozenset(
     {
         "user_message",
@@ -206,7 +206,7 @@ class RunHistory:
     def _select_recent(self, units, *, limit, render):
         selected = []
         for unit in reversed(units):
-            full = [(unit, False), *selected]
+            full = [unit, *selected]
             full_render = render(full)
             if full_render[1] <= limit:
                 selected = full
@@ -340,36 +340,48 @@ class RunHistory:
         recent = tuple(unit for unit in units if unit not in summaries)
         limit = max(0, int(retain_tokens))
 
-        def render(selected):
-            selected_units = [unit for unit, _compact in selected]
-            omitted = len(self._source_ids(recent) - self._source_ids(selected_units))
+        def render(selected, *, include_summaries):
+            included = (*summaries, *selected) if include_summaries else tuple(selected)
+            omitted = len(self._source_ids(units) - self._source_ids(included))
             lines = ["Current run events:"]
-            lines.extend(self._render_fact(unit[0]) for unit in summaries)
             if omitted:
-                lines.append(COMPACTED_HISTORY_OMITTED)
-            for unit, _compact in selected:
+                lines.append(HISTORY_OMITTED)
+            for unit in included:
                 lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)
             return text, token_counter(text)
 
-        minimum = render([])
+        include_summaries = render([], include_summaries=True)[1] <= limit
+
+        def render_selected(selected):
+            return render(selected, include_summaries=include_summaries)
+
+        minimum = render_selected([])
         if minimum[1] > limit:
-            raise ValueError("committed compaction summary exceeds the History budget")
-        retained = self._select_recent(recent, limit=limit, render=render)
-        text, retained_tokens = render(retained)
-        retained_units = [unit for unit, _compact in retained]
-        retained_facts = tuple(fact for unit in retained_units for fact in unit)
-        selected_ids = self._source_ids((*summaries, *retained_units))
+            return "", {
+                "active_count": len(active),
+                "selected_count": 0,
+                "omitted_count": len(active),
+                "artifact_references": 0,
+                "projection_mode": "compacted_call_transactions",
+                "retained_tokens": 0,
+            }
+        retained = self._select_recent(
+            recent,
+            limit=limit,
+            render=render_selected,
+        )
+        text, retained_tokens = render_selected(retained)
+        selected = (*summaries, *retained) if include_summaries else tuple(retained)
+        retained_facts = tuple(fact for unit in selected for fact in unit)
+        selected_ids = self._source_ids(selected)
         return text, {
             "active_count": len(active),
             "selected_count": len(selected_ids),
             "omitted_count": max(0, len(active) - len(selected_ids)),
             "artifact_references": sum(
-                bool(fact.artifact_id)
-                for unit in summaries
-                for fact in unit
-            )
-            + sum(bool(fact.artifact_id) for fact in retained_facts),
+                bool(fact.artifact_id) for fact in retained_facts
+            ),
             "projection_mode": "compacted_call_transactions",
             "retained_tokens": retained_tokens,
         }
@@ -381,11 +393,10 @@ class RunHistory:
         limit = max(0, int(retain_tokens))
 
         def render(selected):
-            selected_units = [unit for unit, _compact in selected]
-            omitted = len(self._source_ids(units) - self._source_ids(selected_units))
+            omitted = len(self._source_ids(units) - self._source_ids(selected))
             lines = ["Current run events (bounded fallback):"]
             lines.append(f"- {omitted} older events omitted")
-            for unit, _compact in selected:
+            for unit in selected:
                 lines.extend(self._render_fact(fact) for fact in unit)
             text = "\n".join(lines)
             return text, token_counter(text)
@@ -401,9 +412,8 @@ class RunHistory:
             }
         retained = self._select_recent(units, limit=limit, render=render)
         text, retained_tokens = render(retained)
-        retained_units = [unit for unit, _compact in retained]
-        retained_facts = tuple(fact for unit in retained_units for fact in unit)
-        selected_ids = self._source_ids(retained_units)
+        retained_facts = tuple(fact for unit in retained for fact in unit)
+        selected_ids = self._source_ids(retained)
         return text, {
             "active_count": len(active),
             "selected_count": len(selected_ids),

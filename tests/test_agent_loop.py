@@ -13,7 +13,7 @@ from pico import (
     Workspace,
 )
 from pico.agent_loop import AgentLoop
-from pico.command_runner import CommandResult
+from pico.command_runner import CommandResult, CommandRunner
 from pico.contracts import ToolCall, ToolOutcome, ToolRunnerResult
 from pico.evidence import verification_is_current
 from pico.mutations import content_revision, file_revision
@@ -80,6 +80,10 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         def run(*_args, **_kwargs):
             verified_contents.append(target.read_text(encoding="utf-8"))
             return CommandResult(returncode=0, stdout="1 passed\n")
+
+        @staticmethod
+        def run_bytes(*args, **kwargs):
+            return CommandRunner(tmp_path).run_bytes(*args, **kwargs)
 
     client = DriftBeforeFirstEditClient(
         [
@@ -217,6 +221,10 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
         def run(*_args, **_kwargs):
             return CommandResult(returncode=1, stderr="assertion failed")
 
+        @staticmethod
+        def run_bytes(*args, **kwargs):
+            return CommandRunner(tmp_path).run_bytes(*args, **kwargs)
+
     client = FakeModelClient(
         [
             ModelAction.tool(
@@ -262,6 +270,10 @@ def test_verifier_created_file_prevents_successful_completion(tmp_path):
                 encoding="utf-8",
             )
             return CommandResult(returncode=0, stdout="tests passed")
+
+        @staticmethod
+        def run_bytes(*args, **kwargs):
+            return CommandRunner(tmp_path).run_bytes(*args, **kwargs)
 
     runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
@@ -339,36 +351,45 @@ def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_p
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     (tmp_path / "other.txt").write_text("beta\n", encoding="utf-8")
 
-    class ThresholdClient(FakeModelClient):
-        request_count = 0
-
-        def complete_action(self, *args, **kwargs):
-            action = super().complete_action(*args, **kwargs)
-            self.request_count += 1
-            self.last_completion_metadata = (
-                {"input_tokens": 5500, "output_tokens": 300}
-                if self.request_count == 1
-                else {"input_tokens": 1000, "output_tokens": 50}
-            )
-            return action
-
-    client = ThresholdClient([
-        ModelAction.tools(
-            (
-                ToolCall(
-                    "read_file",
-                    {"path": "hello.txt", "start_line": 1, "end_line": 1},
-                    "call_hello",
-                ),
-                ToolCall(
-                    "read_file",
-                    {"path": "other.txt", "start_line": 1, "end_line": 1},
-                    "call_other",
-                ),
-            )
-        ),
-        ModelAction.tool("list_files", {"path": "."}),
-        ModelAction.final("Done after reset."),
+    client = FakeModelClient([
+        {
+            "status": "completed",
+            "usage": {"input_tokens": 5500, "output_tokens": 300},
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call_hello",
+                    "arguments": '{"path":"hello.txt","start_line":1,"end_line":1}',
+                },
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call_other",
+                    "arguments": '{"path":"other.txt","start_line":1,"end_line":1}',
+                },
+            ],
+        },
+        {
+            "status": "completed",
+            "usage": {"input_tokens": 1000, "output_tokens": 50},
+            "output": [{
+                "type": "function_call",
+                "name": "list_files",
+                "call_id": "call_list",
+                "arguments": '{"path":"."}',
+            }],
+        },
+        {
+            "status": "completed",
+            "usage": {"input_tokens": 1000, "output_tokens": 50},
+            "output": [{
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_final",
+                "arguments": '{"answer":"Done after reset."}',
+            }],
+        },
     ])
     runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
@@ -428,18 +449,27 @@ def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_p
 def test_provider_session_continues_below_projected_input_high_watermark(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
 
-    class CapacityClient(FakeModelClient):
-        def complete_action(self, *args, **kwargs):
-            action = super().complete_action(*args, **kwargs)
-            self.last_completion_metadata = {
-                "input_tokens": 5000,
-                "output_tokens": 300,
-            }
-            return action
-
-    client = CapacityClient([
-        ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
-        ModelAction.final("Done without reset."),
+    client = FakeModelClient([
+        {
+            "status": "completed",
+            "usage": {"input_tokens": 5000, "output_tokens": 300},
+            "output": [{
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_read",
+                "arguments": '{"path":"hello.txt","start_line":1,"end_line":1}',
+            }],
+        },
+        {
+            "status": "completed",
+            "usage": {"input_tokens": 5000, "output_tokens": 300},
+            "output": [{
+                "type": "function_call",
+                "name": "submit_final",
+                "call_id": "call_final",
+                "arguments": '{"answer":"Done without reset."}',
+            }],
+        },
     ])
     runtime_workspace = Workspace.build(tmp_path)
     agent = Pico(
@@ -800,38 +830,13 @@ def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
     assert finished_tools == ["read_file"]
 
 
-def test_final_only_multi_call_is_closed_before_tool_limit_stop(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
+def test_multiple_submit_final_calls_cannot_form_a_model_action():
     calls = (
         ToolCall("submit_final", {"answer": "first"}, "call_final_a"),
         ToolCall("submit_final", {"answer": "second"}, "call_final_b"),
     )
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tool(
-                "read_file",
-                {"path": "hello.txt", "start_line": 1, "end_line": 1},
-            ),
-            ModelAction.tools(calls),
-        ],
-    )
-    agent.config = replace(agent.config, max_tool_executions=1)
-
-    outcome = agent.ask("Inspect hello.txt")
-
-    assert outcome.stop_reason == "tool_execution_limit"
-    assert agent.run.run_log.pending_tool_calls() == ()
-    group_results = [
-        event
-        for event in agent.read_run_events(outcome.run_id)
-        if event.call_id in {"call_final_a", "call_final_b"}
-    ]
-    assert [event.call_id for event in group_results] == [
-        "call_final_a",
-        "call_final_b",
-    ]
-    assert all(event.outcome_status == "rejected" for event in group_results)
+    with pytest.raises(ValueError, match="final action"):
+        ModelAction.tools(calls)
 
 
 def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
@@ -986,7 +991,7 @@ def test_tool_group_executes_budgeted_prefix_and_rejects_suffix(tmp_path):
     assert results[1].payload["outcome"]["failure"]["code"] == "tool_execution_limit"
 
 
-def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
+def test_submit_final_cannot_share_a_model_action_with_a_tool():
     calls = (
         ToolCall(
             "read_file",
@@ -995,29 +1000,8 @@ def test_submit_final_must_be_the_only_call_in_its_turn(tmp_path):
         ),
         ToolCall("submit_final", {"answer": "too early"}, "call_final"),
     )
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tools(calls),
-            ModelAction.tool("list_files", {"path": "."}),
-            ModelAction.final("Retried alone."),
-        ],
-    )
-
-    outcome = agent.ask("Inspect and finish")
-
-    assert outcome.answer == "Retried alone."
-    results = [
-        event
-        for event in agent.read_run_events(outcome.run_id)
-        if event.kind == "tool_result"
-        and event.call_id in {"call_read", "call_final"}
-    ]
-    assert [event.call_id for event in results] == ["call_read", "call_final"]
-    assert [event.outcome_status for event in results] == ["success", "rejected"]
-    assert results[1].payload["outcome"]["failure"]["code"] == (
-        "final_call_must_be_alone"
-    )
+    with pytest.raises(ValueError, match="final action"):
+        ModelAction.tools(calls)
 
 
 def test_one_observation_failure_does_not_cancel_batch_siblings(
@@ -1168,3 +1152,59 @@ def test_provider_failure_at_deadline_settles_as_turn_timeout(tmp_path):
 
     assert outcome.stop_reason == "turn_timeout"
     assert outcome.status == "stopped"
+
+
+@pytest.mark.parametrize("reason", ["user_cancelled", "user_reset", "turn_timeout"])
+@pytest.mark.parametrize("phase", ["before_command", "after_command", "after_diff"])
+def test_stop_during_completion_is_settled_before_success(tmp_path, monkeypatch, reason, phase):
+    from pico import run_lifecycle, verification
+
+    agent = build_agent(tmp_path, [
+        ModelAction.tool("write_file", {"path": "result.txt", "content": "done"}),
+        ModelAction.final("done"),
+    ])
+    agent.config = replace(agent.config, verification_command="true",
+                           turn_timeout_seconds=1 if reason == "turn_timeout" else 30)
+
+    def stop():
+        if reason == "turn_timeout":
+            time.sleep(agent.run.execution_context.remaining_seconds() + 0.02)
+        elif reason == "user_reset":
+            agent.reset()
+        else:
+            assert agent.cancel_current_run(reason)
+
+    snapshot = verification.capture_repository_state
+    snapshots = []
+
+    def observe(root, **kwargs):
+        result = snapshot(root, **kwargs)
+        snapshots.append(result)
+        if (phase == "before_command" and len(snapshots) == 1
+                or phase == "after_command" and len(snapshots) == 2):
+            stop()
+        return result
+
+    final_diff = run_lifecycle.build_final_diff
+
+    def render_diff(runtime):
+        result = final_diff(runtime)
+        if phase == "after_diff":
+            stop()
+        return result
+
+    monkeypatch.setattr(verification, "capture_repository_state", observe)
+    monkeypatch.setattr(run_lifecycle, "build_final_diff", render_diff)
+    outcome = agent.ask("Create result.txt")
+    assert outcome.status == "stopped"
+    assert outcome.stop_reason == reason
+    assert agent.session.active_run_id == ""
+    assert (tmp_path / "result.txt").read_text() == "done"
+    replayed = agent.dependencies.run_store.replay(outcome.run_id)
+    assert replayed.status == "stopped"
+    assert replayed.evidence.changed_paths == ["result.txt"]
+    assert len(replayed.evidence.verifications) == 1
+    if phase == "before_command":
+        assert replayed.evidence.verifications[0]["status"] == "failed"
+    if reason == "user_reset":
+        assert agent.run.projection.contract is None

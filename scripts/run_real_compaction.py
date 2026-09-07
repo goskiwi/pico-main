@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -28,6 +27,7 @@ from pico.config import load_project_env, provider_env
 from pico.providers.clients import DEFAULT_OPENAI_BASE_URL
 from pico.run_projection import RunProjection
 from scripts.real_case_support import git_metadata, require_clean_runtime
+from scripts.run_real_harness_cases import prepare_workspace as prepare_repository
 
 EVIDENCE_COUNT = 12
 CONTROLLED_CONTEXT_LIMIT = 28_000
@@ -73,34 +73,20 @@ def _git(root, *args):
 
 
 def prepare_workspace(workspace):
-    workspace = Path(workspace).resolve()
-    if workspace.exists():
-        shutil.rmtree(workspace)
-    (workspace / "src").mkdir(parents=True)
-    (workspace / "evidence").mkdir()
-    (workspace / "src" / "__init__.py").write_text("", encoding="utf-8")
-    (workspace / TARGET_PATH).write_text(
-        "def normalize_label(value: str) -> str:\n"
-        "    return value.strip().lower()\n",
-        encoding="utf-8",
-    )
-    (workspace / ".gitignore").write_text(".pico/\n", encoding="utf-8")
+    files = {
+        "src/__init__.py": "",
+        TARGET_PATH: "def normalize_label(value: str) -> str:\n    return value.strip().lower()\n",
+    }
     for index, fact in enumerate(FACTS, start=1):
         filler = "\n".join(
             f"audit record {line:03d}: historical sample for segment {index:02d}; "
             "retained only to exercise bounded context continuation."
             for line in range(1, 76)
         )
-        (workspace / "evidence" / f"segment_{index:02d}.md").write_text(
-            f"# Evidence segment {index:02d}\n\nCritical fact: {fact}\n\n{filler}\n",
-            encoding="utf-8",
+        files[f"evidence/segment_{index:02d}.md"] = (
+            f"# Evidence segment {index:02d}\n\nCritical fact: {fact}\n\n{filler}\n"
         )
-    _git(workspace, "init", "--quiet")
-    _git(workspace, "config", "user.name", "Pico Compaction Evaluation")
-    _git(workspace, "config", "user.email", "pico-compaction@example.invalid")
-    _git(workspace, "add", "--all")
-    _git(workspace, "commit", "--quiet", "-m", "controlled failing baseline")
-    return workspace
+    return prepare_repository(workspace, files)
 
 
 def build_prompt():
@@ -177,26 +163,26 @@ def analyze_run(events):
         and entry.outcome_status == "success"
         and entry.side_effect_state == "changed"
     ]
-    requested_calls = []
+    evidence_read_paths = []
     for entry in events:
-        if entry.kind == "assistant_tool_calls":
-            requested_calls.extend(
-                {"name": call.name, "args": call.args}
-                for call in entry.tool_calls
-            )
-    evidence_read_paths = [
-        call["args"].get("path")
-        for call in requested_calls
-        if call["name"] == "read_file"
-        and str(call["args"].get("path", "")).startswith("evidence/")
-    ]
+        if entry.kind != "tool_result" or entry.name != "read_file" or entry.outcome_status != "success":
+            continue
+        read = entry.payload["outcome"]["structured"]
+        if (str(read.get("path", "")).startswith("evidence/")
+                and read.get("start_line") == 1
+                and read.get("end_line") == read.get("total_lines")
+                and not read.get("truncated")):
+            evidence_read_paths.append(read["path"])
     state = replayed.working
     return {
         "model_request_count": len(turns),
         "max_single_request_input_tokens": max(input_tokens, default=0),
         "compaction_count": kinds.count("compaction"),
         "provider_session_reset_count": kinds.count("provider_session_reset"),
-        "tool_group_count": kinds.count("assistant_tool_calls"),
+        "tool_group_count": sum(
+            entry.kind == "assistant_tool_calls" and len(entry.tool_calls) > 1
+            for entry in events
+        ),
         "resume_count": kinds.count("run_resumed"),
         "successful_mutation_count": len(successful_mutations),
         "evidence_read_paths": evidence_read_paths,
@@ -221,7 +207,7 @@ def main(argv=None):
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=ROOT / "artifacts" / "real-compaction-workspace",
+        help="Create a new directory here; omit for a fresh temporary workspace.",
     )
     parser.add_argument(
         "--artifact",
@@ -264,7 +250,7 @@ def main(argv=None):
         workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto",
-            allowed_tools=("read_file", "edit_file", "update_working_state"),
+            allowed_tools=("read_file", "read_artifact", "edit_file", "update_working_state"),
             allowed_write_paths=(TARGET_PATH,),
             max_tool_executions=18,
             max_agent_turns=32,
@@ -292,6 +278,11 @@ def main(argv=None):
     changed_paths = _git(workspace, "diff", "--name-only", "HEAD").splitlines()
 
     checks = {
+        "run_completed": outcome.status == "completed",
+        "runtime_verification_passed": any(
+            entry.kind == "verification_result" and entry.payload["status"] == "passed"
+            for entry in events
+        ),
         "initial_failure_reproduced": not initial["ok"],
         "compaction_triggered": analysis["compaction_count"] >= 1,
         "provider_session_reset": analysis["provider_session_reset_count"] >= 1,
@@ -323,7 +314,8 @@ def main(argv=None):
             "turn_timeout_seconds": args.turn_timeout_seconds,
         },
         "run_id": run_id,
-        "final_answer": outcome.answer,
+        "workspace_root": str(workspace),
+        "outcome": outcome.to_dict(),
         "analysis": analysis,
         "checks": checks,
         "verification": {"visible": visible, "hidden": hidden},

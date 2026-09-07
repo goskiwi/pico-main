@@ -9,12 +9,20 @@ from typing import TYPE_CHECKING
 
 from . import context_manager as context
 from .compaction_summary import CompactionSummarizer, SemanticCompactionError
-from .history import COMPACTED_HISTORY_OMITTED, RunHistory
+from .execution import (
+    ExecutionCancelled,
+    ExecutionContext,
+    ExecutionDeadlineExceeded,
+)
+from .history import HISTORY_OMITTED, RunHistory
 from .prompt_instructions import build_prompt_instructions
+from .verification import ResolvedVerificationPolicy
 from .working_state import WorkingState
+from .workspace import WORKSPACE_GIT_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from .runtime import Pico
+    from .tool_runtime import ResolvedToolSurface
 
 AGENTS_MD_MAX_BYTES = 32 * 1024
 
@@ -76,17 +84,17 @@ class PromptBuilder:
         self,
         user_message,
         *,
+        tool_surface: ResolvedToolSurface,
         provider_context_tokens=None,
         compaction_metadata=None,
         history_override=None,
-        action_tools=None,
     ):
         """Build one prompt and its diagnostics from current Runtime inputs."""
-        raw = self._raw_sections(user_message)
+        raw = self._raw_sections(user_message, tool_surface)
         history = self._history()
         config = self.runtime.config
         instructions_tokens = self.count_tokens(self.instructions)
-        tool_schema_tokens = self._tool_schema_tokens(action_tools)
+        tool_schema_tokens = self._tool_schema_tokens(tool_surface)
         run_log = self.runtime.run.run_log
         run_log_generation = run_log.generation if run_log is not None else 0
         count_tokens = self.tokenizer.count
@@ -228,17 +236,21 @@ class PromptBuilder:
         return (ModelPrompt(self.instructions, input_text), metadata)
 
     def plan_compaction(
-        self, user_message, *, provider_context_tokens=None, action_tools=None
+        self,
+        user_message,
+        *,
+        tool_surface: ResolvedToolSurface,
+        provider_context_tokens=None,
     ):
         """Plan semantic compaction or return a bounded read-only fallback."""
         run_log = self.runtime.run.run_log
         if run_log is None or run_log.pending_tool_calls():
             return (None, None, None)
-        raw = self._raw_sections(user_message)
+        raw = self._raw_sections(user_message, tool_surface)
         history = self._history()
         config = self.runtime.config
         instructions_tokens = self.count_tokens(self.instructions)
-        tool_schema_tokens = self._tool_schema_tokens(action_tools)
+        tool_schema_tokens = self._tool_schema_tokens(tool_surface)
         count_tokens = self.tokenizer.count
         (history_text, _metadata) = context.render_history(history)
         raw = {**raw, "history": history_text}
@@ -260,11 +272,6 @@ class PromptBuilder:
         threshold_tokens = max(1, config.provider_context_limit_tokens - reserve_tokens)
         if context_tokens < threshold_tokens:
             return (None, None, None)
-        timeout = (
-            self.runtime.run.execution_context.bounded_timeout()
-            if self.runtime.run.execution_context is not None
-            else None
-        )
         failure_code = ""
         failure_detail = ""
         compacted = None
@@ -283,13 +290,14 @@ class PromptBuilder:
         def build_summary(events):
             try:
                 summary = self.semantic_summarizer.summarize(
-                    events, request_timeout=timeout
+                    events,
+                    execution_context=self.runtime.run.execution_context,
                 )
                 projected = (
                     "Current run events:\n[compaction] "
                     + summary
                     + "\n"
-                    + COMPACTED_HISTORY_OMITTED
+                    + HISTORY_OMITTED
                 )
                 if history_token_counter(projected) > projection_history_budget:
                     raise SemanticCompactionError(
@@ -297,6 +305,8 @@ class PromptBuilder:
                     )
                 return summary
             except SemanticCompactionError:
+                raise
+            except (ExecutionCancelled, ExecutionDeadlineExceeded):
                 raise
             except Exception as exc:
                 raise SemanticCompactionError(
@@ -374,20 +384,18 @@ class PromptBuilder:
             else None
         )
 
-    def _tool_schema_tokens(self, action_tools=None):
+    def _tool_schema_tokens(self, tool_surface):
         estimator = getattr(
             self.runtime.model_client, "estimate_action_tool_tokens", None
         )
         if estimator is None:
             return 0
-        tools = (
-            self.runtime.tools.model_action_tools()
-            if action_tools is None
-            else action_tools
+        return max(
+            0,
+            int(estimator(tool_surface.action_tools, self.count_tokens)),
         )
-        return max(0, int(estimator(tools, self.count_tokens)))
 
-    def _raw_sections(self, user_message):
+    def _raw_sections(self, user_message, tool_surface):
         projection = self.runtime.run.projection
         contract = projection.contract
         goal = contract.goal if contract is not None else str(user_message)
@@ -396,44 +404,40 @@ class PromptBuilder:
         working = projection.working if contract is not None else WorkingState()
         working_text = context.render_working_state(working)
         feedback = projection.runtime_feedback
-        mode, paths = self.runtime.tools.effective_policy()
+        verification_policy = (
+            ResolvedVerificationPolicy.resolve(
+                contract,
+                self.runtime.config.verification_command,
+            )
+            if contract is not None
+            else None
+        )
         return {
-            "runtime_policy": context.render_runtime_policy(contract, mode, paths),
+            "runtime_policy": context.render_runtime_policy(
+                contract,
+                tool_surface.mode,
+                tool_surface.allowed_write_paths,
+                bool(
+                    verification_policy
+                    and verification_policy.verify_net_changes
+                ),
+            ),
             "repository_instructions": context.render_repository_instructions(
                 self.repository_instructions
             ),
-            "workspace": self.runtime.workspace.text(),
+            "workspace": self.runtime.workspace.text(
+                command_runner=self.runtime.dependencies.command_runner,
+                execution_context=(
+                    self.runtime.run.execution_context
+                    or ExecutionContext.standalone(
+                        max_seconds=WORKSPACE_GIT_TIMEOUT_SECONDS
+                    )
+                ),
+            ),
             "repo_map": self._repo_map_text(user_message, working_text),
             "working_state": working_text,
             "task_request": "task_request:\n" + json.dumps(goal, ensure_ascii=False),
-            "runtime_instruction": (
-                "runtime_instruction:\n"
-                + json.dumps(
-                    {
-                        "instruction": feedback.instruction,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                if feedback is not None
-                else ""
-            ),
-            "runtime_evidence": (
-                "runtime_evidence:\n"
-                + json.dumps(
-                    {
-                        "content": feedback.evidence,
-                        "artifact_id": feedback.evidence_artifact_id,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                if (
-                    feedback is not None
-                    and (feedback.evidence or feedback.evidence_artifact_id)
-                )
-                else ""
-            ),
+            **context.runtime_feedback_sections(feedback),
             "latest_user_request": (
                 "latest_user_request:\n" + json.dumps(latest, ensure_ascii=False)
                 if latest

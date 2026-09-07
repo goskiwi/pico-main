@@ -94,7 +94,6 @@ def activate(agent, run_id, goal):
     )
     agent.run.run_log = run_log
     run_log.append_user(contract)
-    agent.run.projection = run_log.projection
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
     return run_log
 
@@ -112,6 +111,7 @@ def append_synthetic_historical_transaction(agent, index):
             call,
             effect_scope="none",
             potential_effects=[],
+            operation={},
         )
     outcome = ToolOutcome(
         tool_call_id=call.call_id,
@@ -248,7 +248,10 @@ def repo_map_experiment(root):
     agent = build_agent(root)
     run_log = activate(agent, "run_day5_default", QUERY)
 
-    prompt, metadata = agent.prompt.build(QUERY)
+    prompt, metadata = agent.prompt.build(
+        QUERY,
+        tool_surface=agent.tools.resolve_surface(),
+    )
     input_text = prompt.input_text
     context = untrusted_context(input_text)
     rendered_repo_map = context["repo_map"]
@@ -302,8 +305,9 @@ def build_pressure_fixture(root, run_id):
         },
         f"call_state_{run_id}",
     )
+    surface = agent.tools.resolve_surface()
     group = run_log.append_tool_calls((state_call,))
-    state_outcome = agent.tools.execute_pending_group(group.event_id)[0]
+    state_outcome = agent.tools.execute_pending_group(group.event_id, surface)[0]
     assert state_outcome.status == "success"
     assert agent.run.projection.working.constraints == (WORKING_CONSTRAINT,)
     for index in range(6):
@@ -316,12 +320,15 @@ def bounded_fallback_experiment(root):
     original_events = tuple(run_log.events)
     original_ids = [event.event_id for event in original_events]
 
+    surface = agent.tools.resolve_surface()
     compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
+        tool_surface=surface,
         provider_context_tokens=3400,
     )
     prompt, prompt_metadata = agent.prompt.build(
         QUERY,
+        tool_surface=surface,
         provider_context_tokens=3400,
         compaction_metadata=compaction,
         history_override=history_override,
@@ -418,12 +425,15 @@ def semantic_compaction_experiment(root):
     original_ids = [event.event_id for event in original_physical]
     original_history_view_count = len(RunHistory(run_log.events).active_events())
 
+    surface = agent.tools.resolve_surface()
     compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
+        tool_surface=surface,
         provider_context_tokens=3400,
     )
     prompt, prompt_metadata = agent.prompt.build(
         QUERY,
+        tool_surface=surface,
         provider_context_tokens=3400,
         compaction_metadata=compaction,
         history_override=history_override,

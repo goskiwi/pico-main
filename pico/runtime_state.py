@@ -9,12 +9,23 @@ from .run_projection import RunProjection
 
 @dataclass(slots=True)
 class ActiveRunState:
-    """Run-scoped state kept separate from long-lived runtime dependencies."""
+    """Internal Run-scoped state; an active Projection belongs to its RunLog."""
 
-    projection: RunProjection = field(default_factory=RunProjection)
-    execution_context: ExecutionContext | None = None
     run_log: RunLog | None = None
+    execution_context: ExecutionContext | None = None
     request_tool_start: int = 0
+    _empty_projection: RunProjection = field(
+        default_factory=RunProjection,
+        repr=False,
+    )
+
+    @property
+    def projection(self):
+        return (
+            self.run_log.projection
+            if self.run_log is not None
+            else self._empty_projection
+        )
 
     @property
     def evidence(self):
@@ -29,8 +40,8 @@ class ActiveRunState:
         """Whether this unfinished Run is dormant and safe to resume."""
 
         return bool(
-            self.projection.contract is not None
-            and self.run_log is not None
+            self.run_log is not None
+            and self.projection.contract is not None
             and not self.projection.terminal
             and self.execution_context is None
         )

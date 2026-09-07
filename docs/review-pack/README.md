@@ -6,7 +6,7 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.run_log` / `pico.prompt_builder`: single-source causal state, minimal conditional dynamic input, two-section semantic compaction and Token governance.
 - `pico.repo_map`: tree-sitter symbol graph and task-ranked projection.
 - `pico.working_state`: RunLog-projected constraints, decisions and next steps. Goal belongs to TaskContract.
-- `pico.tool_runtime` / `pico.mutations`: staged admission, revision-bound atomic edits, and one approval-bound diagnostic command.
+- `pico.tool_runtime` / `pico.mutations`: Runtime-observed declared effects, atomic create-only writes, revision-bound atomic edits, and one approval-bound diagnostic command.
 - `pico.run_lifecycle` / `pico.run_store`: Run Log-tail resume, operation receipts and artifacts without a second recovery-state object.
 - `pico.command_runner` / `pico.verification`: trusted host execution for the Runtime-configured Verification command, not a sandbox.
 - `pico.evidence` / `pico.completion_controller`: evidence-bound completion.
@@ -17,9 +17,10 @@ Pico is a compact, single-protocol local multi-agent coding Runtime.
 - `pico.agent_loop` / `pico.run_lifecycle` / `pico.completion_controller`: model turns,
   durable Run lifecycle and completion authority have separate owners.
 
-Prompt/Provider review uses one current Tool surface derived from TaskContract and the remaining
-Tool budget. That exact schema set is sent to the Provider and charged to the Token budget; the
-final-only boundary narrows it to `submit_final` and rebuilds the Provider session.
+Prompt/Provider review uses one `ResolvedToolSurface` derived from TaskContract, installed executors
+and the remaining Tool budget. That same object supplies Prompt policy, Schema token accounting,
+Provider schemas, parser declarations and local execution authority; the final-only boundary narrows
+it to `submit_final` and rebuilds the Provider session.
 
 The review demo's seven-category Effective Recovery Context is a teaching/observability composition,
 not a seven-section summary. Semantic Compaction generates and persists only Progress and Critical

@@ -21,7 +21,7 @@ def run_main(argv=None):
     if not store.has_events(args.run_id):
         raise SystemExit(f"Run Log not found for {args.run_id}")
     if args.command == "show":
-        _log, projection = store.load_run(args.run_id)
+        projection = store.load_run(args.run_id).projection
         print(json.dumps(projection.summary(), indent=2, sort_keys=True))
         return 0
     for entry in store.read_events(args.run_id):

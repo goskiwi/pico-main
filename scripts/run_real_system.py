@@ -167,7 +167,8 @@ def _single_run(workspace):
     if len(run_ids) != 1:
         raise RuntimeError(f"expected one top-level Run, found {len(run_ids)}")
     store = RunStore(root)
-    log, projection = store.load_run(run_ids[0])
+    log = store.load_run(run_ids[0])
+    projection = log.projection
     return run_ids[0], log.events, projection
 
 
@@ -183,6 +184,7 @@ def main(argv=None):
         "--workspace",
         type=Path,
         default=None,
+        help="Create a new directory here; omit for a fresh temporary workspace.",
     )
     parser.add_argument(
         "--artifact",
@@ -196,7 +198,6 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     artifact_name = "real-child" if args.delegate else "real-system"
-    args.workspace = args.workspace or ROOT / "artifacts" / f"{artifact_name}-workspace"
     args.artifact = args.artifact or ROOT / "artifacts" / f"{artifact_name}.json"
     args.patch = args.patch or ROOT / "artifacts" / f"{artifact_name}.patch"
 
@@ -324,6 +325,7 @@ def main(argv=None):
         "model": args.model,
         "provider_base_url": base_url,
         "run_id": run_id,
+        "workspace_root": str(workspace),
         "cli": {
             "exit_code": cli.returncode,
             "stdout": cli.stdout[-5000:],

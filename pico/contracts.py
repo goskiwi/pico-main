@@ -15,6 +15,7 @@ SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
 EFFECT_SCOPES = frozenset({"none", "workspace"})
 TOOL_ARTIFACT_ID_PATTERN = r"^tool_[a-f0-9]{16}_[a-f0-9]{10}$"
 TOOL_ARTIFACT_ID = re.compile(TOOL_ARTIFACT_ID_PATTERN)
+TOOL_OUTPUT_MAX_BYTES = 12 * 1024
 RECOVERY_CONDITIONS = frozenset(
     {
         "retry_after_change",
@@ -64,6 +65,26 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolExecutionPlan:
+    """One immutable pre-effect plan persisted before a Tool Runner starts."""
+
+    effect_scope: str
+    paths: tuple[tuple[str, Any], ...] = ()
+    operation: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.effect_scope not in EFFECT_SCOPES:
+            raise ValueError(f"invalid planned effect scope: {self.effect_scope}")
+        if not isinstance(self.operation, dict):
+            raise TypeError("tool execution operation must be an object")
+        if self.paths and self.effect_scope == "none":
+            raise ValueError("planned paths require a non-empty effect scope")
+        logical = tuple(str(path) for path, _target in self.paths)
+        if any(not path for path in logical) or len(set(logical)) != len(logical):
+            raise ValueError("planned effect paths must be non-empty and unique")
+
+
+@dataclass(frozen=True)
 class ToolRunnerResult:
     """Exact result returned by a tool runner before Runtime auditing."""
 
@@ -95,6 +116,10 @@ class ModelAction:
             raise ValueError("tool action requires at least one tool call")
         if self.kind != "tool" and self.tool_calls:
             raise ValueError("only tool actions may contain tool calls")
+        if any(call.name == "submit_final" for call in self.tool_calls):
+            raise ValueError(
+                "submit_final is a final action, not an executable tool action"
+            )
         call_ids = tuple(call.call_id for call in self.tool_calls)
         if len(set(call_ids)) != len(call_ids):
             raise ValueError("tool action call ids must be unique")
@@ -305,9 +330,30 @@ class ToolOutcome:
 
     def render_for_model(self):
         payload = self.model_payload()
-        return json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+
+        def encode():
+            return json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":"))
+
+        rendered = encode()
+        if len(rendered.encode("utf-8")) <= TOOL_OUTPUT_MAX_BYTES:
+            return rendered
+        if not self.artifact_id:
+            raise ValueError("oversized tool output requires an artifact")
+        # Replay consumes exact structured facts; the model can page through
+        # their artifact when the complete receipt cannot fit on the wire.
+        payload.pop("structured", None)
+        payload.pop("affected_paths", None)
+        if self.failure is not None:
+            payload["failure"] = {**self.failure.to_dict(), "detail": "See artifact."}
+        notice = f"\n[Full result: {self.artifact_id}; use read_artifact.]"
+        low, high = 0, len(self.content)
+        while low < high:
+            middle = (low + high + 1) // 2
+            payload["content"] = self.content[:middle] + notice
+            if len(encode().encode("utf-8")) <= TOOL_OUTPUT_MAX_BYTES:
+                low = middle
+            else:
+                high = middle - 1
+        payload["content"] = self.content[:low] + notice
+        return encode()
