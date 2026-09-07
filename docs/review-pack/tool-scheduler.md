@@ -45,7 +45,7 @@ not-started，绝不重放 Runner。
 - 七个 Day 1–7 演示通过。
 - 真实 CLI 修复：模型在首轮返回 3 个 `read_file`，随后独占 `edit_file`；可见和隐藏验证通过。
 - 真实 Child：Parent 的 3 个读取并行，Child Worktree 修改、验证和 Parent 集成通过。
-- 真实 Compaction：12 份证据各读取一次，发生一次 Provider session reset 和一次语义压缩；
+- 真实 Compaction：12 份证据各读取一次，完成 Provider session 轮换与语义压缩；
   WorkingState 保留、单次修改、可见与隐藏验证全部通过。
 
 当前 commit 的真实运行证据位于 `artifacts/real-system.json`、
