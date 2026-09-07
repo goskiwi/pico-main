@@ -416,6 +416,8 @@ def test_tool_runtime_returns_canonical_outcome_and_artifact(tmp_path):
         "model_artifact_id",
     }
     assert outcome.artifact_id == ""
+    assert outcome.model_output == ""
+    assert outcome.model_artifact_id == ""
     assert not (tmp_path / ".pico" / "runs" / "manual" / "artifacts").exists()
 
 

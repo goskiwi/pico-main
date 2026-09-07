@@ -741,7 +741,7 @@ class ToolRuntime:
             separators=(",", ":"),
         )
         if len(full_model_output.encode("utf-8")) <= DEFAULT_TOOL_PREVIEW_BYTES:
-            return replace(outcome, model_output=full_model_output)
+            return outcome
 
         model_descriptor = self.runtime.dependencies.artifacts.write_tool_output(
             _run_id(self.runtime),
