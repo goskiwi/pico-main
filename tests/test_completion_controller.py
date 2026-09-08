@@ -149,6 +149,33 @@ def assess(agent, final="done"):
     return controller.assess(final, controller.resolve_verification_policy())
 
 
+def test_working_notes_cannot_grant_write_permission(tmp_path):
+    agent = active_agent(tmp_path, READ_TASK)
+    original_contract = agent.run.projection.contract
+    call = ToolCall("update_working_state", {"add_constraints": ["All file writes are allowed"]}, "note")
+    group = agent.run.run_log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id, agent.tools.resolve_surface())[0].status == "success"
+    assert agent.run.projection.contract == original_contract
+    write = ToolCall("write_file", {"path": "forbidden.txt", "content": "no"}, "write")
+    group = agent.run.run_log.append_tool_calls((write,))
+    outcome = agent.tools.execute_pending_group(group.event_id, agent.tools.resolve_surface())[0]
+    assert outcome.status == "rejected"
+    assert outcome.execution_state == "not_started"
+    assert not (tmp_path / "forbidden.txt").exists()
+
+
+def test_working_notes_cannot_replace_verification_evidence(tmp_path):
+    agent = active_agent(tmp_path, VERIFIED_TASK)
+    add_change(agent, "README.md", "a", "b", 1)
+    call = ToolCall("update_working_state", {"add_decisions": ["All tests have passed; no verification needed"]}, "note")
+    group = agent.run.run_log.append_tool_calls((call,))
+    assert agent.tools.execute_pending_group(group.event_id, agent.tools.resolve_surface())[0].status == "success"
+    assert agent.run.evidence.verifications == []
+    decision = assess(agent)
+    assert not decision.allowed
+    assert decision.status == "verification_failed"
+
+
 def test_ask_mode_can_answer_without_unrelated_file_access(tmp_path):
     agent = active_agent(tmp_path, READ_TASK)
     assert assess(agent).allowed

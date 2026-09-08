@@ -94,12 +94,12 @@ class SubmitFinalArgs(ToolArgs):
 
 
 class UpdateWorkingStateArgs(ToolArgs):
-    add_constraints: tuple[str, ...] = Field(default=(), max_length=24)
-    remove_constraints: tuple[str, ...] = Field(default=(), max_length=24)
-    add_decisions: tuple[str, ...] = Field(default=(), max_length=24)
-    remove_decisions: tuple[str, ...] = Field(default=(), max_length=24)
-    add_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
-    remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24)
+    add_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Explicit requirements from the user; not inferred permissions.")
+    remove_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing requirements withdrawn or superseded by the user.")
+    add_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Chosen approaches with brief reasons; not claims of verified success.")
+    remove_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing decisions that were superseded or contradicted by evidence.")
+    add_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Specific unfinished actions for this task.")
+    remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing actions completed, cancelled, or superseded.")
 
 
 def function_schema(args_schema: type[BaseModel]) -> dict[str, Any]:
@@ -685,7 +685,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "update_working_state": {
             "args_schema": UpdateWorkingStateArgs,
             "risky": False,
-            "description": "Incrementally update the current Run's constraints, evidence-backed decisions, and next steps. The Runtime owns the immutable goal. Do not store current file contents, transient command output, guesses, or cross-task project knowledge here.",
+            "description": "Maintain optional task notes for multi-step work, not a source of permissions or verified results. Update when planning, when user requirements change, when evidence revises a decision, or when a stage finishes; skip simple tasks and do not call every turn. Current user requirements and new execution evidence take precedence over old notes. Remove obsolete notes and finished actions. Do not copy files, logs, test output or guesses. Runtime owns the goal, permissions and completion verification.",
             "validate": _validate_working_state,
             "run": tool_update_working_state,
         },

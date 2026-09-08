@@ -165,6 +165,11 @@ Subagent 实现。
 
 ### Day 2：State、Fact 与 Projection
 
+WorkingState 是可选的模型任务笔记，按规划、需求变化、证据修正和阶段完成更新，不强制
+每轮更新。约束只记用户明确要求，决策记所选方案和依据，下一步只保留待办；当前用户要求
+和新执行证据优先。结构校验与日志回放保证的是保存一致性，不证明笔记内容正确，也不赋予
+写权限或替代完成验证。简单任务可以不使用。
+
 - 阅读 TaskContract、`pico/working_state.py` 的六字段 add/remove WorkingState、RunLog 和
   RunProjection；交互 CLI 使用 `/state` 查看这一当前 Run 投影。
 - 运行 `scripts/day2_state_walkthrough.py` 的三段实验：
