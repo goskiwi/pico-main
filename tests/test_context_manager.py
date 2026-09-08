@@ -534,11 +534,12 @@ def test_workspace_queries_git_facts_when_rendered(tmp_path):
     assert "README.md" not in before
     assert "README.md" in after
     assert "startup_directory (relative to workspace root): src" in after
-    assert "repository: git" in after
-    assert "head: branch " in after
-    assert "status: dirty" in after
-    assert "unstaged=1" in after
-    assert "status_truncated: false" in after
+    assert f"Root: {tmp_path}" in after
+    assert "Git snapshot (at context build): branch " in after
+    assert "; dirty." in after
+    assert "Existing changes (Git short status):" in after
+    assert "; clean." in before
+    assert all(label not in before for label in ("staged=", "diff:", "truncated", "Existing changes"))
 
 
 def test_workspace_distinguishes_filesystem_unborn_and_detached_heads(tmp_path):
@@ -547,9 +548,8 @@ def test_workspace_distinguishes_filesystem_unborn_and_detached_heads(tmp_path):
         command_runner=CommandRunner(filesystem.root),
         execution_context=ExecutionContext.root(max_seconds=30),
     )
-    assert "repository: filesystem" in filesystem_text
-    assert "head: not_applicable" in filesystem_text
-    assert "status: not_applicable" in filesystem_text
+    assert "Git: not a Git repository." in filesystem_text
+    assert "not_applicable" not in filesystem_text
 
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     repository = Workspace.build(tmp_path)
@@ -558,8 +558,7 @@ def test_workspace_distinguishes_filesystem_unborn_and_detached_heads(tmp_path):
         command_runner=runner,
         execution_context=ExecutionContext.root(max_seconds=30),
     )
-    assert "repository: git" in unborn_text
-    assert "head: unborn " in unborn_text
+    assert "Git snapshot (at context build): unborn " in unborn_text
 
     (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
@@ -587,7 +586,33 @@ def test_workspace_distinguishes_filesystem_unborn_and_detached_heads(tmp_path):
         command_runner=runner,
         execution_context=ExecutionContext.root(max_seconds=30),
     )
-    assert "head: detached " in detached_text
+    assert "Git snapshot (at context build): detached " in detached_text
+
+
+@pytest.mark.parametrize("repository,head,status,expected", [
+    ("unavailable", "not_applicable", "unavailable", "repository detection unavailable; state unknown"),
+    ("git", "branch main", "unavailable", "status unavailable; do not assume clean"),
+    ("git", "unavailable", "dirty", "unavailable; dirty"),
+])
+def test_workspace_unavailable_state_is_explicit(tmp_path, repository, head, status, expected):
+    from pico.workspace import WorkspaceObservation
+
+    text = WorkspaceObservation(repository, head, status).render(root=tmp_path, logical_cwd=".")
+    assert expected in text
+    assert "; clean." not in text
+
+
+def test_workspace_conflicts_are_visible_without_zero_statistics(tmp_path):
+    from pico.workspace import WorkspaceObservation
+
+    observation = WorkspaceObservation(
+        "git", "branch main", "dirty", status_lines=("UU conflict.py",),
+        conflicted_files=1, untracked_files=0,
+    )
+    text = observation.render(root=tmp_path, logical_cwd=".")
+    assert "Merge conflicts: 1 paths." in text
+    assert "UU conflict.py" in text
+    assert "untracked=0" not in text
 
 
 def test_workspace_status_reports_full_counts_when_paths_are_truncated(
@@ -606,8 +631,8 @@ def test_workspace_status_reports_full_counts_when_paths_are_truncated(
     )
 
     assert "untracked=4" in rendered
-    assert "status_truncated: true" in rendered
-    assert "- paths:" not in rendered
+    assert "Change list truncated; not all paths are shown" in rendered
+    assert "Existing changes (Git short status):" not in rendered
 
 
 def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):

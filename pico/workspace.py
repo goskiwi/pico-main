@@ -76,39 +76,37 @@ class WorkspaceObservation:
     binary_files: int | None = None
     status_truncated: bool = False
 
-    def render(self, logical_cwd):
+    def render(self, *, root, logical_cwd):
         lines = [
             "Workspace:",
+            f"- Root: {root}",
             f"- startup_directory (relative to workspace root): {logical_cwd}",
-            "- tool_path_base: workspace root; '.' means workspace root, not startup_directory",
-            f"- repository: {self.repository}",
-            f"- head: {self.head}",
-            f"- status: {self.status}",
+            "- Relative tool paths use Root; '.' means Root.",
         ]
-        if self.staged_files is not None:
-            lines.extend(
-                (
-                    (
-                        "- changes: "
-                        f"staged={self.staged_files}, "
-                        f"unstaged={self.unstaged_files}, "
-                        f"untracked={self.untracked_files}, "
-                        f"conflicted={self.conflicted_files}"
-                    ),
-                    (
-                        "- diff: unavailable"
-                        if self.additions is None
-                        else "- diff: "
-                        f"+{self.additions} -{self.deletions}, "
-                        f"binary={self.binary_files}"
-                    ),
-                    "- status_truncated: "
-                    + str(self.status_truncated).lower(),
-                )
-            )
+        if self.repository == "filesystem":
+            lines.append("- Git: not a Git repository.")
+            return "\n".join(lines)
+        if self.repository == "unavailable":
+            lines.append("- Git: repository detection unavailable; state unknown.")
+            return "\n".join(lines)
+        state = "status unavailable; do not assume clean" if self.status == "unavailable" else self.status
+        lines.append(f"- Git snapshot (at context build): {self.head}; {state}.")
+        if self.conflicted_files:
+            lines.append(f"- Merge conflicts: {self.conflicted_files} paths.")
         if self.status_lines:
-            lines.append("- paths:")
+            lines.append("Existing changes (Git short status):")
             lines.extend(f"  {line}" for line in self.status_lines)
+        if self.status_truncated:
+            counts = ", ".join(
+                f"{name}={value}" for name, value in (
+                    ("staged", self.staged_files),
+                    ("unstaged", self.unstaged_files),
+                    ("untracked", self.untracked_files),
+                    ("conflicted", self.conflicted_files),
+                ) if value
+            )
+            lines.append("- Change list truncated; not all paths are shown."
+                         + (f" Full-status counts: {counts}." if counts else ""))
         return "\n".join(lines)
 
 
@@ -296,7 +294,7 @@ class Workspace:
         return self.observe(
             command_runner=command_runner,
             execution_context=execution_context,
-        ).render(logical_cwd)
+        ).render(root=self.root, logical_cwd=logical_cwd)
 
     @staticmethod
     def path_state(path, *, execution_context) -> str:
