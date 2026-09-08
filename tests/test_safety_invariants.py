@@ -1,3 +1,6 @@
+import pytest
+from pathlib import Path
+
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
@@ -37,6 +40,101 @@ def run_active(agent, call):
     surface = agent.tools.resolve_surface()
     group = run_log.append_tool_calls((call,))
     return agent.tools.execute_pending_group(group.event_id, surface)[0]
+
+
+def edit_call(path, revision):
+    return ToolCall("edit_file", {"path": path, "old_text": "before", "new_text": "after",
+                                 "expected_revision": revision}, "edit")
+
+
+def test_edit_reads_one_original_and_reuses_it_for_backup(tmp_path, monkeypatch):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_bytes(b"before\r\nuntouched\r\n")
+    revision = file_revision(target)
+    reads = []
+    original_open = Path.open
+    def measured(path, *args, **kwargs):
+        if path == target and (args[0] if args else kwargs.get("mode")) == "rb":
+            reads.append(path)
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", measured)
+    outcome = run_active(agent, edit_call("subject.txt", revision))
+    assert outcome.status == "success"
+    assert len(reads) == 3  # Original, pre-replace recheck, post-write observation.
+    started = next(e for e in agent.run.run_log.events if e.kind == "tool_started")
+    effect = started.payload["potential_effects"][0]
+    _descriptor, data = agent.dependencies.artifacts.read_internal(
+        agent.run.projection.run_id, effect["before_artifact_id"], expected_kind="workspace_preimage",
+    )
+    assert data == b"before\r\nuntouched\r\n"
+    assert effect["before_state"] == revision
+    assert target.read_bytes() == b"after\r\nuntouched\r\n"
+
+
+@pytest.mark.parametrize("failure", ["backup", "started"])
+def test_edit_does_not_write_if_preimage_or_intent_persistence_fails(tmp_path, monkeypatch, failure):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    call = edit_call("subject.txt", file_revision(target))
+    def fail(*_args, **_kwargs):
+        raise OSError("injected persistence failure")
+    if failure == "backup":
+        monkeypatch.setattr(agent.dependencies.artifacts, "write_workspace_preimage", fail)
+        assert run_active(agent, call).execution_state == "not_started"
+    else:
+        monkeypatch.setattr(RunLog, "append_tool_started", fail)
+        with pytest.raises(OSError, match="injected"):
+            run_active(agent, call)
+    assert target.read_text() == "before"
+    assert not any(e.kind == "tool_started" for e in agent.run.run_log.events)
+
+
+def test_edit_commit_recheck_preserves_external_save(tmp_path, monkeypatch):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    call = edit_call("subject.txt", file_revision(target))
+    commit = agent.dependencies.mutations._commit
+    def external_save(*args):
+        target.write_text("external update")
+        return commit(*args)
+    monkeypatch.setattr(agent.dependencies.mutations, "_commit", external_save)
+    outcome = run_active(agent, call)
+    assert outcome.failure.code == "revision_conflict"
+    assert outcome.side_effect_state == "none"
+    assert target.read_text() == "external update"
+
+
+def test_edit_after_write_without_result_can_be_reconciled(tmp_path, monkeypatch):
+    from pico.mutations import file_revision
+    from pico.run_lifecycle import RunLifecycle
+
+    agent = build_agent(tmp_path)
+    RunLifecycle(agent).initialize("Edit subject")
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    call = edit_call("subject.txt", file_revision(target))
+    def fail(*_args, **_kwargs):
+        raise OSError("result not persisted")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(RunLog, "append_tool_result", fail)
+        with pytest.raises(OSError, match="result not persisted"):
+            run_active(agent, call)
+    assert target.read_text() == "after"
+    resumed = Pico.resume(FakeModelClient([]), agent.workspace, config=agent.config,
+                          session=agent.session.store.load(agent.session.id))
+    resumed.tools.reconcile_interrupted()
+    assert not resumed.run.run_log.pending_tool_calls()
+    assert resumed.run.evidence.changed_paths == ["subject.txt"]
+    assert target.read_text() == "after"
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):

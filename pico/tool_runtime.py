@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
+from functools import partial
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -458,19 +461,15 @@ class ToolRuntime:
         artifacts = {}
         for logical, path in paths:
             before_state = states.get(logical, "absent")
-            if call.name == "edit_file" and call.args["expected_revision"] != before_state:
-                raise RevisionConflict(logical, call.args["expected_revision"], before_state)
             if before_state == "absent":
                 artifacts[logical] = ""
                 continue
             if not path.is_file():
                 raise ValueError(f"workspace preimage is not a file: {logical}")
-            descriptor = agent.dependencies.artifacts.write_workspace_preimage(
-                _run_id(agent),
-                call.call_id,
-                logical,
-                path,
-            )
+            with path.open("rb") as source:
+                descriptor = agent.dependencies.artifacts.write_workspace_preimage(
+                    _run_id(agent), call.call_id, logical, source,
+                )
             captured = "sha256:" + descriptor["sha256"]
             if captured != before_state:
                 raise RevisionConflict(logical, before_state, captured)
@@ -853,6 +852,60 @@ class ToolRuntime:
             else FailureInfo("approval_denied", "approval denied", "no_retry")
         )
 
+    def _execute_edit(self, call, tool, context, plan):
+        agent = self.runtime
+        logical, path = plan.paths[0]
+        with ExitStack() as stack:
+            try:
+                raw, revision = stack.enter_context(agent.dependencies.mutations.prepare_edit(
+                    path, call.args["expected_revision"],
+                    execution_context=context.execution_context,
+                ))
+                before = {logical: revision}
+                drift = tracked_workspace_drift(before, plan.effect_scope, agent.run.evidence.change_set.files)
+                if drift:
+                    return self._rejected(
+                        call, "workspace_drift", f"workspace changed outside this Run: {logical}",
+                        "user_action_required", structured={"drift": list(drift)},
+                    )
+                descriptor = agent.dependencies.artifacts.write_workspace_preimage(
+                    _run_id(agent), call.call_id, logical, BytesIO(raw),
+                )
+                preimages = {logical: descriptor["artifact_id"]}
+                context.execution_context.check_active()
+            except ToolFailureError as exc:
+                return self._rejected(call, exc.failure.code, exc.failure.detail,
+                                      exc.failure.recovery, structured=exc.structured)
+            except (ExecutionCancelled, ExecutionDeadlineExceeded):
+                raise
+            except Exception as exc:
+                return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
+
+            # Failure to persist intent must escape; never perform the edit or
+            # append a speculative rejection over an ambiguous durable write.
+            self._record_tool_started(agent, call, plan=plan, potential_effects=[{
+                "path": logical, "before_state": revision,
+                "before_artifact_id": descriptor["artifact_id"],
+            }])
+            context.execution_plan = plan
+            bound = {**tool, "run": partial(tool["run"], original=raw)}
+            try:
+                result = self._invoke_runner(bound, context, call.args)
+            except Exception as exc:
+                after = self._effect_snapshot(agent, plan.paths, settling=True)
+                outcome = self._observed_exception_outcome(
+                    call, exc, effects_before=before, effects_after=after,
+                    preimages=preimages, potential_scope=plan.effect_scope,
+                )
+            else:
+                after = self._effect_snapshot(agent, plan.paths, settling=True)
+                outcome = self._observed_result_outcome(
+                    call, result, effects_before=before, effects_after=after,
+                    preimages=preimages, potential_scope=plan.effect_scope,
+                )
+        self._record_tool_result(agent, outcome)
+        return outcome
+
     def _execute(self, call, surface):
         agent = self.runtime
         name, args = call.name, call.args
@@ -891,11 +944,13 @@ class ToolRuntime:
                 (logical for logical, _path in potential_paths),
                 surface.allowed_write_paths,
             )
-            effects_before = self._effect_snapshot(agent, potential_paths)
+            effects_before = {} if name == "edit_file" else self._effect_snapshot(agent, potential_paths)
         except Exception as exc:  # noqa: BLE001 - fail before side effect
             return self._rejected(
                 call, "effect_planning_failed", str(exc), "retry_after_change"
             )
+        if name == "edit_file":
+            return self._execute_edit(call, tool, context, plan)
         drift = tracked_workspace_drift(
             effects_before,
             potential_scope,

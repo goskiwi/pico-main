@@ -418,9 +418,10 @@ def run_resume(args, runtime, workspace):
         },
         "call_interrupted_edit",
     )
-    preimage = original.dependencies.artifacts.write_workspace_preimage(
-        run_id, call.call_id, "recovery.txt", target
-    )
+    with target.open("rb") as source:
+        preimage = original.dependencies.artifacts.write_workspace_preimage(
+            run_id, call.call_id, "recovery.txt", source
+        )
     original.run.run_log.append_tool_calls((call,))
     original.run.run_log.append_tool_started(
             call,

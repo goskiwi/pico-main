@@ -57,9 +57,10 @@ def run_resume_accepted(args, runtime, workspace):
         "path": "recovery.txt", "old_text": "baseline\n", "new_text": "recovered\n",
         "expected_revision": file_revision(target),
     }, "call_interrupted_correct_edit")
-    preimage = original.dependencies.artifacts.write_workspace_preimage(
-        run_id, call.call_id, "recovery.txt", target
-    )
+    with target.open("rb") as source:
+        preimage = original.dependencies.artifacts.write_workspace_preimage(
+            run_id, call.call_id, "recovery.txt", source
+        )
     original.run.run_log.append_tool_calls((call,))
     original.run.run_log.append_tool_started(call, effect_scope="workspace", potential_effects=[{
         "path": "recovery.txt", "before_state": file_revision(target),

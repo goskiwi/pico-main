@@ -185,6 +185,17 @@ Child 身份、base、verifier 和计划 Worktree 路径在任何 Child 资源�
 
 ## 状态与信任边界
 
+文件工具的执行细节：`read_file` 在分块读取时响应取消和截止时间，整文件 revision 的
+计算仍保留；`list_files` 用 `offset`、`limit` 分页，返回 `next_offset`，目录变化时应从零
+重新列出，不保证跨页快照隔离。`read_artifact` 只缓存最近一份通过完整性校验的字节内容，
+翻页时复用；内容文件的身份、大小、修改时间或描述信息变化后重新读取并校验。
+缓存不写入日志，不取代 Artifact 的 hash／长度校验，也不会把未经校验的新页直接返回。
+
+`edit_file` 在现有 Workspace 写锁内读取一次原文，用同一份字节校验预期 revision、
+检查 Run 漂移、保存 Preimage 并持久化 `tool_started`，随后匹配和计算替换；提交前仍重新
+校验磁盘版本，提交后观察实际状态。备份或开始日志失败不写目标文件，写入后中断仍由日志
+恢复处理。这是减少重复读取，不是跨进程原子 CAS；普通写入与 Child 合入流程不变。
+
 工具注册时绑定各自需要的固定依赖（路径、修改服务、Artifact、执行器等）；每次调用的
 `ToolContext` 仅携带 `run_id`、`tool_call_id`、`execution_context`、当前 `working_state`
 和 `execution_plan`。校验、计划、执行使用同一套绑定，WorkingState 则每次从最新投影获取。

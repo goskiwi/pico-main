@@ -8,6 +8,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 
 from .contracts import ToolFailureError
@@ -283,16 +284,28 @@ class WorkspaceMutationService:
             ),
         )
 
-    def edit(self, path, old_text, new_text, expected_revision):
+    @contextmanager
+    def prepare_edit(self, path, expected_revision, *, execution_context):
+        """Keep one original byte snapshot and the write lock through publication."""
         target = self._target(path)
         logical_path = target.relative_to(self.root)
         with self._lock:
+            execution_context.check_active()
             if not target.is_file():
                 raise ValueError("patch target is not a file")
             raw = target.read_bytes()
+            execution_context.check_active()
             actual = content_revision(raw)
             if actual != expected_revision:
                 raise RevisionConflict(logical_path, expected_revision, actual)
+            yield raw, actual
+
+    def edit(self, path, old_text, new_text, expected_revision, *, original):
+        """Apply an edit using bytes supplied by prepare_edit, while its lock is held."""
+        target = self._target(path)
+        logical_path = target.relative_to(self.root)
+        with self._lock:
+            raw, actual = original, expected_revision
             text = raw.decode("utf-8")
             # read_file presents LF text. Match those logical line breaks against
             # the original bytes, without normalizing the entire file on write.

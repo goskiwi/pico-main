@@ -203,6 +203,8 @@ Subagent 实现。
   `external` 内容。
 - 对照输出解释 stale Revision、ToolOutcome、Preimage、PathTransition、Unified Diff，以及
   为什么 Observation 可并行而 Edit/Approval 仍必须独占一轮。
+- 补充阅读：edit 的 `prepare_edit` 在写锁内产生一次原文读取；Runtime 从这份字节保存
+  Preimage 和开始事件，再把原文绑定到本次编辑回调。提交前复验及写后观察保留。
 - ToolContext 只保存 Run ID、Call ID、ExecutionContext、当前 WorkingState 和执行计划。
   路径解析、文件修改、Artifact、命令及子任务服务在工具注册时通过 `partial` 绑定给需要它们的
   校验、计划与执行回调；不把整个 Runtime 传给 Runner。WorkingState 每次调用重新读取，

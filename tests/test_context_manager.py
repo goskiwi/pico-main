@@ -27,6 +27,89 @@ from pico.task_state import TaskContract, WriteScope
 from pico.tool_runtime import ResolvedToolSurface
 
 
+def test_directory_pages_reach_every_entry(tmp_path):
+    agent = build_agent(tmp_path)
+    for index in range(205):
+        (tmp_path / f"entry-{index:03}.txt").touch()
+    seen, offset = [], 0
+    while True:
+        outcome = agent.tools.execute_manual("list_files", {"path": ".", "offset": offset, "limit": 100})
+        assert outcome.status == "success"
+        seen.extend(line for line in outcome.content.splitlines() if line.startswith("[F]"))
+        offset = outcome.structured["next_offset"]
+        if offset is None:
+            assert not outcome.structured["has_more"]
+            break
+        assert f"offset={offset}" in outcome.content
+    assert len(seen) == len(set(seen)) == 206  # Includes fixture README.
+    assert "[F] entry-204.txt" in seen
+    assert agent.tools.execute_manual("list_files", {"offset": 1000}).status == "error"
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline"])
+def test_read_file_checks_execution_between_chunks(tmp_path, stop):
+    from io import BytesIO
+    from pathlib import Path
+    from pico.tools import tool_read_file
+    from pico.tool_context import ToolContext
+    from pico.execution import ExecutionDeadlineExceeded
+
+    execution = ExecutionContext.root(max_seconds=30)
+    class Source(BytesIO):
+        reads = 0
+        def readline(self, size=-1):
+            self.reads += 1
+            if stop == "cancel":
+                execution.request_stop("user_cancelled")
+            else:
+                execution.deadline = 0
+            return super().readline(size)
+    source = Source(b"line\n" * 1000)
+    class Target:
+        def open(self, *_args):
+            return source
+        def relative_to(self, _root):
+            return Path("data.txt")
+    expected = ExecutionCancelled if stop == "cancel" else ExecutionDeadlineExceeded
+    with pytest.raises(expected):
+        tool_read_file(ToolContext(execution_context=execution),
+                       {"path": "data.txt", "start_line": 1, "end_line": 1},
+                       path_resolver=lambda _path: Target(), workspace_root=tmp_path)
+    assert source.reads == 1
+
+
+def test_artifact_pages_reuse_verified_bytes_and_detect_changes(tmp_path, monkeypatch):
+    from pathlib import Path
+    agent = build_agent(tmp_path)
+    artifacts = agent.dependencies.artifacts
+    descriptor = artifacts.write_tool_output("pages", "call", "abcd" * 10000)
+    aid = descriptor["artifact_id"]
+    target = agent.dependencies.run_store.artifact_dir("pages") / (aid + ".txt")
+    reads = []
+    original = Path.read_bytes
+    def measured(path):
+        if path == target:
+            reads.append(path)
+        return original(path)
+    monkeypatch.setattr(Path, "read_bytes", measured)
+    first = artifacts.read_slice("pages", aid, 0, 100)
+    second = artifacts.read_slice("pages", aid, 100, 100)
+    assert first["content"] == second["content"] == "abcd" * 25
+    assert len(reads) == 1
+    target.write_text("xxxx" * 10000)  # Same length, new content.
+    with pytest.raises(ValueError, match="digest mismatch"):
+        artifacts.read_slice("pages", aid, 200, 100)
+    assert len(reads) == 2
+    target.write_text("abcd" * 10000)
+    artifacts.read_slice("pages", aid, 0, 100)
+    descpath = target.with_suffix(".json")
+    changed = json.loads(descpath.read_text())
+    changed["sha256"] = "0" * 64
+    descpath.write_text(json.dumps(changed))
+    with pytest.raises(ValueError, match="digest mismatch"):
+        artifacts.read_slice("pages", aid, 100, 100)
+
+
 def test_tool_context_contains_only_call_state_and_bindings_are_tool_specific(tmp_path):
     from dataclasses import fields
     from pico.tool_context import ToolContext

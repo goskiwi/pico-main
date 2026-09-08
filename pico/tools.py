@@ -49,6 +49,8 @@ class ToolArgs(BaseModel):
 
 class ListFilesArgs(ToolArgs):
     path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
+    offset: int = Field(default=0, ge=0, description="Entry offset; use next_offset to continue. Restart at zero if the directory changes.")
+    limit: int = Field(default=200, ge=1, le=200)
 
 
 class ReadFileArgs(ToolArgs):
@@ -244,25 +246,33 @@ def _validate_run_command(context, args, *, command_runner):
 
 def tool_list_files(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args.get("path", "."))
-    entries = [
-        item
-        for item in sorted(
-            path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())
-        )
-        if item.name not in IGNORED_PATH_NAMES
-    ]
-    selected = entries[:200]
+    entries = []
+    for item in path.iterdir():
+        if context.execution_context is not None:
+            context.execution_context.check_active()
+        if item.name not in IGNORED_PATH_NAMES:
+            entries.append(item)
+    entries.sort(key=lambda item: (item.is_file(), item.name.lower(), item.name))
+    offset, limit = args["offset"], args["limit"]
+    if offset > len(entries):
+        raise ValueError("directory offset is past the end; restart at offset=0")
+    selected = entries[offset:offset + limit]
+    next_offset = offset + len(selected) if offset + len(selected) < len(entries) else None
     lines = []
     for entry in selected:
         kind = "[D]" if entry.is_dir() else "[F]"
         lines.append(f"{kind} {entry.relative_to(workspace_root)}")
     relative = path.relative_to(workspace_root).as_posix() or "."
+    if next_offset is not None:
+        lines.append(f"[More entries: call list_files with path={json.dumps(relative)}, offset={next_offset}, limit={limit}.]")
     return ToolRunnerResult(
         "\n".join(lines) or "(empty)",
         structured={
             "path": relative,
             "returned_count": len(selected),
-            "has_more": len(entries) > len(selected),
+            "offset": offset,
+            "next_offset": next_offset,
+            "has_more": next_offset is not None,
         },
     )
 
@@ -280,6 +290,8 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
     actual_end_line = None
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.readline(64 * 1024), b""):
+            if context.execution_context is not None:
+                context.execution_context.check_active()
             digest.update(chunk)
             total_lines = number
             if start_line <= number <= requested_end_line:
@@ -503,11 +515,11 @@ def tool_write_file(context, args, *, mutation_service, path_resolver, workspace
     )
 
 
-def tool_edit_file(context, args, *, mutation_service, path_resolver, workspace_root):
+def tool_edit_file(context, args, *, mutation_service, path_resolver, workspace_root, original):
     path = path_resolver(args["path"])
     old_text = str(args.get("old_text", ""))
     receipt = mutation_service.edit(
-        path, old_text, str(args["new_text"]), args["expected_revision"]
+        path, old_text, str(args["new_text"]), args["expected_revision"], original=original
     )
     relative = path.relative_to(workspace_root).as_posix()
     changed = receipt.changed
@@ -637,7 +649,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "risky": False,
             "manual_observation": True,
             "concurrency": "parallel",
-            "description": "List files in the workspace.",
+            "description": "List a sorted directory page. Continue with next_offset; restart at zero if the directory changes.",
             "validate": partial(_validate_list_files, path_resolver=path_resolver),
             "run": partial(tool_list_files, path_resolver=path_resolver, workspace_root=workspace_root),
         },

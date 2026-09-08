@@ -21,6 +21,7 @@ class ArtifactStore:
     def __init__(self, run_store, redactor):
         self.run_store = run_store
         self.redactor = redactor
+        self._verified_page_source = None
 
     def write_tool_output(self, run_id, call_id, content):
         safe_content = str(self.redactor(str(content)))
@@ -44,8 +45,8 @@ class ArtifactStore:
         )
         return descriptor
 
-    def write_workspace_preimage(self, run_id, call_id, logical_path, source_path):
-        """Copy original bytes without holding the source text in memory."""
+    def write_workspace_preimage(self, run_id, call_id, logical_path, source):
+        """Copy an original byte stream; edit supplies its already-read bytes."""
 
         root = self.run_store.artifact_dir(run_id).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -55,11 +56,10 @@ class ArtifactStore:
         digest = hashlib.sha256()
         size = 0
         with tempfile.NamedTemporaryFile(dir=root, suffix=".tmp") as staged:
-            with Path(source_path).open("rb") as source:
-                for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                    staged.write(chunk)
-                    digest.update(chunk)
-                    size += len(chunk)
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                staged.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
             staged.flush()
             os.fsync(staged.fileno())
             artifact_id = f"preimage_{key_digest[:16]}_{digest.hexdigest()[:10]}"
@@ -136,12 +136,24 @@ class ArtifactStore:
         content_path = self._artifact_path(root, artifact_id, ".txt")
         if not content_path.exists():
             raise ValueError("artifact content is missing")
+        stat = content_path.stat()
+        version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        key = (str(content_path), version, descriptor.get("sha256"), descriptor.get("size_bytes"))
+        cached = self._verified_page_source
+        if cached is not None and cached[0] == key:
+            return descriptor, cached[1]
+        # Only reuse already-verified bytes, never read new page bytes under an
+        # old digest. A changed file or descriptor takes the full validation path.
+        self._verified_page_source = None
         data = content_path.read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         if digest != descriptor.get("sha256"):
             raise ValueError("artifact digest mismatch")
         if len(data) != int(descriptor.get("size_bytes", -1)):
             raise ValueError("artifact size mismatch")
+        after = content_path.stat()
+        if version == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            self._verified_page_source = (key, data)
         return descriptor, data
 
     @staticmethod
