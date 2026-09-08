@@ -10,6 +10,7 @@ from pico.run_cli import run_main
 from pico.run_log import RunEvent, RunLog, replay_events
 from pico.run_projection import RunOutcome, RunProjection
 from pico.run_store import RunStore
+from pico.session_store import Session, SessionStore
 from pico.task_state import TaskContract, WriteScope
 
 READ_TASK = {
@@ -56,8 +57,97 @@ def read_outcome(call_id="read"):
     )
 
 
+def test_session_recovery_scans_only_owned_runs_and_latest_loads_each_once(tmp_path, monkeypatch):
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    for session_id in ("one", "two", "three"):
+        sessions.save(Session(sessions, session_id, tmp_path))
+        for index in range(2):
+            log = RunLog(f"run{index}", session_id, sessions.runs(session_id))
+            log.append_user(task_contract())
+    reads = []
+    original = RunStore.load_run
+
+    def measured(store, run_id):
+        reads.append((store.root.parent.name, run_id))
+        return original(store, run_id)
+
+    monkeypatch.setattr(RunStore, "load_run", measured)
+    recovered = sessions.runs("two").find_active_run("two")
+    assert recovered.session_id == "two"
+    assert reads == [("two", name) for _owner, name in reads]
+    assert len(reads) == 2
+    reads.clear()
+    assert sessions.latest_active() in {"one", "two", "three"}
+    assert len(reads) == 6
+    assert len(set(reads)) == 6
+    assert not (tmp_path / ".pico/runs").exists()
+
+
+def test_orphan_run_is_recovered_from_session_directory(tmp_path):
+    from pico import FakeModelClient, Pico, Workspace
+
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    session = sessions.create(tmp_path)
+    log = RunLog("orphan", session.id, sessions.runs(session.id))
+    log.append_user(task_contract())  # Crash before publishing active_run_id.
+    assert sessions.load(session.id).active_run_id == ""
+    agent = Pico.resume(FakeModelClient([]), Workspace.build(tmp_path), session=sessions.load(session.id))
+    assert agent.run.projection.run_id == "orphan"
+    assert sessions.load(session.id).active_run_id == "orphan"
+    assert log.store.events_path("orphan") == (
+        sessions.directory(session.id) / "runs/orphan/events.jsonl"
+    )
+
+
+def test_new_session_does_not_read_other_sessions_runs(tmp_path, monkeypatch):
+    from pico import FakeModelClient, Pico, Workspace
+
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    old = sessions.create(tmp_path)
+    RunLog("old", old.id, sessions.runs(old.id)).append_user(task_contract())
+
+    def unexpected(*_args):
+        pytest.fail("new Session must not load another Session's Run")
+
+    monkeypatch.setattr(RunStore, "load_run", unexpected)
+    monkeypatch.setattr(RunStore, "find_active_run", unexpected)
+    monkeypatch.setattr("pico.runtime.load_resumable_run", unexpected)
+    Pico.create(FakeModelClient([]), Workspace.build(tmp_path), session_store=sessions)
+
+
+def test_create_cannot_overwrite_existing_session(tmp_path):
+    from pico import FakeModelClient, Pico, Workspace
+
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    original = Pico.create(FakeModelClient([]), Workspace.build(tmp_path),
+                           session_store=sessions, session_id="fixed")
+    original.session.set_active_run("preserve")
+    with pytest.raises(FileExistsError):
+        Pico.create(FakeModelClient([]), Workspace.build(tmp_path),
+                    session_store=sessions, session_id="fixed")
+    assert sessions.load("fixed").active_run_id == "preserve"
+
+
+def test_resume_uses_pointer_without_scanning(tmp_path, monkeypatch):
+    from pico import FakeModelClient, Pico, Workspace
+
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    session = sessions.create(tmp_path)
+    RunLog("pointed", session.id, sessions.runs(session.id)).append_user(task_contract())
+    session.set_active_run("pointed")
+
+    def unexpected(*_args):
+        pytest.fail("a valid pointer does not require orphan discovery")
+
+    monkeypatch.setattr(RunStore, "find_active_run", unexpected)
+    agent = Pico.resume(FakeModelClient([]), Workspace.build(tmp_path), session=session)
+    assert agent.run.projection.run_id == "pointed"
+
+
 def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
-    store = RunStore(tmp_path / ".pico/runs")
+    sessions = SessionStore(tmp_path / ".pico/sessions")
+    sessions.save(Session(sessions, "session", tmp_path))
+    store = sessions.runs("session")
     append(store, "run", "user_message", {"content": "inspect"})
     append(
         store,
@@ -94,12 +184,12 @@ def test_run_log_projects_metrics_and_cli_views(tmp_path, capsys):
     assert summary["metrics"]["executed_tool_count"] == 1
     assert summary["metrics"]["tool_counts"] == {"read_file": 1}
     assert summary["pending_call_ids"] == []
-    assert run_main(["show", "run", "--cwd", str(tmp_path)]) == 0
+    assert run_main(["show", "run", "--session", "session", "--cwd", str(tmp_path)]) == 0
     assert json.loads(capsys.readouterr().out)["run_cursor"]["sequence"] == 4
 
 
 def test_replay_snapshots_one_iterable_and_validates_event_identity(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     append(store, "run", "user_message", {"content": "inspect"})
     events = tuple(store.read_events("run"))
 
@@ -125,7 +215,7 @@ def test_replay_snapshots_one_iterable_and_validates_event_identity(tmp_path):
 
 
 def test_load_run_returns_the_same_event_snapshot_used_by_replay(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     append(store, "run", "user_message", {"content": "inspect"})
     append(store, "run", "run_started", {"workspace_root": "/w"})
 
@@ -210,7 +300,7 @@ def test_loaded_log_rejects_another_run_identity_before_installing_state(tmp_pat
 
 
 def test_projection_tracks_one_pending_tool_transaction(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     append(store, "run", "user_message", {"content": "inspect"})
     append(
         store,
@@ -229,7 +319,7 @@ def test_projection_tracks_one_pending_tool_transaction(tmp_path):
 
 
 def test_tool_group_round_trips_in_original_order(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     calls = (
@@ -271,7 +361,7 @@ def test_tool_group_round_trips_in_original_order(tmp_path):
 
 
 def test_grouped_working_state_updates_project_in_result_order(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     calls = (
@@ -348,7 +438,7 @@ def test_tool_group_payload_is_strict(payload):
 
 
 def test_tool_group_rejects_out_of_order_results(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     calls = (
@@ -377,7 +467,7 @@ def test_tool_group_rejects_out_of_order_results(tmp_path):
 
 
 def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     calls = tuple(
@@ -404,7 +494,7 @@ def test_tool_group_rejects_start_across_unfinished_execution_barrier(tmp_path):
 
 
 def test_task_contract_is_first_event_and_goal_cannot_be_overwritten(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     original = "repair the original task"
     append(store, "run", "user_message", {"content": original})
     append(store, "run", "run_resumed", {"workspace_root": "/w"})
@@ -414,7 +504,7 @@ def test_task_contract_is_first_event_and_goal_cannot_be_overwritten(tmp_path):
 
 
 def test_run_log_repairs_only_incomplete_tail(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     append(store, "tail", "user_message", {"content": "inspect"})
     path = store.events_path("tail")
     with path.open("ab") as handle:
@@ -526,7 +616,7 @@ def test_rejects_legacy_payload_shapes():
 
 
 def test_mismatched_tool_result_is_not_persisted(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     log.append_tool_calls((ToolCall("read_file", {}, "expected"),))
@@ -548,7 +638,7 @@ def test_mismatched_tool_result_is_not_persisted(tmp_path):
 
 
 def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     terminal = log.append_final("done", FinalDiff())
@@ -564,7 +654,7 @@ def test_terminal_only_persists_final_diff_and_blocks_later_events(tmp_path):
 
 
 def test_stopped_run_may_omit_an_unavailable_final_diff(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     stopped = RunLog("stopped", "session", store)
     stopped.append_user(task_contract())
     event = stopped.append_stopped("stopped", "user_reset")
@@ -580,7 +670,7 @@ def test_stopped_run_may_omit_an_unavailable_final_diff(tmp_path):
 
 
 def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     with pytest.raises(ValueError, match="does not match net changes"):
@@ -588,14 +678,14 @@ def test_replay_rejects_diff_descriptor_without_net_changes(tmp_path):
 
 
 def test_run_store_rejects_escaping_run_ids(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     for run_id in ("", ".", "..", "../outside", "nested/run"):
         with pytest.raises(ValueError, match="invalid run id"):
             store.events_path(run_id)
 
 
 def test_find_active_run_uses_last_event_time(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     append(store, "run_z", "user_message", {"content": "old"})
     append(store, "run_a", "user_message", {"content": "new"})
     log = store.find_active_run("session")
@@ -606,7 +696,7 @@ def test_find_active_run_uses_last_event_time(tmp_path):
 
 
 def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     log.append_model_instruction("historical fact that must be summarized")
@@ -651,7 +741,7 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
 
 
 def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     log.append_user(task_contract())
     log.append_model_instruction("historical " * 30)
@@ -689,7 +779,7 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
 
 
 def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     user = log.append_user(task_contract())
     old = log.append_model_instruction("old")
@@ -718,7 +808,7 @@ def test_consecutive_compactions_replace_the_active_logical_prefix(tmp_path):
 
 
 def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     user = log.append_user(task_contract())
     old = log.append_model_instruction("old")
@@ -760,7 +850,7 @@ def test_compacted_history_keeps_summary_and_only_complete_recent_units(tmp_path
 
 
 def test_tool_group_history_is_bounded_per_call(tmp_path):
-    store = RunStore(tmp_path / ".pico/runs")
+    store = RunStore(tmp_path / ".pico/sessions/session/runs")
     log = RunLog("run", "session", store)
     user = log.append_user(task_contract())
     old = log.append_model_instruction("old")

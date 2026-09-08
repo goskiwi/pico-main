@@ -34,13 +34,13 @@ def print_section(title, value):
 def build_agent(root, model, *, session=None):
     store = SessionStore(root / ".pico" / "sessions")
     runtime_workspace = Workspace.build(root)
-    return Pico(
+    start = Pico.resume if session is not None else Pico.create
+    options = {"session": session} if session is not None else {"session_store": store}
+    return start(
         model_client=model,
         workspace=runtime_workspace,
         config=PicoConfig(mode="ask", verification_command=""),
-        session=session
-        if session is not None
-        else store.create(runtime_workspace.root),
+        **options,
     )
 
 
@@ -149,7 +149,7 @@ def fact_projection_experiment(root):
     print_section(
         "A1. Run Log 保存的是 Fact",
         {
-            "events_path": f".pico/runs/{run_id}/events.jsonl",
+            "events_path": f".pico/sessions/{agent.session.id}/runs/{run_id}/events.jsonl",
             "event_sequence": [
                 {
                     "sequence": event.sequence,

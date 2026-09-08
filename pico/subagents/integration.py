@@ -10,7 +10,7 @@ from ..contracts import ToolExecutionPlan, ToolOutcome
 from ..mutations import ABSENT_REVISION, content_revision, file_revision
 from ..persistence import atomic_replace_bytes
 from ..run_log import replay_events
-from ..run_store import RunStore
+from ..session_store import SessionStore
 from ..verification import verify_workspace
 from ..workspace import clip
 from .contracts import ChildIntegration
@@ -54,7 +54,7 @@ class PatchIntegrator:
             self.parent.dependencies.run_store.run_dir(run_id)
             / "subagents" / record.child_id
         )
-        projection = RunStore(task_root / "runs").load_run(
+        projection = SessionStore(task_root / "sessions").runs(record.child_id).load_run(
             record.completed().child_run_id
         ).projection
         if projection.status != "completed":

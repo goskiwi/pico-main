@@ -158,18 +158,14 @@ def _tool_results(events):
 
 
 def _single_run(workspace):
-    root = workspace / ".pico" / "runs"
-    run_ids = sorted(
-        path.name
-        for path in root.iterdir()
-        if path.is_dir() and (path / "events.jsonl").is_file()
-    )
-    if len(run_ids) != 1:
-        raise RuntimeError(f"expected one top-level Run, found {len(run_ids)}")
-    store = RunStore(root)
-    log = store.load_run(run_ids[0])
+    paths = sorted((workspace / ".pico" / "sessions").glob("*/runs/*/events.jsonl"))
+    if len(paths) != 1:
+        raise RuntimeError(f"expected one top-level Run, found {len(paths)}")
+    run_dir = paths[0].parent
+    store = RunStore(run_dir.parent)
+    log = store.load_run(run_dir.name)
     projection = log.projection
-    return run_ids[0], log.events, projection
+    return run_dir.name, log.events, projection
 
 
 def main(argv=None):

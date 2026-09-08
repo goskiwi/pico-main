@@ -126,16 +126,14 @@ def main():
             ]
         )
         runtime_workspace = Workspace.build(root)
-        repaired = Pico(
+        repaired = Pico.create(
             model_client=repair_model,
             workspace=runtime_workspace,
             config=PicoConfig(
                 mode="auto",
                 verification_command="",
             ),
-            session=SessionStore(root / ".pico" / "sessions").create(
-                runtime_workspace.root
-            ),
+            session_store=SessionStore(root / ".pico" / "sessions"),
         )
         run_outcome = repaired.ask(
             "Replace alpha without losing concurrent edits",
@@ -154,7 +152,7 @@ def main():
         denied_root = root / "denied"
         denied_root.mkdir()
         runtime_workspace = Workspace.build(denied_root)
-        denied = Pico(
+        denied = Pico.create(
             model_client=FakeModelClient(
                 [
                     ModelAction.tool(
@@ -176,9 +174,7 @@ def main():
                 mode="code",
                 verification_command="",
             ),
-            session=SessionStore(denied_root / ".pico" / "sessions").create(
-                runtime_workspace.root
-            ),
+            session_store=SessionStore(denied_root / ".pico" / "sessions"),
         )
         denied.dependencies.approval_handler = lambda *_args, **_kwargs: False
         denied_run_outcome = denied.ask(

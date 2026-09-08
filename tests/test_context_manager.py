@@ -39,7 +39,7 @@ def test_complete_working_state_is_visible_after_resume(tmp_path):
     assert agent.tools.execute_pending_group(
         group.event_id, surface
     )[0].status == "success"
-    resumed = Pico(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
+    resumed = Pico.resume(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
                    session=agent.session.store.load(agent.session.id))
     prompt, metadata = resumed.prompt.build(
         "Continue",
@@ -66,13 +66,11 @@ READ_TASK = {
 def build_agent(tmp_path, max_new_tokens=64):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     runtime_workspace = Workspace.build(tmp_path)
-    return Pico(
+    return Pico.create(
         FakeModelClient([]),
         runtime_workspace,
         config=PicoConfig(mode="auto", max_new_tokens=max_new_tokens),
-        session=SessionStore(tmp_path / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
     )
 
 
@@ -174,13 +172,11 @@ def named_json(input_text, name):
 
 def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         FakeModelClient([]),
         runtime_workspace,
         config=PicoConfig(mode="ask", max_new_tokens=64),
-        session=SessionStore(tmp_path / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
     )
     activate(agent, "Inspect README")
 
@@ -674,13 +670,11 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
     client = RecordingClient()
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="ask", max_new_tokens=64),
-        session=SessionStore(tmp_path / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
     )
     activate(agent, "Inspect")
     manager = prompt_for_budget(agent, total_budget=1800)

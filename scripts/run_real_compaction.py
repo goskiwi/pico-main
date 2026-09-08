@@ -245,7 +245,7 @@ def main(argv=None):
         args.timeout,
     )
     runtime_workspace = Workspace.build(workspace)
-    agent = Pico(
+    agent = Pico.create(
         model_client=client,
         workspace=runtime_workspace,
         config=PicoConfig(
@@ -262,9 +262,7 @@ def main(argv=None):
             verification_command=VISIBLE_COMMAND,
         ),
         command_runner=CommandRunner(workspace),
-        session=SessionStore(workspace / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(workspace / ".pico" / "sessions"),
     )
     outcome = agent.ask(
         build_prompt(),

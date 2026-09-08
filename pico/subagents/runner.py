@@ -8,7 +8,6 @@ from copy import deepcopy
 from pathlib import Path
 
 from ..contracts import FailureInfo, ToolExecutionPlan, ToolOutcome
-from ..run_store import RunStore
 from ..session_store import SessionStore
 from ..workspace import Workspace
 from .contracts import (
@@ -136,7 +135,7 @@ class SubagentRunner:
             handle.cleanup()
 
     def _child_run_store(self, run_id, record):
-        return RunStore(self._task_root(run_id, record.child_id) / "runs")
+        return SessionStore(self._task_root(run_id, record.child_id) / "sessions").runs(record.child_id)
 
     def _child_projection(self, run_id, record):
         result = record.result
@@ -227,16 +226,17 @@ class SubagentRunner:
                 else record.verification_command
             ),
         )
-        return Pico(
+        sessions = SessionStore(task_root / "sessions")
+        return Pico.create(
             model_client=self.model_client_factory(record.spec),
             workspace=workspace,
-            run_store=RunStore(task_root / "runs"),
             config=config,
             command_runner=self.parent.dependencies.command_runner_factory(
                 workspace_root
             ),
             parent_execution_context=self.parent.run.execution_context,
-            session=SessionStore(task_root / "sessions").create(workspace.root),
+            session_store=sessions,
+            session_id=record.child_id,
         )
 
     def _run_child(self, run_id, record):

@@ -8,14 +8,12 @@ from pico.task_state import TaskContract, WriteScope
 def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n")
     runtime_workspace = Workspace.build(tmp_path)
-    return Pico(
+    return Pico.create(
         FakeModelClient([]),
         runtime_workspace,
         config=PicoConfig(mode="auto", verification_command=""),
         **kwargs,
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
 

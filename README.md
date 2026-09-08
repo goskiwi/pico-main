@@ -11,7 +11,7 @@ Pico 面向用户已经信任的本地仓库。Code 模式允许模型申请一�
 子进程。Pico 检测 Repository 可见净变化：Git 仓库使用 Diff、Untracked state 与 HEAD，非 Git
 Workspace 使用有界 metadata snapshot；它不追踪 ignored 文件或外部系统副作用。未知仓库、
 未知 PR 或其他不可信代码必须放到 Pico 外部的 CI、VM 或容器中运行。
-CLI 注入终端 Approval handler；程序化 `Pico(...)` 未提供 handler 时，Code 模式的 risky Tool
+CLI 注入终端 Approval handler；程序化 `Pico.create/resume(...)` 未提供 handler 时，Code 模式的 risky Tool
 默认拒绝且不会读取 stdin。
 
 ## 快速开始
@@ -61,8 +61,8 @@ CLI 从仓库根目录到启动目录加载 `AGENTS.md`；模型访问其他路�
 仓库 Context。当前用户任务冲突时优先；Mode、工具权限、路径和完成规则仍由 Runtime 代码决定。
 
 每个新 Prompt snapshot 还现场构造一个 `WorkspaceObservation`：明确区分 Git、普通目录和
-Git 不可用，表达 branch、detached HEAD 或 unborn branch，并给出 staged、unstaged、untracked、
-conflicted 数量、总 Diff 行数及有界路径列表。普通 Tool continuation 复用 Provider session，
+Git 不可用，表达 branch、detached HEAD 或 unborn branch，并按状态展示有界改动路径与异常提示。
+普通 Tool continuation 复用 Provider session，
 不把同一个快照反复追加到上下文；RepoMap 再按当前任务和已观察路径提供代码入口。
 
 ## 上下文预算
@@ -121,7 +121,7 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskContract 和工具预算允许的 Schema 发送
 给 Provider；ToolRuntime 在本机再次执行准入。
 
-程序化 `Pico(..., check_runner=...)` 可选安装 `run_check`：在明确配置的隔离执行器中
+程序化 `Pico.create/resume(..., check_runner=...)` 可选安装 `run_check`：在明确配置的隔离执行器中
 运行临时 Python／pytest 复现，Code／Auto 可用，Ask 不暴露。普通 CLI 默认不安装此工具。
 执行器由调用方提供，接口与信任边界见 [复现检查说明](docs/review-pack/isolated-checks.md)。
 
@@ -145,7 +145,7 @@ Runtime 对每个调用独立准入，并在读写边界间建立顺序屏障；
 | `submit_final` | ✓ | ✓ | ✓ | 请求 Runtime 进行最终完成检查 |
 
 CLI 的 `build_agent()` 默认安装 Child runner，因此真实 CLI 请求会携带 `delegate` 与
-`integrate_child`。程序化 `Pico(...)` 默认是单 Agent；只有显式传入
+`integrate_child`。程序化 `Pico.create/resume(...)` 默认是单 Agent；只有显式传入
 `subagent_model_client_factory` 才加载 Child 工具。交互模式使用 `/state` 查看当前 Run 的
 WorkingState。
 
@@ -178,14 +178,25 @@ Child 身份、base、verifier 和计划 Worktree 路径在任何 Child 资源�
 
 ```text
 .pico/
-  sessions/<session_id>.json
-  runs/<run_id>/
-    events.jsonl
-    artifacts/*
-    subagents/<child_id>/{sessions,runs,patch.diff}
+  sessions/<session_id>/
+    session.json
+    runs/<run_id>/
+      events.jsonl
+      artifacts/*
+      subagents/<child_id>/
+        patch.diff
+        sessions/<child_id>/
+          session.json
+          runs/<child_run_id>/{events.jsonl,artifacts/}
 ```
 
-Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话历史。恢复会重放 Run Log、修复末尾未完成的 Tool 事务，并把新的
+Session 保存会话 ID、Workspace 归属和 `active_run_id`，不保存对话历史。
+恢复逻辑仅用于 `Pico.resume()` 和运行中的异常恢复；`Pico.create()` 自己创建新 Session，
+不调用恢复、不扫描 Run 目录。旧 `Pico(...)` 入口已移除。恢复时，有指针则直接加载
+本 Session 的 Run；无指针时只扫描本 Session 的 runs，恢复首条事件落盘但指针尚未发布的
+崩溃窗口。`--resume latest` 遍历 Session，但不重复全仓扫描 Run。旧平铺布局不兼容、不迁移。
+查看运行必须指定归属：`pico run show RUN_ID --session SESSION_ID --cwd /path/to/repo`。
+恢复会重放 Run Log、修复末尾未完成的 Tool 事务，并把新的
 resume 请求作为 `user_guidance` Fact 持久化。文件工具不能访问 `.git/` 或 `.pico/`；固定
 `run_command` 和 Verification 都拥有当前用户的宿主权限，不能被描述为 Sandbox。
 两者共用 Repository 净状态观察：HEAD、staged/unstaged diff 与非忽略 untracked revision。

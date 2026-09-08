@@ -50,10 +50,11 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 ## 从一个真实 CLI 请求开始
 
-程序入口先准备对象，再交给 Pico：`SessionStore.create(workspace.root)` 新建会话，
-`SessionStore.load(session_id)` 恢复会话，两者都直接返回 `Session`。
-普通启动直接新建会话；只有显式传入 `--resume <session_id>` 或 `--resume latest` 时，才选择旧会话恢复。
-`Pico(model_client, workspace, session, config=...)` 不再包装会话字典；会话通过
+程序入口明确选择新建或恢复：普通启动调用 `Pico.create(..., session_store=store)`，
+由它创建 Session 并装配 Runtime，不调用恢复查找，也不扫描空 Run 目录。
+只有显式传入 `--resume <session_id>` 或 `--resume latest` 时，才加载 Session 并调用
+`Pico.resume(..., session=store.load(session_id))`。旧 `Pico(...)` 构造方式不再支持。
+运行中异常恢复仍保留首条事件已落盘但指针未发布时的孤立 Run 查找。会话通过
 `session.id`、`session.active_run_id` 访问。`PicoConfig(...)` 构造时即完成校验与规范化，
 修改使用 `dataclasses.replace(config, ...)`，不存在第二次 `build/normalized` 加工。
 
@@ -139,7 +140,7 @@ deadline 保持执行控制异常。已提交 Summary 仍是可选历史投影�
 不会阻塞 Run 恢复。
 
 Subagents 在 CLI 中默认提供，因为 `build_agent()` 会安装 Child Model Client Factory；直接使用
-`Pico(...)` API 时只有显式传入该 Factory 才启用。无论是否启用，普通单 Agent Core 都不依赖
+`Pico.create/resume(...)` API 时只有显式传入该 Factory 才启用。无论是否启用，普通单 Agent Core 都不依赖
 Subagent 实现。
 
 ## 保留原始七天顺序

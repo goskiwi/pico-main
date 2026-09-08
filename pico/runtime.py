@@ -13,7 +13,6 @@ from .prompt_builder import PromptBuilder
 from .repo_map import RepoMap
 from .run_lifecycle import RunLifecycle, load_resumable_run
 from .run_projection import RunOutcome
-from .run_store import RunStore
 from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
@@ -28,7 +27,29 @@ __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 class Pico:
     """Coordinate model, state, prompt, tools, and long-lived dependencies."""
 
-    def __init__(
+    def __init__(self):
+        raise TypeError("Use Pico.create() for a new Session or Pico.resume() for recovery")
+
+    @classmethod
+    def create(cls, model_client, workspace, *, session_store, session_id=None, **options):
+        """Create a new Session and assemble its runtime without recovery IO."""
+        session = session_store.create(workspace.root, session_id=session_id)
+        return cls._assemble(model_client, workspace, session, **options)
+
+    @classmethod
+    def resume(cls, model_client, workspace, *, session, **options):
+        """Restore an existing Session, including an orphaned unfinished Run."""
+        runtime = cls._assemble(model_client, workspace, session, **options)
+        load_resumable_run(runtime)
+        return runtime
+
+    @classmethod
+    def _assemble(cls, model_client, workspace, session, **options):
+        runtime = cls.__new__(cls)
+        runtime._initialize(model_client, workspace, session, **options)
+        return runtime
+
+    def _initialize(
         self,
         model_client,
         workspace,
@@ -36,6 +57,7 @@ class Pico:
         *,
         config: PicoConfig | None = None,
         run_store=None,
+        trace=None,
         command_runner=None,
         command_runner_factory=None,
         subagent_model_client_factory=None,
@@ -49,9 +71,7 @@ class Pico:
         self.run = ActiveRunState()
         self.session = session
 
-        effective_run_store = run_store or RunStore(
-            self.workspace.root / ".pico" / "runs"
-        )
+        effective_run_store = run_store or session.store.runs(session.id, trace=trace)
         artifacts = ArtifactStore(effective_run_store, self.redact_text)
         mutations = WorkspaceMutationService(self.workspace.root)
 
@@ -81,7 +101,6 @@ class Pico:
 
         self.tools = ToolRuntime(self)
         self.prompt = PromptBuilder(self)
-        load_resumable_run(self)
 
     def redact_text(self, text):
         return securitylib.redact_text(

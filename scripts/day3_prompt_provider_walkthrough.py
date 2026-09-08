@@ -107,7 +107,7 @@ def build_prompt_fixture(root):
     """Build Prompt and schemas inside a real read-only Run."""
     client = new_client()
     runtime_workspace = Workspace.build(root)
-    bootstrap = Pico(
+    bootstrap = Pico.create(
         model_client=client,
         workspace=runtime_workspace,
         config=PicoConfig(
@@ -115,9 +115,7 @@ def build_prompt_fixture(root):
             verification_command="",
             max_new_tokens=96,
         ),
-        session=SessionStore(root / ".pico" / "prompt-session").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(root / ".pico" / "prompt-session"),
     )
     RunLifecycle(bootstrap).initialize(
         "Read README.md"
@@ -472,7 +470,7 @@ def experiment_incomplete_is_rejected(
 
 def overflow_agent(root, client, session_name):
     runtime_workspace = Workspace.build(root)
-    return Pico(
+    return Pico.create(
         model_client=client,
         workspace=runtime_workspace,
         config=PicoConfig(
@@ -480,9 +478,7 @@ def overflow_agent(root, client, session_name):
             verification_command="",
             max_new_tokens=96,
         ),
-        session=SessionStore(root / ".pico" / session_name).create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(root / ".pico" / session_name),
     )
 
 

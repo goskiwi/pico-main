@@ -41,16 +41,14 @@ def test_completion_decision_has_an_explicit_status():
 def active_agent(tmp_path, requirements, verification_command=""):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         FakeModelClient([]),
         runtime_workspace,
         config=PicoConfig(
             mode="auto",
             verification_command=verification_command,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
     contract = TaskContract("task", **requirements)
     log = RunLog("run", agent.session.id, agent.dependencies.run_store)

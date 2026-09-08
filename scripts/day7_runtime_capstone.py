@@ -17,7 +17,6 @@ from pico import (
 )
 from pico.command_runner import CommandRunner, shell_argv
 from pico.mutations import file_revision
-from pico.run_store import RunStore
 from pico.trace import TracePrinter
 
 
@@ -107,18 +106,16 @@ def main():
             ]
         )
         runtime_workspace = Workspace.build(root)
-        agent = Pico(
+        agent = Pico.create(
             model_client=model,
             workspace=runtime_workspace,
-            run_store=RunStore(root / ".pico" / "runs", trace=TracePrinter(sys.stderr)),
+            trace=TracePrinter(sys.stderr),
             config=PicoConfig(
                 mode="auto",
                 verification_command=verify_command,
             ),
             command_runner=command_runner,
-            session=SessionStore(root / ".pico" / "sessions").create(
-                runtime_workspace.root
-            ),
+            session_store=SessionStore(root / ".pico" / "sessions"),
         )
 
         outcome = agent.ask(

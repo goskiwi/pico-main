@@ -24,11 +24,11 @@ def build_agent(tmp_path, outputs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = Workspace.build(tmp_path)
     store = SessionStore(tmp_path / ".pico" / "sessions")
-    return Pico(
+    return Pico.create(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         config=PicoConfig(mode="auto"),
-        session=store.create(workspace.root),
+        session_store=store,
     )
 
 
@@ -217,7 +217,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -225,9 +225,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
             verification_command="verify",
         ),
         command_runner=RecordingVerificationCommandRunner(),
-        session=SessionStore(tmp_path / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
     )
 
     outcome = agent.ask(
@@ -336,7 +334,7 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -344,9 +342,7 @@ def test_repeated_rejected_completion_attempts_stop_at_limit(tmp_path):
             verification_command="verify",
         ),
         command_runner=FailingCommandRunner(),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     outcome = agent.ask("Create subject.txt")
@@ -372,7 +368,7 @@ def test_verifier_created_file_prevents_successful_completion(tmp_path):
             return CommandRunner(tmp_path).run_bytes(*args, **kwargs)
 
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         FakeModelClient(
             [
                 ModelAction.tool(
@@ -388,9 +384,7 @@ def test_verifier_created_file_prevents_successful_completion(tmp_path):
             verification_command="verify",
         ),
         command_runner=MutatingVerificationRunner(),
-        session=SessionStore(tmp_path / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
     )
 
     with pytest.raises(RuntimeError, match="fake model ran out of outputs"):
@@ -488,7 +482,7 @@ def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_p
         },
     ])
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -499,9 +493,7 @@ def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_p
             compaction_reserve_tokens=2000,
             compaction_keep_recent_tokens=6000,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
     original_count = agent.prompt.tokenizer.count
     agent.prompt.tokenizer.count = lambda text: (
@@ -569,7 +561,7 @@ def test_provider_session_continues_below_projected_input_high_watermark(tmp_pat
         },
     ])
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -580,9 +572,7 @@ def test_provider_session_continues_below_projected_input_high_watermark(tmp_pat
             compaction_reserve_tokens=2000,
             compaction_keep_recent_tokens=6000,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
     original_count = agent.prompt.tokenizer.count
     agent.prompt.tokenizer.count = lambda text: (
@@ -609,7 +599,7 @@ def test_missing_provider_usage_uses_actual_local_continuation_payload(tmp_path)
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -620,9 +610,7 @@ def test_missing_provider_usage_uses_actual_local_continuation_payload(tmp_path)
             compaction_reserve_tokens=2_000,
             compaction_keep_recent_tokens=2_000,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
     original_count = agent.prompt.tokenizer.count
     agent.prompt.tokenizer.count = lambda text: (
@@ -675,7 +663,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
@@ -686,9 +674,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
             compaction_reserve_tokens=10_000,
             compaction_keep_recent_tokens=100,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     assert (
@@ -714,13 +700,11 @@ def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
 
     client = OverflowClient([])
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="auto"),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     with pytest.raises(ProviderContextOverflow):
@@ -751,13 +735,11 @@ def test_untyped_runtime_error_is_not_recovered(tmp_path, message):
 
     client = OrdinaryFailureClient([])
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="auto"),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     with pytest.raises(RuntimeError, match=message):
@@ -812,13 +794,11 @@ def test_ask_mode_sends_only_observation_surface(tmp_path):
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="ask"),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     assert agent.ask("Inspect hello.txt").answer == "Done."
@@ -843,16 +823,14 @@ def test_tool_budget_switches_to_final_only_surface(tmp_path):
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(
             mode="ask",
             max_tool_executions=1,
         ),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     assert agent.ask("Inspect hello.txt").answer == (
@@ -1195,13 +1173,11 @@ def test_auto_mode_allows_bounded_file_edits_but_hides_run_command(tmp_path):
         ]
     )
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="auto"),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
     outcome = agent.ask("Create created.txt")
@@ -1237,13 +1213,11 @@ def test_provider_failure_at_deadline_settles_as_turn_timeout(tmp_path):
 
     client = DeadlineClient([])
     runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico(
+    agent = Pico.create(
         client,
         runtime_workspace,
         config=PicoConfig(mode="ask", turn_timeout_seconds=30),
-        session=SessionStore(tmp_path / ".pico/sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
     client.agent = agent
 

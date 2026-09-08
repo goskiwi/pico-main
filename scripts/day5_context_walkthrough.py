@@ -72,13 +72,11 @@ def build_agent(root, *, pressure_window=False):
             }
         )
     runtime_workspace = Workspace.build(root)
-    return Pico(
+    return Pico.create(
         model_client=FakeModelClient([]),
         workspace=runtime_workspace,
         config=PicoConfig(**config),
-        session=SessionStore(root / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        session_store=SessionStore(root / ".pico" / "sessions"),
     )
 
 

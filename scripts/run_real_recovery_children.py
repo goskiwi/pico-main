@@ -111,7 +111,7 @@ def run_sequential_children(args, runtime, workspace):
         "from common import a,b; assert a() in (0,1); assert b() in (0,2)"
     )
     runtime_workspace = Workspace.build(workspace)
-    parent = Pico(
+    parent = Pico.create(
         model_client=_client(args), workspace=runtime_workspace,
         config=PicoConfig(
             mode="auto", allowed_tools=("read_file", "read_artifact", "delegate", "integrate_child", "update_working_state"),
@@ -119,7 +119,7 @@ def run_sequential_children(args, runtime, workspace):
             max_tool_executions=20, max_agent_turns=20, turn_timeout_seconds=900,
         ),
         command_runner=CommandRunner(workspace),
-        session=SessionStore(workspace / ".pico" / "sessions").create(runtime_workspace.root),
+        session_store=SessionStore(workspace / ".pico" / "sessions"),
         subagent_model_client_factory=lambda _spec: _client(args),
     )
     outcome = parent.ask(

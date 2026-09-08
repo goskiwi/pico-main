@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .persistence import atomic_write_json
-from .run_store import RUN_ID
+from .run_store import RUN_ID, RunStore
 
-SESSION_SCHEMA_VERSION = "session-v11"
+SESSION_SCHEMA_VERSION = "session-v12"
 SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
@@ -37,14 +37,26 @@ class SessionStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def path(self, session_id):
+    def directory(self, session_id):
         session_id = str(session_id)
         if not SESSION_ID.fullmatch(session_id):
             raise ValueError("invalid session id")
-        path = self.root / f"{session_id}.json"
+        path = self.root / session_id
+        if path.is_symlink():
+            raise ValueError("session directory must not be a symlink")
+        return path
+
+    def path(self, session_id):
+        path = self.directory(session_id) / "session.json"
         if path.is_symlink():
             raise ValueError("session path must not be a symlink")
         return path
+
+    def runs(self, session_id, *, trace=None):
+        root = self.directory(session_id) / "runs"
+        if root.is_symlink():
+            raise ValueError("session runs directory must not be a symlink")
+        return RunStore(root, trace=trace)
 
     @staticmethod
     def validate(session):
@@ -83,11 +95,16 @@ class SessionStore:
         atomic_write_json(path, payload)
         return path
 
-    def create(self, workspace_root):
+    def create(self, workspace_root, *, session_id=None):
+        session_id = session_id if session_id is not None else (
+            datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            + "-" + uuid.uuid4().hex[:6]
+        )
+        # New means new: never overwrite a Session or adopt orphaned state.
+        self.directory(session_id).mkdir(parents=True, exist_ok=False)
         session = Session(
             self,
-            datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            + "-" + uuid.uuid4().hex[:6],
+            session_id,
             Path(workspace_root).resolve(),
         )
         self.save(session)
@@ -101,13 +118,16 @@ class SessionStore:
             self, session["id"], Path(session["workspace_root"]), session["active_run_id"]
         )
 
-    def latest_active(self, run_store):
+    def latest_active(self):
         """Return the Session with the newest pointed or orphaned unfinished Run."""
 
-        files = [path for path in self.root.glob("*.json") if not path.is_symlink()]
+        directories = [path for path in self.root.iterdir()
+                       if path.is_dir() and not path.is_symlink()
+                       and (path / "session.json").is_file()]
         candidates = []
-        for path in files:
-            session = self.load(path.stem)
+        for path in directories:
+            session = self.load(path.name)
+            run_store = self.runs(session.id)
             run_log = None
             if session.active_run_id:
                 run_log = run_store.load_run(session.active_run_id)

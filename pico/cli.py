@@ -17,7 +17,6 @@ from pathlib import Path
 from .config import load_project_env, provider_env
 from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
-from .run_store import RunStore
 from .runtime import Pico, PicoConfig, SessionStore
 from .trace import TracePrinter
 from .working_state import WorkingState
@@ -235,21 +234,19 @@ def build_agent(args):
 
     session_id = args.resume
     if session_id == "latest":
-        session_id = store.latest_active(RunStore(workspace.root / ".pico" / "runs"))
+        session_id = store.latest_active()
         if not session_id:
             raise ValueError("no unfinished Session is available to resume")
-    session = store.load(session_id) if session_id else store.create(workspace.root)
-    return Pico(
+    start = Pico.resume if session_id else Pico.create
+    session_options = {"session": store.load(session_id)} if session_id else {"session_store": store}
+    return start(
         model_client=model,
         workspace=workspace,
-        run_store=RunStore(
-            workspace.root / ".pico" / "runs",
-            trace=TracePrinter(sys.stderr) if args.trace else None,
-        ),
+        trace=TracePrinter(sys.stderr) if args.trace else None,
         config=config,
         subagent_model_client_factory=child_model_client_factory,
         approval_handler=_terminal_approval,
-        session=session,
+        **session_options,
     )
 
 

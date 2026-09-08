@@ -1,4 +1,4 @@
-"""Single-writer Run Log and artifact directory storage."""
+"""Single-writer Run Log and artifact storage within one Session's runs directory."""
 
 from __future__ import annotations
 

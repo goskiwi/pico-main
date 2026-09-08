@@ -188,7 +188,11 @@ def _client(args):
 
 def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier="", session=None, run_store=None):
     runtime_workspace = Workspace.build(workspace)
-    return Pico(
+    start = Pico.resume if session is not None else Pico.create
+    options = {"session": session} if session is not None else {
+        "session_store": SessionStore(workspace / ".pico" / "sessions")
+    }
+    return start(
         model_client=client,
         workspace=runtime_workspace,
         run_store=run_store,
@@ -203,11 +207,7 @@ def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier
             verification_command=verifier,
         ),
         command_runner=CommandRunner(workspace),
-        session=session
-        if session is not None
-        else SessionStore(workspace / ".pico" / "sessions").create(
-            runtime_workspace.root
-        ),
+        **options,
     )
 
 
