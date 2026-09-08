@@ -59,7 +59,6 @@ IMPLEMENT_TOOLS = (
     "edit_file",
     "update_working_state",
 )
-CHILD_MAX_TOOL_EXECUTIONS = 12
 CHILD_MAX_AGENT_TURNS = 16
 
 
@@ -199,7 +198,6 @@ class SubagentRunner:
         config = PicoConfig(
             mode=("ask" if record.spec.role == "explore" else "auto"),
             max_agent_turns=CHILD_MAX_AGENT_TURNS,
-            max_tool_executions=CHILD_MAX_TOOL_EXECUTIONS,
             max_parallel_tools=self.parent.config.max_parallel_tools,
             max_new_tokens=self.parent.config.max_new_tokens,
             summary_max_output_tokens=self.parent.config.summary_max_output_tokens,

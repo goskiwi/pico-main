@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 
 from pydantic import Field
 
@@ -23,15 +24,14 @@ class IntegrateChildArgs(StrictModel):
     child_id: str = Field(pattern=r"^child_[a-f0-9]{12}$")
 
 
-def _subagent_service(context):
-    service = context.subagent_service
+def _subagent_service(service):
     if service is None:
         raise RuntimeError("subagent executor is unavailable")
     return service
 
 
-def _delegate_plan(context, args):
-    manager = _subagent_service(context)
+def _delegate_plan(context, args, *, service):
+    manager = _subagent_service(service)
     return manager.plan_delegate(
         context.tool_call_id,
         args["role"],
@@ -40,8 +40,8 @@ def _delegate_plan(context, args):
     )
 
 
-def _delegate(context, args):
-    manager = _subagent_service(context)
+def _delegate(context, args, *, service):
+    manager = _subagent_service(service)
     receipt = manager.delegate(
         context.execution_plan,
         args["role"],
@@ -63,16 +63,16 @@ def _delegate(context, args):
     )
 
 
-def _integration_paths(context, child_id):
-    manager = _subagent_service(context)
+def _integration_paths(service, child_id):
+    manager = _subagent_service(service)
     record = manager.parent.run.projection.children.record(child_id)
     patch = record.completed().patch
     return tuple(patch.changed_paths) if patch else ()
 
 
-def _integration_plan(context, args):
-    manager = _subagent_service(context)
-    paths = _integration_paths(context, args["child_id"])
+def _integration_plan(context, args, *, service):
+    manager = _subagent_service(service)
+    paths = _integration_paths(service, args["child_id"])
     command = str(manager.parent.config.verification_command or "").strip()
     if not command:
         raise ValueError("Child integration requires a verification command")
@@ -97,8 +97,8 @@ def _integration_plan(context, args):
     )
 
 
-def _integrate(context, args):
-    manager = _subagent_service(context)
+def _integrate(context, args, *, service):
+    manager = _subagent_service(service)
     result = manager.integrate_child(
         args["child_id"],
         context.execution_plan,
@@ -109,32 +109,32 @@ def _integrate(context, args):
     )
 
 
-def build_tool_registry(*, available):
+def build_tool_registry(*, service):
     return {
         "delegate": {
             "args_schema": DelegateArgs,
             "risky": False,
-            "available": bool(available),
+            "available": service is not None,
             "description": (
                 "Run one synchronous Explore or Implement Child. Explore shares the "
                 "parent workspace read-only. Implement requires exact allowed write paths, "
                 "a configured verifier, and an isolated Git worktree; it returns an "
                 "immutable patch receipt but never integrates automatically."
             ),
-            "plan": _delegate_plan,
-            "run": _delegate,
+            "plan": partial(_delegate_plan, service=service),
+            "run": partial(_delegate, service=service),
         },
         "integrate_child": {
             "args_schema": IntegrateChildArgs,
             "risky": True,
-            "available": bool(available),
+            "available": service is not None,
             "workspace_mutating": True,
             "state_mutating": True,
-            "plan": _integration_plan,
+            "plan": partial(_integration_plan, service=service),
             "description": (
                 "Explicitly verify and integrate one completed Implement Child patch into "
                 "the unchanged parent repository."
             ),
-            "run": _integrate,
+            "run": partial(_integrate, service=service),
         },
     }

@@ -57,6 +57,27 @@ def read_outcome(call_id="read"):
     )
 
 
+def test_empty_projection_starts_only_after_first_task_event(tmp_path):
+    empty = RunProjection()
+    assert empty.status == "not_started"
+    assert not empty.terminal
+    assert empty.contract is None
+    assert replay_events(()).status == "not_started"
+    with pytest.raises(ValueError, match="no task"):
+        empty.summary()
+    with pytest.raises(ValueError, match="terminal"):
+        RunOutcome(empty)
+
+    store = RunStore(tmp_path / "runs")
+    log = RunLog("run", "session", store)
+    assert log.projection.status == "not_started"
+    log.append_user(task_contract())
+    assert log.projection.status == "running"
+    assert not log.projection.terminal
+    assert log.projection.contract == task_contract()
+    assert store.replay("run").summary() == log.projection.summary()
+
+
 def test_session_recovery_scans_only_owned_runs_and_latest_loads_each_once(tmp_path, monkeypatch):
     sessions = SessionStore(tmp_path / ".pico/sessions")
     for session_id in ("one", "two", "three"):

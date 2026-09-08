@@ -42,23 +42,6 @@ def redact_text(text, env=None, secret_env_names=None):
     return text
 
 
-def redact_value(value, key=None, env=None, secret_env_names=None):
-    if key and is_secret_env_name(key, secret_env_names=secret_env_names):
-        return REDACTED_VALUE
-    if isinstance(value, dict):
-        return {
-            str(item_key): redact_value(item_value, key=item_key, env=env, secret_env_names=secret_env_names)
-            for item_key, item_value in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_value(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
-    if isinstance(value, tuple):
-        return [redact_value(item, key=key, env=env, secret_env_names=secret_env_names) for item in value]
-    if isinstance(value, str):
-        return redact_text(value, env=env, secret_env_names=secret_env_names)
-    return value
-
-
 def redact_facts(value, redactor, key=""):
     # These values are machine identities consumed by replay and mutation logic.
     if key in {

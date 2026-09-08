@@ -64,7 +64,6 @@ class ResolvedToolSurface:
     definitions: dict[str, dict]
     action_tools: tuple[dict, ...]
     exclusions: dict[str, FailureInfo]
-    tool_budget_exhausted: bool = False
 
     @property
     def names(self):
@@ -192,18 +191,26 @@ class ToolRuntime:
         return tuple(reconciled)
 
     def _build_registry(self):
-        tools = toolkit.build_tool_registry()
+        runtime = self.runtime
+        tools = toolkit.build_tool_registry(
+            workspace_root=runtime.workspace.root,
+            path_resolver=runtime.workspace.resolve_tool_path,
+            artifact_store=runtime.dependencies.artifacts,
+            redact_text=runtime.redact_text,
+            mutation_service=runtime.dependencies.mutations,
+            command_runner=runtime.dependencies.command_runner,
+        )
         from .checks import build_tool_registry as build_check_registry
         from .subagents.tools import build_tool_registry as build_subagent_registry
 
         tools.update(
             build_check_registry(
-                available=self.runtime.dependencies.check_runner is not None
+                check_runner=runtime.dependencies.check_runner
             )
         )
         tools.update(
             build_subagent_registry(
-                available=self.runtime.dependencies.subagents is not None
+                service=runtime.dependencies.subagents
             )
         )
         return tools
@@ -324,15 +331,6 @@ class ToolRuntime:
             # coupling execution to later Registry dictionary mutations.
             definitions[name] = dict(tool)
 
-        budget_exhausted = not manual and self.remaining_budget() == 0
-        if budget_exhausted:
-            for name in definitions:
-                exclusions[name] = FailureInfo(
-                    "tool_execution_limit",
-                    "Runtime tool budget exhausted",
-                    "no_retry",
-                )
-            definitions = {}
         action_tools = (
             ()
             if manual
@@ -344,23 +342,11 @@ class ToolRuntime:
             definitions=definitions,
             action_tools=action_tools,
             exclusions=exclusions,
-            tool_budget_exhausted=budget_exhausted,
         )
-
-    def remaining_budget(self):
-        limit = self.runtime.config.max_tool_executions
-        if limit is None:
-            return None
-        executed = self.runtime.run.metrics.executed_tool_count - self.runtime.run.request_tool_start
-        return max(0, limit - executed)
 
     def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
         return ToolContext(
-            workspace_root=runtime.workspace.root,
-            path_resolver=runtime.workspace.resolve_tool_path,
-            artifact_store=runtime.dependencies.artifacts,
-            redact_text=runtime.redact_text,
             run_id=str(runtime.run.projection.run_id or "manual"),
             tool_call_id=str(call_id),
             working_state=(
@@ -373,10 +359,6 @@ class ToolRuntime:
                 if execution_context is not None
                 else runtime.run.execution_context
             ),
-            mutation_service=runtime.dependencies.mutations,
-            command_runner=runtime.dependencies.command_runner,
-            check_runner=runtime.dependencies.check_runner,
-            subagent_service=runtime.dependencies.subagents,
         )
 
     def _resolve_tool(self, call, surface, *, record=True):
@@ -764,21 +746,10 @@ class ToolRuntime:
                 outcomes.append(item)
                 index += 1
                 continue
-            remaining = self.remaining_budget()
-            if remaining == 0:
-                outcome = self._rejected(
-                    item.call, "tool_execution_limit",
-                    "Runtime tool budget exhausted", record=True,
-                )
-                outcomes.append(outcome)
-                index += 1
-                continue
             group = []
             while index < len(prepared) and isinstance(
                 prepared[index], PreparedParallelCall
             ):
-                if remaining is not None and len(group) >= remaining:
-                    break
                 group.append(prepared[index])
                 index += 1
             for candidate in group:
@@ -823,7 +794,9 @@ class ToolRuntime:
         def flush():
             if parallel:
                 outcomes.extend(
-                    self._execute_parallel_segment(tuple(parallel), surface)
+                    self._execute_parallel_segment(
+                        tuple(parallel), surface
+                    )
                 )
                 parallel.clear()
 
@@ -856,7 +829,9 @@ class ToolRuntime:
                 "no_retry",
                 record=False,
             )
-        return self._execute(call, self.resolve_surface(manual=True))
+        return self._execute(
+            call, self.resolve_surface( manual=True),
+        )
 
     def _approval_failure(self, name, args, surface):
         if surface.mode == "auto":
@@ -887,10 +862,6 @@ class ToolRuntime:
                 "final_call_must_be_alone",
                 "submit_final must be the only call in its model response",
                 "retry_after_change",
-            )
-        if self.remaining_budget() == 0:
-            return self._rejected(
-                call, "tool_execution_limit", "Runtime tool budget exhausted"
             )
         tool, admission_rejection = self._resolve_tool(call, surface)
         if admission_rejection is not None:

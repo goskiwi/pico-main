@@ -116,7 +116,7 @@ def run_sequential_children(args, runtime, workspace):
         config=PicoConfig(
             mode="auto", allowed_tools=("read_file", "read_artifact", "delegate", "integrate_child", "update_working_state"),
             allowed_write_paths=("common.py",), verification_command=verifier,
-            max_tool_executions=20, max_agent_turns=20, turn_timeout_seconds=900,
+             max_agent_turns=20, turn_timeout_seconds=900,
         ),
         command_runner=CommandRunner(workspace),
         session_store=SessionStore(workspace / ".pico" / "sessions"),

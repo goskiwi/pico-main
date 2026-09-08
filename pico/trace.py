@@ -49,7 +49,10 @@ class TracePrinter:
             return f"[Model {self.turn}] requesting…"
         if kind == "turn_metrics":
             elapsed = time.monotonic() - self.request_started if self.request_started else 0
+            cached = payload.get("cached_tokens")
+            cached_text = "unknown" if cached is None else str(cached)
             return (f"[Model {self.turn}] returned · input={payload.get('input_tokens')} "
+                    f"cached={cached_text} "
                     f"output={payload.get('output_tokens')} · {elapsed:.2f}s")
         if kind == "assistant_tool_calls":
             self.calls = {call.call_id: call for call in event.tool_calls}

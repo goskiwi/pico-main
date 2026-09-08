@@ -13,7 +13,6 @@ class ActiveRunState:
 
     run_log: RunLog | None = None
     execution_context: ExecutionContext | None = None
-    request_tool_start: int = 0
     _empty_projection: RunProjection = field(
         default_factory=RunProjection,
         repr=False,

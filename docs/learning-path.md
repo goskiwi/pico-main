@@ -50,6 +50,10 @@ Runner、Evidence 和 Verification。它们是六个 Ownership 之间的真实�
 
 ## 从一个真实 CLI 请求开始
 
+每次 `ask/resume` 的模型计数起点为 `AgentLoopState.starting_model_request_count`。
+执行限制使用模型轮数、请求超时、取消和并行度，不再单独限制工具执行总次数。
+工具累计次数仍从日志统计，用于观测；没有请求级工具计数起点或额度耗尽提示。
+
 程序入口明确选择新建或恢复：普通启动调用 `Pico.create(..., session_store=store)`，
 由它创建 Session 并装配 Runtime，不调用恢复查找，也不扫描空 Run 目录。
 只有显式传入 `--resume <session_id>` 或 `--resume latest` 时，才加载 Session 并调用
@@ -177,7 +181,7 @@ Subagent 实现。
 ### Day 3：Prompt 与 Provider
 
 - 阅读步骤 5～6：`instructions`、`input`、`tools` 三个通道和 Function Call Output 回写。
-- 每轮解析当前 Mode、TaskContract 和工具预算允许的 native schemas；final submission 再冻结 Verification policy；
+- 每轮解析当前 Mode、TaskContract 和工具权限允许的 native schemas；final submission 再冻结 Verification policy；
   final-only 边界缩成 `submit_final` 并重建 Session。Prompt Token 预算按这个真实表面计算。
 - 首轮动态 Input 按 Runtime policy、Task Request、非空的有界 Context 排列；普通 Tool 续接
   只追加 Call/Output，不重发另一份 Workspace/History。
@@ -199,7 +203,10 @@ Subagent 实现。
   `external` 内容。
 - 对照输出解释 stale Revision、ToolOutcome、Preimage、PathTransition、Unified Diff，以及
   为什么 Observation 可并行而 Edit/Approval 仍必须独占一轮。
-- 查看 ToolContext 中实际依赖类型；执行期间的 ExecutionContext 随本次运行结束释放。
+- ToolContext 只保存 Run ID、Call ID、ExecutionContext、当前 WorkingState 和执行计划。
+  路径解析、文件修改、Artifact、命令及子任务服务在工具注册时通过 `partial` 绑定给需要它们的
+  校验、计划与执行回调；不把整个 Runtime 传给 Runner。WorkingState 每次调用重新读取，
+  不捕获注册时的旧投影；执行期间的 ExecutionContext 随本次运行结束释放。
 
 完成标准：能说明模型为什么不能直接写文件。
 

@@ -4,6 +4,8 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+from functools import partial
+
 import hashlib
 import json
 import os
@@ -144,8 +146,8 @@ def build_action_tools(tools):
     return definitions
 
 
-def _validate_list_files(context, args):
-    path = context.path(args.get("path", "."))
+def _validate_list_files(context, args, *, path_resolver):
+    path = path_resolver(args.get("path", "."))
     if not path.exists():
         raise ToolFailureError(
             "missing_path", f"path does not exist: {args.get('path', '.')}"
@@ -155,8 +157,8 @@ def _validate_list_files(context, args):
     return args
 
 
-def _validate_read_file(context, args):
-    path = context.path(args["path"])
+def _validate_read_file(context, args, *, path_resolver):
+    path = path_resolver(args["path"])
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
     if not path.is_file():
@@ -171,16 +173,16 @@ def _validate_read_file(context, args):
     return args
 
 
-def _validate_read_artifact(context, args):
-    if context.artifact_store is None or not context.run_id:
+def _validate_read_artifact(context, args, *, artifact_store):
+    if artifact_store is None or not context.run_id:
         raise ValueError("artifact store is unavailable")
     return args
 
 
-def _validate_search(context, args):
+def _validate_search(context, args, *, path_resolver):
     if not str(args.get("pattern", "")).strip():
         raise ValueError("pattern must not be empty")
-    path = context.path(args.get("path", "."))
+    path = path_resolver(args.get("path", "."))
     if not path.exists():
         raise ToolFailureError(
             "missing_path", f"path does not exist: {args.get('path', '.')}"
@@ -188,13 +190,13 @@ def _validate_search(context, args):
     return args
 
 
-def _require_mutation_service(context):
-    if context.mutation_service is None:
+def _require_mutation_service(mutation_service):
+    if mutation_service is None:
         raise ValueError("workspace mutation service is unavailable")
 
 
-def _validate_write_file(context, args):
-    path = context.path(args["path"])
+def _validate_write_file(context, args, *, mutation_service, path_resolver, workspace_root):
+    path = path_resolver(args["path"])
     if path.exists():
         if path.is_dir():
             raise ToolFailureError("invalid_path_type", "path is a directory")
@@ -202,23 +204,23 @@ def _validate_write_file(context, args):
             "existing_file_requires_edit",
             "write_file only creates new files; read the current file and use edit_file",
             structured={
-                "path": path.relative_to(context.workspace_root).as_posix(),
+                "path": path.relative_to(workspace_root).as_posix(),
                 "recommended_next_tool": "read_file",
             },
         )
-    _require_mutation_service(context)
+    _require_mutation_service(mutation_service)
     return args
 
 
-def _validate_edit_file(context, args):
+def _validate_edit_file(context, args, *, mutation_service, path_resolver):
     # Edit admission is intentionally strict so the later mutation is
     # deterministic and revision-bound.
-    path = context.path(args["path"])
+    path = path_resolver(args["path"])
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
     if not path.is_file():
         raise ToolFailureError("invalid_path_type", "path is not a file")
-    _require_mutation_service(context)
+    _require_mutation_service(mutation_service)
     return args
 
 
@@ -231,17 +233,17 @@ def _validate_working_state(context, args):
     return normalized
 
 
-def _validate_run_command(context, args):
+def _validate_run_command(context, args, *, command_runner):
     command = str(args["command"]).strip()
     if not command:
         raise ValueError("run_command requires a non-blank command")
-    if context.command_runner is None:
+    if command_runner is None:
         raise RuntimeError("run_command requires a CommandRunner")
     return {"command": command}
 
 
-def tool_list_files(context, args):
-    path = context.path(args.get("path", "."))
+def tool_list_files(context, args, *, path_resolver, workspace_root):
+    path = path_resolver(args.get("path", "."))
     entries = [
         item
         for item in sorted(
@@ -253,8 +255,8 @@ def tool_list_files(context, args):
     lines = []
     for entry in selected:
         kind = "[D]" if entry.is_dir() else "[F]"
-        lines.append(f"{kind} {entry.relative_to(context.workspace_root)}")
-    relative = path.relative_to(context.workspace_root).as_posix() or "."
+        lines.append(f"{kind} {entry.relative_to(workspace_root)}")
+    relative = path.relative_to(workspace_root).as_posix() or "."
     return ToolRunnerResult(
         "\n".join(lines) or "(empty)",
         structured={
@@ -265,8 +267,8 @@ def tool_list_files(context, args):
     )
 
 
-def tool_read_file(context, args):
-    path = context.path(args["path"])
+def tool_read_file(context, args, *, path_resolver, workspace_root):
+    path = path_resolver(args["path"])
     start_line = int(args.get("start_line", 1))
     requested_end_line = int(args.get("end_line", 200))
     digest = hashlib.sha256()
@@ -298,7 +300,7 @@ def tool_read_file(context, args):
     if truncated:
         body += "\n[read output truncated; narrow the line range or search for specific content]"
     revision = "sha256:" + digest.hexdigest()
-    relative = path.relative_to(context.workspace_root).as_posix()
+    relative = path.relative_to(workspace_root).as_posix()
     return ToolRunnerResult(
         f"# {relative}\nrevision: {revision}\n{body}",
         structured={
@@ -313,8 +315,8 @@ def tool_read_file(context, args):
     )
 
 
-def tool_read_artifact(context, args):
-    page = context.artifact_store.read_slice(
+def tool_read_artifact(context, args, *, artifact_store, redact_text):
+    page = artifact_store.read_slice(
         context.run_id,
         args["artifact_id"],
         args["offset"],
@@ -332,7 +334,7 @@ def tool_read_artifact(context, args):
         if has_more:
             text += f"\n[More output available; call read_artifact with offset={end}.]"
         return ToolRunnerResult(
-            context.redact_text(text),
+            redact_text(text),
             structured={
                 "artifact_id": str(args["artifact_id"]),
                 "offset": page["offset"],
@@ -464,9 +466,9 @@ def _bounded_rg_search(root, relative_path, pattern, executable, execution):  # 
     )
 
 
-def tool_search(context, args):
+def tool_search(context, args, *, path_resolver, workspace_root):
     pattern = str(args.get("pattern", "")).strip()
-    path = context.path(args.get("path", "."))
+    path = path_resolver(args.get("path", "."))
 
     executable = shutil.which("rg")
     if executable is None:
@@ -474,15 +476,15 @@ def tool_search(context, args):
             "Search requires ripgrep (rg); install it and retry.",
             failure=FailureInfo("search_unavailable", "ripgrep is not installed", "user_action_required"),
         )
-    relative_path = path.relative_to(context.workspace_root).as_posix() or "."
-    return _bounded_rg_search(context.workspace_root, relative_path, pattern, executable, context.execution_context)
+    relative_path = path.relative_to(workspace_root).as_posix() or "."
+    return _bounded_rg_search(workspace_root, relative_path, pattern, executable, context.execution_context)
 
 
-def tool_write_file(context, args):
-    path = context.path(args["path"])
+def tool_write_file(context, args, *, mutation_service, path_resolver, workspace_root):
+    path = path_resolver(args["path"])
     content = str(args["content"])
-    receipt = context.mutation_service.write(path, content)
-    relative = path.relative_to(context.workspace_root).as_posix()
+    receipt = mutation_service.write(path, content)
+    relative = path.relative_to(workspace_root).as_posix()
     changed = receipt.changed
     return ToolRunnerResult(
         content=(
@@ -501,13 +503,13 @@ def tool_write_file(context, args):
     )
 
 
-def tool_edit_file(context, args):
-    path = context.path(args["path"])
+def tool_edit_file(context, args, *, mutation_service, path_resolver, workspace_root):
+    path = path_resolver(args["path"])
     old_text = str(args.get("old_text", ""))
-    receipt = context.mutation_service.edit(
+    receipt = mutation_service.edit(
         path, old_text, str(args["new_text"]), args["expected_revision"]
     )
-    relative = path.relative_to(context.workspace_root).as_posix()
+    relative = path.relative_to(workspace_root).as_posix()
     changed = receipt.changed
     return ToolRunnerResult(
         content=(
@@ -531,12 +533,12 @@ def tool_update_working_state(_context, _args):
     return ToolRunnerResult("working state update accepted")
 
 
-def tool_run_command(context, args):
+def tool_run_command(context, args, *, command_runner, workspace_root):
     command = str(args["command"])
     try:
         before = capture_repository_state(
-            context.workspace_root,
-            command_runner=context.command_runner,
+            workspace_root,
+            command_runner=command_runner,
             execution_context=context.execution_context,
         )
     except RepositorySnapshotError as exc:
@@ -549,9 +551,9 @@ def tool_run_command(context, args):
                 "retry_after_change",
             ),
         )
-    result = context.command_runner.run(
+    result = command_runner.run(
         shell_argv(command),
-        cwd=context.workspace_root,
+        cwd=workspace_root,
         timeout=RUN_COMMAND_TIMEOUT_SECONDS,
         env={},
         execution_context=context.execution_context,
@@ -559,8 +561,8 @@ def tool_run_command(context, args):
     snapshot_failure = None
     try:
         after = capture_repository_state(
-            context.workspace_root,
-            command_runner=context.command_runner,
+            workspace_root,
+            command_runner=command_runner,
             execution_context=context.execution_context,
         )
         changes = repository_state_changes(before, after)
@@ -621,13 +623,13 @@ def tool_run_command(context, args):
     )
 
 
-def _workspace_file_plan(context, args):
-    path = context.path(args["path"])
-    logical = path.relative_to(context.workspace_root).as_posix()
+def _workspace_file_plan(context, args, *, path_resolver, workspace_root):
+    path = path_resolver(args["path"])
+    logical = path.relative_to(workspace_root).as_posix()
     return ToolExecutionPlan("workspace", ((logical, path),))
 
 
-def build_tool_registry():
+def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner):
     """Each tool declares its schema, policy, validator, runner and effects together."""
     return {
         "list_files": {
@@ -636,8 +638,8 @@ def build_tool_registry():
             "manual_observation": True,
             "concurrency": "parallel",
             "description": "List files in the workspace.",
-            "validate": _validate_list_files,
-            "run": tool_list_files,
+            "validate": partial(_validate_list_files, path_resolver=path_resolver),
+            "run": partial(tool_list_files, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "read_file": {
             "args_schema": ReadFileArgs,
@@ -645,8 +647,8 @@ def build_tool_registry():
             "manual_observation": True,
             "concurrency": "parallel",
             "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
-            "validate": _validate_read_file,
-            "run": tool_read_file,
+            "validate": partial(_validate_read_file, path_resolver=path_resolver),
+            "run": partial(tool_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "read_artifact": {
             "args_schema": ReadArtifactArgs,
@@ -654,8 +656,8 @@ def build_tool_registry():
             "manual_observation": True,
             "concurrency": "parallel",
             "description": "Read up to 8 KiB from a truncated tool-output artifact in the current run.",
-            "validate": _validate_read_artifact,
-            "run": tool_read_artifact,
+            "validate": partial(_validate_read_artifact, artifact_store=artifact_store),
+            "run": partial(tool_read_artifact, artifact_store=artifact_store, redact_text=redact_text),
         },
         "search": {
             "args_schema": SearchArgs,
@@ -663,16 +665,16 @@ def build_tool_registry():
             "manual_observation": True,
             "concurrency": "parallel",
             "description": "Search the workspace with ripgrep (rg must be installed).",
-            "validate": _validate_search,
-            "run": tool_search,
+            "validate": partial(_validate_search, path_resolver=path_resolver),
+            "run": partial(tool_search, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "run_command": {
             "args_schema": RunCommandArgs,
             "risky": True,
             "workspace_mutating": True,
             "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
-            "validate": _validate_run_command,
-            "run": tool_run_command,
+            "validate": partial(_validate_run_command, command_runner=command_runner),
+            "run": partial(tool_run_command, command_runner=command_runner, workspace_root=workspace_root),
         },
         "write_file": {
             "args_schema": WriteFileArgs,
@@ -680,9 +682,9 @@ def build_tool_registry():
             "workspace_mutating": True,
             "state_mutating": True,
             "description": "Create a new UTF-8 text file. The target must not already exist; read and use edit_file for every change to an existing file.",
-            "validate": _validate_write_file,
-            "run": tool_write_file,
-            "plan": _workspace_file_plan,
+            "validate": partial(_validate_write_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
+            "run": partial(tool_write_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
+            "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "edit_file": {
             "args_schema": EditFileArgs,
@@ -690,9 +692,9 @@ def build_tool_registry():
             "workspace_mutating": True,
             "state_mutating": True,
             "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's file/revision headers and line-number prefixes.",
-            "validate": _validate_edit_file,
-            "run": tool_edit_file,
-            "plan": _workspace_file_plan,
+            "validate": partial(_validate_edit_file, mutation_service=mutation_service, path_resolver=path_resolver),
+            "run": partial(tool_edit_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
+            "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "update_working_state": {
             "args_schema": UpdateWorkingStateArgs,

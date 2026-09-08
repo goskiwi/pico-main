@@ -67,6 +67,15 @@ Git 不可用，表达 branch、detached HEAD 或 unborn branch，并按状态�
 
 ## 上下文预算
 
+执行资源只限制模型轮数、请求时间和并行度，并支持取消；主 Agent 和 Child 均不设置
+独立的工具执行次数额度。一轮多工具调用不再按总次数截断，但权限和执行顺序检查不变。
+累计工具执行数仍用于统计。旧 `--max-tool-executions` 参数已删除，不兼容。
+
+`--trace` 的模型统计展示 `input`、`cached`、`output`。`input` 是包含缓存部分的总输入；
+`cached` 来自响应的 `usage.input_tokens_details.cached_tokens`，缺失为 `unknown`，
+明确返回零才显示 `0`。缓存部分仍占上下文，不能从上下文预算中扣除；这些统计不保证
+所用中转服务支持缓存，也不等于本地测试已验证真实命中。
+
 默认主请求输出上限 `--max-new-tokens 32000`，压缩预留
 `--compaction-reserve-tokens 32000`，独立摘要请求输出上限
 `--summary-max-output-tokens 16000`。这些是起始配置，不是所有模型的最优值；切换模型时，
@@ -118,7 +127,7 @@ Telemetry、Compaction 等观测 payload 保持可扩展。事件 envelope、seq
 
 ## 真实 CLI 工具面
 
-CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskContract 和工具预算允许的 Schema 发送
+CLI 默认注册以下十一个原生工具。每轮只把当前 Mode、TaskContract 和工具权限允许的 Schema 发送
 给 Provider；ToolRuntime 在本机再次执行准入。
 
 程序化 `Pico.create/resume(..., check_runner=...)` 可选安装 `run_check`：在明确配置的隔离执行器中
@@ -175,6 +184,16 @@ Child 身份、base、verifier 和计划 Worktree 路径在任何 Child 资源�
 `integrate_child`；运行中的 Child 执行不会跨 CLI 恢复或重新调度。
 
 ## 状态与信任边界
+
+工具注册时绑定各自需要的固定依赖（路径、修改服务、Artifact、执行器等）；每次调用的
+`ToolContext` 仅携带 `run_id`、`tool_call_id`、`execution_context`、当前 `working_state`
+和 `execution_plan`。校验、计划、执行使用同一套绑定，WorkingState 则每次从最新投影获取。
+
+脱敏是已知环境密钥值的文本替换，不是通用秘密检测：工具结果、验证输出和对外 Tool
+Artifact 经过脱敏；用户原话、工具参数、原始文件备份及最终 Diff 不保证脱敏。路径和
+revision 等机器字段保留原值，Trace 也会展示路径，因此不能把整个 `.pico` 目录或 Trace
+当成可直接公开的安全材料。分享前仍需检查。短密钥值可能误替换普通文本，当前算法不理解
+代码语义。Artifact 分页会在脱敏后计算输出大小，工具出口的统一脱敏同样保留。
 
 ```text
 .pico/

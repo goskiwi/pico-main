@@ -179,6 +179,7 @@ class AgentLoop:
             "turn_metrics",
             {
                 "input_tokens": completion_metadata.get("input_tokens"),
+                "cached_tokens": completion_metadata.get("cached_tokens"),
                 "output_tokens": completion_metadata.get("output_tokens"),
             },
         )
@@ -235,7 +236,6 @@ class AgentLoop:
     def _handle_tool_turn(self, loop_state, turn):
         agent = self.agent
         calls = turn.action.tool_calls
-        budget_exhausted = turn.tool_surface.tool_budget_exhausted
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
         group = agent.run.run_log.append_tool_calls(calls)
@@ -261,36 +261,13 @@ class AgentLoop:
             turn.tool_surface,
         )
 
-        model_instruction = self._append_budget_instruction(loop_state)
         provider_results = [outcome.render_for_model() for outcome in outcomes]
-        if model_instruction:
-            provider_results[-1] += (
-                "\n\nRuntime instruction: " + model_instruction
-            )
         self._continue_provider(
             loop_state,
             turn,
             provider_results,
         )
-        if budget_exhausted:
-            return LoopDirective("stop", "tool_execution_limit")
         return LoopDirective("continue")
-
-    def _append_budget_instruction(self, loop_state):
-        agent = self.agent
-        if (
-            agent.tools.remaining_budget() is None
-            or agent.tools.remaining_budget() > 0
-        ):
-            return ""
-        budget_instruction = (
-            "Runtime tool budget exhausted. Do not call another tool; "
-            "use submit_final now with the available evidence."
-        )
-        agent.append_model_instruction(
-            budget_instruction,
-        )
-        return budget_instruction
 
     def _handle_invalid_output(self, loop_state, turn):
         loop_state.invalid_output_count += 1

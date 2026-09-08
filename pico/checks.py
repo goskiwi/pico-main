@@ -1,6 +1,7 @@
 """Optional diagnostic checks supplied by a trusted isolated execution backend."""
 
 from typing import Literal
+from functools import partial
 
 from pydantic import Field
 
@@ -15,14 +16,14 @@ class RunCheckArgs(ToolArgs):
     timeout_seconds: int = Field(default=30, ge=1, le=60)
 
 
-def _validate(context, args):
-    if context.check_runner is None:
+def _validate(context, args, *, check_runner):
+    if check_runner is None:
         raise ValueError("isolated check runner is unavailable")
     return args
 
 
-def _run(context, args):
-    result = context.check_runner(
+def _run(context, args, *, check_runner):
+    result = check_runner(
         code=args["code"], kind=args["kind"], timeout_seconds=args["timeout_seconds"],
         execution_context=context.execution_context,
     )
@@ -48,11 +49,11 @@ def _run(context, args):
     )
 
 
-def build_tool_registry(*, available=True):
+def build_tool_registry(*, check_runner):
     return {"run_check": {
         "args_schema": RunCheckArgs,
         "risky": False,
-        "available": bool(available),
+        "available": check_runner is not None,
         "description": (
             "Run a small Python or pytest diagnostic against current code in a fresh isolated "
             "container. Use it to test hypotheses and edge cases before submit_final, including "
@@ -62,6 +63,6 @@ def build_tool_registry(*, available=True):
             "Call this tool alone. A passing diagnostic does not replace the fixed Runtime verifier "
             "or prove the task is complete."
         ),
-        "validate": _validate,
-        "run": _run,
+        "validate": partial(_validate, check_runner=check_runner),
+        "run": partial(_run, check_runner=check_runner),
     }}

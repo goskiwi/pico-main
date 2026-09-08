@@ -252,7 +252,6 @@ def main(argv=None):
             mode="auto",
             allowed_tools=("read_file", "read_artifact", "edit_file", "update_working_state"),
             allowed_write_paths=(TARGET_PATH,),
-            max_tool_executions=18,
             max_agent_turns=32,
             max_new_tokens=1024,
             turn_timeout_seconds=args.turn_timeout_seconds,

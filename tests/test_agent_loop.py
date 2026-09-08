@@ -118,6 +118,41 @@ def test_resume_write_scope_cannot_expand(tmp_path, mode, original, current, exp
     assert agent.tools.resolve_surface().allowed_write_paths == expected
 
 
+@pytest.mark.parametrize("details,expected", [({"cached_tokens": 80}, 80), ({"cached_tokens": 0}, 0), (None, None)])
+def test_cached_tokens_flow_to_event_and_trace_without_reducing_input(tmp_path, details, expected):
+    from io import StringIO
+    from pico.trace import TracePrinter
+
+    usage = {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    if details is not None:
+        usage["input_tokens_details"] = details
+    response = {
+        "status": "completed", "usage": usage,
+        "output": [{"type": "function_call", "name": "submit_final",
+                    "call_id": "final", "arguments": '{"answer":"Done."}'}],
+    }
+    stream = StringIO()
+    agent = build_agent(tmp_path, [response])
+    agent.dependencies.run_store.trace = TracePrinter(stream)
+    agent.ask("Inspect")
+    assert agent.model_client.last_completion_metadata["input_tokens"] == 100
+    assert agent.model_client.last_completion_metadata["cached_tokens"] == expected
+    event = next(e for e in agent.read_run_events(agent.run.projection.run_id) if e.kind == "turn_metrics")
+    assert event.payload["input_tokens"] == 100
+    assert event.payload["cached_tokens"] == expected
+    label = "unknown" if expected is None else str(expected)
+    assert f"input=100 cached={label} output=5" in stream.getvalue()
+
+
+def test_removed_tool_budget_options_are_rejected():
+    from pico.cli import build_arg_parser
+
+    with pytest.raises(TypeError):
+        PicoConfig(max_tool_executions=1)
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--max-tool-executions", "1"])
+
+
 def test_live_trace_is_printed_before_model_returns_without_file_contents(tmp_path):
     from io import StringIO
 
@@ -426,8 +461,8 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
         if entry.kind == "turn_metrics"
     ]
     assert [entry.payload for entry in turns] == [
-        {"input_tokens": None, "output_tokens": None},
-        {"input_tokens": None, "output_tokens": None},
+        {"input_tokens": None, "output_tokens": None, "cached_tokens": None},
+        {"input_tokens": None, "output_tokens": None, "cached_tokens": None},
     ]
     assert not any(
         entry.kind == "provider_session_reset"
@@ -750,31 +785,6 @@ def test_untyped_runtime_error_is_not_recovered(tmp_path, message):
     assert client.request_count == 1
 
 
-def test_tool_execution_at_limit_gets_one_final_only_model_turn(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
-            ModelAction.final("Done at the tool boundary."),
-        ],
-    )
-    agent.config = replace(agent.config, max_tool_executions=1)
-
-    outcome = agent.ask("Inspect hello.txt")
-
-    assert outcome.answer == "Done at the tool boundary."
-    assert agent.run.metrics.executed_tool_count == 1
-    assert agent.run.projection.status == "completed"
-    assert agent.model_client.action_tool_surfaces[-1] == ("submit_final",)
-    resets = [
-        event
-        for event in agent.run.run_log.events
-        if event.kind == "provider_session_reset"
-    ]
-    assert [event.payload["reason"] for event in resets] == [
-        "tool_surface_changed"
-    ]
 
 
 def test_ask_mode_sends_only_observation_surface(tmp_path):
@@ -811,43 +821,6 @@ def test_ask_mode_sends_only_observation_surface(tmp_path):
     assert "write_file" not in names
 
 
-def test_tool_budget_switches_to_final_only_surface(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    client = FakeModelClient(
-        [
-            ModelAction.tool(
-                "read_file",
-                {"path": "hello.txt", "start_line": 1, "end_line": 1},
-            ),
-            ModelAction.final("Done at the boundary."),
-        ]
-    )
-    runtime_workspace = Workspace.build(tmp_path)
-    agent = Pico.create(
-        client,
-        runtime_workspace,
-        config=PicoConfig(
-            mode="ask",
-            max_tool_executions=1,
-        ),
-        session_store=SessionStore(tmp_path / ".pico/sessions"),
-    )
-
-    assert agent.ask("Inspect hello.txt").answer == (
-        "Done at the boundary."
-    )
-
-    assert "read_file" in client.action_tool_surfaces[0]
-    assert "write_file" not in client.action_tool_surfaces[0]
-    assert client.action_tool_surfaces[-1] == ("submit_final",)
-    resets = [
-        event
-        for event in agent.run.run_log.events
-        if event.kind == "provider_session_reset"
-    ]
-    assert [event.payload["reason"] for event in resets] == [
-        "tool_surface_changed"
-    ]
 
 def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     (tmp_path / "hello.txt").write_text("unique-tool-output\n", encoding="utf-8")
@@ -881,30 +854,6 @@ def test_next_run_does_not_implicitly_receive_prior_run_context(tmp_path):
     assert agent.session.active_run_id == ""
 
 
-def test_final_only_turn_does_not_execute_an_extra_tool(tmp_path):
-    (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tool("read_file", {"path": "hello.txt", "start_line": 1, "end_line": 1}),
-            ModelAction.tool("list_files", {"path": "."}),
-        ],
-    )
-    agent.config = replace(agent.config, max_tool_executions=1)
-
-    outcome = agent.ask("Inspect hello.txt")
-
-    assert outcome.answer == (
-        "Stopped after reaching the tool execution limit without a final answer."
-    )
-    assert agent.run.metrics.executed_tool_count == 1
-    finished_tools = [
-        entry.name
-        for entry in agent.dependencies.run_store.read_events(agent.run.projection.run_id)
-        if entry.kind == "tool_result"
-        and entry.payload["outcome"]["execution_state"] != "not_started"
-    ]
-    assert finished_tools == ["read_file"]
 
 
 def test_multiple_submit_final_calls_cannot_form_a_model_action():
@@ -916,7 +865,9 @@ def test_multiple_submit_final_calls_cannot_form_a_model_action():
         ModelAction.tools(calls)
 
 
-def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
+
+
+def test_admission_rejection_is_not_counted_as_tool_execution(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
@@ -926,7 +877,6 @@ def test_admission_rejection_does_not_consume_execution_budget(tmp_path):
             ModelAction.final("Recovered after correcting the call."),
         ],
     )
-    agent.config = replace(agent.config, max_tool_executions=1)
 
     outcome = agent.ask("Inspect hello.txt")
 
@@ -1036,36 +986,6 @@ def test_mixed_tool_group_runs_parallel_read_before_exclusive_write(tmp_path):
     assert len(agent.model_client.recorded_action_result_groups[0]) == 2
 
 
-def test_tool_group_executes_budgeted_prefix_and_rejects_suffix(tmp_path):
-    calls = (
-        ToolCall(
-            "read_file",
-            {"path": "README.md", "start_line": 1, "end_line": 1},
-            "call_a",
-        ),
-        ToolCall("list_files", {"path": "."}, "call_b"),
-    )
-    agent = build_agent(
-        tmp_path,
-        [
-            ModelAction.tools(calls),
-            ModelAction.final("Budgeted prefix completed."),
-        ],
-    )
-    agent.config = replace(agent.config, max_tool_executions=1)
-
-    outcome = agent.ask("Try two independent reads")
-
-    assert outcome.answer == "Budgeted prefix completed."
-    assert agent.run.metrics.executed_tool_count == 1
-    results = [
-        event
-        for event in agent.read_run_events(outcome.run_id)
-        if event.kind == "tool_result" and event.call_id in {"call_a", "call_b"}
-    ]
-    assert len(results) == 2
-    assert [event.outcome_status for event in results] == ["success", "rejected"]
-    assert results[1].payload["outcome"]["failure"]["code"] == "tool_execution_limit"
 
 
 def test_submit_final_cannot_share_a_model_action_with_a_tool():

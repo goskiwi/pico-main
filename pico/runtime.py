@@ -108,13 +108,6 @@ class Pico:
             secret_env_names=self.config.secret_env_names,
         )
 
-    def redact_value(self, value, key=None):
-        return securitylib.redact_value(
-            value,
-            key=key,
-            secret_env_names=self.config.secret_env_names,
-        )
-
     def emit_event(self, event_type, payload=None):
         task_state = self.run.projection
         run_log = self.run.run_log

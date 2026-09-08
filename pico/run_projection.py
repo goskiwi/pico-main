@@ -174,7 +174,7 @@ class RunProjection:
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
     children: ChildState = field(default_factory=ChildState)
-    status: str = "running"
+    status: str = "not_started"
     stop_reason: str = ""
     final_answer: str = ""
     pending_group: PendingToolGroup = field(default_factory=PendingToolGroup)
@@ -254,6 +254,7 @@ class RunProjection:
         )
         if event.kind == "user_message":
             self.contract = TaskContract.from_dict(event.payload["contract"])
+            self.status = "running"
         self.working.apply_event(event)
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)

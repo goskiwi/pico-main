@@ -231,8 +231,6 @@ def main(argv=None):
         str(args.turn_timeout),
         "--max-agent-turns",
         "16",
-        "--max-tool-executions",
-        "20",
         build_prompt(delegate=args.delegate),
     ]
     environment = dict(os.environ)

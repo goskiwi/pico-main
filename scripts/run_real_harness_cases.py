@@ -200,7 +200,6 @@ def _agent(client, workspace, *, mode, allowed_tools, allowed_paths=(), verifier
             mode=mode,
             allowed_tools=tuple(allowed_tools),
             allowed_write_paths=tuple(allowed_paths),
-            max_tool_executions=12,
             max_agent_turns=12,
             max_new_tokens=1024,
             turn_timeout_seconds=600,

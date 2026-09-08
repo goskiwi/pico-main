@@ -625,8 +625,12 @@ def _extract_usage(data):
     usage = usage if isinstance(usage, dict) else {}
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
+    details = usage.get("input_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    cached = cached if type(cached) is int and cached >= 0 else None
     return {
         "input_tokens": input_tokens,
+        "cached_tokens": cached,
         "output_tokens": output_tokens,
         "total_tokens": usage.get("total_tokens"),
     }

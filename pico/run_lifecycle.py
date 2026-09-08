@@ -146,7 +146,6 @@ class RunLifecycle:
         runtime.run.execution_context = self._root_execution()
         try:
             runtime.tools.reconcile_interrupted()
-            runtime.run.request_tool_start = runtime.run.metrics.executed_tool_count
             if resumed:
                 run_log.append_user_guidance(user_message)
 
@@ -306,10 +305,7 @@ class RunLifecycle:
 
     @staticmethod
     def _stopped_result(stop):
-        if stop == "tool_execution_limit":
-            final = "Stopped after reaching the tool execution limit without a final answer."
-            stop_reason = "tool_execution_limit"
-        elif stop == "invalid_output_limit":
+        if stop == "invalid_output_limit":
             final = (
                 "Stopped after too many invalid model outputs without a "
                 "valid tool call or final answer."

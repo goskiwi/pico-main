@@ -31,7 +31,6 @@ class PicoConfig:
 
     mode: str = "code"
     max_agent_turns: int = 32
-    max_tool_executions: int | None = None
     max_parallel_tools: int = 4
     max_new_tokens: int = 32000
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
@@ -58,13 +57,6 @@ class PicoConfig:
         max_agent_turns = int(self.max_agent_turns)
         if max_agent_turns < 1:
             raise ValueError("max_agent_turns must be positive")
-        max_tool_executions = (
-            None
-            if self.max_tool_executions is None
-            else int(self.max_tool_executions)
-        )
-        if max_tool_executions is not None and max_tool_executions < 1:
-            raise ValueError("max_tool_executions must be positive when configured")
         max_parallel_tools = int(self.max_parallel_tools)
         if max_parallel_tools < 1:
             raise ValueError("max_parallel_tools must be positive")
@@ -99,7 +91,6 @@ class PicoConfig:
         normalized = {
             "mode": str(self.mode),
             "max_agent_turns": max_agent_turns,
-            "max_tool_executions": max_tool_executions,
             "max_parallel_tools": max_parallel_tools,
             "max_new_tokens": max_new_tokens,
             "secret_env_names": frozenset(

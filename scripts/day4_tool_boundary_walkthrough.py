@@ -139,13 +139,13 @@ def main():
             "Replace alpha without losing concurrent edits",
         )
         context = repaired.tools.context(call_id="teaching_inspection")
-        print_section("ToolContext 的明确依赖", {
-            "mutations": type(context.mutation_service).__name__,
-            "artifacts": type(context.artifact_store).__name__,
-            "command_runner": type(context.command_runner).__name__,
+        print_section("固定依赖绑定到工具，调用状态放入 ToolContext", {
+            "edit_bound_dependencies": sorted(repaired.tools.registry["edit_file"]["run"].keywords),
+            "artifact_bound_dependencies": sorted(repaired.tools.registry["read_artifact"]["run"].keywords),
+            "command_bound_dependencies": sorted(repaired.tools.registry["run_command"]["run"].keywords),
             "working_state": type(context.working_state).__name__,
             "execution_context_after_run": context.execution_context,
-            "note": "运行结束后 ExecutionContext 释放；Runner 执行时接收当前上下文",
+            "note": "固定依赖在注册时绑定；每次调用重新读取当前 WorkingState，运行结束后 ExecutionContext 释放",
         })
         repair_outcomes = outcomes(repaired)
 

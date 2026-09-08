@@ -27,6 +27,50 @@ from pico.task_state import TaskContract, WriteScope
 from pico.tool_runtime import ResolvedToolSurface
 
 
+def test_tool_context_contains_only_call_state_and_bindings_are_tool_specific(tmp_path):
+    from dataclasses import fields
+    from pico.tool_context import ToolContext
+
+    agent = build_agent(tmp_path)
+    assert {field.name for field in fields(ToolContext)} == {
+        "run_id", "tool_call_id", "execution_context", "working_state", "execution_plan",
+    }
+    registry = agent.tools.registry
+    assert set(registry["read_file"]["run"].keywords) == {"path_resolver", "workspace_root"}
+    edit = registry["edit_file"]
+    assert set(edit["run"].keywords) == {"path_resolver", "workspace_root", "mutation_service"}
+    assert edit["validate"].keywords["path_resolver"] is edit["plan"].keywords["path_resolver"]
+    assert edit["run"].keywords["path_resolver"] is edit["plan"].keywords["path_resolver"]
+    assert not registry["run_check"]["available"]
+    assert not registry["delegate"]["available"]
+
+    RunLifecycle(agent).initialize("Maintain current notes")
+    old = agent.tools.context(call_id="before")
+    call = ToolCall("update_working_state", {"add_decisions": ["current decision"]}, "state_update")
+    group = agent.run.run_log.append_tool_calls((call,))
+    outcome = agent.tools.execute_pending_group(group.event_id, agent.tools.resolve_surface())[0]
+    assert outcome.status == "success"
+    current = agent.tools.context(call_id="after")
+    assert current.working_state is agent.run.projection.working
+    assert current.working_state.decisions == ("current decision",)
+    assert old.working_state.decisions == ()
+
+
+def test_resume_preserves_non_budget_feedback_and_untrusted_evidence(tmp_path):
+    agent = build_agent(tmp_path)
+    activate(agent)
+    agent.append_model_instruction("Repair the failing check before submitting.",
+                                   evidence="FAILED test_add: expected 3, got 2")
+    resumed = Pico.resume(FakeModelClient([]), agent.workspace, config=agent.config,
+                          session=agent.session.store.load(agent.session.id))
+    RunLifecycle(resumed).initialize("Continue fixing the check")
+    prompt, _ = resumed.prompt.build("Continue fixing the check",
+                                     tool_surface=resumed.tools.resolve_surface())
+    assert resumed.run.projection.runtime_feedback is not None
+    assert "Repair the failing check before submitting." in prompt.input_text
+    assert "FAILED test_add" in untrusted_context(prompt.input_text)["runtime_evidence"]
+
+
 def test_complete_working_state_is_visible_after_resume(tmp_path):
     agent = build_agent(tmp_path)
     RunLifecycle(agent).initialize("Keep current task state")
@@ -37,7 +81,7 @@ def test_complete_working_state_is_visible_after_resume(tmp_path):
     surface = agent.tools.resolve_surface()
     group = agent.run.run_log.append_tool_calls((call,))
     assert agent.tools.execute_pending_group(
-        group.event_id, surface
+        group.event_id, surface,
     )[0].status == "success"
     resumed = Pico.resume(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
                    session=agent.session.store.load(agent.session.id))
