@@ -323,10 +323,7 @@ def render_history(history):
     return (text if metadata.get("selected_count", 0) else ""), metadata
 
 
-def _history_budget(raw, available, *, section_caps, count_tokens):
+def _history_budget(raw, available, *, fixed_context, count_tokens):
     empty_history = {**raw, "history": ""}
-    fixed_context = _fixed_context(
-        raw, section_caps=section_caps, count_tokens=count_tokens
-    )
     minimum = _assemble_input(empty_history, fixed_context)
     return max(0, available - count_tokens(minimum))

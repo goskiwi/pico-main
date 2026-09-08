@@ -247,10 +247,7 @@ def repo_map_experiment(root):
     agent = build_agent(root)
     run_log = activate(agent, "run_day5_default", QUERY)
 
-    prompt, metadata = agent.prompt.build(
-        QUERY,
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    prompt, metadata = agent.prompt.build(agent.prompt.prepare(QUERY, tool_surface=agent.tools.resolve_surface()))
     input_text = prompt.input_text
     context = untrusted_context(input_text)
     rendered_repo_map = context["repo_map"]
@@ -320,17 +317,14 @@ def bounded_fallback_experiment(root):
     original_ids = [event.event_id for event in original_events]
 
     surface = agent.tools.resolve_surface()
-    compaction, history_override = RunLifecycle(agent).prepare_compaction(
+    inputs, compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
         tool_surface=surface,
         provider_context_tokens=3400,
     )
     prompt, prompt_metadata = agent.prompt.build(
-        QUERY,
-        tool_surface=surface,
-        provider_context_tokens=3400,
-        compaction_metadata=compaction,
-        history_override=history_override,
+        inputs, provider_context_tokens=3400,
+        compaction_metadata=compaction, history_override=history_override,
     )
     physical_events = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
     context = untrusted_context(prompt.input_text)
@@ -426,17 +420,14 @@ def semantic_compaction_experiment(root):
     original_history_view_count = len(run_log.history().active_events())
 
     surface = agent.tools.resolve_surface()
-    compaction, history_override = RunLifecycle(agent).prepare_compaction(
+    inputs, compaction, history_override = RunLifecycle(agent).prepare_compaction(
         QUERY,
         tool_surface=surface,
         provider_context_tokens=3400,
     )
     prompt, prompt_metadata = agent.prompt.build(
-        QUERY,
-        tool_surface=surface,
-        provider_context_tokens=3400,
-        compaction_metadata=compaction,
-        history_override=history_override,
+        inputs, provider_context_tokens=3400,
+        compaction_metadata=compaction, history_override=history_override,
     )
     physical_after = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
     history_view_after = tuple(run_log.history().active_events())

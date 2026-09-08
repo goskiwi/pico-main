@@ -30,7 +30,7 @@ def _run(context, args, *, check_runner):
     failure = None
     if result.infrastructure_error:
         failure = FailureInfo("check_infrastructure_error", result.stderr or result.stdout,
-                              "retry_after_wait")
+                              "retry_after_change")
     elif result.stop_reason:
         failure = FailureInfo("check_interrupted", result.stop_reason, "retry_after_change")
     elif result.output_limited:
@@ -41,9 +41,7 @@ def _run(context, args, *, check_runner):
                               "retry_after_change")
     return ToolRunnerResult(
         "\n".join(filter(None, [result.stdout, result.stderr])) or "Check produced no output.",
-        structured={"purpose": "Isolated diagnostic requested by the model",
-                    "code_preview": str(args["code"])[:1000],
-                    "kind": args["kind"], "exit_code": result.returncode,
+        structured={"kind": args["kind"], "exit_code": result.returncode,
                     "stop_reason": result.stop_reason, "output_limited": result.output_limited},
         failure=failure,
     )

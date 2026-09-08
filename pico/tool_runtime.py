@@ -107,18 +107,22 @@ class ToolRuntime:
         for call in pending_calls:
             started = started_by_id.get(call.call_id)
             if started is None:
-                detail = "tool call was persisted but never entered execution"
+                detail = (
+                    "tool call was persisted but never entered execution; "
+                    "reassess the current task, permissions and inputs before issuing a new call; "
+                    "the old call will not be replayed automatically"
+                )
                 outcome = ToolOutcome(
                     tool_call_id=call.call_id,
                     tool_name=call.name,
                     status="error",
                     execution_state="not_started",
                     side_effect_state="none",
-                    content=detail,
+                    content="",
                     failure=FailureInfo(
                         "operation_not_started",
                         detail,
-                        "retry_after_wait",
+                        "retry_after_change",
                     ),
                 )
             else:
@@ -162,11 +166,11 @@ class ToolRuntime:
                         if changed
                         else ("unknown" if unknown else "none")
                     ),
-                    content=detail,
+                    content="",
                     failure=FailureInfo(
                         "operation_interrupted",
                         detail,
-                        "no_retry" if uncertain else "retry_after_wait",
+                        "no_retry" if uncertain else "retry_after_change",
                     ),
                     affected_paths=tuple(changed),
                     effect_scope=effect_scope if changed or unknown else "none",
@@ -566,12 +570,12 @@ class ToolRuntime:
                 "error",
                 "failed",
                 "none",
-                f"error: parallel tool {call.name} failed: {result}",
+                "",
                 failure=(typed.failure if typed else None)
                 or FailureInfo(
                     "operation_interrupted" if interrupted else "observation_failed",
                     str(result),
-                    "retry_after_wait" if interrupted else "retry_after_change",
+                    "user_action_required" if interrupted else "retry_after_change",
                 ),
                 structured=typed.structured if typed else None,
             )
@@ -585,8 +589,7 @@ class ToolRuntime:
                 "partial_success",
                 "completed",
                 "unknown",
-                "error: parallel-safe tool reported a side effect\n"
-                + str(result.content),
+                result.content,
                 failure=FailureInfo(
                     "parallel_tool_reported_side_effect",
                     "parallel-safe tool reported a side effect",
@@ -641,8 +644,7 @@ class ToolRuntime:
                 "partial_success",
                 "completed",
                 "unknown",
-                "error: tool reported effects outside its resolved plan\n"
-                + str(result.content),
+                result.content,
                 failure=FailureInfo(
                     "tool_effect_outside_plan",
                     "tool reported unplanned paths: " + ", ".join(unexpected),
@@ -702,7 +704,7 @@ class ToolRuntime:
                 "error",
                 "failed",
                 "none",
-                f"error: tool {call.name} failed: {error}",
+                "",
                 failure=typed.failure,
                 structured=self._observed_structured(typed.structured, ()),
             )
@@ -719,7 +721,7 @@ class ToolRuntime:
             "partial_success" if uncertain else "error",
             "failed",
             "partial" if uncertain else "none",
-            f"error: tool {call.name} failed: {error}",
+            "",
             failure=FailureInfo(
                 "tool_partial_success" if uncertain else "tool_failed",
                 str(error),
@@ -1057,7 +1059,7 @@ class ToolRuntime:
                     "partial_success" if uncertain else "error",
                     "failed",
                     "partial" if paths else ("unknown" if unknown else "none"),
-                    f"error: tool {name} failed: {exc}",
+                    "",
                     failure=(typed_error.failure if typed_error else None)
                     or FailureInfo(
                         "tool_partial_success"
@@ -1093,7 +1095,7 @@ class ToolRuntime:
             "rejected",
             "not_started",
             "none",
-            f"error: {detail} for {call.name}",
+            "",
             failure=FailureInfo(code, detail, recovery),
             structured=structured,
         )

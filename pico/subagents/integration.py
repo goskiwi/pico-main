@@ -326,7 +326,7 @@ class PatchIntegrator:
         return replace(outcome, structured={
             **outcome.structured, "status": "integrated", "child_id": record.child_id,
             "base_sha": record.base_sha, "changed_paths": list(receipt.changed_paths),
-        }, content=outcome.content + "; Child application confirmed; current-state verification is required")
+        }, content="Child application confirmed; current-state verification is required")
 
     def _applied_receipt_from_history(self, child_id):
         calls = {}

@@ -48,15 +48,16 @@ def _delegate(context, args, *, service):
         args["task"],
         args["allowed_write_paths"],
     )
+    error = receipt.pop("error", None)
     return ToolRunnerResult(
-        f"Child {receipt['child_id']} finished with status {receipt['status']}",
+        "",
         structured=dict(receipt),
         failure=(
             None
             if receipt["status"] == "completed"
             else FailureInfo(
                 "child_failed",
-                receipt["error"] or "Child did not complete",
+                error or "Child did not complete",
                 "retry_after_change",
             )
         ),

@@ -28,6 +28,7 @@ class AgentLoopState:
     prompt_snapshot: tuple[ModelPrompt, tuple[str, ...]] | None = None
     provider_context_tokens: int | None = None
     overflow_recovery_attempted: bool = False
+    last_request_input_tokens: int = 0
     invalid_output_count: int = 0
     completion_block_count: int = 0
     starting_model_request_count: int = 0
@@ -121,15 +122,15 @@ class RunLifecycle:
         tool_surface,
         provider_context_tokens=None,
     ):
+        inputs = self.runtime.prompt.prepare(user_message, tool_surface=tool_surface)
         plan, metadata, history = self.runtime.prompt.plan_compaction(
-            user_message,
-            tool_surface=tool_surface,
+            inputs,
             provider_context_tokens=provider_context_tokens,
         )
         if plan is not None:
             self.runtime.run.run_log.append_compaction(*plan)
             metadata["committed"] = True
-        return metadata, history
+        return inputs, metadata, history
 
     def initialize(
         self,

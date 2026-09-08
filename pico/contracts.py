@@ -24,12 +24,6 @@ RECOVERY_CONDITIONS = frozenset(
         "no_retry",
     }
 )
-RECOVERY_ACTIONS = {
-    "retry_after_change": "repair",
-    "retry_after_wait": "wait",
-    "user_action_required": "request_user_action",
-    "no_retry": "stop_route",
-}
 
 
 def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
@@ -183,10 +177,6 @@ class FailureInfo:
             recovery=str(value["recovery"]),
         )
 
-    @property
-    def correction_action(self):
-        return RECOVERY_ACTIONS[self.recovery]
-
 
 class ToolFailureError(RuntimeError):
     """Typed pre-effect failure raised before a Tool commits side effects."""
@@ -251,10 +241,6 @@ class ToolOutcome:
             self.side_effect_state, self.affected_paths, self.effect_scope
         )
 
-    @property
-    def correction_action(self):
-        return self.failure.correction_action if self.failure is not None else "continue"
-
     def to_dict(self):
         return {
             "tool_call_id": self.tool_call_id,
@@ -313,14 +299,26 @@ class ToolOutcome:
             "status": self.status,
             "execution_state": self.execution_state,
             "side_effect_state": self.side_effect_state,
-            "correction_action": self.correction_action,
-            "content": self.content,
         }
-        if self.structured:
-            payload["structured"] = dict(self.structured)
+        if self.content:
+            payload["content"] = self.content
+        # Keep recovery transactions in the durable outcome, not in every
+        # model response. All other tool-specific diagnostics remain visible.
+        structured = {key: value for key, value in self.structured.items()
+                      if key != "path_transitions"}
+        if self.tool_name in {"write_file", "edit_file"} and self.status == "success":
+            revision = structured.pop("after_revision", None)
+            structured.pop("before_revision", None)
+            if revision is not None:
+                structured["revision"] = revision
+        if structured:
+            payload["structured"] = structured
         if self.failure is not None:
             payload["failure"] = self.failure.to_dict()
-        if self.affected_paths:
+        if self.affected_paths and not (
+            self.status == "success" and self.side_effect_state == "changed"
+            and self.affected_paths == (structured.get("path"),)
+        ):
             payload["affected_paths"] = list(self.affected_paths)
         if self.effect_scope != "none":
             payload["effect_scope"] = self.effect_scope
@@ -340,13 +338,27 @@ class ToolOutcome:
             return rendered
         if not self.artifact_id:
             raise ValueError("oversized tool output requires an artifact")
-        # Replay consumes exact structured facts; the model can page through
-        # their artifact when the complete receipt cannot fit on the wire.
-        payload.pop("structured", None)
-        payload.pop("affected_paths", None)
-        if self.failure is not None:
-            payload["failure"] = {**self.failure.to_dict(), "detail": "See artifact."}
         notice = f"\n[Full result: {self.artifact_id}; use read_artifact.]"
+        payload["content"] = notice
+        if len(encode().encode("utf-8")) > TOOL_OUTPUT_MAX_BYTES:
+            essential = {
+                "path", "revision", "before_revision", "after_revision",
+                "expected_revision", "actual_revision", "start_line", "end_line",
+                "total_lines", "offset", "end_offset", "next_offset", "total_bytes",
+                "has_more", "truncated", "artifact_id", "exit_code", "stop_reason",
+                "output_limited", "child_id", "child_run_id", "role", "status",
+            }
+            payload["structured"] = {
+                key: value for key, value in payload.get("structured", {}).items()
+                if key in essential
+            }
+            payload["metadata_omitted"] = True
+            if self.failure is not None:
+                payload["failure"] = {**self.failure.to_dict(), "detail": "See artifact for full failure details."}
+            if len(encode().encode("utf-8")) > TOOL_OUTPUT_MAX_BYTES:
+                raise ValueError(
+                    f"essential tool result metadata exceeds output budget; full result: {self.artifact_id}"
+                )
         low, high = 0, len(self.content)
         while low < high:
             middle = (low + high + 1) // 2

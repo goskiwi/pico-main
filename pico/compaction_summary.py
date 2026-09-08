@@ -102,16 +102,6 @@ class CompactionSummarizer:
         self.calls = []
 
     @staticmethod
-    def _semantic_content(outcome):
-        lines = outcome.content.splitlines()
-        if outcome.tool_name == "read_file":
-            lines = [
-                line for line in lines
-                if not line.startswith("revision: ")
-            ]
-        return "\n".join(lines)
-
-    @staticmethod
     def _semantic_record(entry):
         payload = dict(entry.payload)
         if entry.kind == "tool_call":
@@ -125,8 +115,18 @@ class CompactionSummarizer:
             record = {
                 "kind": "tool_result",
                 "tool": outcome.tool_name,
-                "content": CompactionSummarizer._semantic_content(outcome),
+                "content": outcome.content,
             }
+            metadata = {key: value for key, value in outcome.structured.items() if key in {
+                "path", "start_line", "end_line", "exit_code", "stop_reason",
+                "output_limited", "offset", "end_offset", "next_offset", "has_more",
+                "truncated", "total_bytes", "role", "result", "status", "changed_paths",
+            }}
+            patch = outcome.structured.get("patch")
+            if isinstance(patch, dict) and patch.get("changed_paths"):
+                metadata["child_patch_paths"] = patch["changed_paths"]
+            if metadata:
+                record["metadata"] = metadata
             if outcome.status != "success":
                 record["status"] = outcome.status
             if outcome.failure is not None:
@@ -176,7 +176,7 @@ class CompactionSummarizer:
             # Keep record identity, outcome status and artifact references intact.
             bounded = [
                 {key: clip(value, limit) if key in {
-                    "content", "arguments", "instruction", "evidence"
+                    "content", "arguments", "instruction", "evidence", "metadata"
                 } else value for key, value in record.items()}
                 for record in records
             ]

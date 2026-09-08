@@ -153,6 +153,59 @@ def test_removed_tool_budget_options_are_rejected():
         build_arg_parser().parse_args(["--max-tool-executions", "1"])
 
 
+def test_recovered_unstarted_call_has_one_error_and_requires_reassessment(tmp_path):
+    from pico.run_lifecycle import RunLifecycle
+
+    original = build_agent(tmp_path, [])
+    RunLifecycle(original).initialize("Inspect README")
+    original.run.run_log.append_tool_calls((ToolCall("read_file", {"path": "README.md"}, "pending"),))
+    resumed = Pico.resume(FakeModelClient([]), original.workspace, config=original.config,
+                          session=original.session.store.load(original.session.id))
+    resumed.tools.reconcile_interrupted()
+    event = next(e for e in resumed.run.run_log.events if e.kind == "tool_result")
+    outcome = ToolOutcome.from_dict(event.payload["outcome"])
+    assert outcome.status == "error"
+    assert outcome.execution_state == "not_started"
+    assert outcome.side_effect_state == "none"
+    assert outcome.content == ""
+    assert outcome.failure.code == "operation_not_started"
+    assert outcome.failure.recovery == "retry_after_change"
+    text = outcome.render_for_model()
+    payload = json.loads(text)
+    assert "content" not in payload
+    assert "correction_action" not in payload
+    assert not hasattr(outcome, "correction_action")
+    assert text.count("never entered execution") == 1
+    assert "not be replayed automatically" in payload["failure"]["detail"]
+    assert not any(e.kind == "tool_started" for e in resumed.run.run_log.events)
+
+
+def test_failure_explanation_is_not_synthesized_as_tool_output(tmp_path):
+    agent = build_agent(tmp_path, [])
+    rejected = agent.tools.execute_manual("read_file", {"path": "missing.txt"})
+    assert rejected.content == ""
+    assert rejected.failure.code == "missing_path"
+    payload = json.loads(rejected.render_for_model())
+    assert "content" not in payload
+    assert "missing.txt" in payload["failure"]["detail"]
+
+
+def test_failure_keeps_real_partial_output(tmp_path):
+    from pico.contracts import FailureInfo
+
+    agent = build_agent(tmp_path, [])
+    result = ToolRunnerResult("test_a PASSED\ntest_b FAILED", failure=FailureInfo(
+        "check_failed", "check exited with 1", "retry_after_change",
+    ))
+    outcome = agent.tools._result_outcome(ToolCall("run_check", {}, "check"), result)
+    payload = json.loads(outcome.render_for_model())
+    assert payload["content"] == result.content
+    assert payload["failure"]["detail"] == "check exited with 1"
+    assert payload["execution_state"] == "completed"
+    assert payload["side_effect_state"] == "none"
+    assert payload["status"] == "error"
+
+
 def test_live_trace_is_printed_before_model_returns_without_file_contents(tmp_path):
     from io import StringIO
 
@@ -281,7 +334,7 @@ def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     assert conflict["status"] == "rejected"
     assert conflict["execution_state"] == "not_started"
     assert conflict["side_effect_state"] == "none"
-    assert ToolOutcome.from_dict(conflict).correction_action == "repair"
+    assert ToolOutcome.from_dict(conflict).failure.recovery == "retry_after_change"
     assert conflict["failure"]["code"] == "revision_conflict"
     assert conflict["failure"]["recovery"] == "retry_after_change"
     assert conflict["structured"] == {
@@ -453,7 +506,7 @@ def test_tool_turn_reuses_initial_prompt_and_records_provider_result(tmp_path):
     assert agent.model_client.prompts[0] == agent.model_client.prompts[1]
     result = json.loads(agent.model_client.recorded_action_results[0])
     assert result["status"] == "success"
-    assert result["correction_action"] == "continue"
+    assert "correction_action" not in result
     assert result["structured"]["path"] == "hello.txt"
     assert "alpha" in result["content"]
     turns = [
@@ -668,16 +721,22 @@ def test_missing_provider_usage_uses_actual_local_continuation_payload(tmp_path)
     assert resets[0].payload["projected_input_tokens"] >= 6_000
 
 
-def test_context_overflow_compacts_and_retries_once(tmp_path):
+@pytest.mark.parametrize("reject_retry", [False, True])
+def test_context_overflow_compacts_and_retries_once(tmp_path, reject_retry):
     for name in ("first.txt", "second.txt"):
         (tmp_path / name).write_text((name + " x" * 200 + "\n") * 80)
 
     class OverflowClient(FakeModelClient):
         request_count = 0
 
+        def estimate_action_input_tokens(self, *args, **kwargs):
+            count = super().estimate_action_input_tokens(*args, **kwargs)
+            estimates.append(count)
+            return count
+
         def complete_action(self, *args, **kwargs):
             self.request_count += 1
-            if self.request_count == 3:
+            if self.request_count == 3 or (reject_retry and self.request_count == 4):
                 raise ProviderContextOverflow("redacted context overflow")
             return super().complete_action(*args, **kwargs)
 
@@ -686,6 +745,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
                 return "Compacted earlier reads."
             return super().complete(prompt, max_new_tokens, **kwargs)
 
+    estimates = []
     client = OverflowClient(
         [
             ModelAction.tool(
@@ -712,10 +772,14 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
         session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
-    assert (
-        agent.ask("Read both files and finish").answer
-        == "Recovered after compaction."
-    )
+    if reject_retry:
+        with pytest.raises(ProviderContextOverflow, match="redacted context overflow"):
+            agent.ask("Read both files and finish")
+        assert agent.run.resumable
+        assert agent.session.store.load(agent.session.id).active_run_id == agent.run.projection.run_id
+    else:
+        assert agent.ask("Read both files and finish").answer == "Recovered after compaction."
+    assert estimates[3] < estimates[2]
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
     assert sum(entry.kind == "compaction" for entry in entries) == 0
     resets = [entry for entry in entries if entry.kind == "provider_session_reset"]
@@ -725,7 +789,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path):
     assert client.request_count == 4
 
 
-def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
+def test_unchanged_context_overflow_rebuild_is_not_sent(tmp_path):
     class OverflowClient(FakeModelClient):
         request_count = 0
 
@@ -742,7 +806,7 @@ def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
         session_store=SessionStore(tmp_path / ".pico/sessions"),
     )
 
-    with pytest.raises(ProviderContextOverflow):
+    with pytest.raises(ProviderContextOverflow, match="did not reduce the full request"):
         agent.ask("Inspect the workspace")
 
     entries = agent.dependencies.run_store.read_events(agent.run.projection.run_id)
@@ -750,7 +814,10 @@ def test_second_consecutive_typed_context_overflow_is_not_retried(tmp_path):
     assert [entry.payload["reason"] for entry in resets] == [
         "context_overflow_retry"
     ]
-    assert client.request_count == 2
+    assert client.request_count == 1
+    assert sum(event.kind == "model_requested" for event in entries) == 1
+    assert agent.run.resumable
+    assert agent.session.store.load(agent.session.id).active_run_id == agent.run.projection.run_id
 
 
 @pytest.mark.parametrize(

@@ -198,6 +198,10 @@ Subagent 实现。
 
 ### Day 4：ToolRuntime 与一次安全 Edit
 
+失败说明看 `failure.detail`，后续条件看 `failure.recovery`，实际工具输出看 `content`。
+纯拒绝和恢复产生的失败不再复制错误正文到 `content`；模型输出也不再包含
+`correction_action`。`operation_not_started` 要求重新评估后发起新调用，而不是等待旧调用。
+
 - 阅读步骤 7～10：ToolRuntime、私有 tool-execution helpers、ToolContext、文件 Runner 和 Mutation Service。
 - 运行 `scripts/day4_tool_boundary_walkthrough.py`，跟踪 `alpha -> agent`，同时保留外部追加的
   `external` 内容。
@@ -213,6 +217,15 @@ Subagent 实现。
 完成标准：能说明模型为什么不能直接写文件。
 
 ### Day 5：Context、RepoMap 与 Compaction
+
+Provider 超限恢复最多发送一次重试，且必须比被拒绝的实际完整输入更小；客户端用相同
+本地计数器估算 instructions、Schema 和当前回放消息。输入未缩减时不发送，重试仍失败则
+保留未完成 Run 并报错。`last_request_input_tokens` 只属于本次循环，不写入另一套状态。
+
+构建顺序是 `PromptBuilder.prepare()` 一次采样及预算计算，`plan_compaction()` 规划，
+`RunLifecycle.prepare_compaction()` 提交事件并返回 `(inputs, metadata, history_override)`，
+最后 `build(inputs, ...)` 使用同一份输入与最新历史生成请求。`build` 不再接收用户文字和
+工具表面；需要独立构建时先调用 `prepare`。诊断 metadata 独立生成，最终整包预算检查保留。
 
 运行 `scripts/day5_context_walkthrough.py`，按四个实验学习：
 

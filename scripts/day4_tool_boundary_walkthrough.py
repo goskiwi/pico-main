@@ -64,7 +64,7 @@ def outcomes(agent):
                 "execution_state": outcome.execution_state,
                 "side_effect_state": event.side_effect_state,
                 "failure": outcome.failure.code if outcome.failure else "",
-                "derived_correction_action": outcome.correction_action,
+                "recovery": outcome.failure.recovery if outcome.failure else None,
                 "affected_paths": list(event.affected_paths),
                 "artifact_id": outcome.artifact_id,
             }
@@ -274,11 +274,7 @@ def main():
                     "tool_name": repaired_outcome.tool_name,
                     "artifact_id": repaired_outcome.artifact_id,
                 },
-                "derived_not_persisted": {
-                    "correction_action": repaired_outcome.correction_action,
-                    "stored_in_outcome": "correction_action"
-                    in repaired_result_event.payload["outcome"],
-                },
+                "recovery": repaired_outcome.failure.recovery if repaired_outcome.failure else None,
                 "stale_revision_conflict": {
                     "expected_revision": stale_outcome.structured["expected_revision"],
                     "actual_revision": stale_outcome.structured["actual_revision"],

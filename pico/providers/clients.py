@@ -403,6 +403,14 @@ def _action_result_items(pending_call_ids, results):
     ]
 
 
+def _estimate_action_input_tokens(action_input, input_text, instructions, action_tools, token_counter):
+    items = action_input or [{"role": "user", "content": [{"type": "input_text", "text": str(input_text)}]}]
+    return token_counter(json.dumps(
+        {"instructions": str(instructions), "tools": list(action_tools), "input": items},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ))
+
+
 def _projected_context_tokens(
     action_input,
     result_items,
@@ -445,6 +453,11 @@ def _replay_context_tokens(turn):
 
 class FakeModelClient:
     conversation_mode = "responses-manual-replay-v1"
+
+    def estimate_action_input_tokens(self, input_text, *, instructions, action_tools, token_counter):
+        return _estimate_action_input_tokens(
+            self._action_input, input_text, instructions, action_tools, token_counter
+        )
 
     def __init__(self, outputs):
         self.outputs = list(outputs)
@@ -861,6 +874,11 @@ def _parse_provider_turn(data, action_tools):
 
 
 class OpenAICompatibleModelClient:
+    def estimate_action_input_tokens(self, input_text, *, instructions, action_tools, token_counter):
+        return _estimate_action_input_tokens(
+            self._action_input, input_text, instructions, action_tools, token_counter
+        )
+
     conversation_mode = "responses-manual-replay-v1"
 
     def __init__(self, model, base_url, api_key, temperature, timeout):

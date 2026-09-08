@@ -314,7 +314,7 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
     revision = "sha256:" + digest.hexdigest()
     relative = path.relative_to(workspace_root).as_posix()
     return ToolRunnerResult(
-        f"# {relative}\nrevision: {revision}\n{body}",
+        body,
         structured={
             "path": relative,
             "start_line": start_line,
@@ -338,11 +338,7 @@ def tool_read_artifact(context, args, *, artifact_store, redact_text):
         content = page["content"][:characters]
         end = page["offset"] + len(content.encode("utf-8"))
         has_more = end < page["total_bytes"]
-        text = (
-            f"# artifact {args['artifact_id']}\n"
-            f"bytes {page['offset']}-{end} of {page['total_bytes']}\n"
-            + content
-        )
+        text = content
         if has_more:
             text += f"\n[More output available; call read_artifact with offset={end}.]"
         return ToolRunnerResult(
@@ -446,10 +442,8 @@ def _bounded_rg_search(root, relative_path, pattern, executable, execution):  # 
     truncated = bool(limited or match_limited)
     failure = None
     if cancelled:
-        lines.append("[search cancelled]")
-        failure = FailureInfo("operation_interrupted", "search cancelled", "retry_after_wait")
+        failure = FailureInfo("operation_interrupted", "search cancelled; await an explicit request to continue", "user_action_required")
     elif timed_out:
-        lines.append("[search timed out]")
         failure = FailureInfo(
             "search_timeout",
             "search timed out",
@@ -464,7 +458,7 @@ def _bounded_rg_search(root, relative_path, pattern, executable, execution):  # 
         )
         failure = FailureInfo(code, detail, "retry_after_change")
     content = "\n".join(lines).replace(str(root) + "/", "")
-    if not content:
+    if not content and failure is None:
         content = stderr or "(no matches)"
     return ToolRunnerResult(
         content,
@@ -485,8 +479,8 @@ def tool_search(context, args, *, path_resolver, workspace_root):
     executable = shutil.which("rg")
     if executable is None:
         return ToolRunnerResult(
-            "Search requires ripgrep (rg); install it and retry.",
-            failure=FailureInfo("search_unavailable", "ripgrep is not installed", "user_action_required"),
+            "",
+            failure=FailureInfo("search_unavailable", "ripgrep (rg) is not installed; install it and retry", "user_action_required"),
         )
     relative_path = path.relative_to(workspace_root).as_posix() or "."
     return _bounded_rg_search(workspace_root, relative_path, pattern, executable, context.execution_context)
@@ -497,20 +491,12 @@ def tool_write_file(context, args, *, mutation_service, path_resolver, workspace
     content = str(args["content"])
     receipt = mutation_service.write(path, content)
     relative = path.relative_to(workspace_root).as_posix()
-    changed = receipt.changed
     return ToolRunnerResult(
-        content=(
-            f"wrote {relative} ({len(content)} chars)\n"
-            f"before_revision: {receipt.before_revision}\n"
-            f"after_revision: {receipt.after_revision}\n"
-            f"diff:\n{receipt.diff}"
-        ),
+        content=receipt.diff,
         structured={
             "path": relative,
-            "changed": changed,
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
-            "diff_bytes": len(receipt.diff.encode("utf-8")),
         },
     )
 
@@ -522,21 +508,12 @@ def tool_edit_file(context, args, *, mutation_service, path_resolver, workspace_
         path, old_text, str(args["new_text"]), args["expected_revision"], original=original
     )
     relative = path.relative_to(workspace_root).as_posix()
-    changed = receipt.changed
     return ToolRunnerResult(
-        content=(
-            f"edited {relative}\n"
-            f"before_revision: {receipt.before_revision}\n"
-            f"after_revision: {receipt.after_revision}\n"
-            f"diff:\n{receipt.diff or '(no changes)'}"
-        ),
+        content=receipt.diff or "(no changes)",
         structured={
             "path": relative,
-            "changed": changed,
-            "replacement_count": 1,
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
-            "diff_bytes": len(receipt.diff.encode("utf-8")),
         },
     )
 
@@ -555,7 +532,7 @@ def tool_run_command(context, args, *, command_runner, workspace_root):
         )
     except RepositorySnapshotError as exc:
         return ToolRunnerResult(
-            f"command not started: {exc}",
+            "",
             structured={"command": command, "repository_changes": []},
             failure=FailureInfo(
                 "repository_snapshot_unavailable",
@@ -584,11 +561,8 @@ def tool_run_command(context, args, *, command_runner, workspace_root):
     output = "\n".join(
         part
         for part in (
-            f"command: {command}",
-            f"exit_code: {result.returncode}",
             result.stdout.strip(),
             result.stderr.strip(),
-            f"stop_reason: {result.stop_reason}" if result.stop_reason else "",
         )
         if part
     )
@@ -703,7 +677,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's file/revision headers and line-number prefixes.",
+            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's line-number prefixes. Use the revision from the read or successful edit result metadata.",
             "validate": partial(_validate_edit_file, mutation_service=mutation_service, path_resolver=path_resolver),
             "run": partial(tool_edit_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),

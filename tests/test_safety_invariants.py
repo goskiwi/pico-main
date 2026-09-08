@@ -137,6 +137,18 @@ def test_edit_after_write_without_result_can_be_reconciled(tmp_path, monkeypatch
     assert target.read_text() == "after"
 
 
+def test_failed_child_has_one_error_source_and_replays(tmp_path):
+    agent = build_agent(tmp_path, subagent_model_client_factory=lambda _spec: FakeModelClient([]))
+    call = ToolCall("delegate", {"role": "explore", "task": "Inspect README", "allowed_write_paths": []})
+    outcome = run_active(agent, call)
+    assert outcome.status == "error"
+    assert outcome.failure.detail
+    assert "error" not in outcome.structured
+    replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    child = replayed.children.record(outcome.structured["child_id"])
+    assert child.result.error == outcome.failure.detail
+
+
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")
     outside.write_text("secret")

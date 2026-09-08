@@ -370,6 +370,32 @@ def test_rejected_output_tokens_do_not_enter_context_projection():
     ) == 101
 
 
+def test_retry_estimate_counts_full_input_without_using_reported_usage():
+    instance = client()
+    observed = []
+    def count(text):
+        observed.append(json.loads(text))
+        return len(text)  # Character counter to verify the serialized input exactly.
+    options = {"instructions": "rules", "action_tools": TOOLS, "token_counter": count}
+    initial = instance.estimate_action_input_tokens("inspect", **options)
+    assert instance._action_input == []
+    assert observed[-1]["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "inspect"}]}]
+    response = Response({
+        "status": "completed", "usage": {"input_tokens": 999999, "output_tokens": 50},
+        "output": [{"type": "function_call", "name": "read_file", "call_id": "read",
+                    "arguments": '{"path":"README.md"}'}],
+    })
+    with patch("pico.providers.clients._open_response", return_value=response):
+        complete_action(instance)
+    instance.record_action_results(("observed result " * 100,))
+    extended = instance.estimate_action_input_tokens("not appended again", **options)
+    assert extended > initial
+    assert observed[-1] == {"instructions": "rules", "tools": TOOLS, "input": instance._action_input}
+    assert "not appended again" not in json.dumps(observed[-1])
+    instance.reset_action_session()
+    assert instance.estimate_action_input_tokens("inspect", **options) == initial
+
+
 def test_context_estimate_owns_usage_and_expires_after_continuation_or_reset():
     instance = client()
     response = Response({

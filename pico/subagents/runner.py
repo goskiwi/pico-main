@@ -89,12 +89,11 @@ def recover_delegate(runtime, call):
             "error",
             "failed",
             "none",
-            detail,
+            "",
             structured={
                 "child_id": record.child_id,
                 "role": record.spec.role,
                 "status": "failed",
-                "error": detail,
             },
             failure=FailureInfo("child_interrupted", detail, "retry_after_change"),
         )

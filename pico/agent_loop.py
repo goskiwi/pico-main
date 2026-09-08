@@ -111,7 +111,6 @@ class AgentLoop:
         agent = self.agent
         tool_surface = agent.tools.resolve_surface()
         prompt = self._prepare_prompt(loop_state, tool_surface)
-        agent.emit_event("model_requested")
         action = self._request_action(
             loop_state,
             prompt,
@@ -140,14 +139,13 @@ class AgentLoop:
                     },
                 )
         if loop_state.prompt_snapshot is None:
-            compaction_metadata, history_override = self.lifecycle.prepare_compaction(
+            inputs, compaction_metadata, history_override = self.lifecycle.prepare_compaction(
                 loop_state.user_message,
                 tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
             )
             prompt, _metadata = agent.prompt.build(
-                loop_state.user_message,
-                tool_surface=tool_surface,
+                inputs,
                 provider_context_tokens=loop_state.provider_context_tokens,
                 compaction_metadata=compaction_metadata,
                 history_override=history_override,
@@ -165,6 +163,18 @@ class AgentLoop:
         tool_surface,
     ):
         agent = self.agent
+        input_tokens = agent.model_client.estimate_action_input_tokens(
+            prompt.input_text, instructions=prompt.instructions,
+            action_tools=tool_surface.action_tools, token_counter=agent.prompt.count_tokens,
+        )
+        if loop_state.overflow_recovery_attempted and input_tokens >= loop_state.last_request_input_tokens:
+            raise ProviderContextOverflow(
+                "context overflow recovery did not reduce the full request "
+                f"({loop_state.last_request_input_tokens} -> {input_tokens} estimated input tokens); "
+                "check the model context/output limits or reduce required context"
+            )
+        loop_state.last_request_input_tokens = input_tokens
+        agent.emit_event("model_requested")
         action = agent.model_client.complete_action(
             prompt.input_text,
             agent.config.max_new_tokens,

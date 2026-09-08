@@ -122,10 +122,8 @@ def build_prompt_fixture(root):
     )
     tool_surface = bootstrap.tools.resolve_surface()
     action_tools = tool_surface.action_tools
-    prompt, metadata = bootstrap.prompt.build(
-        "Read README.md",
-        tool_surface=tool_surface,
-    )
+    inputs = bootstrap.prompt.prepare("Read README.md", tool_surface=tool_surface)
+    prompt, metadata = bootstrap.prompt.build(inputs)
     names = {tool["name"] for tool in action_tools}
     expected_tool_tokens = client.estimate_action_tool_tokens(
         action_tools,
@@ -477,6 +475,7 @@ def overflow_agent(root, client, session_name):
             mode="auto",
             verification_command="",
             max_new_tokens=96,
+            compaction_keep_recent_tokens=100,
         ),
         session_store=SessionStore(root / ".pico" / session_name),
     )
@@ -488,24 +487,32 @@ def reset_events(agent):
 
 
 def experiment_context_overflow(root):
-    """D: classify at the adapter, then recover exactly once in AgentLoop."""
+    """D: retry only a smaller request, with one recovery attempt."""
     success_root = root / "overflow-success"
     success_root.mkdir()
-    (success_root / "README.md").write_text("overflow demo\n", encoding="utf-8")
+    (success_root / "README.md").write_text("overflow demo " * 1000 + "\n", encoding="utf-8")
     success_client = new_client()
     success_requests = []
+    summary_requests = []
 
     def overflow_once(request, timeout, execution_context):
         execution_context.check_active()
-        success_requests.append(json.loads(request.data.decode("utf-8")))
+        body = json.loads(request.data.decode("utf-8"))
+        if any(tool.get("name") == "submit_compaction_summary" for tool in body.get("tools", [])):
+            summary_requests.append(body)
+            return response_with_call("submit_compaction_summary", "summary", {
+                "progress": {"done": ["README inspected"], "in_progress": [], "blocked": []},
+                "critical_context": ["README contains repeated overflow demo text"],
+            })
+        success_requests.append(body)
         if len(success_requests) == 1:
-            raise context_overflow_http_error()
-        if len(success_requests) == 2:
             return response_with_call(
-                "list_files",
-                "call_observe_after_overflow",
-                {"path": "."},
+                "read_file",
+                "call_observe_before_overflow",
+                {"path": "README.md", "start_line": 1, "end_line": 1},
             )
+        if len(success_requests) == 2:
+            raise context_overflow_http_error()
         return response_with_call(
             "submit_final",
             "call_after_overflow",
@@ -531,14 +538,15 @@ def experiment_context_overflow(root):
     ]
 
     print_section(
-        "D1. 一次 typed context overflow：重建后成功",
+        "D1. 历史增长后 typed context overflow：缩减后重试成功",
         {
             "flow": (
                 "HTTP 400 structured error → ProviderContextOverflow → "
-                "AgentLoop reset Provider session/Prompt → retry → completed"
+                "AgentLoop rebuilds a smaller input → retry → completed"
             ),
             "task_contract": "Auto mode with observed no-change completion",
             "http_request_count": len(success_requests),
+            "summary_request_count": len(summary_requests),
             "provider_session_reset_count": len(success_resets),
             "reset_reason": success_resets[0].payload["reason"],
             "run_status": outcome.status,
@@ -573,17 +581,17 @@ def experiment_context_overflow(root):
 
     failure_resets = reset_events(failure_agent)
     assert isinstance(caught, ProviderContextOverflow)
-    assert str(caught) == ("OpenAI-compatible error: provider context window exceeded")
+    assert "did not reduce the full request" in str(caught)
     assert "provider-private" not in str(caught)
-    assert len(failure_requests) == 2
+    assert len(failure_requests) == 1
     assert [event.payload["reason"] for event in failure_resets] == [
         "context_overflow_retry"
     ]
 
     print_section(
-        "D2. 连续两次 typed overflow：第二次向外抛",
+        "D2. 重建未缩减：不发第二次请求",
         {
-            "flow": "overflow → reset once → overflow again → raise",
+            "flow": "overflow → rebuild → input not smaller → raise without sending",
             "http_request_count": len(failure_requests),
             "provider_session_reset_count": len(failure_resets),
             "raised_type": type(caught).__name__,

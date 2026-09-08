@@ -331,7 +331,7 @@ class ChildState:
             raise ValueError("invalid Child receipt identity")
         child_run_id = receipt.get("child_run_id", "")
         if outcome["status"] != "success":
-            return ChildFailure(receipt["error"], child_run_id)
+            return ChildFailure(outcome["failure"]["detail"], child_run_id)
         if receipt["status"] != "completed":
             raise ValueError("invalid completed Child receipt")
         patch = None

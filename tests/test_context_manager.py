@@ -27,6 +27,69 @@ from pico.task_state import TaskContract, WriteScope
 from pico.tool_runtime import ResolvedToolSurface
 
 
+@pytest.mark.parametrize("new_text,changed", [("after", True), ("before", False)])
+def test_edit_model_view_preserves_revision_without_recovery_metadata(tmp_path, new_text, changed):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    RunLifecycle(agent).initialize("Edit subject")
+    call = ToolCall("edit_file", {"path": "subject.txt", "old_text": "before",
+                                 "new_text": new_text, "expected_revision": file_revision(target)})
+    group = agent.run.run_log.append_tool_calls((call,))
+    outcome = agent.tools.execute_pending_group(group.event_id, agent.tools.resolve_surface())[0]
+    visible = json.loads(outcome.render_for_model())
+    assert visible["structured"] == {"path": "subject.txt", "revision": file_revision(target)}
+    assert visible["side_effect_state"] == ("changed" if changed else "none")
+    assert "before_revision:" not in outcome.content
+    assert "after_revision:" not in outcome.content
+    assert bool(outcome.structured.get("path_transitions")) == changed
+    assert outcome.structured["after_revision"] == file_revision(target)
+    replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    assert replayed.evidence.changed_paths == (["subject.txt"] if changed else [])
+
+
+def test_long_results_keep_revision_and_paging_metadata(tmp_path):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "long.txt"
+    target.write_text(("hello " * 50 + "\n") * 300)
+    read = agent.tools.execute_manual("read_file", {"path": "long.txt", "end_line": 200})
+    assert read.artifact_id
+    visible = json.loads(read.render_for_model())
+    assert visible["structured"]["revision"] == file_revision(target)
+    assert "revision:" not in visible["content"]
+    large = ToolOutcome("page", "read_artifact", "success", "completed", "none", "output " * 3000,
+        structured={"artifact_id": read.artifact_id, "offset": 0, "end_offset": 8000,
+                    "total_bytes": 16000, "has_more": True, "diagnostics": "x" * 20000})
+    prepared = agent.tools.prepare_outcome(large)
+    payload = json.loads(prepared.render_for_model())
+    assert payload["structured"]["end_offset"] == 8000
+    assert payload["structured"]["artifact_id"] == read.artifact_id
+    assert payload["metadata_omitted"] is True
+    assert len(prepared.render_for_model().encode()) <= 12 * 1024
+    _descriptor, data = agent.dependencies.artifacts._read_verified("manual", prepared.artifact_id)
+    assert json.loads(data)["structured"]["diagnostics"] == "x" * 20000
+    huge = agent.tools.prepare_outcome(ToolOutcome(
+        "huge", "read_file", "success", "completed", "none", "",
+        structured={"path": "p" * 20000, "revision": "sha256:version"},
+    ))
+    with pytest.raises(ValueError, match="essential tool result metadata"):
+        huge.render_for_model()
+
+
+def test_summary_keeps_child_handoff_and_read_provenance_without_hashes():
+    outcome = ToolOutcome("child", "delegate", "success", "completed", "none", "",
+        structured={"child_id": "child_noise", "result": "Found authentication in auth.py",
+                    "role": "explore", "status": "completed"})
+    record = CompactionSummarizer._semantic_record(SimpleNamespace(
+        kind="tool_result", payload={"outcome": outcome.to_dict()}))
+    assert record["metadata"]["result"] == "Found authentication in auth.py"
+    assert "child_id" not in record["metadata"]
+
+
 def test_directory_pages_reach_every_entry(tmp_path):
     agent = build_agent(tmp_path)
     for index in range(205):
@@ -147,8 +210,7 @@ def test_resume_preserves_non_budget_feedback_and_untrusted_evidence(tmp_path):
     resumed = Pico.resume(FakeModelClient([]), agent.workspace, config=agent.config,
                           session=agent.session.store.load(agent.session.id))
     RunLifecycle(resumed).initialize("Continue fixing the check")
-    prompt, _ = resumed.prompt.build("Continue fixing the check",
-                                     tool_surface=resumed.tools.resolve_surface())
+    prompt, _ = resumed.prompt.build(resumed.prompt.prepare("Continue fixing the check", tool_surface=resumed.tools.resolve_surface()))
     assert resumed.run.projection.runtime_feedback is not None
     assert "Repair the failing check before submitting." in prompt.input_text
     assert "FAILED test_add" in untrusted_context(prompt.input_text)["runtime_evidence"]
@@ -168,20 +230,14 @@ def test_complete_working_state_is_visible_after_resume(tmp_path):
     )[0].status == "success"
     resumed = Pico.resume(FakeModelClient([]), Workspace.build(tmp_path), config=agent.config,
                    session=agent.session.store.load(agent.session.id))
-    prompt, metadata = resumed.prompt.build(
-        "Continue",
-        tool_surface=resumed.tools.resolve_surface(),
-    )
+    prompt, metadata = resumed.prompt.build(resumed.prompt.prepare("Continue", tool_surface=resumed.tools.resolve_surface()))
     assert "NEXT_STEP_MUST_SURVIVE" in prompt.input_text
     assert all(item.strip() in prompt.input_text for item in constraints)
     assert metadata["sections"]["working_state"]["budget_tokens"] is None
     assert "working_state" not in metadata["budget_allocation"]["clipped_sections"]
     manager = prompt_for_budget(resumed, total_budget=500)
     with pytest.raises(ContextBudgetExceeded):
-        manager.build(
-            "Continue",
-            tool_surface=resumed.tools.resolve_surface(),
-        )
+        manager.build(manager.prepare("Continue", tool_surface=resumed.tools.resolve_surface()))
     assert resumed.run.projection.working.next_steps == ("NEXT_STEP_MUST_SURVIVE",)
 
 READ_TASK = {
@@ -307,10 +363,7 @@ def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
     )
     activate(agent, "Inspect README")
 
-    input_text, metadata = prompt_for_budget(agent, total_budget=1800).build(
-        "Inspect README",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    input_text, metadata = (_builder := prompt_for_budget(agent, total_budget=1800)).build(_builder.prepare("Inspect README", tool_surface=agent.tools.resolve_surface()))
     input_text = input_text.input_text
 
     assert input_text.index('task_request:\n"Inspect README"') < input_text.index(
@@ -356,10 +409,7 @@ def test_prompt_policy_and_schema_share_one_request_surface_snapshot(
     with monkeypatch.context() as frozen:
         frozen.setattr(agent.tools, "resolve_surface", unexpected_policy_resolution)
         frozen.setattr(agent.tools, "_effective_policy", unexpected_policy_resolution)
-        prompt, metadata = agent.prompt.build(
-            "Modify README",
-            tool_surface=surface,
-        )
+        prompt, metadata = agent.prompt.build(agent.prompt.prepare("Modify README", tool_surface=surface))
 
     assert named_json(prompt.input_text, "runtime_policy") == {
         "mode": "auto",
@@ -369,10 +419,7 @@ def test_prompt_policy_and_schema_share_one_request_surface_snapshot(
     assert metadata["tool_schema_tokens"] >= 0
 
     next_surface = agent.tools.resolve_surface()
-    next_prompt, _metadata = agent.prompt.build(
-        "Modify README",
-        tool_surface=next_surface,
-    )
+    next_prompt, _metadata = agent.prompt.build(agent.prompt.prepare("Modify README", tool_surface=next_surface))
     assert next_surface.mode == "ask"
     assert {"write_file", "edit_file"}.isdisjoint(next_surface.names)
     assert named_json(next_prompt.input_text, "runtime_policy") == {
@@ -381,7 +428,7 @@ def test_prompt_policy_and_schema_share_one_request_surface_snapshot(
         "write_scope": {"mode": "none"},
     }
     with pytest.raises(TypeError, match="tool_surface"):
-        agent.prompt.build("Modify README")
+        agent.prompt.prepare("Modify README")
 
 
 def test_prompt_uses_the_resolved_current_verification_policy(tmp_path):
@@ -391,10 +438,7 @@ def test_prompt_uses_the_resolved_current_verification_policy(tmp_path):
     agent.config = replace(agent.config, verification_command="verify-now")
     policy = verification_policy(agent)
 
-    prompt, _metadata = agent.prompt.build(
-        "Modify README",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    prompt, _metadata = agent.prompt.build(agent.prompt.prepare("Modify README", tool_surface=agent.tools.resolve_surface()))
 
     assert policy.verify_net_changes is True
     assert named_json(prompt.input_text, "runtime_policy")["verify_changes"] is True
@@ -458,10 +502,7 @@ def test_repo_map_query_uses_goal_working_state_and_observed_paths(tmp_path):
         return SimpleNamespace(text="", details={"selected_count": 0})
 
     agent.dependencies.repo_map.render = render
-    prompt_for_budget(agent, total_budget=2400).build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    (_builder := prompt_for_budget(agent, total_budget=2400)).build(_builder.prepare("continue", tool_surface=agent.tools.resolve_surface()))
 
     query = queries[-1]
     assert "Repair payment retry" in query
@@ -498,10 +539,7 @@ def test_wire_places_current_working_state_after_history(tmp_path):
         )
     )
 
-    input_text, metadata = prompt_for_budget(agent, total_budget=2400).build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    input_text, metadata = (_builder := prompt_for_budget(agent, total_budget=2400)).build(_builder.prepare("continue", tool_surface=agent.tools.resolve_surface()))
     input_text = input_text.input_text
 
     assert input_text.index('<section name="history">') < input_text.index(
@@ -522,10 +560,7 @@ def test_repository_instructions_are_distinct_from_untrusted_context(tmp_path):
     agent = build_agent(tmp_path)
     activate(agent, "Inspect")
 
-    input_text, metadata = prompt_for_budget(agent, total_budget=1800).build(
-        "Inspect",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    input_text, metadata = (_builder := prompt_for_budget(agent, total_budget=1800)).build(_builder.prepare("Inspect", tool_surface=agent.tools.resolve_surface()))
     input_text = input_text.input_text
     context = untrusted_context(input_text)
     instructions = repository_instructions(input_text)
@@ -765,10 +800,7 @@ def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):
     run_log = activate(agent, goal)
     run_log.append_user_guidance(latest)
 
-    input_text, metadata = prompt_for_budget(agent, total_budget=3200).build(
-        latest,
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    input_text, metadata = (_builder := prompt_for_budget(agent, total_budget=3200)).build(_builder.prepare(latest, tool_surface=agent.tools.resolve_surface()))
     input_text = input_text.input_text
 
     assert named_json(input_text, "task_request") == goal
@@ -777,10 +809,7 @@ def test_mandatory_policy_and_requests_are_never_clipped(tmp_path):
     assert metadata["sections"]["latest_user_request"]["budget_tokens"] is None
 
     with pytest.raises(ContextBudgetExceeded):
-        prompt_for_budget(agent, total_budget=300).build(
-            latest,
-            tool_surface=agent.tools.resolve_surface(),
-        )
+        (_builder := prompt_for_budget(agent, total_budget=300)).build(_builder.prepare(latest, tool_surface=agent.tools.resolve_surface()))
 
 
 def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
@@ -813,15 +842,9 @@ def test_tool_schema_budget_uses_the_exact_explicit_action_surface(tmp_path):
         action_tools=(),
         exclusions={},
     )
-    _input, empty_metadata = manager.build(
-        "Inspect",
-        tool_surface=empty_surface,
-    )
+    _input, empty_metadata = manager.build(manager.prepare("Inspect", tool_surface=empty_surface))
     read_surface = agent.tools.resolve_surface()
-    _input, read_metadata = manager.build(
-        "Inspect",
-        tool_surface=read_surface,
-    )
+    _input, read_metadata = manager.build(manager.prepare("Inspect", tool_surface=read_surface))
 
     assert client.estimated_surfaces[0] == []
     assert empty_metadata["tool_schema_tokens"] == 0
@@ -840,20 +863,61 @@ def test_prompt_build_is_read_only_even_above_compaction_threshold(tmp_path):
     before = tuple(run_log.events)
     generation = run_log.generation
 
-    _, metadata = prompt_for_budget(
+    _, metadata = (_builder := prompt_for_budget(
         agent,
         total_budget=1200,
         compaction_reserve_tokens=200,
         compaction_keep_recent_tokens=100,
-    ).build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-        provider_context_tokens=1100,
-    )
+    )).build(_builder.prepare("continue", tool_surface=agent.tools.resolve_surface()), provider_context_tokens=1100)
 
     assert tuple(run_log.events) == before
     assert run_log.generation == generation
     assert metadata["compaction"] is None
+
+
+@pytest.mark.parametrize("mode", ["normal", "compaction", "fallback"])
+def test_prompt_rebuild_samples_context_and_budget_once(tmp_path, monkeypatch, mode):
+    agent = build_agent(tmp_path)
+    RunLifecycle(agent).initialize("Inspect")
+    log = agent.run.run_log
+    if mode != "normal":
+        for index in range(6):
+            append_read(log, index, "observed fact " * 300)
+    manager = prompt_for_budget(agent, total_budget=1400,
+                                compaction_reserve_tokens=200, compaction_keep_recent_tokens=100)
+    class Summary:
+        calls = []
+        def summarize(self, _events, **_kwargs):
+            if mode == "fallback":
+                raise SemanticCompactionError("test summarizer unavailable")
+            return "Observed facts summarized."
+    manager.semantic_summarizer = Summary()
+    counts = {"workspace": 0, "repo_map": 0, "schema": 0, "fixed": 0}
+    def counted(label, function):
+        def invoke(*args, **kwargs):
+            counts[label] += 1
+            return function(*args, **kwargs)
+        return invoke
+    monkeypatch.setattr(agent.workspace, "text", counted("workspace", agent.workspace.text))
+    monkeypatch.setattr(agent.dependencies.repo_map, "render", counted("repo_map", agent.dependencies.repo_map.render))
+    monkeypatch.setattr(manager, "_tool_schema_tokens", counted("schema", manager._tool_schema_tokens))
+    monkeypatch.setattr(context, "_fixed_context", counted("fixed", context._fixed_context))
+    inputs, compaction, history = RunLifecycle(agent).prepare_compaction(
+        "Inspect", tool_surface=agent.tools.resolve_surface(),
+        provider_context_tokens=1400 if mode != "normal" else None,
+    )
+    prompt, metadata = manager.build(inputs, compaction_metadata=compaction, history_override=history)
+    assert counts == {"workspace": 1, "repo_map": 1, "schema": 1, "fixed": 1}
+    assert metadata["within_budget"]
+    assert metadata["run_log_generation"] == log.generation
+    if mode == "normal":
+        assert compaction is None
+    elif mode == "compaction":
+        assert compaction["committed"]
+        assert "Observed facts summarized." in prompt.input_text
+    else:
+        assert compaction["degraded"] and not compaction["committed"]
+        assert not any(event.kind == "compaction" for event in log.events)
 
 
 def test_prepare_compaction_commits_before_read_only_build(tmp_path):
@@ -884,17 +948,12 @@ def test_prepare_compaction_commits_before_read_only_build(tmp_path):
     manager.semantic_summarizer = Summary()
     surface = manager.runtime.tools.resolve_surface()
 
-    compaction, history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, compaction, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=surface,
     )
     event_count = len(run_log.events)
-    input_text, metadata = manager.build(
-        "continue",
-        tool_surface=surface,
-        compaction_metadata=compaction,
-        history_override=history_override,
-    )
+    input_text, metadata = manager.build(inputs, compaction_metadata=compaction, history_override=history_override)
     input_text = input_text.input_text
 
     assert compaction["mode"] == "semantic_history"
@@ -951,15 +1010,12 @@ def test_compaction_covers_resume_history_but_projects_latest_guidance(tmp_path)
     manager.semantic_summarizer = Summary()
     surface = manager.runtime.tools.resolve_surface()
 
-    metadata, _history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, metadata, _history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "Keep config.py unchanged",
         tool_surface=surface,
     )
     compaction = next(event for event in run_log.events if event.kind == "compaction")
-    prompt, _prompt_metadata = manager.build(
-        "Keep config.py unchanged",
-        tool_surface=surface,
-    )
+    prompt, _prompt_metadata = manager.build(manager.prepare("Keep config.py unchanged", tool_surface=surface))
 
     assert metadata["committed"] is True
     assert guidance.event_id in compaction.covered_event_ids
@@ -1009,10 +1065,7 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
         evidence="UNTRUSTED-VERIFIER-OUTPUT",
     )
 
-    prompt, metadata = agent.prompt.build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    prompt, metadata = agent.prompt.build(agent.prompt.prepare("continue", tool_surface=agent.tools.resolve_surface()))
 
     assert named_json(prompt.input_text, "runtime_instruction") == {
         "instruction": "Read the current revision and repair the rejected edit.",
@@ -1052,10 +1105,7 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
             "observed",
         )
     )
-    next_prompt, _metadata = agent.prompt.build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    next_prompt, _metadata = agent.prompt.build(agent.prompt.prepare("continue", tool_surface=agent.tools.resolve_surface()))
 
     assert "runtime_instruction:" not in next_prompt.input_text
     assert agent.run.projection.runtime_feedback is None
@@ -1093,7 +1143,7 @@ def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path)
     history_budget = context._history_budget(
         raw,
         available,
-        section_caps=manager.section_caps,
+        fixed_context=context._fixed_context(raw, section_caps=manager.section_caps, count_tokens=manager.count_tokens),
         count_tokens=manager.count_tokens,
     )
     prefix = "Current run events:\n[compaction] "
@@ -1119,7 +1169,7 @@ def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path)
     manager.semantic_summarizer = Summary()
     before = tuple(run_log.events)
 
-    metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=surface,
     )
@@ -1153,10 +1203,7 @@ def test_committed_summary_is_optional_under_a_smaller_context_budget(tmp_path):
     )
     agent.prompt = PromptBuilder(agent)
 
-    prompt, metadata = agent.prompt.build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    prompt, metadata = agent.prompt.build(agent.prompt.prepare("continue", tool_surface=agent.tools.resolve_surface()))
 
     history = untrusted_context(prompt.input_text)["history"]
     assert summary not in history
@@ -1282,8 +1329,6 @@ def test_compaction_source_separates_semantics_from_transaction_metadata():
         execution_state="completed",
         side_effect_state="none",
         content=(
-            "# evidence/segment_03.md\n"
-            "revision: sha256:transport-only\n"
             "3: Critical fact: Every run of internal whitespace must become "
             "one ASCII hyphen."
         ),
@@ -1329,8 +1374,8 @@ def test_compaction_source_separates_semantics_from_transaction_metadata():
     assert records[1] == {
         "kind": "tool_result",
         "tool": "read_file",
+        "metadata": {"path": "evidence/segment_03.md", "start_line": 1, "end_line": 79},
         "content": (
-            "# evidence/segment_03.md\n"
             "3: Critical fact: Every run of internal whitespace must become "
             "one ASCII hyphen."
         ),
@@ -1368,7 +1413,7 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
     history_budget = context._history_budget(
         raw,
         available,
-        section_caps=manager.section_caps,
+        fixed_context=context._fixed_context(raw, section_caps=manager.section_caps, count_tokens=manager.count_tokens),
         count_tokens=manager.count_tokens,
     )
     history_cost = context._history_token_counter(
@@ -1423,7 +1468,7 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
     manager.semantic_summarizer = Summary()
     before_events = tuple(run_log.events)
 
-    metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=surface,
         provider_context_tokens=4900,
@@ -1459,7 +1504,7 @@ def test_semantic_failure_uses_complete_transaction_fallback_without_event(tmp_p
     before = tuple(run_log.events)
     surface = manager.runtime.tools.resolve_surface()
 
-    metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=surface,
     )
@@ -1486,7 +1531,7 @@ def test_fallback_history_and_metadata_can_be_consumed_by_a_new_builder(tmp_path
     )
     before = tuple(run_log.events)
     surface = agent.tools.resolve_surface()
-    compaction, history_override = RunLifecycle(agent).prepare_compaction(
+    inputs, compaction, history_override = RunLifecycle(agent).prepare_compaction(
         "continue",
         tool_surface=surface,
         provider_context_tokens=1900,
@@ -1494,12 +1539,7 @@ def test_fallback_history_and_metadata_can_be_consumed_by_a_new_builder(tmp_path
     history, history_metadata = history_override
 
     fresh_builder = PromptBuilder(agent)
-    prompt, metadata = fresh_builder.build(
-        "continue",
-        tool_surface=surface,
-        compaction_metadata=compaction,
-        history_override=history_override,
-    )
+    prompt, metadata = fresh_builder.build(inputs, compaction_metadata=compaction, history_override=history_override)
 
     assert fresh_builder is not manager
     assert compaction["degraded"] is True
@@ -1520,18 +1560,11 @@ def test_consecutive_builds_use_the_current_history_metadata(tmp_path):
         retain_tokens=180,
         token_counter=manager.count_tokens,
     )
-    _fallback_prompt, fallback_metadata = manager.build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-        history_override=history_override,
-    )
+    _fallback_prompt, fallback_metadata = manager.build(manager.prepare("continue", tool_surface=agent.tools.resolve_surface()), history_override=history_override)
     append_read(run_log, 6, "LATEST-OBSERVED-FACT")
     expected_history, expected_metadata = manager._history().render_projection()
 
-    prompt, metadata = manager.build(
-        "continue",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    prompt, metadata = manager.build(manager.prepare("continue", tool_surface=agent.tools.resolve_surface()))
 
     assert fallback_metadata["history_projection"] == history_override[1]
     assert metadata["history_projection"] == expected_metadata
@@ -1551,24 +1584,19 @@ def test_pending_group_skips_compaction(tmp_path):
     )
     manager = prompt_for_budget(agent, total_budget=300)
 
-    assert RunLifecycle(manager.runtime).prepare_compaction(
+    _inputs, metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=manager.runtime.tools.resolve_surface(),
         provider_context_tokens=299,
-    ) == (
-        None,
-        None,
     )
+    assert metadata is None and history_override is None
 
 
 def test_request_larger_than_runtime_budget_is_rejected(tmp_path):
     agent = build_agent(tmp_path, max_new_tokens=100)
     activate(agent)
     with pytest.raises(ContextBudgetExceeded):
-        prompt_for_budget(agent, total_budget=120).build(
-            "X " * 100,
-            tool_surface=agent.tools.resolve_surface(),
-        )
+        (_builder := prompt_for_budget(agent, total_budget=120)).build(_builder.prepare("X " * 100, tool_surface=agent.tools.resolve_surface()))
 
 
 def test_provider_usage_can_trigger_explicit_compaction(tmp_path):
@@ -1595,7 +1623,7 @@ def test_provider_usage_can_trigger_explicit_compaction(tmp_path):
     summary = Summary()
     manager.semantic_summarizer = summary
 
-    metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
+    inputs, metadata, history_override = RunLifecycle(manager.runtime).prepare_compaction(
         "continue",
         tool_surface=manager.runtime.tools.resolve_surface(),
         provider_context_tokens=9_500,
@@ -1659,10 +1687,7 @@ def test_live_completion_feedback_matches_rebuilt_prompt(tmp_path):
     restored = agent.dependencies.run_store.load_run(agent.run.projection.run_id)
     replayed = restored.projection
     agent.run.run_log = restored
-    rebuilt, _metadata = agent.prompt.build(
-        "Repair failing tests",
-        tool_surface=agent.tools.resolve_surface(),
-    )
+    rebuilt, _metadata = agent.prompt.build(agent.prompt.prepare("Repair failing tests", tool_surface=agent.tools.resolve_surface()))
     assert named_json(live, "runtime_instruction") == named_json(
         rebuilt.input_text, "runtime_instruction"
     ) == {"instruction": "Repair and verify again"}

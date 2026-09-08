@@ -362,15 +362,16 @@ returned RunLog directly and `ActiveRunState.projection` derives from it. Store 
 successfully read/written cursor for recovery.
 
 `RunHistory(events)` owns read-only history selection, rendering and compaction planning.
-It neither appends events nor owns a second durable state. Read `PromptBuilder.build` for the
-complete path from current Runtime inputs through history selection and budgeting to ModelPrompt
-and diagnostics. `PromptBuilder.plan_compaction` directly owns the corresponding planning flow;
-both entries require the request's already-resolved Tool Surface and cannot recompute its policy.
-Neither entry forwards a long argument list to a second implementation. Context helpers only
+It neither appends events nor owns a second durable state. `PromptBuilder.prepare` consumes the
+already-resolved Tool Surface, samples Workspace/RepoMap once and calculates shared input/history
+budgets. `plan_compaction` and `build` consume those same prepared inputs without resampling or
+recomputing tool policy. After compaction is committed, `build` projects the latest history and
+checks the assembled request budget. `_metadata` constructs diagnostics separately. Context helpers only
 format text, clip sections and calculate token budgets, without accessing the builder or Runtime.
 History text and diagnostics travel together as a `(text, metadata)` pair, including a fallback
 `history_override`; there is no cached `_last_history_metadata` or legacy string override.
-`RunLifecycle.prepare_compaction` submits the returned plan through `RunLog.append_compaction`;
+`RunLifecycle.prepare_compaction` submits the returned plan through `RunLog.append_compaction`
+and returns `(inputs, metadata, history_override)` for the build step;
 `ToolRuntime.reconcile_interrupted` owns interrupted-tool reconciliation. RunLog retains event
 validation, protocol order and durable append.
 

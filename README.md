@@ -67,6 +67,18 @@ Git 不可用，表达 branch、detached HEAD 或 unborn branch，并按状态�
 
 ## 上下文预算
 
+Provider 报上下文超限时，Runtime 强制重建一次，并比较被拒绝请求与新请求的完整本地
+输入估算（instructions、工具 Schema、实际回放消息）。只有新输入严格变小才发送重试；
+没有缩减则明确报错，提示检查模型窗口／输出配置或减少必需上下文。缩减后仍被拒绝也停止，
+保留未完成 Run。比较不采用 Provider usage 或扣除缓存 Token，不新增压缩策略；
+本地估算变小并不保证 Provider 一定接受。
+
+一次 Prompt 重建分为 `prepare → plan_compaction → build`：`prepare` 只采样一次
+Workspace、RepoMap、规则与任务，并计算可用输入及 History 预算；压缩规划和最终构建共享
+这些本次准备数据。Runtime 提交压缩事件后，`build` 重新投影历史，不再次采样仓库。
+最后仍检查实际组装后的整包预算，诊断信息由独立 `_metadata` 方法生成。准备数据只在本次
+调用链传递，不持久化、不作为跨请求缓存；正常 Provider 续接仍沿用已有 prompt snapshot。
+
 执行资源只限制模型轮数、请求时间和并行度，并支持取消；主 Agent 和 Child 均不设置
 独立的工具执行次数额度。一轮多工具调用不再按总次数截断，但权限和执行顺序检查不变。
 累计工具执行数仍用于统计。旧 `--max-tool-executions` 参数已删除，不兼容。
@@ -184,6 +196,25 @@ Child 身份、base、verifier 和计划 Worktree 路径在任何 Child 资源�
 `integrate_child`；运行中的 Child 执行不会跨 CLI 恢复或重新调度。
 
 ## 状态与信任边界
+
+工具结果区分实际正文、结构化信息和失败说明：文件读取的路径／revision／范围只在元数据
+中提供；修改正文只保留 diff，命令正文只保留 stdout/stderr。修改前后 revision 仍保存在
+内部回执中，模型视图只返回当前回执的新 revision，无变化的成功编辑同样保留它。
+`path_transitions` 和备份引用留在日志用于恢复，不整包发送给模型；失败、部分成功和未知
+副作用仍保留必要诊断。仅无消费者的 `changed`、固定替换次数、diff 字节数及检查代码回显
+已移除，累计执行统计和净改动集合不变。
+
+长输出先截断正文；必要的版本、分页、状态信息保留。其他元数据需要省略时显示
+`metadata_omitted` 并提供完整 Artifact；必要元数据本身超限会明确报错，不静默丢弃。
+Child 失败说明只持久化在 `failure.detail`，Child 投影由该字段重建。取消要求明确继续，
+恢复产生的已闭合调用要求重新评估，不默认指示等待。历史摘要保留路径、读取范围、退出状态
+和 Child 交接结果，但不重新塞入备份和 revision 等执行标识。
+
+ToolOutcome 的 `content` 只承载实际输出，Runtime 失败解释只放在 `failure.detail`；
+纯失败没有输出时，模型消息省略 `content`，但日志仍保留空字符串字段。恢复建议只使用
+`failure.recovery`，不再派生或发送 `correction_action`。未进入执行的旧调用会被闭合，
+模型应根据当前任务、权限和输入重新决定是否发起新调用，不要求空等，也不会自动重放。
+调用结果、执行阶段和副作用状态仍分别保留，带失败的真实部分输出不会因去重而丢弃。
 
 文件工具的执行细节：`read_file` 在分块读取时响应取消和截止时间，整文件 revision 的
 计算仍保留；`list_files` 用 `offset`、`limit` 分页，返回 `next_offset`，目录变化时应从零

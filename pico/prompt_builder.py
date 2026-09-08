@@ -106,37 +106,39 @@ class PromptBuilder:
         self.repository_instructions = current
         return changed
 
-    def build(
-        self,
-        user_message,
-        *,
-        tool_surface: ResolvedToolSurface,
-        provider_context_tokens=None,
-        compaction_metadata=None,
-        history_override=None,
-    ):
-        """Build one prompt and its diagnostics from current Runtime inputs."""
+    def prepare(self, user_message, *, tool_surface: ResolvedToolSurface):
+        """Sample context and calculate budgets once for one prompt rebuild."""
         raw = self._raw_sections(user_message, tool_surface)
-        history = self._history()
-        config = self.runtime.config
         instructions_tokens = self.count_tokens(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(tool_surface)
-        run_log = self.runtime.run.run_log
-        run_log_generation = run_log.generation if run_log is not None else 0
-        count_tokens = self.tokenizer.count
-        output_reserve = int(config.max_new_tokens)
-        request_overhead_tokens = instructions_tokens + tool_schema_tokens
+        available = (self.runtime.config.provider_context_limit_tokens
+                     - self.runtime.config.max_new_tokens - instructions_tokens - tool_schema_tokens)
+        fixed = context._fixed_context(raw, section_caps=self.section_caps, count_tokens=self.count_tokens)
+        return {
+            "raw": raw,
+            "instructions_tokens": instructions_tokens,
+            "tool_schema_tokens": tool_schema_tokens,
+            "available": available,
+            "fixed_context": fixed,
+            "history_budget": context._history_budget(
+                raw, available, fixed_context=fixed, count_tokens=self.count_tokens
+            ),
+            "history_token_counter": context._history_token_counter(raw, fixed, count_tokens=self.count_tokens),
+        }
+
+    def build(self, inputs, *, provider_context_tokens=None,
+              compaction_metadata=None, history_override=None):
+        """Render prepared context with the current, possibly compacted history."""
+        raw = inputs["raw"]
+        history = self._history()
+        count_tokens = self.count_tokens
+        available = inputs["available"]
         (history_text, history_metadata) = (
             context.render_history(history)
             if history_override is None
             else history_override
         )
         raw = {**raw, "history": history_text}
-        available = (
-            config.provider_context_limit_tokens
-            - output_reserve
-            - request_overhead_tokens
-        )
         minimum_input = context._assemble_input(raw, context._required_context(raw))
         if count_tokens(minimum_input) > available:
             raise context.ContextBudgetExceeded(
@@ -144,21 +146,10 @@ class PromptBuilder:
                 "Runtime instruction and WorkingState exceed the model budget"
             )
         if history_override is None and history is not None:
-            fixed_context = context._fixed_context(
-                raw, section_caps=self.section_caps, count_tokens=count_tokens
-            )
-            history_budget = context._history_budget(
-                raw,
-                available,
-                section_caps=self.section_caps,
-                count_tokens=count_tokens,
-            )
             try:
                 compacted_history = history.render_compacted_projection(
-                    retain_tokens=history_budget,
-                    token_counter=context._history_token_counter(
-                        raw, fixed_context, count_tokens=count_tokens
-                    ),
+                    retain_tokens=inputs["history_budget"],
+                    token_counter=inputs["history_token_counter"],
                 )
             except ValueError as exc:
                 raise context.ContextBudgetExceeded(str(exc)) from exc
@@ -181,6 +172,25 @@ class PromptBuilder:
             raise context.ContextBudgetExceeded(
                 "assembled prompt exceeds the available input budget"
             )
+        metadata = self._metadata(
+            inputs, raw=raw, rendered_context=rendered_context,
+            section_budgets=section_budgets, allocation=allocation,
+            history_metadata=history_metadata, input_text_tokens=input_text_tokens,
+            compaction_metadata=compaction_metadata,
+            provider_context_tokens=provider_context_tokens,
+        )
+        return ModelPrompt(self.instructions, input_text), metadata
+
+    def _metadata(self, inputs, *, raw, rendered_context, section_budgets,
+                  allocation, history_metadata, input_text_tokens,
+                  compaction_metadata, provider_context_tokens):
+        count_tokens = self.count_tokens
+        config = self.runtime.config
+        instructions_tokens = inputs["instructions_tokens"]
+        tool_schema_tokens = inputs["tool_schema_tokens"]
+        output_reserve = int(config.max_new_tokens)
+        run_log = self.runtime.run.run_log
+        run_log_generation = run_log.generation if run_log is not None else 0
         sections = {}
         for key in (
             "runtime_policy",
@@ -259,31 +269,20 @@ class PromptBuilder:
             else None,
             "provider_context_tokens": provider_context_tokens,
         }
-        return (ModelPrompt(self.instructions, input_text), metadata)
+        return metadata
 
-    def plan_compaction(
-        self,
-        user_message,
-        *,
-        tool_surface: ResolvedToolSurface,
-        provider_context_tokens=None,
-    ):
+    def plan_compaction(self, inputs, *, provider_context_tokens=None):
         """Plan semantic compaction or return a bounded read-only fallback."""
         run_log = self.runtime.run.run_log
         if run_log is None or run_log.pending_tool_calls():
             return (None, None, None)
-        raw = self._raw_sections(user_message, tool_surface)
         history = self._history()
         config = self.runtime.config
-        instructions_tokens = self.count_tokens(self.instructions)
-        tool_schema_tokens = self._tool_schema_tokens(tool_surface)
-        count_tokens = self.tokenizer.count
-        (history_text, _metadata) = context.render_history(history)
-        raw = {**raw, "history": history_text}
-        request_overhead_tokens = instructions_tokens + tool_schema_tokens
-        fixed_context = context._fixed_context(
-            raw, section_caps=self.section_caps, count_tokens=count_tokens
-        )
+        count_tokens = self.count_tokens
+        history_text, _metadata = context.render_history(history)
+        raw = {**inputs["raw"], "history": history_text}
+        request_overhead_tokens = inputs["instructions_tokens"] + inputs["tool_schema_tokens"]
+        fixed_context = inputs["fixed_context"]
         full_context = dict(fixed_context)
         if raw["history"]:
             full_context["history"] = raw["history"]
@@ -301,17 +300,8 @@ class PromptBuilder:
         failure_code = ""
         failure_detail = ""
         compacted = None
-        available = (
-            config.provider_context_limit_tokens
-            - int(config.max_new_tokens)
-            - request_overhead_tokens
-        )
-        projection_history_budget = context._history_budget(
-            raw, available, section_caps=self.section_caps, count_tokens=count_tokens
-        )
-        history_token_counter = context._history_token_counter(
-            raw, fixed_context, count_tokens=count_tokens
-        )
+        projection_history_budget = inputs["history_budget"]
+        history_token_counter = inputs["history_token_counter"]
 
         def build_summary(events, *, max_summary_tokens):
             try:
