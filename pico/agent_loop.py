@@ -239,6 +239,23 @@ class AgentLoop:
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
         group = agent.run.run_log.append_tool_calls(calls)
+        if agent.prompt.refresh_repository_instructions():
+            # The calls were proposed without these rules. Close the entire
+            # group without effects, then let the model reconsider it.
+            for call in calls:
+                agent.tools._rejected(
+                    call, "repository_instructions_changed",
+                    "No tool executed. Repository instructions were loaded or changed; "
+                    "review their directory scopes and propose the appropriate calls again.",
+                    recovery="retry_after_change", record=True,
+                )
+            agent.model_client.reset_action_session()
+            loop_state.prompt_snapshot = None
+            loop_state.provider_context_tokens = None
+            agent.emit_event("provider_session_reset", {
+                "reason": "repository_instructions_changed",
+            })
+            return LoopDirective("continue")
         outcomes = agent.tools.execute_pending_group(
             group.event_id,
             turn.tool_surface,

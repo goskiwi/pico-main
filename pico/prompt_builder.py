@@ -27,21 +27,24 @@ if TYPE_CHECKING:
 AGENTS_MD_MAX_BYTES = 32 * 1024
 
 
-def load_repository_instructions(repo_root, cwd):
-    """Load applicable AGENTS.md files once from repository root through CWD."""
+def load_repository_instructions(repo_root, cwd, *, access_paths=()):
+    """Load scoped rules along startup and accessed paths, without scanning subtrees."""
 
     repo_root = Path(repo_root).resolve()
     cwd = Path(cwd).resolve()
-    relative = cwd.relative_to(repo_root)
-    directories = [repo_root]
-    current = repo_root
-    for part in relative.parts:
-        current /= part
-        directories.append(current)
+    directories = {repo_root}
+    for target in (cwd, *access_paths):
+        target = Path(target).resolve()
+        directory = target if target.is_dir() else target.parent
+        relative = directory.relative_to(repo_root)
+        current = repo_root
+        for part in relative.parts:
+            current /= part
+            directories.add(current)
 
     instructions = {}
     remaining = AGENTS_MD_MAX_BYTES
-    for directory in directories:
+    for directory in sorted(directories, key=lambda path: (len(path.parts), path.as_posix())):
         path = directory / "AGENTS.md"
         if remaining <= 0 or not path.is_file() or path.is_symlink():
             continue
@@ -79,6 +82,29 @@ class PromptBuilder:
 
     def count_tokens(self, text):
         return self.tokenizer.count(text)
+
+    def refresh_repository_instructions(self):
+        paths = []
+        log = self.runtime.run.run_log
+        for event in log.events if log is not None else ():
+            if event.kind != "assistant_tool_calls":
+                continue
+            for call in event.tool_calls:
+                if call.name not in {"list_files", "search", "read_file", "write_file", "edit_file"}:
+                    continue
+                raw = call.args.get("path", ".")
+                if not isinstance(raw, str):
+                    continue
+                try:
+                    paths.append(self.runtime.workspace.resolve_tool_path(raw))
+                except ValueError:
+                    continue  # Invalid paths remain the ToolRuntime's responsibility.
+        current = load_repository_instructions(
+            self.runtime.workspace.root, self.runtime.workspace.cwd, access_paths=paths
+        )
+        changed = current != self.repository_instructions
+        self.repository_instructions = current
+        return changed
 
     def build(
         self,
@@ -287,11 +313,16 @@ class PromptBuilder:
             raw, fixed_context, count_tokens=count_tokens
         )
 
-        def build_summary(events):
+        def build_summary(events, *, max_summary_tokens):
             try:
                 summary = self.semantic_summarizer.summarize(
                     events,
                     execution_context=self.runtime.run.execution_context,
+                    context_limit_tokens=config.provider_context_limit_tokens,
+                    max_output_tokens=min(
+                        config.summary_max_output_tokens, max_summary_tokens
+                    ),
+                    count_tokens=count_tokens,
                 )
                 projected = (
                     "Current run events:\n[compaction] "
@@ -320,6 +351,7 @@ class PromptBuilder:
                 )
             compacted = history.plan_compaction(
                 retain_tokens=config.compaction_keep_recent_tokens,
+                max_history_tokens=projection_history_budget,
                 history_token_counter=history_token_counter,
                 summary_builder=build_summary,
             )
@@ -396,6 +428,7 @@ class PromptBuilder:
         )
 
     def _raw_sections(self, user_message, tool_surface):
+        self.refresh_repository_instructions()
         projection = self.runtime.run.projection
         contract = projection.contract
         goal = contract.goal if contract is not None else str(user_message)

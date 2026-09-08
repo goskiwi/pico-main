@@ -79,7 +79,8 @@ class WorkspaceObservation:
     def render(self, logical_cwd):
         lines = [
             "Workspace:",
-            f"- cwd: {logical_cwd}",
+            f"- startup_directory (relative to workspace root): {logical_cwd}",
+            "- tool_path_base: workspace root; '.' means workspace root, not startup_directory",
             f"- repository: {self.repository}",
             f"- head: {self.head}",
             f"- status: {self.status}",

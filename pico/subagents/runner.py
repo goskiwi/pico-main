@@ -203,6 +203,7 @@ class SubagentRunner:
             max_tool_executions=CHILD_MAX_TOOL_EXECUTIONS,
             max_parallel_tools=self.parent.config.max_parallel_tools,
             max_new_tokens=self.parent.config.max_new_tokens,
+            summary_max_output_tokens=self.parent.config.summary_max_output_tokens,
             secret_env_names=self.parent.config.secret_env_names,
             allowed_tools=(
                 EXPLORE_TOOLS

@@ -287,6 +287,8 @@ def render_repository_instructions(instructions):
         lines.extend(
             (
                 f'<instructions path="{escape(path, quote=True)}">',
+                "Applies only to this directory and its descendants: "
+                + escape(path.rpartition("/")[0] or ".", quote=False),
                 escape(content, quote=False),
                 "</instructions>",
             )

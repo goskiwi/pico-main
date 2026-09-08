@@ -632,12 +632,13 @@ def test_compaction_filters_canonical_state_but_covers_full_prefix(tmp_path):
     log.append_model_instruction("recent")
     seen = []
 
-    def summarize(events):
+    def summarize(events, *, max_summary_tokens):
         seen.extend(events)
         return "short"
 
     result = log.history().plan_compaction(
         retain_tokens=1,
+        max_history_tokens=10000,
         history_token_counter=lambda text: max(1, len(text)),
         summary_builder=summarize,
     )
@@ -669,8 +670,9 @@ def test_compaction_retain_budget_counts_one_complete_history_projection(tmp_pat
     )
     result = log.history().plan_compaction(
         retain_tokens=wire_tokens(recent_projection),
+        max_history_tokens=10000,
         history_token_counter=wire_tokens,
-        summary_builder=lambda _events: "short",
+        summary_builder=lambda _events, **_kwargs: "short",
     )
 
     assert result is not None

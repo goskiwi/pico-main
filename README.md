@@ -46,14 +46,38 @@ Resume 可以收窄写能力但不能扩大原 Contract，当前启动配置的 
 收紧。`ask()` 返回结构化 `RunOutcome`，持久事实仍以
 `RunStore.replay(run_id)` 为准。
 
-CLI 从仓库根目录到启动目录依次加载适用的 `AGENTS.md`，以 32 KiB 总上限放入首个 user
-input 的独立 `repository_instructions`，不把它提升为 system policy，也不混入普通不可信
+所有相对工具路径以 Workspace 根目录为基准，`.` 不是启动子目录。Workspace 中的
+`startup_directory` 单独表示启动位置。
+
+CLI 从仓库根目录到启动目录加载 `AGENTS.md`；模型访问其他路径时沿其祖先目录按需加载，
+不扫描整个仓库。每份规则明确限定目录子树，深层规则只在自身子树内优先。
+新规则或规则内容变化时，当前模型调用组记为尚未执行，重建上下文后由模型重新决策，
+不会先写入再补规则。重建时从原始调用日志重新发现访问路径，无额外规则状态存储。
+规则沿用 32 KiB 总上限，放入 user input 的独立 `repository_instructions`，
+不把它提升为 system policy，也不混入普通不可信
 仓库 Context。当前用户任务冲突时优先；Mode、工具权限、路径和完成规则仍由 Runtime 代码决定。
 
 每个新 Prompt snapshot 还现场构造一个 `WorkspaceObservation`：明确区分 Git、普通目录和
 Git 不可用，表达 branch、detached HEAD 或 unborn branch，并给出 staged、unstaged、untracked、
 conflicted 数量、总 Diff 行数及有界路径列表。普通 Tool continuation 复用 Provider session，
 不把同一个快照反复追加到上下文；RepoMap 再按当前任务和已观察路径提供代码入口。
+
+## 上下文预算
+
+默认主请求输出上限 `--max-new-tokens 32000`，压缩预留
+`--compaction-reserve-tokens 32000`，独立摘要请求输出上限
+`--summary-max-output-tokens 16000`。这些是起始配置，不是所有模型的最优值；切换模型时，
+需按模型实际能力设置输出上限和 `--provider-context-limit`（默认 272000）。
+
+主请求与摘要请求分别计算输入、指令、工具 Schema 和输出预算，三个参数不叠加到同一次请求。
+摘要输出上限还受主请求剩余 History 空间约束。摘要源保留语义事实；超预算时裁剪长字段，
+标记省略并保留 Artifact 引用，不改写原始 RunLog。连记录元数据都放不下时，走已有的
+显式降级路径，不发送超预算摘要请求。
+
+`--compaction-keep-recent-tokens 20000` 是按完整工具响应组选择近期历史的目标预算，
+不是保证保留最后 20000 Token，也不是保证完整文件。摘要生成后，只有摘要与实际保留历史
+一起符合主请求 History 预算、且确实缩短历史，才提交压缩。以上 Token 数为本地估算，
+不代表 Provider 的精确计费或上下文计算；真实摘要事实保真仍需长任务验证。
 
 ## 核心运行链
 

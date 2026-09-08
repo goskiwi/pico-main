@@ -450,6 +450,40 @@ def test_repository_instructions_follow_root_to_cwd_order(tmp_path):
     ]
 
 
+def test_accessed_rules_have_scopes_and_do_not_scan_siblings(tmp_path):
+    from pico.context_manager import render_repository_instructions
+
+    api = tmp_path / "api"
+    web = tmp_path / "web"
+    api.mkdir()
+    web.mkdir()
+    (tmp_path / "AGENTS.md").write_text("root rule")
+    (api / "AGENTS.md").write_text("api rule")
+    (web / "AGENTS.md").write_text("web rule")
+    instructions = load_repository_instructions(
+        tmp_path, tmp_path, access_paths=[api / "new" / "file.py"]
+    )
+    assert list(instructions) == ["AGENTS.md", "api/AGENTS.md"]
+    text = render_repository_instructions(instructions)
+    assert "Applies only to this directory and its descendants: api" in text
+    assert "web rule" not in text
+
+
+def test_tool_paths_use_root_even_when_starting_in_subdirectory(tmp_path):
+    from pico.tools import ReadFileArgs
+
+    nested = tmp_path / "api"
+    nested.mkdir()
+    (tmp_path / "same.py").write_text("root")
+    (nested / "same.py").write_text("nested")
+    workspace = Workspace.build(nested, repo_root_override=tmp_path)
+    assert workspace.resolve_tool_path("same.py") == tmp_path / "same.py"
+    assert workspace.resolve_tool_path("api/same.py") == nested / "same.py"
+    assert "workspace root, not startup directory" in (
+        ReadFileArgs.model_json_schema()["properties"]["path"]["description"]
+    )
+
+
 def test_repository_instruction_loading_has_one_total_byte_limit(tmp_path):
     nested = tmp_path / "service"
     nested.mkdir()
@@ -499,7 +533,7 @@ def test_workspace_queries_git_facts_when_rendered(tmp_path):
 
     assert "README.md" not in before
     assert "README.md" in after
-    assert "cwd: src" in after
+    assert "startup_directory (relative to workspace root): src" in after
     assert "repository: git" in after
     assert "head: branch " in after
     assert "status: dirty" in after
@@ -798,8 +832,9 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
 
     first = run_log.history().plan_compaction(
         retain_tokens=100,
+        max_history_tokens=10000,
         history_token_counter=len,
-        summary_builder=lambda _events: "first summary",
+        summary_builder=lambda _events, **_kwargs: "first summary",
     )
     assert first is not None
     run_log.append_compaction(first[0], first[1])
@@ -808,8 +843,9 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
 
     second = run_log.history().plan_compaction(
         retain_tokens=100,
+        max_history_tokens=10000,
         history_token_counter=len,
-        summary_builder=lambda _events: "second summary",
+        summary_builder=lambda _events, **_kwargs: "second summary",
     )
 
     assert second is not None
@@ -1001,15 +1037,95 @@ def test_compaction_propagates_execution_cancellation(tmp_path):
         compaction_keep_recent_tokens=100,
     )
     manager.semantic_summarizer = CompactionSummarizer(CancellingClient)
+    # Exercise cancellation during a request that can actually fit; the old
+    # 900-token fixture now correctly fails before calling the provider.
+    agent.config = replace(agent.config, provider_context_limit_tokens=3500,
+                           summary_max_output_tokens=128)
 
     with pytest.raises(ExecutionCancelled, match="user_cancelled"):
         RunLifecycle(agent).prepare_compaction(
             "continue",
             tool_surface=agent.tools.resolve_surface(),
-            provider_context_tokens=850,
+            provider_context_tokens=3400,
         )
 
     assert not any(event.kind == "compaction" for event in run_log.events)
+
+
+def test_summary_request_budgets_long_semantic_results_and_large_arguments():
+    from pico import ModelAction
+    from pico.compaction_summary import SUMMARY_TOOL
+
+    outcome = ToolOutcome(
+        "call_large", "read_file", "success", "completed", "none",
+        "important fact <&> 中文 " * 20000,
+        artifact_id="tool_0123456789abcdef_0123456789",
+    )
+    events = [
+        SimpleNamespace(kind="tool_call", payload={
+            "name": "edit_file", "args": {"new_text": "large edit " * 20000},
+        }),
+        SimpleNamespace(kind="tool_result", payload={"outcome": outcome.to_dict()}),
+    ]
+    requests = []
+
+    class SummaryClient:
+        def complete_action(self, text, output_tokens, **kwargs):
+            requests.append((text, output_tokens, kwargs))
+            return ModelAction.tool(SUMMARY_TOOL["name"], {
+                "progress": {"done": [], "in_progress": [], "blocked": []},
+                "critical_context": [outcome.artifact_id],
+            })
+
+    counter = context.Tokenizer().count
+    summarizer = CompactionSummarizer(SummaryClient)
+    result = summarizer.summarize(
+        events, execution_context=ExecutionContext.root(max_seconds=30),
+        context_limit_tokens=4000, max_output_tokens=700, count_tokens=counter,
+    )
+    text, output_tokens, kwargs = requests[0]
+    measured = (counter(text) + counter(kwargs["instructions"])
+                + counter(json.dumps(kwargs["action_tools"], ensure_ascii=False, sort_keys=True)))
+    assert measured + output_tokens <= 4000
+    assert output_tokens == 700
+    assert "omitted from summary input" in text
+    assert outcome.artifact_id in text and outcome.artifact_id in result
+    records = json.loads(unescape(text.split('>\n', 1)[1].rsplit('\n</history>', 1)[0]))
+    assert [record["kind"] for record in records] == ["tool_call", "tool_result"]
+    assert outcome.content == "important fact <&> 中文 " * 20000
+
+
+def test_summary_metadata_overflow_does_not_send_request():
+    def unexpected_client():
+        pytest.fail("must not send an oversized summary request")
+
+    summarizer = CompactionSummarizer(unexpected_client)
+    with pytest.raises(SemanticCompactionError, match="input budget"):
+        summarizer.summarize(
+            [SimpleNamespace(kind="model_instruction", payload={"instruction": "x"})],
+            execution_context=ExecutionContext.root(max_seconds=30),
+            context_limit_tokens=100, max_output_tokens=99, count_tokens=len,
+        )
+
+
+def test_compaction_rejects_summary_plus_retained_history_over_budget(tmp_path):
+    agent = build_agent(tmp_path)
+    log = activate(agent)
+    for index in range(3):
+        append_read(log, index, "historical fact " * 100)
+    calls = []
+
+    def summary(_events, *, max_summary_tokens):
+        calls.append(max_summary_tokens)
+        return "s" * 150
+
+    result = log.history().plan_compaction(
+        retain_tokens=1, max_history_tokens=100,
+        history_token_counter=len, summary_builder=summary,
+    )
+    assert result is None
+    assert 0 < calls[0] < 100
+    assert not any(event.kind == "compaction" for event in log.events)
 
 
 def test_compaction_source_separates_semantics_from_transaction_metadata():

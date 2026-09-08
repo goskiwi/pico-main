@@ -223,6 +223,7 @@ def build_agent(args):
         provider_context_limit_tokens=args.provider_context_limit,
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
+        summary_max_output_tokens=args.summary_max_output_tokens,
         verification_command=resolve_verification_command(
             workspace.root,
             args.verify_command,
@@ -390,6 +391,12 @@ def build_arg_parser():
         type=int,
         default=defaults.compaction_keep_recent_tokens,
         help="Approximate recent Run Log tokens retained after compaction.",
+    )
+    parser.add_argument(
+        "--summary-max-output-tokens",
+        type=int,
+        default=defaults.summary_max_output_tokens,
+        help="Maximum output tokens for the separate history-summary request.",
     )
     parser.add_argument(
         "--verify-command",

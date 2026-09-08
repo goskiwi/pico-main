@@ -33,13 +33,14 @@ class PicoConfig:
     max_agent_turns: int = 32
     max_tool_executions: int | None = None
     max_parallel_tools: int = 4
-    max_new_tokens: int = 1024
+    max_new_tokens: int = 32000
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
     allowed_tools: tuple[str, ...] | None = None
     turn_timeout_seconds: int = 600
     provider_context_limit_tokens: int = 272000
-    compaction_reserve_tokens: int = 16384
+    compaction_reserve_tokens: int = 32000
     compaction_keep_recent_tokens: int = 20000
+    summary_max_output_tokens: int = 16000
     verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
     repo_map_enabled: bool = True
@@ -73,6 +74,9 @@ class PicoConfig:
         provider_context_limit_tokens = int(self.provider_context_limit_tokens)
         compaction_reserve_tokens = int(self.compaction_reserve_tokens)
         compaction_keep_recent_tokens = int(self.compaction_keep_recent_tokens)
+        summary_max_output_tokens = int(self.summary_max_output_tokens)
+        if summary_max_output_tokens < 1:
+            raise ValueError("summary_max_output_tokens must be positive")
         if provider_context_limit_tokens <= max_new_tokens:
             raise ValueError(
                 "provider context limit must exceed max_new_tokens"
@@ -106,6 +110,7 @@ class PicoConfig:
             "provider_context_limit_tokens": provider_context_limit_tokens,
             "compaction_reserve_tokens": compaction_reserve_tokens,
             "compaction_keep_recent_tokens": compaction_keep_recent_tokens,
+            "summary_max_output_tokens": summary_max_output_tokens,
             "verification_command": self.verification_command,
             "allowed_write_paths": _allowed_write_paths(self.allowed_write_paths),
         }

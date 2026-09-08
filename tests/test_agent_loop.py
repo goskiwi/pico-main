@@ -32,6 +32,40 @@ def build_agent(tmp_path, outputs):
     )
 
 
+def test_new_directory_rules_are_seen_before_a_proposed_write(tmp_path):
+    nested = tmp_path / "api"
+    nested.mkdir()
+    (nested / "AGENTS.md").write_text("API_ONLY_RULE: do not create generated.py\n")
+    (nested / "existing.py").write_text("existing evidence\n")
+    agent = build_agent(tmp_path, [
+        ModelAction.tool("write_file", {"path": "api/generated.py", "content": "wrong"}),
+        ModelAction.tool("read_file", {"path": "api/existing.py"}),
+        ModelAction.final("Inspected existing.py; generated.py was not created."),
+    ])
+
+    agent.ask("Inspect the API and follow its rules")
+
+    assert not (nested / "generated.py").exists()
+    prompts = agent.model_client.prompts
+    assert "API_ONLY_RULE" not in prompts[0]
+    assert "API_ONLY_RULE" in prompts[1]
+    assert "Applies only to this directory and its descendants: api" in prompts[1]
+    assert prompts[1] == prompts[2]  # Already loaded rules do not force another reset.
+    events = agent.run.run_log.events
+    result = next(event.payload["outcome"] for event in events if event.kind == "tool_result")
+    assert result["execution_state"] == "not_started"
+    assert result["failure"]["code"] == "repository_instructions_changed"
+    assert not any(event.kind == "tool_started" and event.call_id == result["tool_call_id"]
+                   for event in events)
+
+    # A fresh builder recovers accessed rule paths from the durable calls,
+    # including the write that was never executed; no second state store.
+    from pico.prompt_builder import PromptBuilder
+    rebuilt = PromptBuilder(agent)
+    rebuilt.refresh_repository_instructions()
+    assert rebuilt.repository_instructions["api/AGENTS.md"].startswith("API_ONLY_RULE")
+
+
 def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
     agent = build_agent(
@@ -461,6 +495,7 @@ def test_provider_session_resets_before_results_cross_input_high_watermark(tmp_p
             mode="auto",
             verification_command="",
             provider_context_limit_tokens=8000,
+            max_new_tokens=1024,
             compaction_reserve_tokens=2000,
             compaction_keep_recent_tokens=6000,
         ),
@@ -541,6 +576,7 @@ def test_provider_session_continues_below_projected_input_high_watermark(tmp_pat
             mode="auto",
             verification_command="",
             provider_context_limit_tokens=8000,
+            max_new_tokens=1024,
             compaction_reserve_tokens=2000,
             compaction_keep_recent_tokens=6000,
         ),
@@ -580,6 +616,7 @@ def test_missing_provider_usage_uses_actual_local_continuation_payload(tmp_path)
             mode="auto",
             verification_command="",
             provider_context_limit_tokens=8_000,
+            max_new_tokens=1024,
             compaction_reserve_tokens=2_000,
             compaction_keep_recent_tokens=2_000,
         ),

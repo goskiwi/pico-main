@@ -213,7 +213,10 @@ Subagent 实现。
    Schema 解析和提交，比较物理原 Events、
    Compaction Fact 与模型可见的 RunLog History View；Summary 始终只有 `Progress` 与
    `Critical Context`，它不是第二个 `RunProjection`。摘要输入使用独立语义投影：RunLog 继续
-   保存 Call ID、revision 和分页统计，Summarizer 只接收继续任务所需的实际结果内容与失败／副作用。
+   保存 Call ID、revision 和分页统计，Summarizer 接收实际结果内容与失败／副作用的语义投影。
+   摘要请求独立计算输入、指令、Schema 和输出预算；长字段超预算时标记裁剪并保留 Artifact
+   引用，原始日志不变。摘要输出上限由 `summary_max_output_tokens` 和主请求在保留近期历史后
+   的剩余空间共同决定。提交前实际检查摘要加保留历史的总预算，不能只检查摘要自身。
 4. **小预算历史投影**：旧摘要无法放入时省略它并显示 omitted 标记，日志和 WorkingState
    不变。History 由 `RunLog.history()` 构造，当前纠错提示 ID 直接来自 RunProjection。
 

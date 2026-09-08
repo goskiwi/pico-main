@@ -46,11 +46,11 @@ class ToolArgs(BaseModel):
 
 
 class ListFilesArgs(ToolArgs):
-    path: str = "."
+    path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
 
 
 class ReadFileArgs(ToolArgs):
-    path: str = Field(min_length=1)
+    path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
     start_line: int = Field(default=1, ge=1)
     end_line: int = Field(default=200, ge=1)
 
@@ -63,7 +63,7 @@ class ReadArtifactArgs(ToolArgs):
 
 class SearchArgs(ToolArgs):
     pattern: str = Field(min_length=1)
-    path: str = "."
+    path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
 
 
 class RunCommandArgs(ToolArgs):
@@ -71,12 +71,12 @@ class RunCommandArgs(ToolArgs):
 
 
 class WriteFileArgs(ToolArgs):
-    path: str = Field(min_length=1)
+    path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
     content: str
 
 
 class EditFileArgs(ToolArgs):
-    path: str = Field(min_length=1)
+    path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
     old_text: str = Field(min_length=1)
     new_text: str
     expected_revision: str = Field(

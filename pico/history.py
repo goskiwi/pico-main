@@ -215,7 +215,8 @@ class RunHistory:
             break
         return selected
 
-    def plan_compaction(self, *, retain_tokens, history_token_counter, summary_builder):
+    def plan_compaction(self, *, retain_tokens, max_history_tokens,
+                        history_token_counter, summary_builder):
         active = list(self.active_events())
         latest_guidance_id = self._latest_user_guidance_id(self._events)
         pending_instruction_id = self._projected_instruction_id
@@ -260,9 +261,14 @@ class RunHistory:
         summary_facts = tuple(fact for unit in summary_units for fact in unit)
         if not summary_facts:
             return None
-        summary = summary_builder(summary_facts)
+        summary_budget = max_history_tokens - retained_tokens
+        if summary_budget < 1:
+            return None
+        summary = summary_builder(summary_facts, max_summary_tokens=summary_budget)
         before = render(units)
         after = render(retained, summary=summary)
+        if history_token_counter(after) > max_history_tokens:
+            return None
         if history_token_counter(after) >= history_token_counter(before):
             return None
         return (
