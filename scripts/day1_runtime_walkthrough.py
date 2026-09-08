@@ -92,7 +92,14 @@ def main():
         assert outcome.status == "completed"
         assert outcome.answer == "README 已读取，文件工具工作正常。"
         assert agent.session.active_run_id == ""
-        assert agent.run.projection.contract.allows_workspace_mutation is False
+        assert agent.run.projection.contract.write_scope.mode == "none"
+        contract = agent.run.projection.contract.to_dict()
+        assert set(contract) == {"goal", "write_scope", "verify_changes"}
+        print_section("启动配置生成 TaskContract", {
+            "contract": contract,
+            "scope_source": "Ask → WriteScope(none); no intent-classification model",
+            "identity": {"run_id": outcome.run_id, "session_id": agent.session.id},
+        })
 
         events = agent.run.run_log.events
         event_rows = [

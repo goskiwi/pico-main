@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pico import (
     FakeModelClient,
+    ModelAction,
     Pico,
     PicoConfig,
     SessionStore,
@@ -15,11 +16,12 @@ from pico import (
     ToolOutcome,
     Workspace,
 )
+from pico.compaction_summary import CompactionSummarizer
 from pico.execution import ExecutionContext
-from pico.history import RunHistory
+from pico.history import HISTORY_OMITTED
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.task_state import TaskContract
+from pico.task_state import TaskContract, WriteScope
 
 QUERY = "Where is calculate_invoice_total used?"
 SUMMARY_MARKER = "SEMANTIC-SUMMARY-MARKER"
@@ -83,12 +85,11 @@ def build_agent(root, *, pressure_window=False):
 def activate(agent, run_id, goal):
     contract = TaskContract(
         goal=goal,
-        allows_workspace_mutation=False,
+        write_scope=WriteScope("none"),
         verify_changes=False,
     )
     run_log = RunLog(
         run_id,
-        f"task_{run_id}",
         agent.session.id,
         agent.dependencies.run_store,
     )
@@ -391,9 +392,14 @@ def bounded_fallback_experiment(root):
     )
 
 
-class DeterministicSummarizer:
+class DeterministicSummarizer(CompactionSummarizer):
     def __init__(self):
-        self.calls = []
+        super().__init__(lambda: FakeModelClient([ModelAction.tool(
+            "submit_compaction_summary", {
+                "progress": {"done": [SUMMARY_MARKER], "in_progress": [], "blocked": []},
+                "critical_context": ["invoice history was inspected"],
+            },
+        )]))
         self.seen_event_kinds = []
         self.seen_tool_names = []
 
@@ -402,19 +408,15 @@ class DeterministicSummarizer:
         self.seen_tool_names = [
             event.payload["name"] for event in events if event.kind == "tool_call"
         ]
-        self.calls.append(
-            {
-                "duration_ms": 0,
-                "completion_metadata": {"fixture": "deterministic"},
-            }
-        )
-        return (
-            "## Progress\n"
-            "### Done\n"
-            f"- {SUMMARY_MARKER}\n\n"
-            "## Critical Context\n"
-            "- invoice history was inspected"
-        )
+        source = self._source(events)
+        records = json.loads(source)
+        assert all("call_id" not in record and "structured" not in record for record in records)
+        print_section("摘要输入使用真实语义投影", {
+            "record_keys": [sorted(record) for record in records[:2]],
+            "history_source": "RunLog.history(): 当前 feedback ID 由 RunProjection 提供",
+            "fixture_boundary": "只预设模型返回，投影、请求构建及摘要解析实际执行",
+        })
+        return super().summarize(events, **_kwargs)
 
 
 def semantic_compaction_experiment(root):
@@ -423,7 +425,7 @@ def semantic_compaction_experiment(root):
     agent.prompt.semantic_summarizer = summarizer
     original_physical = tuple(run_log.events)
     original_ids = [event.event_id for event in original_physical]
-    original_history_view_count = len(RunHistory(run_log.events).active_events())
+    original_history_view_count = len(run_log.history().active_events())
 
     surface = agent.tools.resolve_surface()
     compaction, history_override = RunLifecycle(agent).prepare_compaction(
@@ -439,7 +441,7 @@ def semantic_compaction_experiment(root):
         history_override=history_override,
     )
     physical_after = tuple(agent.dependencies.run_store.read_events(run_log.run_id))
-    history_view_after = tuple(RunHistory(run_log.events).active_events())
+    history_view_after = tuple(run_log.history().active_events())
     physical_counts = durable_kind_counts(physical_after)
     compaction_event = physical_after[-1]
     summary = compaction_event.content
@@ -530,12 +532,36 @@ def semantic_compaction_experiment(root):
     )
 
 
+def small_history_budget_experiment(root):
+    agent, log = build_pressure_fixture(root, "run_day5_small_budget")
+    before_working = agent.run.projection.working.to_dict()
+    log.append_compaction(
+        "An old summary too large for the new window. " * 50,
+        [event.event_id for event in log.history().active_events()],
+    )
+    before_events = log.events
+    budget = len("Current run events:\n" + HISTORY_OMITTED)
+    text, metadata = log.history().render_compacted_projection(
+        retain_tokens=budget, token_counter=len,
+    )
+    assert HISTORY_OMITTED in text
+    assert "An old summary" not in text
+    assert log.events == before_events
+    assert agent.run.projection.working.to_dict() == before_working
+    print_section("D. 小预算允许省略旧摘要", {
+        "counter": "字符计数夹具，用于演示预算选择",
+        "history": text, "metadata": metadata,
+        "working_state_preserved": True, "durable_events_unchanged": True,
+    })
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="pico-day5-") as directory:
         root = Path(directory)
         repo_map_experiment(root / "repo-map")
         bounded_fallback_experiment(root / "fallback")
         semantic_compaction_experiment(root / "semantic")
+        small_history_budget_experiment(root / "small-budget")
 
 
 if __name__ == "__main__":

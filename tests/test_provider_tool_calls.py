@@ -367,8 +367,29 @@ def test_rejected_output_tokens_do_not_enter_context_projection():
         instructions="rules",
         action_tools=TOOLS,
         token_counter=lambda _text: 1,
-        provider_input_tokens=100,
     ) == 101
+
+
+def test_context_estimate_owns_usage_and_expires_after_continuation_or_reset():
+    instance = client()
+    response = Response({
+        "status": "completed",
+        "usage": {"input_tokens": 100, "output_tokens": 60},
+        "output": [{"type": "function_call", "name": "read_file",
+                    "call_id": "read", "arguments": '{"path":"README.md"}'}],
+    })
+    options = {"instructions": "rules", "action_tools": TOOLS, "token_counter": lambda _: 1}
+    with patch("pico.providers.clients._open_response", return_value=response):
+        complete_action(instance)
+        # Diagnostic metadata is not the session's estimation state.
+        instance.last_completion_metadata["input_tokens"] = 9999
+        assert instance.projected_context_tokens(("observed",), **options) == 161
+        instance.record_action_results(("observed",))
+        assert instance.projected_context_tokens(("continue",), **options) == 1
+        complete_action(instance)
+        assert instance.projected_context_tokens(("observed",), **options) == 161
+        instance.reset_action_session()
+        assert instance.projected_context_tokens(("continue",), **options) == 1
 
 
 @pytest.mark.parametrize(

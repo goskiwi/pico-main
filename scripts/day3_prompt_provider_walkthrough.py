@@ -202,9 +202,19 @@ def experiment_channels_and_pending(
                 "pending_call_ids": list(client._pending_call_ids),
             }
         )
-        client.record_action_results(
-            ('{"status":"success","content":"# Provider demo"}',)
+        results = ('{"status":"success","content":"# Provider demo"}',)
+        estimated = client.projected_context_tokens(
+            results, instructions=prompt.instructions,
+            action_tools=action_tools, token_counter=len,
         )
+        assert estimated > 240 + 18
+        print_section("Provider 会话负责下一轮计量", {
+            "reported_usage": client.last_completion_metadata,
+            "projected_context": estimated,
+            "counter": "本段使用 len 展示计算路径，非真实 token 数",
+            "ownership": "调用方只传 results，不传回 input/output usage",
+        })
+        client.record_action_results(results)
         pending_timeline.append(
             {
                 "moment": "记录 function_call_output 后",

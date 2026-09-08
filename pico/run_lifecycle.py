@@ -14,7 +14,7 @@ from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineEx
 from .run_log import RunLog
 from .run_projection import RunOutcome
 from .runtime_state import ActiveRunState
-from .task_state import TaskContract
+from .task_state import TaskContract, WriteScope
 
 if TYPE_CHECKING:
     from .prompt_builder import ModelPrompt
@@ -153,7 +153,6 @@ class RunLifecycle:
             runtime.emit_event(
                 "run_resumed" if resumed else "run_started",
                 {
-                    "task_id": runtime.run.projection.task_id,
                     "workspace_root": str(runtime.workspace.root),
                 },
             )
@@ -188,13 +187,11 @@ class RunLifecycle:
             raise RuntimeError("Run state contains a Run Log without a TaskContract")
 
         run_id = runtime.new_run_id()
-        task_id = runtime.new_task_id()
         contract = self._task_contract(
             user_message,
         )
         run_log = RunLog(
             run_id,
-            task_id,
             runtime.session.id,
             runtime.dependencies.run_store,
         )
@@ -212,18 +209,12 @@ class RunLifecycle:
         self,
         goal,
     ):
-        allows_workspace_mutation = self.runtime.config.mode != "ask"
+        config = self.runtime.config
         return TaskContract(
             goal=goal,
-            allows_workspace_mutation=allows_workspace_mutation,
+            write_scope=WriteScope.from_policy(config.mode, config.allowed_write_paths),
             verify_changes=(
-                allows_workspace_mutation
-                and bool(self.runtime.config.verification_command)
-            ),
-            allowed_write_paths=(
-                ()
-                if not allows_workspace_mutation
-                else self.runtime.config.allowed_write_paths
+                config.mode != "ask" and bool(config.verification_command)
             ),
         )
 
@@ -250,6 +241,9 @@ class RunLifecycle:
 
         runtime = self.runtime
         sequence = runtime.run.evidence.last_workspace_mutation_sequence
+        trace = runtime.dependencies.run_store.trace
+        if trace is not None:
+            trace.write("[Verification] checking…")
         current = runtime.run_verification(sequence, policy)
         if current is not None:
             runtime.emit_event("verification_result", current)

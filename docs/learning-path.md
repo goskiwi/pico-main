@@ -150,6 +150,8 @@ Subagent 实现。
 - 运行 `scripts/day1_runtime_walkthrough.py`：它使用真实
   `build_arg_parser -> build_agent -> ask` 路径，只用 `FakeModelClient` 替换网络 Provider；
   依次展示 CLI 任务要求、八个顶层组件、全新 Session 的恢复探测和完整 `RunOutcome`。
+- 查看启动策略生成的 `TaskContract(goal, write_scope, verify_changes)`；写范围是
+  `none/workspace/paths`。事件只有 Run/Session 身份，不再有独立 Task ID。
 - 确认 `RunOutcome` 是终态 Projection 的非持久化返回快照；Run Log 中没有第二种
   `run_outcome` Fact。
 - RepoMap 此时只需要知道“默认存在”，不要打开其实现。
@@ -164,6 +166,8 @@ Subagent 实现。
   1. 查看原始 Fact，并比较 Live、`load_run` 与 `RunStore.replay` 的完整 Projection；
   2. Replay 单 Call 前缀，并观察 ordered Tool Call group 的 Pending Call IDs；
   3. 用新 `Pico` 加载无副作用的中断调用，在下一次 `ask()` 自动对账且不盲目重放 Runner。
+- `PendingToolGroup` 自己管理调用、启动与结果游标；RunProjection 委托工具事件校验，
+  批次完成后 group id 和剩余调用一起清空。
 - 未处理异常后，Runtime 通过 `reload_current_run` 重新加载持久状态，处理“已经落盘但返回失败”的情况。
   Day 6 再通过 walkthrough 学习 Crash Resume 和 Active Reset；精简面试测试套件不保留完整恢复矩阵。
 
@@ -182,6 +186,8 @@ Subagent 实现。
   Surface、单 Call 续接与 Tool Call group 聚合 Result、Incomplete 伪 Final 拒绝、Typed Context Overflow
   的一次重建重试。
 - 只确认非空 RepoMap 会进入首轮 Context，不在今天学习图算法。
+- 观察 Provider 计量实验：输入 usage 与已接受输出归 Provider 会话所有，调用方只提交
+  待回写 results。该小实验使用 `len` 展示增量公式，不把字符数当作真实 token 统计。
 
 完成标准：能画出一次 Function Call 及其 Output 的 Provider 会话。
 
@@ -192,20 +198,24 @@ Subagent 实现。
   `external` 内容。
 - 对照输出解释 stale Revision、ToolOutcome、Preimage、PathTransition、Unified Diff，以及
   为什么 Observation 可并行而 Edit/Approval 仍必须独占一轮。
+- 查看 ToolContext 中实际依赖类型；执行期间的 ExecutionContext 随本次运行结束释放。
 
 完成标准：能说明模型为什么不能直接写文件。
 
-### Day 5：Context、RepoMap 与 Compaction（分三段）
+### Day 5：Context、RepoMap 与 Compaction
 
-运行 `scripts/day5_context_walkthrough.py`，按三个独立实验学习：
+运行 `scripts/day5_context_walkthrough.py`，按四个实验学习：
 
 1. **默认上下文增强**：查看 RepoMap 如何在预算内提供任务相关仓库导航。
 2. **Context Pressure / Fallback**：无 Semantic Summarizer 时不写 Compaction Fact，只保留一对
    完整 Call/Result；`tool_started` 仍只存在于 durable log。
-3. **Context Pressure / Semantic Success**：注入确定性 Summarizer，比较物理原 Events、
+3. **Context Pressure / Semantic Success**：只预设摘要模型输出，实际执行语义投影、请求构建、
+   Schema 解析和提交，比较物理原 Events、
    Compaction Fact 与模型可见的 RunLog History View；Summary 始终只有 `Progress` 与
    `Critical Context`，它不是第二个 `RunProjection`。摘要输入使用独立语义投影：RunLog 继续
    保存 Call ID、revision 和分页统计，Summarizer 只接收继续任务所需的实际结果内容与失败／副作用。
+4. **小预算历史投影**：旧摘要无法放入时省略它并显示 omitted 标记，日志和 WorkingState
+   不变。History 由 `RunLog.history()` 构造，当前纠错提示 ID 直接来自 RunProjection。
 
 第三段最后会额外打印七类 **Effective Recovery Context**：Goal、Constraints & Preferences、
 Progress、Key Decisions、Next Steps、Critical Context、Execution Evidence，并逐项标明来自
@@ -222,6 +232,7 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
   reconcile、读取当前文件、运行真实验证并返回 RunOutcome，已经正确的内容无需再次修改。
   Run 的创建与恢复都走生产 RunLifecycle；只有硬崩溃点的 Call/Started 与已观察文件副作用
   是合成夹具，原 Tool Call 不盲目重放，历史 Partial 在完成后仍保留。
+- 核对恢复前后的持久 `write_scope` 相同；夹具使用当前事件格式，不加载旧 Task ID 日志。
 - `active_reset_experiment` 展示 active Runner 先落 `tool_result`，随后才写 `run_stopped` 并
   清理状态。
 - 最后的 `child_delegation_experiment` 属于 **Orchestration Appendix**：先运行只读 Explore，
@@ -234,6 +245,8 @@ TaskContract、WorkingState、两段 Semantic Summary 或 RunEvidence。七类�
 
 - 运行 `scripts/day7_runtime_capstone.py`，把前六天串成一条完整请求。只有模型动作是预设的，
   文件工具和 pytest 实际执行；输出显示修改前测试失败和 Runtime 修改后验证通过。
+- 脚本默认把实时 Trace 打到 stderr；观察请求、工具启动、结果提交、验证和终态。
+  预设模型不报告 usage，因此 token 显示 None；工具结果按日志提交顺序显示。
 - 观察代码与测试文件在一个 Tool Call group 的 parallel 段中并行读取，而 Edit、WorkingState 与
   `submit_final` 使用 exclusive 边界。
 - 直接核对 `RunOutcome.to_dict()` 中的 changed paths、Final Diff、Metrics 与 `RunStore.replay()` 的终态

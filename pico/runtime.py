@@ -148,15 +148,6 @@ class Pico:
         return AgentLoop(self).run(user_message)
 
     @staticmethod
-    def new_task_id():
-        return (
-            "task_"
-            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            + "-"
-            + uuid.uuid4().hex[:6]
-        )
-
-    @staticmethod
     def new_run_id():
         return (
             "run_"

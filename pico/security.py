@@ -67,7 +67,7 @@ def redact_facts(value, redactor, key=""):
         "before_state", "after_state", "before_artifact_id", "artifact_id",
         "child_id", "child_run_id", "base_sha", "sha256", "status", "role",
         "started_changed_path_states", "finished_changed_path_states",
-        "workspace_root", "workspace_changes", "run_id", "task_id", "session_id",
+        "workspace_root", "workspace_changes", "run_id", "session_id",
     }:
         return value
     if isinstance(value, str):

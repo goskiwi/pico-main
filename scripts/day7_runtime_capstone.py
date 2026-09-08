@@ -17,6 +17,8 @@ from pico import (
 )
 from pico.command_runner import CommandRunner, shell_argv
 from pico.mutations import file_revision
+from pico.run_store import RunStore
+from pico.trace import TracePrinter
 
 
 def print_section(title, value):
@@ -108,6 +110,7 @@ def main():
         agent = Pico(
             model_client=model,
             workspace=runtime_workspace,
+            run_store=RunStore(root / ".pico" / "runs", trace=TracePrinter(sys.stderr)),
             config=PicoConfig(
                 mode="auto",
                 verification_command=verify_command,

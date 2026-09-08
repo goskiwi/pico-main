@@ -1,8 +1,7 @@
-"""Runtime-owned task requirements; live state belongs to RunProjection."""
-
-from __future__ import annotations
+"""Runtime-owned requirements retained across Run recovery."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .workspace import normalize_relative_file
 
@@ -10,77 +9,69 @@ STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 
 
 @dataclass(frozen=True)
-class TaskContract:
-    """Immutable goal, write scope, and completion requirements for one Run."""
-
-    goal: str
-    allows_workspace_mutation: bool
-    verify_changes: bool
-    allowed_write_paths: tuple[str, ...] | None = None
+class WriteScope:
+    mode: Literal["none", "workspace", "paths"]
+    paths: tuple[str, ...] = ()
 
     def __post_init__(self):
-        if not isinstance(self.goal, str):
-            raise TypeError("task contract goal must be a string")
-        if not isinstance(self.allows_workspace_mutation, bool):
-            raise TypeError("allows_workspace_mutation must be a boolean")
-        if not isinstance(self.verify_changes, bool):
-            raise TypeError("verify_changes must be a boolean")
-        if self.allowed_write_paths is not None:
-            if not isinstance(self.allowed_write_paths, (list, tuple)):
-                raise TypeError("allowed_write_paths must be a sequence or null")
-            if any(not isinstance(path, str) for path in self.allowed_write_paths):
-                raise TypeError("allowed_write_paths entries must be strings")
-        object.__setattr__(
-            self,
-            "allowed_write_paths",
-            None
-            if self.allowed_write_paths is None
-            else tuple(
-                normalize_relative_file(path) for path in self.allowed_write_paths
-            ),
-        )
+        if self.mode not in {"none", "workspace", "paths"}:
+            raise ValueError("invalid write scope mode")
+        if not isinstance(self.paths, tuple) or any(not isinstance(p, str) for p in self.paths):
+            raise TypeError("write scope paths must be a tuple of strings")
+        normalized = tuple(normalize_relative_file(p) for p in self.paths)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("write scope paths must be unique")
+        if (self.mode == "paths") != bool(normalized):
+            raise ValueError("only paths mode requires a non-empty path list")
+        object.__setattr__(self, "paths", normalized)
+
+    @classmethod
+    def from_policy(cls, mode, paths):
+        if mode == "ask" or paths == ():
+            return cls("none")
+        return cls("workspace") if paths is None else cls("paths", tuple(paths))
+
+    def allowed_paths(self):
+        return None if self.mode == "workspace" else self.paths
+
+    def to_dict(self):
+        return {"mode": self.mode, "paths": list(self.paths)}
+
+    @classmethod
+    def from_dict(cls, value):
+        if not isinstance(value, dict) or set(value) != {"mode", "paths"}:
+            raise ValueError("invalid write scope fields")
+        if not isinstance(value["paths"], list):
+            raise TypeError("write scope paths must be a list")
+        return cls(value["mode"], tuple(value["paths"]))
+
+
+@dataclass(frozen=True)
+class TaskContract:
+    goal: str
+    write_scope: WriteScope
+    verify_changes: bool
+
+    def __post_init__(self):
         self.validate()
 
     def validate(self):
+        if not isinstance(self.goal, str):
+            raise TypeError("task contract goal must be a string")
         if not self.goal.strip():
             raise ValueError("task contract requires a goal")
-        if not self.allows_workspace_mutation and self.allowed_write_paths:
-            raise ValueError("non-mutating contract cannot allow write paths")
-        if self.allowed_write_paths is not None and len(
-            set(self.allowed_write_paths)
-        ) != len(self.allowed_write_paths):
-            raise ValueError("allowed_write_paths must be unique")
+        if not isinstance(self.write_scope, WriteScope):
+            raise TypeError("task contract requires WriteScope")
+        if not isinstance(self.verify_changes, bool):
+            raise TypeError("verify_changes must be a boolean")
         return self
 
     @classmethod
     def from_dict(cls, value):
-        expected = {
-            "goal",
-            "allows_workspace_mutation",
-            "verify_changes",
-            "allowed_write_paths",
-        }
-        if not isinstance(value, dict) or set(value) != expected:
+        if not isinstance(value, dict) or set(value) != {"goal", "write_scope", "verify_changes"}:
             raise ValueError("invalid task contract fields")
-        paths = value["allowed_write_paths"]
-        if paths is not None and not isinstance(paths, list):
-            raise TypeError("allowed_write_paths must be a list or null")
-        return cls(
-            goal=value["goal"],
-            allows_workspace_mutation=value["allows_workspace_mutation"],
-            verify_changes=value["verify_changes"],
-            allowed_write_paths=None if paths is None else tuple(paths),
-        )
+        return cls(value["goal"], WriteScope.from_dict(value["write_scope"]), value["verify_changes"])
 
     def to_dict(self):
-        self.validate()
-        return {
-            "goal": self.goal,
-            "allows_workspace_mutation": self.allows_workspace_mutation,
-            "verify_changes": self.verify_changes,
-            "allowed_write_paths": (
-                None
-                if self.allowed_write_paths is None
-                else list(self.allowed_write_paths)
-            ),
-        }
+        return {"goal": self.goal, "write_scope": self.write_scope.to_dict(),
+                "verify_changes": self.verify_changes}

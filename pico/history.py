@@ -28,8 +28,9 @@ class _ProjectedFact:
 
 
 class RunHistory:
-    def __init__(self, events):
+    def __init__(self, events, *, projected_instruction_id):
         self._events = tuple(events)
+        self._projected_instruction_id = projected_instruction_id
 
     def latest_user_guidance(self):
         entry = next(
@@ -217,7 +218,7 @@ class RunHistory:
     def plan_compaction(self, *, retain_tokens, history_token_counter, summary_builder):
         active = list(self.active_events())
         latest_guidance_id = self._latest_user_guidance_id(self._events)
-        pending_instruction_id = self._pending_runtime_instruction_id(self._events)
+        pending_instruction_id = self._projected_instruction_id
         units = self._history_units(active, allow_incomplete=True)
         if units is None:
             return None
@@ -287,28 +288,12 @@ class RunHistory:
             "",
         )
 
-    @staticmethod
-    def _pending_runtime_instruction_id(events):
-        pending = ""
-        for entry in events:
-            if entry.kind == "model_instruction":
-                pending = entry.event_id
-            elif entry.kind in {
-                "assistant_tool_calls",
-                "assistant_final",
-                "run_stopped",
-            }:
-                pending = ""
-        return pending
-
     def _active_projection_units(self):
         active = self.active_events()
         units = self._projection_units(
             active,
             projected_guidance_id=self._latest_user_guidance_id(self._events),
-            projected_instruction_id=self._pending_runtime_instruction_id(
-                self._events
-            ),
+            projected_instruction_id=self._projected_instruction_id,
             allow_incomplete=True,
         )
         return active, units or []

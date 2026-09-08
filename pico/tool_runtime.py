@@ -259,11 +259,11 @@ class ToolRuntime:
         contract = self.runtime.run.projection.contract
         mode = self.runtime.config.mode
         if mode == "ask" or (
-            contract is not None and not contract.allows_workspace_mutation
+            contract is not None and contract.write_scope.mode == "none"
         ):
             mode = "ask"
         paths = intersect_write_scopes(
-            getattr(contract, "allowed_write_paths", None),
+            contract.write_scope.allowed_paths() if contract is not None else None,
             self.runtime.config.allowed_write_paths,
         )
         return mode, (() if mode == "ask" else paths)

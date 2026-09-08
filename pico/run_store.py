@@ -22,8 +22,9 @@ def _run_id(value):
 
 
 class RunStore:
-    def __init__(self, root):
+    def __init__(self, root, *, trace=None):
         self.root = Path(root).resolve()
+        self.trace = trace
         self.root.mkdir(parents=True, exist_ok=True)
         self._cursors: dict[str, RunCursor] = {}
 

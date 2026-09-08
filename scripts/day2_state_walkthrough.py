@@ -224,6 +224,15 @@ def pending_prefix_experiment(events):
     assert after_call.pending_call_id == call_id
     assert after_started.pending_call_id == call_id
     assert after_result.pending_call_id is None
+    assert after_call.pending_group.group_id == events[call_index].event_id
+    assert after_result.pending_group.group_id == ""
+    print_section("PendingToolGroup 独立负责批次协议", {
+        "owner": type(after_call.pending_group).__name__,
+        "group_id": after_call.pending_group.group_id,
+        "remaining_after_call": [c.call_id for c in after_call.pending_group.remaining],
+        "remaining_after_result": list(after_result.pending_group.remaining),
+        "rules": "Call/Started/Result 顺序由批次校验；RunProjection 负责归约协调",
+    })
 
     print_section(
         "B1. 合法 Event 前缀中的单一 Pending Call",

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactStore
-from .command_runner import CommandRunner
+from .command_runner import CommandResult, CommandRunner
 from .execution import ExecutionContext
 from .mutations import WorkspaceMutationService
 from .repo_map import RepoMap
@@ -28,5 +28,5 @@ class RuntimeDependencies:
     repo_map: RepoMap
     subagents: SubagentRunner | None = None
     parent_execution_context: ExecutionContext | None = None
-    check_runner: Callable | None = None
+    check_runner: Callable[..., CommandResult] | None = None
     approval_handler: Callable[[str, dict], bool] | None = None

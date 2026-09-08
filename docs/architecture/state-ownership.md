@@ -23,6 +23,7 @@ Terminology in this document is strict:
 | Runtime correction | Latest structured `model_instruction` until an accepted Tool or terminal action | Mandatory trusted control plus untrusted evidence across Provider resets |
 | Execution lifecycle | One ExecutionContext deadline and cancellation token | Per-operation bounded timeouts; Provider requests, retry waits, Tools and Verification consume the same context |
 | Provider continuation | Accepted parsed turn replay items plus their pending Call IDs | The raw Provider response is never a second interpretation or replay source |
+| Context estimate | Provider-owned input usage plus accepted output usage for the latest response | Result serialization is added before continuation; after results are recorded or the session resets, estimation uses the actual local payload until new usage arrives. AgentLoop only consumes the estimate |
 | Compacted history | Original Run Facts plus an optional derived Compaction Fact | Current-budget projection prefers a fitting Summary, otherwise omits it and selects recent complete transactions |
 | Large output | One complete output Artifact; exact structured facts in ToolOutcome | Bounded model serialization from that same outcome |
 | Child delegation | Child Run Logs and Patch files | One receipt per Child plus explicit integration state |
@@ -41,6 +42,17 @@ Invariants:
 - `tool_result` is the only durable completion fact for a Tool call.
 - Context includes TaskContract, pending Runtime correction, WorkingState, repository projections and Run Log facts; Prompt build is read-only.
 - Live execution and replay use the same RunProjection reducer.
+- TaskContract stores one `write_scope`: `none`, `workspace`, or non-empty `paths`.
+  Runtime intersects that original scope with current configuration on resume. The old
+  contract fields `allows_workspace_mutation` and `allowed_write_paths` are rejected;
+  the configuration and Child tool arguments still use `allowed_write_paths`.
+- `RunLog.history()` constructs a read-only History snapshot with the current feedback
+  event ID from RunProjection. History does not recompute feedback lifecycle rules.
+  ToolContext declares concrete dependency types; optional executors remain optional.
+- Run identity uses `run_id` and `session_id`; there is no independent Task ID.
+  Old event envelopes containing `task_id` are rejected. `PendingToolGroup` owns batch
+  calls, start/result progress and ordering checks; RunProjection delegates tool events
+  to that object. Its internal counters are not Run-level fields.
 - Live code commits one Fact with `RunLog.append`; `RunStore.load_run` owns the single
   persisted read that returns a ready RunLog owning its Projection, and `RunStore.replay` is its Projection-only
   facade; `replay_events` is reserved for an already complete Event sequence.

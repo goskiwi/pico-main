@@ -2,7 +2,7 @@ from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.contracts import ToolCall
 from pico.execution import ExecutionContext
 from pico.run_log import RunLog
-from pico.task_state import TaskContract
+from pico.task_state import TaskContract, WriteScope
 
 
 def build_agent(tmp_path, **kwargs):
@@ -24,14 +24,13 @@ def run_active(agent, call):
     if run_log is None:
         run_log = RunLog(
             "run_safety_test",
-            "task_safety_test",
             agent.session.id,
             agent.dependencies.run_store,
         )
         run_log.append_user(
             TaskContract(
                 goal="Exercise path safety",
-                allows_workspace_mutation=True,
+                write_scope=WriteScope("workspace"),
                 verify_changes=False,
             )
         )

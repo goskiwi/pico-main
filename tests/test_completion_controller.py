@@ -10,23 +10,23 @@ from pico.execution import ExecutionContext
 from pico.mutations import content_revision, file_revision
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunEvent, RunLog
-from pico.task_state import TaskContract
+from pico.task_state import TaskContract, WriteScope
 from pico.verification import capture_changed_path_states
 
 READ_TASK = {
-    "allows_workspace_mutation": False,
+    "write_scope": WriteScope("none"),
     "verify_changes": False,
 }
 NO_CHANGE_TASK = {
-    "allows_workspace_mutation": True,
+    "write_scope": WriteScope("workspace"),
     "verify_changes": False,
 }
 MODIFY_TASK = {
-    "allows_workspace_mutation": True,
+    "write_scope": WriteScope("workspace"),
     "verify_changes": False,
 }
 VERIFIED_TASK = {
-    "allows_workspace_mutation": True,
+    "write_scope": WriteScope("workspace"),
     "verify_changes": True,
 }
 
@@ -53,7 +53,7 @@ def active_agent(tmp_path, requirements, verification_command=""):
         ),
     )
     contract = TaskContract("task", **requirements)
-    log = RunLog("run", "task", agent.session.id, agent.dependencies.run_store)
+    log = RunLog("run", agent.session.id, agent.dependencies.run_store)
     log.append_user(contract)
     agent.run.run_log = log
     agent.run.execution_context = ExecutionContext.root(max_seconds=30)
@@ -108,7 +108,6 @@ def add_change(agent, path, before, after, sequence=1, status="success", side="c
         f"run:event:{sequence:06d}",
         sequence,
         "run",
-        "task",
         agent.session.id,
         "tool_result",
         "now",

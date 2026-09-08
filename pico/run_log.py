@@ -241,7 +241,6 @@ class RunEvent:
     event_id: str
     sequence: int
     run_id: str
-    task_id: str
     session_id: str
     kind: str
     timestamp: str
@@ -261,7 +260,6 @@ class RunEvent:
             "event_id": self.event_id,
             "sequence": self.sequence,
             "run_id": self.run_id,
-            "task_id": self.task_id,
             "session_id": self.session_id,
             "kind": self.kind,
             "timestamp": self.timestamp,
@@ -274,7 +272,6 @@ class RunEvent:
             "event_id",
             "sequence",
             "run_id",
-            "task_id",
             "session_id",
             "kind",
             "timestamp",
@@ -286,7 +283,6 @@ class RunEvent:
             event_id=str(value["event_id"]),
             sequence=int(value["sequence"]),
             run_id=str(value["run_id"]),
-            task_id=str(value["task_id"]),
             session_id=str(value["session_id"]),
             kind=str(value["kind"]),
             timestamp=str(value["timestamp"]),
@@ -369,9 +365,8 @@ def replay_events(events, *, expected_run_id=None):
 class RunLog:
     """Own event construction, protocol validation and one Run's accepted facts."""
 
-    def __init__(self, run_id, task_id, session_id, store):
+    def __init__(self, run_id, session_id, store):
         self.run_id = str(run_id)
-        self.task_id = str(task_id)
         self.session_id = str(session_id)
         self.store = store
         self._events = []
@@ -390,7 +385,7 @@ class RunLog:
             raise ValueError("active Run Log is missing or empty")
         projection = replay_events(events, expected_run_id=expected_run_id)
         first = events[0]
-        log = cls(first.run_id, first.task_id, first.session_id, store)
+        log = cls(first.run_id, first.session_id, store)
         log._events = list(events)
         log.projection = projection
         return log
@@ -399,13 +394,19 @@ class RunLog:
     def events(self):
         return tuple(self._events)
 
+    def history(self):
+        feedback = self.projection.runtime_feedback
+        return RunHistory(
+            self.events,
+            projected_instruction_id=feedback.event_id if feedback else "",
+        )
+
     def append(self, kind, payload=None):
         sequence = len(self._events) + 1
         entry = RunEvent(
             event_id=f"{self.run_id}:event:{sequence:06d}",
             sequence=sequence,
             run_id=self.run_id,
-            task_id=self.task_id,
             session_id=self.session_id,
             kind=str(kind),
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -416,6 +417,8 @@ class RunLog:
         self.store._append_event(entry)
         self._events.append(entry)
         self.projection.__dict__.update(candidate.__dict__)
+        if self.store.trace is not None:
+            self.store.trace(entry)
         return entry
 
     def pending_tool_starts(self):
@@ -540,10 +543,10 @@ class RunLog:
         return self.projection.pending_call_id or ""
 
     def pending_group_id(self):
-        return self.projection.pending_group_id
+        return self.projection.pending_group.group_id
 
     def pending_tool_calls(self):
-        return tuple(self.projection.pending_calls[self.projection.result_count :])
+        return tuple(self.projection.pending_group.remaining)
 
     def _require_no_pending(self):
         if self.pending_tool_calls():
@@ -554,7 +557,7 @@ class RunLog:
         covered = tuple(covered_event_ids)
         if not covered or len(set(covered)) != len(covered):
             raise ValueError("compaction must cover a non-empty unique prefix")
-        active = RunHistory(self._events).active_events()
+        active = self.history().active_events()
         if covered != tuple(entry.event_id for entry in active[: len(covered)]):
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]

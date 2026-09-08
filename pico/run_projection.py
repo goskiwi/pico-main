@@ -76,9 +76,98 @@ class RunMetrics:
 
 
 @dataclass
+class PendingToolGroup:
+    """Own active tool batch state and event ordering."""
+    _pending_calls: tuple[ToolCall, ...] = ()
+    group_id: str = ""
+    _started_call_ids: set[str] = field(default_factory=set)
+    _last_started_ordinal: int = -1
+    _start_phase_result_count: int = 0
+    _result_count: int = 0
+
+    def check_event(self, event):  # noqa: C901 - ordered tool protocol
+        kind, payload = event.kind, event.payload
+        if kind == "assistant_tool_calls":
+            if self._pending_calls:
+                raise ValueError("Run Log already has pending tool calls")
+        elif kind == "tool_started":
+            call_id = str(payload["tool_call_id"])
+            call = self.find(call_id)
+            if call is None:
+                raise ValueError("tool_started must match a pending tool call")
+            if str(payload["tool_name"]) != call.name:
+                raise ValueError(
+                    "tool_started tool name does not match the pending call"
+                )
+            if call_id in self._started_call_ids:
+                raise ValueError("pending tool call already started")
+            ordinal = self._pending_calls.index(call)
+            expected_ordinal = max(self._result_count, self._last_started_ordinal + 1)
+            if ordinal != expected_ordinal:
+                raise ValueError("tool_started calls must preserve group order")
+            unresolved_started = self._result_count <= self._last_started_ordinal
+            if (
+                unresolved_started
+                and self._result_count != self._start_phase_result_count
+            ):
+                raise ValueError(
+                    "tool_started cannot cross an unfinished execution barrier"
+                )
+        elif kind == "tool_result":
+            outcome = ToolOutcome.from_dict(payload["outcome"])
+            call_id = outcome.tool_call_id
+            if not self._pending_calls or self._result_count >= len(self._pending_calls):
+                raise ValueError("tool_result requires pending tool calls")
+            call = self._pending_calls[self._result_count]
+            if call_id != call.call_id:
+                raise ValueError("tool_result calls must preserve group order")
+            if outcome.tool_name != call.name:
+                raise ValueError(
+                    "tool_result tool name does not match the pending call"
+                )
+            started = call_id in self._started_call_ids
+            if outcome.execution_state == "not_started" and started:
+                raise ValueError("started tool cannot finish as not_started")
+            if outcome.execution_state != "not_started" and not started:
+                raise ValueError("executed tool_result requires tool_started")
+        elif self._pending_calls and kind not in {"tool_started", "tool_result"}:
+            raise ValueError("pending tool calls must receive results first")
+
+    def find(self, call_id):
+        return next(
+            (call for call in self._pending_calls if call.call_id == call_id), None
+        )
+
+    def _begin_calls(self, calls, group_id=""):
+        self._pending_calls = tuple(calls)
+        self.group_id = group_id
+        self._started_call_ids.clear()
+        self._last_started_ordinal = -1
+        self._start_phase_result_count = 0
+        self._result_count = 0
+
+
+    @property
+    def remaining(self):
+        return self._pending_calls[self._result_count:]
+
+    def apply_event(self, event):
+        if event.kind == "assistant_tool_calls":
+            self._begin_calls(event.tool_calls, event.event_id)
+        elif event.kind == "tool_started":
+            if self._result_count > self._last_started_ordinal:
+                self._start_phase_result_count = self._result_count
+            self._started_call_ids.add(event.call_id)
+            self._last_started_ordinal = self._pending_calls.index(self.find(event.call_id))
+        elif event.kind == "tool_result":
+            self._result_count += 1
+            if self._result_count == len(self._pending_calls):
+                self._begin_calls(())
+
+
+@dataclass
 class RunProjection:
     run_id: str = ""
-    task_id: str = ""
     session_id: str = ""
     contract: TaskContract | None = None
     working: WorkingState = field(default_factory=WorkingState)
@@ -88,26 +177,20 @@ class RunProjection:
     status: str = "running"
     stop_reason: str = ""
     final_answer: str = ""
-    pending_calls: tuple[ToolCall, ...] = ()
-    pending_group_id: str = ""
+    pending_group: PendingToolGroup = field(default_factory=PendingToolGroup)
     runtime_feedback: RuntimeFeedback | None = None
-    started_call_ids: set[str] = field(default_factory=set)
-    last_started_ordinal: int = -1
-    start_phase_result_count: int = 0
-    result_count: int = 0
     final_diff: FinalDiff | None = None
     last_cursor: RunCursor = field(default_factory=RunCursor)
 
-    def check_event(self, event):  # noqa: C901 - linear protocol state machine
+    def check_event(self, event):
         kind, payload = event.kind, event.payload
         expected = self.last_cursor.sequence + 1
         if event.sequence != expected:
             raise ValueError("Run Log sequence is not contiguous")
         if event.event_id != f"{event.run_id}:event:{expected:06d}":
             raise ValueError("Run event id does not match its sequence")
-        if self.run_id and (event.run_id, event.task_id, event.session_id) != (
+        if self.run_id and (event.run_id, event.session_id) != (
             self.run_id,
-            self.task_id,
             self.session_id,
         ):
             raise ValueError("Run event identity changed within one run")
@@ -117,53 +200,13 @@ class RunProjection:
             raise ValueError("Run Log must begin with user_message")
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
-        if kind == "assistant_tool_calls":
-            if self.pending_calls:
-                raise ValueError("Run Log already has pending tool calls")
-        elif kind == "tool_started":
-            call_id = str(payload["tool_call_id"])
-            call = self._pending_call(call_id)
-            if call is None:
-                raise ValueError("tool_started must match a pending tool call")
-            if str(payload["tool_name"]) != call.name:
-                raise ValueError(
-                    "tool_started tool name does not match the pending call"
-                )
-            if call_id in self.started_call_ids:
-                raise ValueError("pending tool call already started")
-            ordinal = self.pending_calls.index(call)
-            expected_ordinal = max(self.result_count, self.last_started_ordinal + 1)
-            if ordinal != expected_ordinal:
-                raise ValueError("tool_started calls must preserve group order")
-            unresolved_started = self.result_count <= self.last_started_ordinal
-            if (
-                unresolved_started
-                and self.result_count != self.start_phase_result_count
-            ):
-                raise ValueError(
-                    "tool_started cannot cross an unfinished execution barrier"
-                )
-            self.children.check_started(call, payload, self.run_id)
+        self.pending_group.check_event(event)
+        if kind == "tool_started":
+            self.children.check_started(
+                self.pending_group.find(event.call_id), payload, self.run_id
+            )
         elif kind == "tool_result":
-            outcome = ToolOutcome.from_dict(payload["outcome"])
-            call_id = outcome.tool_call_id
-            if not self.pending_calls or self.result_count >= len(self.pending_calls):
-                raise ValueError("tool_result requires pending tool calls")
-            call = self.pending_calls[self.result_count]
-            if call_id != call.call_id:
-                raise ValueError("tool_result calls must preserve group order")
-            if outcome.tool_name != call.name:
-                raise ValueError(
-                    "tool_result tool name does not match the pending call"
-                )
-            started = call_id in self.started_call_ids
-            if outcome.execution_state == "not_started" and started:
-                raise ValueError("started tool cannot finish as not_started")
-            if outcome.execution_state != "not_started" and not started:
-                raise ValueError("executed tool_result requires tool_started")
-            self.children.check_result(call, payload["outcome"])
-        elif self.pending_calls and kind not in {"tool_started", "tool_result"}:
-            raise ValueError("pending tool calls must receive results first")
+            self.children.check_result(self.pending_group.remaining[0], payload["outcome"])
 
         if kind in {"assistant_final", "run_stopped"}:
             raw = payload.get("final_diff")
@@ -175,26 +218,13 @@ class RunProjection:
             ):
                 raise ValueError("terminal final Diff does not match net changes")
 
-    def _pending_call(self, call_id):
-        return next(
-            (call for call in self.pending_calls if call.call_id == call_id), None
-        )
-
-    def _begin_calls(self, calls, group_id=""):
-        self.pending_calls = tuple(calls)
-        self.pending_group_id = group_id
-        self.started_call_ids.clear()
-        self.last_started_ordinal = -1
-        self.start_phase_result_count = 0
-        self.result_count = 0
-
     @property
     def terminal(self):
         return self.status in {"completed", "stopped"}
 
     @property
     def pending_call_ids(self):
-        return tuple(call.call_id for call in self.pending_calls[self.result_count :])
+        return tuple(call.call_id for call in self.pending_group.remaining)
 
     @property
     def pending_call_id(self):
@@ -218,9 +248,8 @@ class RunProjection:
         return self._advance_event(event)
 
     def _advance_event(self, event):
-        self.run_id, self.task_id, self.session_id = (
+        self.run_id, self.session_id = (
             event.run_id,
-            event.task_id,
             event.session_id,
         )
         if event.kind == "user_message":
@@ -230,24 +259,15 @@ class RunProjection:
         self.metrics.apply_event(event)
         if event.kind == "tool_result":
             self.children.apply_result(
-                self.pending_calls[self.result_count], event.payload["outcome"]
+                self.pending_group.remaining[0], event.payload["outcome"]
             )
+        if event.kind == "tool_started":
+            self.children.apply_started(
+                self.pending_group.find(event.call_id), event.payload, self.run_id
+            )
+        self.pending_group.apply_event(event)
         if event.kind == "assistant_tool_calls":
             self.runtime_feedback = None
-            self._begin_calls(event.tool_calls, event.event_id)
-        elif event.kind == "tool_started":
-            call = self._pending_call(event.call_id)
-            self.children.apply_started(call, event.payload, self.run_id)
-            if self.result_count > self.last_started_ordinal:
-                self.start_phase_result_count = self.result_count
-            self.started_call_ids.add(event.call_id)
-            self.last_started_ordinal = self.pending_calls.index(
-                self._pending_call(event.call_id)
-            )
-        elif event.kind == "tool_result":
-            self.result_count += 1
-            if self.result_count == len(self.pending_calls):
-                self._begin_calls(())
         elif event.kind == "model_instruction":
             self.runtime_feedback = RuntimeFeedback(
                 instruction=str(event.payload["instruction"]),
@@ -271,7 +291,6 @@ class RunProjection:
         return {
             "identity": {
                 "run_id": self.run_id,
-                "task_id": self.task_id,
                 "session_id": self.session_id,
             },
             "task": {

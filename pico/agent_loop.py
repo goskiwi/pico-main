@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ModelTurn:
     action: Any
-    provider_input_tokens: int | None
     instructions: str
     tool_surface: Any
 
@@ -113,16 +112,14 @@ class AgentLoop:
         tool_surface = agent.tools.resolve_surface()
         prompt = self._prepare_prompt(loop_state, tool_surface)
         agent.emit_event("model_requested")
-        action, completion_metadata = self._request_action(
+        action = self._request_action(
             loop_state,
             prompt,
             tool_surface,
         )
-        provider_input_tokens = completion_metadata.get("input_tokens")
         loop_state.overflow_recovery_attempted = False
         return ModelTurn(
             action=action,
-            provider_input_tokens=provider_input_tokens,
             instructions=prompt.instructions,
             tool_surface=tool_surface,
         )
@@ -185,7 +182,7 @@ class AgentLoop:
                 "output_tokens": completion_metadata.get("output_tokens"),
             },
         )
-        return action, completion_metadata
+        return action
 
     def _provider_high_watermark(self):
         config = self.agent.config
@@ -202,7 +199,6 @@ class AgentLoop:
             instructions=turn.instructions,
             action_tools=turn.tool_surface.action_tools,
             token_counter=agent.prompt.count_tokens,
-            provider_input_tokens=turn.provider_input_tokens,
         )
         if projected_tokens >= self._provider_high_watermark():
             threshold_tokens = self._provider_high_watermark()
@@ -213,7 +209,7 @@ class AgentLoop:
                 "provider_session_reset",
                 {
                     "reason": "context_high_watermark",
-                    "input_tokens": turn.provider_input_tokens,
+                    "input_tokens": agent.model_client.last_completion_metadata.get("input_tokens"),
                     "projected_input_tokens": projected_tokens,
                     "threshold_tokens": threshold_tokens,
                 },

@@ -140,6 +140,15 @@ def main():
         run_outcome = repaired.ask(
             "Replace alpha without losing concurrent edits",
         )
+        context = repaired.tools.context(call_id="teaching_inspection")
+        print_section("ToolContext 的明确依赖", {
+            "mutations": type(context.mutation_service).__name__,
+            "artifacts": type(context.artifact_store).__name__,
+            "command_runner": type(context.command_runner).__name__,
+            "working_state": type(context.working_state).__name__,
+            "execution_context_after_run": context.execution_context,
+            "note": "运行结束后 ExecutionContext 释放；Runner 执行时接收当前上下文",
+        })
         repair_outcomes = outcomes(repaired)
 
         denied_root = root / "denied"

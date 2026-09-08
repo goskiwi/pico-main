@@ -410,19 +410,16 @@ def _projected_context_tokens(
     instructions,
     action_tools,
     token_counter,
-    provider_input_tokens,
-    replay_output_tokens,
+    replay_context_tokens,
 ):
-    if isinstance(provider_input_tokens, int) and isinstance(
-        replay_output_tokens, int
-    ):
+    if isinstance(replay_context_tokens, int):
         delta = json.dumps(
             result_items,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
-        return provider_input_tokens + replay_output_tokens + token_counter(delta)
+        return replay_context_tokens + token_counter(delta)
     projected = {
         "instructions": str(instructions),
         "tools": list(action_tools),
@@ -438,11 +435,12 @@ def _projected_context_tokens(
     )
 
 
-def _replay_output_tokens(turn):
-    if not turn.accepted:
-        return 0
-    output_tokens = turn.usage.get("output_tokens")
-    return output_tokens if isinstance(output_tokens, int) else None
+def _replay_context_tokens(turn):
+    input_tokens = turn.usage.get("input_tokens")
+    output_tokens = turn.usage.get("output_tokens") if turn.accepted else 0
+    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        return input_tokens + output_tokens
+    return None
 
 
 class FakeModelClient:
@@ -461,7 +459,7 @@ class FakeModelClient:
         self.recorded_action_result_groups = []
         self._action_input = []
         self._pending_call_ids = ()
-        self._last_replay_output_tokens = None
+        self._replay_context_tokens = None
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
@@ -473,7 +471,7 @@ class FakeModelClient:
         self.recorded_action_results.extend(group)
         self._action_input.extend(self._result_items(group))
         self._pending_call_ids = ()
-        self._last_replay_output_tokens = None
+        self._replay_context_tokens = None
 
     def _result_items(self, results):
         return _action_result_items(self._pending_call_ids, results)
@@ -485,7 +483,6 @@ class FakeModelClient:
         instructions,
         action_tools,
         token_counter,
-        provider_input_tokens=None,
     ):
         return _projected_context_tokens(
             self._action_input,
@@ -493,8 +490,7 @@ class FakeModelClient:
             instructions=instructions,
             action_tools=action_tools,
             token_counter=token_counter,
-            provider_input_tokens=provider_input_tokens,
-            replay_output_tokens=self._last_replay_output_tokens,
+            replay_context_tokens=self._replay_context_tokens,
         )
 
     def complete(self, prompt, max_new_tokens, **kwargs):
@@ -550,7 +546,7 @@ class FakeModelClient:
         else:
             raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
         self.last_completion_metadata = dict(turn.usage)
-        self._last_replay_output_tokens = _replay_output_tokens(turn)
+        self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
             self._pending_call_ids = turn.pending_call_ids
@@ -875,7 +871,7 @@ class OpenAICompatibleModelClient:
     def reset_action_session(self):
         self._action_input = []
         self._pending_call_ids = ()
-        self._last_replay_output_tokens = None
+        self._replay_context_tokens = None
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
@@ -902,7 +898,7 @@ class OpenAICompatibleModelClient:
     def record_action_results(self, results):
         self._action_input.extend(self._result_items(results))
         self._pending_call_ids = ()
-        self._last_replay_output_tokens = None
+        self._replay_context_tokens = None
 
     def projected_context_tokens(
         self,
@@ -911,7 +907,6 @@ class OpenAICompatibleModelClient:
         instructions,
         action_tools,
         token_counter,
-        provider_input_tokens=None,
     ):
         return _projected_context_tokens(
             self._action_input,
@@ -919,8 +914,7 @@ class OpenAICompatibleModelClient:
             instructions=instructions,
             action_tools=action_tools,
             token_counter=token_counter,
-            provider_input_tokens=provider_input_tokens,
-            replay_output_tokens=self._last_replay_output_tokens,
+            replay_context_tokens=self._replay_context_tokens,
         )
 
     def _build_payload(
@@ -1136,7 +1130,7 @@ class OpenAICompatibleModelClient:
         response_data = self._request_response(payload, execution_context)
         turn = _parse_provider_turn(response_data, action_tools)
         self.last_completion_metadata = dict(turn.usage)
-        self._last_replay_output_tokens = _replay_output_tokens(turn)
+        self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
             self._pending_call_ids = turn.pending_call_ids

@@ -14,7 +14,7 @@ from .execution import (
     ExecutionContext,
     ExecutionDeadlineExceeded,
 )
-from .history import HISTORY_OMITTED, RunHistory
+from .history import HISTORY_OMITTED
 from .prompt_instructions import build_prompt_instructions
 from .verification import ResolvedVerificationPolicy
 from .working_state import WorkingState
@@ -379,7 +379,7 @@ class PromptBuilder:
     def _history(self):
         run_log = self.runtime.run.run_log
         return (
-            RunHistory(run_log.events)
+            run_log.history()
             if run_log is not None
             else None
         )

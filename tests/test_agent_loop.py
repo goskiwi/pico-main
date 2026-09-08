@@ -56,6 +56,68 @@ def test_agent_loop_runs_same_control_flow_as_pico_ask(tmp_path):
     assert outcome["artifact_id"] == ""
 
 
+@pytest.mark.parametrize("mode,original,current,expected", [
+    ("ask", None, None, ()),
+    ("auto", (), None, ()),
+    ("auto", ("a.py",), None, ("a.py",)),
+    ("auto", ("a.py",), ("b.py",), ()),
+    ("auto", None, ("b.py",), ("b.py",)),
+])
+def test_resume_write_scope_cannot_expand(tmp_path, mode, original, current, expected):
+    from pico import TaskContract
+    from pico.run_lifecycle import RunLifecycle
+
+    agent = build_agent(tmp_path, [])
+    agent.config = replace(agent.config, mode=mode, allowed_write_paths=original)
+    RunLifecycle(agent).initialize("Inspect files")
+    contract = agent.run.projection.contract
+    wire = contract.to_dict()
+    assert TaskContract.from_dict(wire) == contract
+    with pytest.raises(ValueError, match="invalid task contract fields"):
+        TaskContract.from_dict({"goal": "old", "allows_workspace_mutation": True,
+                                "allowed_write_paths": None, "verify_changes": False})
+    agent.run.execution_context = None
+    agent.run.run_log = agent.dependencies.run_store.load_run(agent.run.projection.run_id)
+    agent.config = replace(agent.config, mode="auto", allowed_write_paths=current)
+    RunLifecycle(agent).initialize("Continue")
+    assert agent.run.projection.contract == contract
+    assert agent.tools.resolve_surface().allowed_write_paths == expected
+
+
+def test_live_trace_is_printed_before_model_returns_without_file_contents(tmp_path):
+    from io import StringIO
+
+    from pico.cli import build_arg_parser
+    from pico.trace import TracePrinter
+
+    assert build_arg_parser().parse_args(["--trace", "inspect"]).trace
+    assert not build_arg_parser().parse_args(["inspect"]).trace
+    stream = StringIO()
+    agent = build_agent(tmp_path, [])
+    (tmp_path / "README.md").write_text("PRIVATE_FILE_CONTENT\n")
+    agent.dependencies.run_store.trace = TracePrinter(stream)
+
+    class ObservedClient(FakeModelClient):
+        def complete_action(self, *args, **kwargs):
+            assert "requesting" in stream.getvalue()
+            if not self.outputs[0].tool_calls:
+                assert 'read_file "README.md" · success' in stream.getvalue()
+            return super().complete_action(*args, **kwargs)
+
+    agent.model_client = ObservedClient([
+        ModelAction.tool("read_file", {"path": "README.md"}),
+        ModelAction.final("PRIVATE_FINAL_TEXT"),
+    ])
+    outcome = agent.ask("PRIVATE_USER_PROMPT")
+    rendered = stream.getvalue()
+    assert outcome.status == "completed"
+    assert "[Run] completed" in rendered
+    assert "PRIVATE_" not in rendered
+    # Losing the diagnostic stream cannot turn a successful commit into an error.
+    stream.close()
+    agent.dependencies.run_store.trace.write("closed destination")
+
+
 def test_stale_edit_conflict_re_reads_repairs_and_verifies_current_workspace(
     tmp_path,
 ):

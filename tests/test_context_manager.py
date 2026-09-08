@@ -15,7 +15,7 @@ from pico.completion_controller import CompletionController
 from pico.context_manager import ContextBudgetExceeded
 from pico.contracts import ToolCall, ToolOutcome
 from pico.execution import ExecutionCancelled, ExecutionContext
-from pico.history import HISTORY_OMITTED, RunHistory
+from pico.history import HISTORY_OMITTED
 from pico.prompt_builder import (
     AGENTS_MD_MAX_BYTES,
     PromptBuilder,
@@ -23,7 +23,7 @@ from pico.prompt_builder import (
 )
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.task_state import TaskContract
+from pico.task_state import TaskContract, WriteScope
 from pico.tool_runtime import ResolvedToolSurface
 
 
@@ -58,7 +58,7 @@ def test_complete_working_state_is_visible_after_resume(tmp_path):
     assert resumed.run.projection.working.next_steps == ("NEXT_STEP_MUST_SURVIVE",)
 
 READ_TASK = {
-    "allows_workspace_mutation": False,
+    "write_scope": WriteScope("none"),
     "verify_changes": False,
 }
 
@@ -109,11 +109,10 @@ def prompt_for_budget(
 
 def activate(agent, goal="Inspect"):
     contract = TaskContract(
-        goal=goal, allows_workspace_mutation=True, verify_changes=False
+        goal=goal, write_scope=WriteScope("workspace"), verify_changes=False
     )
     run_log = RunLog(
         "run_context",
-        "task_context",
         agent.session.id,
         agent.dependencies.run_store,
     )
@@ -797,7 +796,7 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
     for index in range(5):
         append_read(run_log, index, "result " + "x " * 250)
 
-    first = RunHistory(run_log.events).plan_compaction(
+    first = run_log.history().plan_compaction(
         retain_tokens=100,
         history_token_counter=len,
         summary_builder=lambda _events: "first summary",
@@ -807,7 +806,7 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
     for index in range(5, 10):
         append_read(run_log, index, "later " + "y " * 250)
 
-    second = RunHistory(run_log.events).plan_compaction(
+    second = run_log.history().plan_compaction(
         retain_tokens=100,
         history_token_counter=len,
         summary_builder=lambda _events: "second summary",
@@ -815,7 +814,7 @@ def test_resume_guidance_does_not_block_later_compaction(tmp_path):
 
     assert second is not None
     run_log.append_compaction(second[0], second[1])
-    rebuilt = RunHistory(run_log.events)
+    rebuilt = run_log.history()
     assert rebuilt.latest_user_guidance() == "Keep config.py unchanged"
     assert guidance.event_id in first[1]
 
@@ -878,6 +877,10 @@ def test_pending_runtime_instruction_is_mandatory_until_next_model_action(tmp_pa
 
     assert "runtime_instruction:" not in next_prompt.input_text
     assert agent.run.projection.runtime_feedback is None
+    history, _ = run_log.history().render_projection()
+    assert "Read the current revision" in history
+    restored = agent.dependencies.run_store.load_run(run_log.run_id)
+    assert restored.history().render_projection() == run_log.history().render_projection()
 
 
 def test_semantic_summary_must_fit_with_the_omitted_hint_before_commit(tmp_path):
@@ -950,7 +953,7 @@ def test_committed_summary_is_optional_under_a_smaller_context_budget(tmp_path):
     agent = build_agent(tmp_path)
     run_log = activate(agent)
     append_read(run_log, 0, "observed fact")
-    active = RunHistory(run_log.events).active_events()
+    active = run_log.history().active_events()
     summary = (
         "## Progress\n### Done\n- "
         + "large-summary-fact " * 900
@@ -1115,13 +1118,13 @@ def test_semantic_summary_must_shrink_the_final_history_wire(tmp_path):
         ),
         count_tokens=manager.count_tokens,
     )
-    active = RunHistory(run_log.events).active_events()
-    history = RunHistory(run_log.events)
+    active = run_log.history().active_events()
+    history = run_log.history()
     summary_units = history._projection_units(active)
     source = "\n".join(
         history._render_fact(fact) for unit in summary_units for fact in unit
     )
-    before_wire, _metadata = RunHistory(run_log.events).render_projection()
+    before_wire, _metadata = run_log.history().render_projection()
     summary = ""
     for size in range(1, 2000):
         candidate = (
@@ -1368,7 +1371,7 @@ def test_history_omits_canonical_contract_and_successful_working_update(tmp_path
         )
     )
 
-    history, metadata = RunHistory(run_log.events).render_projection()
+    history, metadata = run_log.history().render_projection()
 
     assert "Canonical goal" not in history
     assert "update_working_state" not in history
@@ -1383,7 +1386,6 @@ def test_live_completion_feedback_matches_rebuilt_prompt(tmp_path):
     state = RunLifecycle(agent).initialize("Repair failing tests")
     turn = ModelTurn(
         ModelAction.final("done"),
-        None,
         "rules",
         agent.tools.resolve_surface(),
     )

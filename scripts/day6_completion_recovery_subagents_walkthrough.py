@@ -23,7 +23,7 @@ from pico.execution import ExecutionContext
 from pico.mutations import file_revision
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunLog
-from pico.task_state import TaskContract
+from pico.task_state import TaskContract, WriteScope
 from pico.verification import capture_changed_path_states
 
 
@@ -60,7 +60,6 @@ def assess_completion(agent, final):
 
 def activate(
     agent,
-    task_id,
     run_id,
     goal,
     *,
@@ -69,13 +68,11 @@ def activate(
 ):
     contract = TaskContract(
         goal=goal,
-        allows_workspace_mutation=True,
+        write_scope=WriteScope.from_policy("auto", allowed_write_paths),
         verify_changes=verify_changes,
-        allowed_write_paths=allowed_write_paths,
     )
     run_log = RunLog(
         run_id,
-        task_id,
         agent.session.id,
         agent.dependencies.run_store,
     )
@@ -128,7 +125,6 @@ def completion_experiment(root):
     )
     activate(
         agent,
-        "task_day6_completion",
         "run_day6_completion",
         "Change value and verify it",
         verify_changes=True,
@@ -320,6 +316,7 @@ def recovery_experiment(root):
         session=loaded_session,
     )
     assert resumed.run.resumable is True
+    original_scope = resumed.run.projection.contract.write_scope
     startup_state = {
         "resumable": resumed.run.resumable,
         "pending_call_ids": list(resumed.run.projection.pending_call_ids),
@@ -360,6 +357,7 @@ def recovery_experiment(root):
     assert len(recovered_results) == len(resumed_events) == 1
     assert len(started_run_events) == 1
     assert run_outcome.status == "completed"
+    assert resumed.run.projection.contract.write_scope == original_scope
     assert len(resumed.run.evidence.verifications) == 1
     assert resumed.run.evidence.verifications[-1]["status"] == "passed"
     assert target.read_text(encoding="utf-8") == "side effect happened\n"
@@ -368,6 +366,8 @@ def recovery_experiment(root):
 
     return {
         "startup_active_run_state": startup_state,
+        "persisted_write_scope": original_scope.to_dict(),
+        "scope_preserved_after_resume": True,
         "automatic_reconciliation": {
             "run_started_count": len(started_run_events),
             "run_resumed_count": len(resumed_events),
@@ -562,7 +562,6 @@ def child_delegation_experiment(root):
     )
     activate(
         parent,
-        "task_day6_children",
         "run_day6_children",
         "Inspect, implement, and explicitly integrate subject.py",
         verify_changes=True,

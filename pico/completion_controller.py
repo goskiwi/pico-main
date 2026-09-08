@@ -170,7 +170,7 @@ class CompletionController:
             )
         evidence = self.runtime.run.evidence
         contract = task.contract
-        if not contract.allows_workspace_mutation and evidence.touched_paths:
+        if contract.write_scope.mode == "none" and evidence.touched_paths:
             return (
                 "ask_mode_violation",
                 "Ask mode produced workspace changes; restore them or reset the Run.",

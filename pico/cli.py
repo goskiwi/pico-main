@@ -19,6 +19,7 @@ from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .run_store import RunStore
 from .runtime import Pico, PicoConfig, SessionStore
+from .trace import TracePrinter
 from .working_state import WorkingState
 from .workspace import Workspace, middle
 
@@ -240,6 +241,10 @@ def build_agent(args):
     return Pico(
         model_client=model,
         workspace=workspace,
+        run_store=RunStore(
+            workspace.root / ".pico" / "runs",
+            trace=TracePrinter(sys.stderr) if args.trace else None,
+        ),
         config=config,
         subagent_model_client_factory=child_model_client_factory,
         approval_handler=_terminal_approval,
@@ -295,6 +300,10 @@ def build_arg_parser():
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    parser.add_argument(
+        "--trace", action="store_true",
+        help="Print live Runtime events to stderr (without prompt or file contents).",
+    )
     parser.add_argument(
         "--model",
         default=None,

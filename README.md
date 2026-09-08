@@ -188,7 +188,17 @@ uv run pytest -q
 uv run ruff check pico applications tests scripts
 ```
 
-精简回归只保留 148 项面试 Core：AgentLoop、Completion、Context/Compaction、Provider
+运行时加 `--trace` 可以在终端实时查看请求、工具、压缩、恢复及验证过程：
+
+```bash
+uv run pico --trace --cwd /path/to/repo "修复测试"
+```
+
+Trace 写入 stderr 并立即刷新，默认关闭；不展开 Prompt、文件正文或最终回答。
+并行工具结果按 RunLog 提交顺序显示，不代表工作线程的实际结束顺序。
+恢复会话时只打印本次新增事件。Trace 不写入第二份持久化状态。
+
+精简回归只保留 155 项面试 Core：AgentLoop、Completion、Context/Compaction、Provider
 传输与协议、RunLog/Projection，以及路径安全。CLI 包装、评测脚本、自动 Git 交付、Child
 附录和重复生产边界矩阵不再维护独立测试；Day 1–7 与保留的真实 LLM 报告用于演示这些外围路径。
 外部仓库题库、Docker 判分、成绩统计及旧审查复现脚本已移除。

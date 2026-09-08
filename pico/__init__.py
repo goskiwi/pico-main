@@ -3,7 +3,7 @@ from .providers.clients import FakeModelClient, OpenAICompatibleModelClient
 from .run_projection import RunOutcome
 from .runtime import Pico, PicoConfig, SessionStore
 from .session_store import Session
-from .task_state import TaskContract
+from .task_state import TaskContract, WriteScope
 from .tool_runtime import ToolRuntime
 from .working_state import WorkingState
 from .workspace import Workspace
@@ -23,4 +23,5 @@ __all__ = [
     "ToolRuntime",
     "WorkingState",
     "Workspace",
+    "WriteScope",
 ]
