@@ -74,10 +74,12 @@ def resolve_verification_command(repo_root, explicit_command):
     return explicit or detect_verification_command(repo_root)
 
 
-def _terminal_approval(name, args):
+def _terminal_approval(name, args, plan):
+    request = {"arguments": args, "targets": [str(target) for _path, target in plan.paths],
+               "operation": plan.operation}
     try:
         answer = input(
-            f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
+            f"approve {name} {json.dumps(request, ensure_ascii=True)}? [y/N] "
         )
     except EOFError:
         return False
@@ -277,6 +279,9 @@ def _outcome_summary(agent, outcome):
     ]
     if outcome.status != "completed" and outcome.stop_reason:
         lines.insert(1, f"Stop reason: {outcome.stop_reason}")
+    if outcome.final_diff and outcome.final_diff.external_paths:
+        lines.append("Diff includes observed external changes (not solely Agent-authored): "
+                     + ", ".join(outcome.final_diff.external_paths))
     return "\n".join(lines)
 
 

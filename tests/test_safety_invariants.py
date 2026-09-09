@@ -1,5 +1,8 @@
+import subprocess
+
 import pytest
 from pathlib import Path
+from dataclasses import replace
 
 from pico import FakeModelClient, Pico, PicoConfig, SessionStore, Workspace
 from pico.contracts import ToolCall
@@ -113,6 +116,43 @@ def test_edit_commit_recheck_preserves_external_save(tmp_path, monkeypatch):
     assert target.read_text() == "external update"
 
 
+@pytest.mark.parametrize("tool_name", ["edit_file", "write_file"])
+def test_changed_mutation_target_does_not_claim_external_effect(tmp_path, monkeypatch, tool_name):
+    from pico.delivery import build_final_diff
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    external = tmp_path / "external.txt"
+    external.write_text("external update")
+    if tool_name == "edit_file":
+        target.write_text("before")
+        call = edit_call("subject.txt", file_revision(target))
+    else:
+        call = ToolCall("write_file", {"path": "subject.txt", "content": "after"}, "write")
+    tool = agent.tools.registry[tool_name]
+    runner = tool["run"]
+
+    def external_swap(*args, **kwargs):
+        assert any(event.kind == "tool_started" for event in agent.run.run_log.events)
+        target.unlink(missing_ok=True)
+        target.symlink_to(external)
+        return runner(*args, **kwargs)
+
+    monkeypatch.setitem(tool, "run", external_swap)
+    outcome = run_active(agent, call)
+
+    assert outcome.failure.code == "mutation_target_changed"
+    assert outcome.side_effect_state == "none"
+    assert outcome.affected_paths == ()
+    assert agent.run.evidence.effects == []
+    assert not build_final_diff(agent).artifact_id
+    replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    assert replayed.evidence.effects == []
+    assert target.is_symlink()
+    assert external.read_text() == "external update"
+
+
 def test_edit_after_write_without_result_can_be_reconciled(tmp_path, monkeypatch):
     from pico.mutations import file_revision
     from pico.run_lifecycle import RunLifecycle
@@ -147,6 +187,204 @@ def test_failed_child_has_one_error_source_and_replays(tmp_path):
     replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
     child = replayed.children.record(outcome.structured["child_id"])
     assert child.result.error == outcome.failure.detail
+
+
+def test_scope_is_checked_before_approval_and_plan_is_created_once(tmp_path):
+    approvals, plans = [], []
+    agent = build_agent(tmp_path, approval_handler=lambda *args: approvals.append(args) or True)
+    agent.config = replace(agent.config, mode="code", allowed_write_paths=("allowed.txt",))
+    planner = agent.tools.registry["write_file"]["plan"]
+    def counted(*args):
+        plan = planner(*args)
+        plans.append(plan)
+        return plan
+    agent.tools.registry["write_file"]["plan"] = counted
+    denied = run_active(agent, ToolCall("write_file", {"path": "forbidden.txt", "content": "no"}, "deny"))
+    assert denied.failure.code == "write_scope_denied"
+    assert not approvals
+    allowed = run_active(agent, ToolCall("write_file", {"path": "allowed.txt", "content": "yes"}, "allow"))
+    assert allowed.status == "success"
+    assert len(plans) == 2  # Once per call, not again after approval.
+    assert approvals[0][2].paths == (("allowed.txt", tmp_path / "allowed.txt"),)
+    assert (tmp_path / "allowed.txt").read_text() == "yes"
+    assert not (tmp_path / "forbidden.txt").exists()
+
+
+@pytest.mark.parametrize("change", ["target", "permission"])
+def test_approval_rechecks_targets_and_permissions(tmp_path, change):
+    from pico.mutations import file_revision
+
+    a, b, alias = (tmp_path / name for name in ("a.txt", "b.txt", "alias.txt"))
+    a.write_text("before")
+    b.write_text("before")
+    alias.symlink_to(a)
+    def approve(name, args, plan):
+        assert plan.paths == (("a.txt", a),)
+        if change == "target":
+            alias.unlink()
+            alias.symlink_to(b)
+        else:
+            agent.config = replace(agent.config, allowed_write_paths=())
+        return True
+    agent = build_agent(tmp_path, approval_handler=approve)
+    agent.config = replace(agent.config, mode="code", allowed_write_paths=("a.txt", "b.txt"))
+    outcome = run_active(agent, edit_call("alias.txt", file_revision(a)))
+    assert outcome.failure.code == "approval_context_changed"
+    assert outcome.execution_state == "not_started"
+    assert a.read_text() == b.read_text() == "before"
+
+
+@pytest.mark.parametrize("change_during_approval", [False, True])
+def test_child_approval_compares_normalized_verification_command(tmp_path, change_during_approval):
+    from pico import ModelAction
+    from pico.run_lifecycle import RunLifecycle
+
+    approvals = []
+
+    def approve(name, args, plan):
+        approvals.append(name)
+        assert plan.operation["verification_command"] == "true"
+        if change_during_approval:
+            agent.config = replace(agent.config, verification_command=" false ")
+        return True
+
+    agent = build_agent(
+        tmp_path,
+        approval_handler=approve,
+        subagent_model_client_factory=lambda _spec: FakeModelClient([
+            ModelAction.tool("write_file", {"path": "added.txt", "content": "added\n"}),
+            ModelAction.final("Added file."),
+        ]),
+    )
+    (tmp_path / ".gitignore").write_text(".pico/\n")
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
+
+    git("init", "-q")
+    git("add", "README.md", ".gitignore")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture")
+    agent.config = replace(agent.config, mode="code", verification_command=" true ")
+    RunLifecycle(agent).initialize("Add file via Child")
+    child = run_active(agent, ToolCall("delegate", {
+        "role": "implement", "task": "Create added.txt", "allowed_write_paths": ["added.txt"],
+    }, "delegate"))
+    assert child.status == "success", child.failure
+    result = run_active(agent, ToolCall("integrate_child", {"child_id": child.structured["child_id"]}, "integrate"))
+    assert approvals == ["integrate_child"]
+    if change_during_approval:
+        assert result.failure.code == "approval_context_changed"
+        assert result.execution_state == "not_started"
+        assert not (tmp_path / "added.txt").exists()
+    else:
+        assert result.status == "success", result.failure
+        assert (tmp_path / "added.txt").read_text() == "added\n"
+
+
+def test_external_edit_is_observed_without_claiming_agent_effect_and_can_continue(tmp_path):
+    from pico.mutations import file_revision
+    from pico.run_lifecycle import RunLifecycle
+    from pico.completion_controller import CompletionController
+    from pico.delivery import build_final_diff
+    from pico.run_projection import RunOutcome
+
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, verification_command="true")
+    lifecycle = RunLifecycle(agent)
+    lifecycle.initialize("Edit subject and preserve user changes")
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    assert run_active(agent, edit_call("subject.txt", file_revision(target))).status == "success"
+    controller = CompletionController(agent)
+    policy = controller.resolve_verification_policy()
+    lifecycle.run_completion_verification(policy)
+    assert controller.assess_verification("done", policy).allowed
+    old_verification = agent.run.evidence.verifications[-1]
+    target.write_text("after\nexternal addition\n")
+    blocked = run_active(agent, ToolCall("edit_file", {"path": "subject.txt", "old_text": "after", "new_text": "final",
+                         "expected_revision": file_revision(target)}, "before_read"))
+    assert blocked.failure.code == "workspace_drift"
+    assert blocked.failure.recovery == "retry_after_change"
+    assert "read_file" in controller.assess("done", policy).instruction
+    count = len(agent.run.evidence.effects)
+    observed = run_active(agent, ToolCall("read_file", {"path": "subject.txt"}, "observe_external"))
+    assert observed.structured["external_change_observed"] is True
+    assert len(agent.run.evidence.effects) == count
+    assert len(agent.run.evidence.external_changes) == 1
+    assert agent.run.evidence.last_workspace_mutation_sequence > old_verification["finished_workspace_mutation_sequence"]
+    assert not controller.assess_verification("done", policy).allowed
+    next_call = ToolCall("edit_file", {"path": "subject.txt", "old_text": "after", "new_text": "final",
+                         "expected_revision": observed.structured["revision"]}, "after_read")
+    assert run_active(agent, next_call).status == "success"
+    assert target.read_text() == "final\nexternal addition\n"
+    lifecycle.run_completion_verification(policy)
+    assert controller.assess_verification("done", policy).allowed
+    diff = build_final_diff(agent)
+    assert diff.external_paths == ("subject.txt",)
+    _, data = agent.dependencies.artifacts.read_internal(agent.run.projection.run_id, diff.artifact_id)
+    assert "not solely Agent-authored" in data.decode()
+    assert "+external addition" in data.decode()
+    with pytest.raises(ValueError, match="external changes"):
+        agent.run.run_log.append_final("misattributed", replace(diff, external_paths=()))
+    agent.run.run_log.append_final("done", diff)
+    replayed = agent.dependencies.run_store.replay(agent.run.projection.run_id)
+    assert replayed.evidence.external_changes == agent.run.evidence.external_changes
+    assert RunOutcome(replayed).final_diff.external_paths == ("subject.txt",)
+
+
+def test_external_deletion_can_be_acknowledged_then_recreated(tmp_path):
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    target = tmp_path / "subject.txt"
+    target.write_text("before")
+    run_active(agent, edit_call("subject.txt", file_revision(target)))
+    target.unlink()
+    missing = run_active(agent, ToolCall("read_file", {"path": "subject.txt"}, "missing"))
+    assert missing.failure.code == "missing_path"
+    assert missing.structured["external_change_observed"]
+    recreated = run_active(agent, ToolCall("write_file", {"path": "subject.txt", "content": "new"}, "recreate"))
+    assert recreated.status == "success"
+    assert agent.run.evidence.external_changes[0]["after_state"] == "absent"
+
+
+@pytest.mark.parametrize("redirect_parent", [False, True])
+def test_redirected_tracked_path_requires_restoring_target(tmp_path, redirect_parent):
+    from pico.completion_controller import CompletionController
+    from pico.mutations import file_revision
+
+    agent = build_agent(tmp_path)
+    tracked, other = tmp_path / "tracked", tmp_path / "other"
+    tracked.mkdir()
+    other.mkdir()
+    target = tracked / "subject.txt"
+    external = other / "subject.txt"
+    target.write_text("before")
+    external.write_text("external update")
+    assert run_active(agent, edit_call("tracked/subject.txt", file_revision(target))).status == "success"
+    original_revision = file_revision(target)
+    redirected = tracked if redirect_parent else target
+    backup = tmp_path / "original"
+    redirected.rename(backup)
+    redirected.symlink_to(other if redirect_parent else external, target_is_directory=redirect_parent)
+
+    observed = run_active(agent, ToolCall("read_file", {"path": "tracked/subject.txt"}, "read_redirected"))
+    assert observed.status == "success"
+    assert observed.structured["path"] == "other/subject.txt"
+    assert agent.run.evidence.change_set.files["tracked/subject.txt"].current_after_state == original_revision
+    assert agent.run.evidence.external_changes == []
+    controller = CompletionController(agent)
+    policy = controller.resolve_verification_policy()
+    assessment = controller.assess("done", policy)
+    assert assessment.status == "workspace_drift"
+    assert "Ask the user" in assessment.instruction
+    assert "read_file" not in assessment.instruction
+    assert assessment.evidence == "tracked/subject.txt"
+
+    redirected.unlink()
+    backup.rename(redirected)
+    assert controller.assess("done", policy).allowed
+    assert external.read_text() == "external update"
 
 
 def test_workspace_and_symlink_escape_are_rejected(tmp_path):

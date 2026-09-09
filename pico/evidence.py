@@ -241,6 +241,7 @@ class RunEvidence:
     effects: list[dict] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
     change_set: RunChangeSet = field(default_factory=RunChangeSet)
+    external_changes: list[dict] = field(default_factory=list)
 
     def apply_event(self, event):
         if event.kind == "verification_result":
@@ -260,6 +261,16 @@ class RunEvidence:
         if event.kind != "tool_result":
             return self
         outcome = dict(event.payload.get("outcome", {}) or {})
+        if outcome.get("tool_name") == "read_file":
+            observed = outcome.get("structured", {})
+            path, revision = observed.get("path"), observed.get("revision")
+            missing = (outcome.get("failure") or {}).get("code") == "missing_path"
+            known = self.change_set.files.get(path)
+            if known is not None and revision and (outcome.get("status") == "success" or (missing and revision == ABSENT_REVISION)):
+                if revision != known.current_after_state:
+                    self.external_changes.append({"path": path, "before_state": known.current_after_state,
+                                                  "after_state": revision, "event_sequence": event.sequence})
+                    known.current_after_state = revision
         if str(outcome.get("tool_name", "")) in OBSERVATION_TOOLS:
             self.observations.append(_observation_from_event(event, outcome))
         if str(outcome.get("side_effect_state", "none")) != "none":
@@ -290,11 +301,11 @@ class RunEvidence:
     @property
     def last_workspace_mutation_sequence(self):
         return max(
-            (
+            [
                 int(item["event_sequence"])
                 for item in self.effects
                 if item["effect_scope"] in WORKSPACE_SCOPES
-            ),
+            ] + [int(item["event_sequence"]) for item in self.external_changes],
             default=0,
         )
 
@@ -356,4 +367,5 @@ class RunEvidence:
             ],
             "change_set": self.change_set.to_dict(),
             "verifications": [dict(item) for item in self.verifications],
+            "external_changes": [dict(item) for item in self.external_changes],
         }

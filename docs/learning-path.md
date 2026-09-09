@@ -203,6 +203,11 @@ WorkingState 是可选的模型任务笔记，按规划、需求变化、证据�
 
 ### Day 4：ToolRuntime 与一次安全 Edit
 
+新增协作路径：Agent 修改后用户再次保存，必须先 `read_file` 确认当前版本，才继续编辑。
+该读取事件驱动 `external_changes`，与 Agent 的 effects 分开；历史验证失效，Final Diff
+明确可能包含外部贡献。修改计划先生成，再统一检查范围和审批；审批后复验目标与权限，
+Runner 不再自行从原始参数选择另一个目标。Child 身份与多文件验证规则仍保留。
+
 失败说明看 `failure.detail`，后续条件看 `failure.recovery`，实际工具输出看 `content`。
 纯拒绝和恢复产生的失败不再复制错误正文到 `content`；模型输出也不再包含
 `correction_action`。`operation_not_started` 要求重新评估后发起新调用，而不是等待旧调用。

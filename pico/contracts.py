@@ -346,7 +346,7 @@ class ToolOutcome:
                 "expected_revision", "actual_revision", "start_line", "end_line",
                 "total_lines", "offset", "end_offset", "next_offset", "total_bytes",
                 "has_more", "truncated", "artifact_id", "exit_code", "stop_reason",
-                "output_limited", "child_id", "child_run_id", "role", "status",
+                "output_limited", "child_id", "child_run_id", "role", "status", "external_change_observed",
             }
             payload["structured"] = {
                 key: value for key, value in payload.get("structured", {}).items()

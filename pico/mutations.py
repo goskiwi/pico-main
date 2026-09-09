@@ -239,6 +239,12 @@ class WorkspaceMutationService:
 
     def _target(self, path):
         target = Path(path).resolve()
+        if target != Path(path):
+            raise ToolFailureError(
+                "mutation_target_changed",
+                "prepared mutation target changed; resolve and authorize again",
+                recovery="retry_after_change",
+            )
         if os.path.commonpath([str(self.root), str(target)]) != str(self.root):
             raise ValueError(f"path escapes workspace: {path}")
         return target

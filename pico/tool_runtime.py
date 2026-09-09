@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from contextlib import ExitStack
 from functools import partial
 from io import BytesIO
@@ -242,31 +243,12 @@ class ToolRuntime:
         allowed = set(allowed_tools)
         return {name: tool for name, tool in tools.items() if name in allowed}
 
-    def _validate_args(self, name, args, tool, context, policy):
-        runtime = self.runtime
+    def _validate_args(self, name, args, tool, context):
         validated = tool["args_schema"].model_validate(args or {}).model_dump()
+        context.execution_plan = self._plan_execution(tool, context, validated)
         validator = tool.get("validate")
         if validator is not None:
             validated = validator(context, validated)
-        allowed_paths = policy[1]
-        if name in {"write_file", "edit_file"} and allowed_paths is not None:
-            target = runtime.workspace.resolve_tool_path(validated["path"])
-            relative = target.relative_to(runtime.workspace.root).as_posix()
-            self._require_write_scope((relative,), allowed_paths)
-        if (
-            name == "delegate"
-            and validated.get("role") == "implement"
-            and allowed_paths is not None
-        ):
-            self._require_write_scope(validated["allowed_write_paths"], allowed_paths)
-        if name == "integrate_child" and allowed_paths is not None:
-            record = runtime.run.projection.children.record(
-                validated["child_id"]
-            )
-            patch = record.completed().patch
-            self._require_write_scope(
-                (() if patch is None else patch.changed_paths), allowed_paths
-            )
         return validated
 
     def _effective_policy(self):
@@ -280,6 +262,8 @@ class ToolRuntime:
             contract.write_scope.allowed_paths() if contract is not None else None,
             self.runtime.config.allowed_write_paths,
         )
+        if paths == ():
+            mode = "ask"
         return mode, (() if mode == "ask" else paths)
 
     @staticmethod
@@ -480,10 +464,10 @@ class ToolRuntime:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    def _validate_call(self, call, tool, context, policy, *, record=True):
+    def _validate_call(self, call, tool, context, *, record=True):
         try:
             args = self._validate_args(
-                call.name, call.args, tool, context, policy
+                call.name, call.args, tool, context
             )
         except ToolFailureError as exc:
             return None, self._rejected(
@@ -539,7 +523,7 @@ class ToolRuntime:
         )
         context = self.context(call_id=call.call_id, execution_context=execution)
         call, rejection = self._validate_call(
-            call, tool, context, surface.policy, record=False
+            call, tool, context, record=False
         )
         if rejection is not None:
             return rejection
@@ -834,14 +818,19 @@ class ToolRuntime:
             call, self.resolve_surface( manual=True),
         )
 
-    def _approval_failure(self, name, args, surface):
+    def _check_plan_scope(self, call, plan, allowed_paths):
+        self._require_write_scope((path for path, _target in plan.paths), allowed_paths)
+        if call.name == "delegate" and call.args.get("role") == "implement":
+            self._require_write_scope(call.args["allowed_write_paths"], allowed_paths)
+
+    def _approval_failure(self, name, args, surface, plan):
         if surface.mode == "auto":
             return None
         handler = self.runtime.dependencies.approval_handler
         if handler is None:
             return FailureInfo("approval_denied", "approval denied", "no_retry")
         try:
-            approved = bool(handler(name, dict(args)))
+            approved = bool(handler(name, deepcopy(args), deepcopy(plan)))
         except Exception as exc:  # noqa: BLE001 - host approval boundary
             return FailureInfo(
                 "approval_failed",
@@ -867,8 +856,8 @@ class ToolRuntime:
                 drift = tracked_workspace_drift(before, plan.effect_scope, agent.run.evidence.change_set.files)
                 if drift:
                     return self._rejected(
-                        call, "workspace_drift", f"workspace changed outside this Run: {logical}",
-                        "user_action_required", structured={"drift": list(drift)},
+                        call, "workspace_drift", f"workspace changed outside this Run; read_file before continuing: {logical}",
+                        "retry_after_change", structured={"drift": list(drift)},
                     )
                 descriptor = agent.dependencies.artifacts.write_workspace_preimage(
                     _run_id(agent), call.call_id, logical, BytesIO(raw),
@@ -924,33 +913,41 @@ class ToolRuntime:
         workspace_mutating = bool(tool.get("workspace_mutating", False))
         context = self.context(call_id=call.call_id)
         call, validation_rejection = self._validate_call(
-            call, tool, context, surface.policy
+            call, tool, context
         )
         if validation_rejection is not None:
             return validation_rejection
         args = call.args
-        if tool["risky"]:
-            failure = self._approval_failure(name, args, surface)
-            if failure is not None:
-                return self._rejected(
-                    call,
-                    failure.code,
-                    failure.detail,
-                    failure.recovery,
-                )
-
+        plan = context.execution_plan
         try:
-            plan = self._plan_execution(tool, context, args)
+            self._check_plan_scope(call, plan, surface.allowed_write_paths)
+        except ValueError as exc:
+            return self._rejected(call, "write_scope_denied", str(exc))
+        if tool["risky"]:
+            failure = self._approval_failure(name, args, surface, plan)
+            if failure is not None:
+                return self._rejected(call, failure.code, failure.detail, failure.recovery)
+            if surface.mode != "auto":
+                try:
+                    current = self.resolve_surface()
+                    if name not in current.definitions:
+                        raise ValueError("tool permission changed during approval")
+                    self._check_plan_scope(call, plan, current.allowed_write_paths)
+                    for logical, target in plan.paths:
+                        source = args["path"] if name in {"write_file", "edit_file"} else logical
+                        if agent.workspace.resolve_tool_path(source) != target:
+                            raise ValueError("approved target changed; request approval again")
+                    if name == "integrate_child":
+                        agent.run.projection.children.record(args["child_id"]).completed()
+                        if plan.operation["verification_command"] != str(agent.config.verification_command or "").strip():
+                            raise ValueError("verification command changed during approval")
+                except ValueError as exc:
+                    return self._rejected(call, "approval_context_changed", str(exc), "retry_after_change")
+        try:
             potential_scope, potential_paths = plan.effect_scope, plan.paths
-            self._require_write_scope(
-                (logical for logical, _path in potential_paths),
-                surface.allowed_write_paths,
-            )
             effects_before = {} if name == "edit_file" else self._effect_snapshot(agent, potential_paths)
-        except Exception as exc:  # noqa: BLE001 - fail before side effect
-            return self._rejected(
-                call, "effect_planning_failed", str(exc), "retry_after_change"
-            )
+        except Exception as exc:
+            return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
         if name == "edit_file":
             return self._execute_edit(call, tool, context, plan)
         drift = tracked_workspace_drift(
@@ -963,8 +960,8 @@ class ToolRuntime:
             return self._rejected(
                 call,
                 "workspace_drift",
-                f"workspace changed outside this Run after its last mutation: {paths}",
-                "user_action_required",
+                f"workspace changed outside this Run; read_file before continuing: {paths}",
+                "retry_after_change",
                 structured={"drift": list(drift)},
             )
         try:
@@ -1131,6 +1128,12 @@ class ToolRuntime:
 
     def prepare_outcome(self, outcome):
         """Prepare executed and recovered facts through the same output boundary."""
+        if outcome.tool_name == "read_file":
+            observed = outcome.structured
+            known = self.runtime.run.evidence.change_set.files.get(observed.get("path"))
+            if known is not None and observed.get("revision") and observed["revision"] != known.current_after_state:
+                if outcome.status == "success" or (outcome.failure and outcome.failure.code == "missing_path"):
+                    outcome = replace(outcome, structured={**observed, "external_change_observed": True})
         failure = outcome.failure
         if failure is not None:
             failure = replace(failure, detail=self.runtime.redact_text(failure.detail))

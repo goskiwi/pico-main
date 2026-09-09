@@ -17,6 +17,7 @@ from .runtime_state import ActiveRunState
 from .task_state import TaskContract, WriteScope
 
 if TYPE_CHECKING:
+    from .tool_runtime import ResolvedToolSurface
     from .prompt_builder import ModelPrompt
     from .runtime import Pico
 
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 class AgentLoopState:
     user_message: str
     run_started_at: float
-    prompt_snapshot: tuple[ModelPrompt, tuple[str, ...]] | None = None
+    prompt_snapshot: tuple[ModelPrompt, ResolvedToolSurface] | None = None
     provider_context_tokens: int | None = None
     overflow_recovery_attempted: bool = False
     last_request_input_tokens: int = 0

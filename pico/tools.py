@@ -159,10 +159,11 @@ def _validate_list_files(context, args, *, path_resolver):
     return args
 
 
-def _validate_read_file(context, args, *, path_resolver):
+def _validate_read_file(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args["path"])
     if not path.exists():
-        raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
+        raise ToolFailureError("missing_path", f"path does not exist: {args['path']}",
+                               structured={"path": path.relative_to(workspace_root).as_posix(), "revision": "absent"})
     if not path.is_file():
         raise ToolFailureError("invalid_path_type", "path is not a file")
     if int(args.get("end_line", 200)) < int(args.get("start_line", 1)):
@@ -197,8 +198,8 @@ def _require_mutation_service(mutation_service):
         raise ValueError("workspace mutation service is unavailable")
 
 
-def _validate_write_file(context, args, *, mutation_service, path_resolver, workspace_root):
-    path = path_resolver(args["path"])
+def _validate_write_file(context, args, *, mutation_service, workspace_root):
+    _logical, path = context.execution_plan.paths[0]
     if path.exists():
         if path.is_dir():
             raise ToolFailureError("invalid_path_type", "path is a directory")
@@ -214,10 +215,10 @@ def _validate_write_file(context, args, *, mutation_service, path_resolver, work
     return args
 
 
-def _validate_edit_file(context, args, *, mutation_service, path_resolver):
+def _validate_edit_file(context, args, *, mutation_service):
     # Edit admission is intentionally strict so the later mutation is
     # deterministic and revision-bound.
-    path = path_resolver(args["path"])
+    _logical, path = context.execution_plan.paths[0]
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
     if not path.is_file():
@@ -486,8 +487,8 @@ def tool_search(context, args, *, path_resolver, workspace_root):
     return _bounded_rg_search(workspace_root, relative_path, pattern, executable, context.execution_context)
 
 
-def tool_write_file(context, args, *, mutation_service, path_resolver, workspace_root):
-    path = path_resolver(args["path"])
+def tool_write_file(context, args, *, mutation_service, workspace_root):
+    _logical, path = context.execution_plan.paths[0]
     content = str(args["content"])
     receipt = mutation_service.write(path, content)
     relative = path.relative_to(workspace_root).as_posix()
@@ -501,8 +502,8 @@ def tool_write_file(context, args, *, mutation_service, path_resolver, workspace
     )
 
 
-def tool_edit_file(context, args, *, mutation_service, path_resolver, workspace_root, original):
-    path = path_resolver(args["path"])
+def tool_edit_file(context, args, *, mutation_service, workspace_root, original):
+    _logical, path = context.execution_plan.paths[0]
     old_text = str(args.get("old_text", ""))
     receipt = mutation_service.edit(
         path, old_text, str(args["new_text"]), args["expected_revision"], original=original
@@ -633,7 +634,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "manual_observation": True,
             "concurrency": "parallel",
             "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
-            "validate": partial(_validate_read_file, path_resolver=path_resolver),
+            "validate": partial(_validate_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
             "run": partial(tool_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "read_artifact": {
@@ -668,8 +669,8 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "workspace_mutating": True,
             "state_mutating": True,
             "description": "Create a new UTF-8 text file. The target must not already exist; read and use edit_file for every change to an existing file.",
-            "validate": partial(_validate_write_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
-            "run": partial(tool_write_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
+            "validate": partial(_validate_write_file, mutation_service=mutation_service, workspace_root=workspace_root),
+            "run": partial(tool_write_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "edit_file": {
@@ -678,8 +679,8 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "workspace_mutating": True,
             "state_mutating": True,
             "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's line-number prefixes. Use the revision from the read or successful edit result metadata.",
-            "validate": partial(_validate_edit_file, mutation_service=mutation_service, path_resolver=path_resolver),
-            "run": partial(tool_edit_file, mutation_service=mutation_service, path_resolver=path_resolver, workspace_root=workspace_root),
+            "validate": partial(_validate_edit_file, mutation_service=mutation_service),
+            "run": partial(tool_edit_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
         },
         "update_working_state": {

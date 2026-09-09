@@ -15,6 +15,7 @@ from .repo_map import RepoMap
 from .run_store import RunStore
 
 if TYPE_CHECKING:
+    from .contracts import ToolExecutionPlan
     from .subagents.runner import SubagentRunner
 
 
@@ -29,4 +30,4 @@ class RuntimeDependencies:
     subagents: SubagentRunner | None = None
     parent_execution_context: ExecutionContext | None = None
     check_runner: Callable[..., CommandResult] | None = None
-    approval_handler: Callable[[str, dict], bool] | None = None
+    approval_handler: Callable[[str, dict, "ToolExecutionPlan"], bool] | None = None

@@ -145,17 +145,28 @@ class CompletionController:
         )
 
     def _workspace_drift_blocker(self):
-        drift = self.runtime.run.evidence.change_set.workspace_drift(
-            self.runtime.workspace.root
-        )
+        root = self.runtime.workspace.root
+        drift = self.runtime.run.evidence.change_set.workspace_drift(root)
         if not drift:
             return None
+        redirected = [
+            item["path"] for item in drift
+            if (root / item["path"]).resolve() != root / item["path"]
+        ]
+        if redirected:
+            return (
+                "workspace_drift",
+                "Ask the user to restore the original file targets for these paths "
+                "while preserving external edits. Reading redirected paths cannot "
+                "acknowledge this drift.",
+                ", ".join(redirected),
+            )
         paths = ", ".join(item["path"] for item in drift)
         return (
             "workspace_drift",
             (
-                "Restore the Runtime-projected workspace state or reset the Run "
-                "before submitting completion."
+                "Read the changed files with read_file to observe their current versions, "
+                "preserve external edits, then continue and verify before submitting."
             ),
             paths,
         )

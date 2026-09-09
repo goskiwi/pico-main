@@ -126,8 +126,8 @@ class AgentLoop:
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
         if loop_state.prompt_snapshot is not None:
-            _prompt, prior_names = loop_state.prompt_snapshot
-            if prior_names != tool_surface.names:
+            _prompt, prior_surface = loop_state.prompt_snapshot
+            if prior_surface.names != tool_surface.names or prior_surface.policy != tool_surface.policy:
                 agent.model_client.reset_action_session()
                 loop_state.prompt_snapshot = None
                 loop_state.provider_context_tokens = None
@@ -151,9 +151,9 @@ class AgentLoop:
                 history_override=history_override,
             )
             loop_state.provider_context_tokens = None
-            loop_state.prompt_snapshot = (prompt, tool_surface.names)
+            loop_state.prompt_snapshot = (prompt, tool_surface)
         else:
-            prompt, _names = loop_state.prompt_snapshot
+            prompt, _surface = loop_state.prompt_snapshot
         return prompt
 
     def _request_action(

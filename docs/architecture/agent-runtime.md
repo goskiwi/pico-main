@@ -406,7 +406,11 @@ edits or decide completion.
 
 Completion returns `CompletionDecision(status, instruction, evidence)`: `allowed` carries the final
 answer in `instruction`; a blocker carries repair guidance and untrusted evidence. A successful terminal event requires
-`FinalDiff(artifact_id, size_bytes)`, including an empty receipt for a confirmed zero-change result.
+`FinalDiff(artifact_id, size_bytes, external_paths)`, including an empty receipt for a confirmed
+zero-change result. Successful reads (or confirmed missing-file reads) of tracked paths record
+observed external version changes separately from Agent effects and advance the current workspace
+state, invalidating earlier verification. The final tracked-file workspace delta explicitly labels
+observed external contributions in both its receipt and artifact; it is not a per-line authorship claim.
 A stopped event may omit `final_diff`; its RunOutcome then exposes `None` rather than an error
 string embedded inside an artifact descriptor.
 
@@ -477,7 +481,11 @@ second subprocess implementation. Resource removal uses a separate short settlem
 cancellation. Explore and Implement Children also have smaller Agent/Tool ceilings. Each mutation
 stores its transaction preimage and each Run path retains its initial preimage, so `A -> B -> A` is
 touched but not a net change; successful settlement persists the actual final Unified Diff Artifact.
-External drift blocks successful completion. A user cancellation or reset can still terminalize
+Unobserved external drift blocks successful completion. For ordinary content changes, reading the
+affected file acknowledges its current version, after which edits may continue under the same
+permissions and current-state verification rules. A tracked path redirected through a symlink
+requires the user to restore its original target; reading the new target does not acknowledge the
+original path's drift. A user cancellation or reset can still terminalize
 safely, but a stopped receipt omits `final_diff` when no trustworthy Diff can be produced. Every
 submission requiring verification executes the verifier anew, including after Resume. Historical
 verification records never replace that execution. Command identity, mutation sequence and

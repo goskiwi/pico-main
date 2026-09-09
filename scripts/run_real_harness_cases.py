@@ -270,7 +270,7 @@ def run_approval(args, runtime, workspace):
         allowed_paths=("requested.txt",),
     )
 
-    def deny(name, tool_args):
+    def deny(name, tool_args, plan):
         approvals.append({"name": name, "args": dict(tool_args)})
         return False
 

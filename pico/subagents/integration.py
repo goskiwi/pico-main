@@ -352,14 +352,16 @@ class PatchIntegrator:
                     return confirmed.structured
         return None
 
-    def _publish(self, tree, paths, before):
+    def _publish(self, tree, paths, before, targets):
         mutations = self.parent.dependencies.mutations
         with mutations._lock:
             for path in paths:
-                target = self.parent.workspace.resolve_tool_path(path)
+                target = targets[path]
+                if self.parent.workspace.resolve_tool_path(path) != target:
+                    raise ValueError("approved integration target changed")
                 mutations._require_revision(target, path, before[path])
             for path in paths:
-                target = self.parent.workspace.resolve_tool_path(path)
+                target = targets[path]
                 data, _mode = self._file_data(tree.path / path)
                 if data is None:
                     mutations._require_revision(target, path, before[path])
@@ -385,7 +387,10 @@ class PatchIntegrator:
             return confirmed
         patch = self._verified_patch(self.parent.run.projection.run_id, record)
         changes = self._parent_changes(record)
-        before = {path: file_revision(self.parent.workspace.resolve_tool_path(path)) for path in receipt.changed_paths}
+        targets = dict(plan.paths)
+        if set(targets) != set(receipt.changed_paths):
+            raise ValueError("integration targets differ from the approved plan")
+        before = {path: file_revision(target) for path, target in targets.items()}
         for call in self.parent.run.run_log.pending_tool_calls():
             if call.name == "integrate_child" and call.args.get("child_id") == child_id:
                 started = self.parent.run.run_log.pending_tool_starts().get(call.call_id)
@@ -408,6 +413,6 @@ class PatchIntegrator:
                 raise ValueError("verification changed the combined Child result")
             if self._parent_changes(record) != changes:
                 raise ValueError("parent changed during integration verification")
-            self._publish(tree, paths, before)
+            self._publish(tree, paths, before, targets)
         return {"status": "integrated", "child_id": child_id, "base_sha": record.base_sha,
                 "changed_paths": list(receipt.changed_paths), "verification": verification}

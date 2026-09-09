@@ -184,9 +184,9 @@ def test_tool_context_contains_only_call_state_and_bindings_are_tool_specific(tm
     registry = agent.tools.registry
     assert set(registry["read_file"]["run"].keywords) == {"path_resolver", "workspace_root"}
     edit = registry["edit_file"]
-    assert set(edit["run"].keywords) == {"path_resolver", "workspace_root", "mutation_service"}
-    assert edit["validate"].keywords["path_resolver"] is edit["plan"].keywords["path_resolver"]
-    assert edit["run"].keywords["path_resolver"] is edit["plan"].keywords["path_resolver"]
+    assert set(edit["run"].keywords) == {"workspace_root", "mutation_service"}
+    assert "path_resolver" not in edit["validate"].keywords
+    assert "path_resolver" in edit["plan"].keywords
     assert not registry["run_check"]["available"]
     assert not registry["delegate"]["available"]
 
@@ -386,6 +386,26 @@ def test_context_separates_dynamic_input_and_preserves_request(tmp_path):
         "untrusted_context",
     ]
     assert metadata["included_context_sections"] == ["workspace"]
+
+
+def test_prompt_refreshes_for_scope_change_even_when_tool_names_match(tmp_path):
+    from pico.agent_loop import AgentLoop
+    agent = build_agent(tmp_path)
+    agent.config = replace(agent.config, allowed_write_paths=("a.py", "b.py"))
+    loop = AgentLoop(agent)
+    state = loop.lifecycle.initialize("Edit files")
+    first_surface = agent.tools.resolve_surface()
+    first = loop._prepare_prompt(state, first_surface)
+    agent.config = replace(agent.config, allowed_write_paths=("a.py",))
+    second_surface = agent.tools.resolve_surface()
+    second = loop._prepare_prompt(state, second_surface)
+    assert first_surface.names == second_surface.names
+    assert first.input_text != second.input_text
+    assert named_json(second.input_text, "runtime_policy")["write_scope"]["paths"] == ["a.py"]
+    agent.config = replace(agent.config, allowed_write_paths=("outside.py",))
+    empty = agent.tools.resolve_surface()
+    assert empty.mode == "ask" and empty.allowed_write_paths == ()
+    assert "write_file" not in empty.names and "edit_file" not in empty.names
 
 
 def test_prompt_policy_and_schema_share_one_request_surface_snapshot(
