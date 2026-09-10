@@ -79,8 +79,7 @@ class CompletionController:
         """Assess the latest persisted verification without executing one."""
 
         blocker = (
-            self._static_blocker()
-            or self._effect_blocker()
+            self._effect_blocker()
             or self._task_requirement_blocker()
             or self._workspace_drift_blocker()
         )
