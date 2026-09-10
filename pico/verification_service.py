@@ -58,7 +58,6 @@ class VerificationService:
         blocked = self.inspect(execution)
         if blocked:
             return blocked
-        session = self.runtime.session
         command = self.runtime.config.verification_command.strip()
         if not command or self.runtime.config.mode == "ask":
             return VerificationResult("stop", "This task still requires a configured verifier.",
@@ -133,16 +132,14 @@ class VerificationService:
         return VerificationResult("success", "Configured verification passed.", data=record)
 
     def _approve(self, command):
-        key = {"tool": "verify", "arguments": {"command": command, "paths": []}}
-        denied = self.runtime.session.loop_control["denied"]
-        if key in denied:
-            return False
         if self.runtime.config.mode == "auto":
             return True
         handler = self.runtime.approval_handler
-        if handler and handler("verify", {"command": command},
-                               ToolExecutionPlan("workspace", operation={"command": command})):
-            return True
-        denied.append(key)
-        self.runtime.session.save()
-        return False
+        return bool(
+            handler
+            and handler(
+                "verify",
+                {"command": command},
+                ToolExecutionPlan("workspace", operation={"command": command}),
+            )
+        )

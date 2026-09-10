@@ -380,89 +380,24 @@ def _read_http_failure(exc):
     return status, body, headers, context_overflow
 
 
-def _action_result_items(pending_call_ids, results):
-    results = tuple(str(result) for result in results)
-    if pending_call_ids:
-        if len(results) != len(pending_call_ids):
-            raise ValueError("provider continuation requires one result per call")
-        return [
-            {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result,
-            }
-            for call_id, result in zip(pending_call_ids, results)
-        ]
-    if len(results) != 1:
-        raise ValueError("provider correction requires exactly one result")
-    return [
-        {
-            "role": "user",
-            "content": [{"type": "input_text", "text": results[0]}],
-        }
-    ]
-
-
 def _input_items(value):
     if isinstance(value, list):
         return list(value)
     return [{"role": "user", "content": [{"type": "input_text", "text": str(value)}]}]
 
 
-def _estimate_action_input_tokens(action_input, input_text, instructions, action_tools, token_counter):
-    items = action_input or _input_items(input_text)
+def _estimate_action_input_tokens(input_text, instructions, action_tools, token_counter):
+    items = _input_items(input_text)
     return token_counter(json.dumps(
         {"instructions": str(instructions), "tools": list(action_tools), "input": items},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ))
 
 
-def _projected_context_tokens(
-    action_input,
-    result_items,
-    *,
-    instructions,
-    action_tools,
-    token_counter,
-    replay_context_tokens,
-):
-    if isinstance(replay_context_tokens, int):
-        delta = json.dumps(
-            result_items,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return replay_context_tokens + token_counter(delta)
-    projected = {
-        "instructions": str(instructions),
-        "tools": list(action_tools),
-        "input": [*action_input, *result_items],
-    }
-    return token_counter(
-        json.dumps(
-            projected,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-
-
-def _replay_context_tokens(turn):
-    input_tokens = turn.usage.get("input_tokens")
-    output_tokens = turn.usage.get("output_tokens") if turn.accepted else 0
-    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-        return input_tokens + output_tokens
-    return None
-
-
 class FakeModelClient:
-    conversation_mode = "responses-manual-replay-v1"
-
     def estimate_action_input_tokens(self, input_text, *, instructions, action_tools, token_counter):
         return _estimate_action_input_tokens(
-            self._action_input, input_text, instructions, action_tools, token_counter
+            input_text, instructions, action_tools, token_counter
         )
 
     def __init__(self, outputs):
@@ -471,46 +406,10 @@ class FakeModelClient:
         self.instruction_prompts = []
         self.action_tool_surfaces = []
         self.last_completion_metadata = {}
-        self.reset_action_session()
-
-    def reset_action_session(self):
-        self.recorded_action_results = []
-        self.recorded_action_result_groups = []
-        self._action_input = []
-        self._pending_call_ids = ()
-        self._replay_context_tokens = None
 
     @staticmethod
     def estimate_action_tool_tokens(_action_tools, _token_counter):
         return 0
-
-    def record_action_results(self, results):
-        group = tuple(str(result) for result in results)
-        self.recorded_action_result_groups.append(group)
-        self.recorded_action_results.extend(group)
-        self._action_input.extend(self._result_items(group))
-        self._pending_call_ids = ()
-        self._replay_context_tokens = None
-
-    def _result_items(self, results):
-        return _action_result_items(self._pending_call_ids, results)
-
-    def projected_context_tokens(
-        self,
-        results,
-        *,
-        instructions,
-        action_tools,
-        token_counter,
-    ):
-        return _projected_context_tokens(
-            self._action_input,
-            self._result_items(results),
-            instructions=instructions,
-            action_tools=action_tools,
-            token_counter=token_counter,
-            replay_context_tokens=self._replay_context_tokens,
-        )
 
     def complete(self, prompt, max_new_tokens, **kwargs):
         self.prompts.append(prompt)
@@ -530,8 +429,6 @@ class FakeModelClient:
         execution_context,
     ):
         execution_context.check_active()
-        if not self._action_input:
-            self._action_input.extend(_input_items(input_text))
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
         self.instruction_prompts.append(str(instructions))
         output = self.complete(
@@ -540,30 +437,12 @@ class FakeModelClient:
             execution_context=execution_context,
         )
         if isinstance(output, ModelAction):
-            replay_items = ()
-            pending_call_ids = ()
-            if output.kind == "tool":
-                replay_items = tuple(
-                    _function_call_replay_item(call)
-                    for call in output.tool_calls
-                )
-                pending_call_ids = tuple(
-                    call.call_id for call in output.tool_calls
-                )
-            turn = _ParsedProviderTurn(
-                output,
-                replay_items=replay_items,
-                pending_call_ids=pending_call_ids,
-            )
+            turn = _ParsedProviderTurn(output)
         elif isinstance(output, dict):
             turn = _parse_provider_turn(output, action_tools)
         else:
             raise TypeError("FakeModelClient outputs must be ModelAction or Responses payloads")
         self.last_completion_metadata = dict(turn.usage)
-        self._replay_context_tokens = _replay_context_tokens(turn)
-        if turn.accepted:
-            self._action_input.extend(turn.replay_items)
-            self._pending_call_ids = turn.pending_call_ids
         return turn.action
 
 
@@ -670,100 +549,56 @@ def _tool_call_from_response(call):
 
 @dataclass(frozen=True)
 class _ParsedProviderTurn:
-    """One fully interpreted response and the exact items safe to replay."""
+    """One fully interpreted provider response."""
 
     action: ModelAction
-    replay_items: tuple[dict, ...] = ()
-    pending_call_ids: tuple[str, ...] = ()
     usage: dict = field(default_factory=dict)
-
-    def __post_init__(self):
-        if self.action.kind == "invalid" and (
-            self.replay_items or self.pending_call_ids
-        ):
-            raise ValueError("invalid provider turns cannot carry replay state")
-        if self.action.kind == "tool" and self.pending_call_ids != tuple(
-            call.call_id for call in self.action.tool_calls
-        ):
-            raise ValueError("provider turn call ids do not match its action")
 
     @classmethod
     def invalid(cls, message, usage=None):
         return cls(ModelAction.invalid(message), usage=dict(usage or {}))
 
-    @property
-    def accepted(self):
-        return self.action.kind != "invalid"
 
-
-def _reasoning_replay_item(item):
+def _validate_reasoning_item(item):
     encrypted = item.get("encrypted_content")
     if not isinstance(encrypted, str) or not encrypted:
-        return None, "reasoning output is missing encrypted_content"
-    replay = {"type": "reasoning", "encrypted_content": encrypted}
-    if "id" in item:
-        if not isinstance(item["id"], str) or not item["id"]:
-            return None, "reasoning output has an invalid id"
-        replay["id"] = item["id"]
+        return "reasoning output is missing encrypted_content"
+    if "id" in item and (
+        not isinstance(item["id"], str) or not item["id"]
+    ):
+        return "reasoning output has an invalid id"
     if "summary" in item:
         summary = item["summary"]
         if not isinstance(summary, list) or any(
             not isinstance(part, dict) for part in summary
         ):
-            return None, "reasoning output has a malformed summary"
-        replay["summary"] = summary
-    return replay, ""
+            return "reasoning output has a malformed summary"
+    return ""
 
 
-def _message_replay_item(item):
+def _validate_message_item(item):
     if item.get("status") != "completed":
-        return None, "assistant message output is not completed"
+        return "assistant message output is not completed"
     if item.get("role") != "assistant":
-        return None, "message output must have the assistant role"
+        return "message output must have the assistant role"
     message_id = item.get("id")
     if message_id is not None and (
         not isinstance(message_id, str) or not message_id
     ):
-        return None, "assistant message output has an invalid id"
+        return "assistant message output has an invalid id"
     content = item.get("content")
     if not isinstance(content, list) or not content:
-        return None, "assistant message output has malformed content"
-    normalized = []
+        return "assistant message output has malformed content"
     for part in content:
         if not isinstance(part, dict) or part.get("type") != "output_text":
-            return None, "assistant message output contains unsupported content"
+            return "assistant message output contains unsupported content"
         text = part.get("text")
         annotations = part.get("annotations", [])
         if not isinstance(text, str) or not isinstance(annotations, list):
-            return None, "assistant message output has malformed output_text"
+            return "assistant message output has malformed output_text"
         if annotations:
-            return None, "assistant message output annotations are not supported"
-        normalized.append(
-            {"type": "output_text", "text": text, "annotations": []}
-        )
-    replay = {
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": normalized,
-    }
-    if message_id is not None:
-        replay["id"] = message_id
-    return replay, ""
-
-
-def _function_call_replay_item(call):
-    return {
-        "type": "function_call",
-        "call_id": call.call_id,
-        "name": call.name,
-        "arguments": json.dumps(
-            call.args,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    }
+            return "assistant message output annotations are not supported"
+    return ""
 
 
 def _provider_turn_status_error(data):
@@ -789,37 +624,32 @@ def _parse_provider_output(output, declared):
     if not isinstance(output, list) or any(
         not isinstance(item, dict) for item in output
     ):
-        return (), (), "provider returned malformed response output"
+        return (), "provider returned malformed response output"
     parsed_calls = []
-    replay_items = []
     for item in output:
         item_type = item.get("type")
         if item_type == "reasoning":
-            replay, error = _reasoning_replay_item(item)
+            error = _validate_reasoning_item(item)
             if error:
-                return (), (), error
-            replay_items.append(replay)
+                return (), error
             continue
         if item_type == "message":
-            replay, error = _message_replay_item(item)
+            error = _validate_message_item(item)
             if error:
-                return (), (), error
-            replay_items.append(replay)
+                return (), error
             continue
         if item_type != "function_call":
             return (
-                (),
                 (),
                 f"unsupported provider output item type: {item_type or 'missing'}",
             )
         parsed_call, error = _tool_call_from_response(item)
         if error:
-            return (), (), error
+            return (), error
         if parsed_call.name not in declared:
-            return (), (), f"unknown function call: {parsed_call.name}"
+            return (), f"unknown function call: {parsed_call.name}"
         parsed_calls.append(parsed_call)
-        replay_items.append(_function_call_replay_item(parsed_call))
-    return tuple(replay_items), tuple(parsed_calls), ""
+    return tuple(parsed_calls), ""
 
 
 def _parse_provider_turn(data, action_tools):
@@ -828,9 +658,7 @@ def _parse_provider_turn(data, action_tools):
     if error:
         return _ParsedProviderTurn.invalid(error, usage)
     declared = {str(item["name"]) for item in action_tools}
-    replay_items, parsed_calls, error = _parse_provider_output(
-        data.get("output"), declared
-    )
+    parsed_calls, error = _parse_provider_output(data.get("output"), declared)
     if error:
         return _ParsedProviderTurn.invalid(error, usage)
     if not parsed_calls:
@@ -866,21 +694,14 @@ def _parse_provider_turn(data, action_tools):
             parsed_calls[0].args,
             call_id=parsed_calls[0].call_id,
         )
-    return _ParsedProviderTurn(
-        action=action,
-        replay_items=replay_items,
-        pending_call_ids=tuple(call.call_id for call in parsed_calls),
-        usage=usage,
-    )
+    return _ParsedProviderTurn(action=action, usage=usage)
 
 
 class OpenAICompatibleModelClient:
     def estimate_action_input_tokens(self, input_text, *, instructions, action_tools, token_counter):
         return _estimate_action_input_tokens(
-            self._action_input, input_text, instructions, action_tools, token_counter
+            input_text, instructions, action_tools, token_counter
         )
-
-    conversation_mode = "responses-manual-replay-v1"
 
     def __init__(self, model, base_url, api_key, temperature, timeout):
         self.model = model
@@ -889,12 +710,6 @@ class OpenAICompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.last_completion_metadata = {}
-        self.reset_action_session()
-
-    def reset_action_session(self):
-        self._action_input = []
-        self._pending_call_ids = ()
-        self._replay_context_tokens = None
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
@@ -914,31 +729,6 @@ class OpenAICompatibleModelClient:
             separators=(",", ":"),
         )
         return int(token_counter(serialized))
-
-    def _result_items(self, results):
-        return _action_result_items(self._pending_call_ids, results)
-
-    def record_action_results(self, results):
-        self._action_input.extend(self._result_items(results))
-        self._pending_call_ids = ()
-        self._replay_context_tokens = None
-
-    def projected_context_tokens(
-        self,
-        results,
-        *,
-        instructions,
-        action_tools,
-        token_counter,
-    ):
-        return _projected_context_tokens(
-            self._action_input,
-            self._result_items(results),
-            instructions=instructions,
-            action_tools=action_tools,
-            token_counter=token_counter,
-            replay_context_tokens=self._replay_context_tokens,
-        )
 
     def _build_payload(
         self,
@@ -961,7 +751,7 @@ class OpenAICompatibleModelClient:
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
             "tool_choice": "required",
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": False,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
@@ -1135,22 +925,14 @@ class OpenAICompatibleModelClient:
         execution_context: ExecutionContext,
     ):
         execution_context.check_active()
-        if not self._action_input:
-            self._action_input.extend(_input_items(input_text))
-        if self._pending_call_ids:
-            raise RuntimeError("pending Responses function calls have no recorded outputs")
         self.last_completion_metadata = {}
         payload = self._build_payload(
             max_new_tokens,
             instructions=instructions,
             action_tools=action_tools,
-            input_items=self._action_input,
+            input_items=_input_items(input_text),
         )
         response_data = self._request_response(payload, execution_context)
         turn = _parse_provider_turn(response_data, action_tools)
         self.last_completion_metadata = dict(turn.usage)
-        self._replay_context_tokens = _replay_context_tokens(turn)
-        if turn.accepted:
-            self._action_input.extend(turn.replay_items)
-            self._pending_call_ids = turn.pending_call_ids
         return turn.action

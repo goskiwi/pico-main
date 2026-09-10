@@ -11,6 +11,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -20,12 +21,12 @@ from .contracts import (
     ToolExecutionPlan,
     ToolFailureError,
     ToolOutcome,
+    ToolRunnerResult,
 )
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
 from .mutations import content_revision, file_revision
 from .tool_context import ToolContext
 from .tools import ToolArgs, build_action_tools, build_tool_registry
-from .contracts import ToolRunnerResult
 from .verification_service import VerificationService
 
 READ_TOOLS = frozenset({"list_files", "read_file", "read_artifact", "search"})
@@ -49,6 +50,7 @@ class ToolRuntime:
         self.registry = build_tool_registry(
             workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_tool_path,
+            read_path_resolver=self._resolve_read_path,
             artifact_store=runtime.artifacts,
             redact_text=runtime.redact_text,
             mutation_service=runtime.mutations,
@@ -64,7 +66,7 @@ class ToolRuntime:
             "validate": lambda context, args: None,
             "run": self._run_verification,
         }
-        if not runtime.child and hasattr(runtime.model_client.client, "new_isolated_client"):
+        if hasattr(runtime.model_client.client, "new_isolated_client"):
             from .delegate import definition
             self.registry["delegate"] = definition(runtime)
 
@@ -79,7 +81,7 @@ class ToolRuntime:
             names.discard("run_shell")
         if self.effective_paths() == ():
             names.difference_update(WRITE_TOOLS)
-        if mode != "ask" and not self.runtime.child and self.runtime.config.verification_command.strip():
+        if mode != "ask" and self.runtime.config.verification_command.strip():
             names.add("verify")
         allowed = self.runtime.config.allowed_tools
         if allowed is not None:
@@ -87,11 +89,21 @@ class ToolRuntime:
         registry = {name: self.registry[name] for name in self.registry if name in names}
         return ResolvedToolSurface(registry, tuple(build_action_tools(registry)))
 
+    def _resolve_read_path(self, raw_path):
+        path = Path(raw_path)
+        path = path if path.is_absolute() else self.runtime.workspace.root / path
+        transcript = self.runtime.session.store.transcript_path(self.runtime.session.id)
+        if path == transcript and path.resolve() == transcript:
+            return transcript
+        return self.runtime.workspace.resolve_tool_path(raw_path)
+
     def execute_group(self, calls, entry, execution_context, surface):
         """Execute in model order; every phase transition is persisted."""
-
-        from .tool_batch import execute_group
-        return execute_group(self, calls, entry, execution_context, surface)
+        outcomes = []
+        for call in calls:
+            execution_context.check_active()
+            outcomes.append(self._execute(call, entry, execution_context, surface))
+        return tuple(outcomes)
 
     def reject_group(self, entry, calls):
         for call in calls:
@@ -158,7 +170,8 @@ class ToolRuntime:
             )
 
         session.start_tool(entry, call.call_id)
-        self.operation_id = f"{len(session.history) - 1}:{call.call_id}"
+        history_index = len(session.history) - 1
+        self.operation_id = f"{history_index}:{call.call_id}"
         entry.setdefault("plans", {})[call.call_id] = {
             "effect_scope": context.execution_plan.effect_scope,
             "paths": [logical for logical, _target in context.execution_plan.paths],
@@ -171,6 +184,10 @@ class ToolRuntime:
                 call.name, call.call_id, tool, context, args, expected_revision
             )
             outcome = self._outcome(call, context.execution_plan, runner_result)
+            if call.name in {"read_file", "search"}:
+                target = self._resolve_read_path(args.get("path", "."))
+                if target == session.store.transcript_path(session.id):
+                    outcome.structured["historical"] = True
             if call.name in WRITE_TOOLS:
                 outcome = self._record_mutation(call, outcome, preimage_id)
         except (ExecutionCancelled, ExecutionDeadlineExceeded):
@@ -323,11 +340,14 @@ class ToolRuntime:
     def _finish(self, entry, call, outcome):
         session = self.runtime.session
         outcome = ToolOutcome.from_dict(self.runtime.redact_facts(outcome.to_dict()))
-        self._observe(outcome)
+        if not outcome.structured.get("historical"):
+            self._observe(outcome)
         serialized = json.dumps(outcome.to_dict(), ensure_ascii=False)
         if len(serialized.encode("utf-8")) > TOOL_OUTPUT_MAX_BYTES or len(outcome.content) > 8000:
             descriptor = self.runtime.artifacts.write_tool_output(
-                session.id, f"{len(session.history) - 1}:{call.call_id}", serialized
+                session.id,
+                f"{len(session.history) - 1}:{call.call_id}",
+                serialized,
             )
             outcome = ToolOutcome(
                 **{
@@ -406,36 +426,11 @@ class ToolRuntime:
         name = call.name
         if not tool.get("risky"):
             return None
-        key = {
-            "tool": name,
-            "arguments": {
-                **args,
-                **({"path": plan.paths[0][0]} if name in WRITE_TOOLS else {}),
-                "paths": [logical for logical, _target in plan.paths],
-            },
-        }
-        denied = self.runtime.session.loop_control["denied"]
-        if key in denied:
-            return ToolOutcome(
-                call.call_id,
-                name,
-                "rejected",
-                "not_started",
-                "none",
-                "",
-                failure=FailureInfo(
-                    "approval_denied",
-                    "this exact operation was already denied",
-                    "user_action_required",
-                ),
-            )
         handler = self.runtime.approval_handler
         if self.runtime.config.mode == "auto":
             return None
         if handler is not None and handler(name, deepcopy(args), deepcopy(plan)):
             return None
-        denied.append(key)
-        self.runtime.session.save()
         return ToolOutcome(
             call.call_id,
             name,

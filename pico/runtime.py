@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
+from .config import PicoConfig
 from .context_manager import ContextManager
 from .memory import MemoryStore
 from .model_usage import MeteredClient, ModelUsage
 from .mutations import WorkspaceMutationService
 from .outcome import RunOutcome
-from .runtime_config import PicoConfig
 from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
 from .trace import TracePrinter
+from .verification import detect_verification_command
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
@@ -61,17 +64,20 @@ class Pico:
         command_runner_factory=None,
         approval_handler=None,
         parent_execution_context=None,
-        child=False,
     ):
         self.usage = ModelUsage()
         self.model_client = MeteredClient(model_client, self.usage)
         self.workspace = workspace
         self.session = session
         self.config = config or PicoConfig()
+        if not self.config.verification_command.strip():
+            self.config = replace(
+                self.config,
+                verification_command=detect_verification_command(workspace.root),
+            )
         self.trace = trace if trace is not None else TracePrinter(None)
         self.approval_handler = approval_handler
         factory = command_runner_factory or CommandRunner
-        self.command_runner_factory = factory
         self.command_runner = command_runner or factory(workspace.root)
         self.mutations = WorkspaceMutationService(workspace.root)
         self.artifacts = ArtifactStore(session.store, self.redact_text)
@@ -82,17 +88,13 @@ class Pico:
             )
         self.memory = MemoryStore(workspace.root / ".pico" / "memory.json", self.redact_text)
         self.current_memories = []
-        self.child = child
         self.parent_execution_context = parent_execution_context
         self.execution_context = None
         self.tools = ToolRuntime(self)
         self.context = ContextManager(self)
 
     def redact_text(self, text):
-        return securitylib.redact_text(
-            text,
-            secret_env_names=self.config.secret_env_names,
-        )
+        return securitylib.redact_text(text)
 
     def redact_facts(self, value):
         return securitylib.redact_facts(value, self.redact_text)
@@ -133,7 +135,6 @@ class Pico:
             )
         self.current_memories = []
         self.tools = ToolRuntime(self)
-        self.model_client.reset_action_session()
 
     def emit_trace(self, kind, **payload):
         if self.trace is None:

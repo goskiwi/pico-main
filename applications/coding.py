@@ -1,4 +1,4 @@
-"""Small application wrapper for one verified coding task."""
+"""Small application wrapper for one coding task."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +15,13 @@ class CodingResult:
 class CodingWorkflow:
     """Run Pico and return its report without committing or publishing changes."""
 
-    def __init__(self, model_client, *, config=None, approval_handler=None):
+    def __init__(
+        self,
+        model_client,
+        *,
+        config: PicoConfig | None = None,
+        approval_handler=None,
+    ):
         self.model_client = model_client
         self.config = config or PicoConfig()
         self.approval_handler = approval_handler

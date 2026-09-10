@@ -15,10 +15,10 @@ def validate_session(value, *, schema_version):
         "id",
         "workspace_root",
         "history",
-        "summary",
-        "covered",
-        "observed",
+        "summary_end",
         "request_start",
+        "summary",
+        "observed",
         "run",
         "loop_control",
         "verification_required",
@@ -34,15 +34,19 @@ def validate_session(value, *, schema_version):
     history = value["history"]
     if not isinstance(history, list):
         raise TypeError("session history must be a list")
-    for key in ("covered", "observed", "request_start"):
+    for key in ("summary_end", "observed", "request_start"):
         if type(value[key]) is not int:
             raise TypeError("history positions must be integers")
-    if not 0 <= value["covered"] <= value["observed"] <= len(history):
-        raise ValueError("invalid history coverage")
-    if history and not 0 <= value["request_start"] < len(history):
-        raise ValueError("invalid current request position")
-    if history and history[value["request_start"]].get("kind") != "user":
+    if not 0 <= value["summary_end"] <= value["observed"] <= len(history):
+        raise ValueError("invalid history position")
+    request_start = value["request_start"]
+    if request_start == -1:
+        if any(entry.get("kind") == "user" for entry in history):
+            raise ValueError("missing current request position")
+    elif not 0 <= request_start < len(history) or history[request_start].get("kind") != "user":
         raise ValueError("current request must identify a user message")
+    if not isinstance(value["summary"], str):
+        raise TypeError("summary must be text")
     _validate_history(history)
     _validate_control(value)
     _validate_effects(value)

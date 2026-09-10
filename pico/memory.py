@@ -108,9 +108,9 @@ class MemoryStore:
 
     def extract(self, session, model_client, execution_context):
         sources = [
-            {"index": index, "text": entry["content"]}
-            for index, entry in enumerate(session.history)
-            if index >= session.request_start and entry.get("kind") == "user"
+            {"index": index, "text": message["content"]}
+            for index, message in enumerate(session.history)
+            if index >= session.request_start and message.get("kind") == "user"
         ]
         if not sources:
             return []

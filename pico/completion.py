@@ -15,6 +15,11 @@ class CompletionController:
         if blocked:
             return blocked
         session = self.runtime.session
+        if self.runtime.config.mode == "ask":
+            if session.verification_required or session.task_policy.get("verification_floor"):
+                return VerificationResult("stop", "This task still requires acceptance; Ask mode cannot run it.",
+                                          "verification_required")
+            return VerificationResult("success", proposed_answer)
         if not self.runtime.config.verification_command.strip():
             if session.task_policy.get("verification_floor"):
                 return VerificationResult("stop", "Required acceptance command is unavailable.",

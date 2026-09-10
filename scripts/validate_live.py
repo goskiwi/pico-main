@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pico import Pico, PicoConfig, SessionStore, ToolCall, Workspace
 from pico.agent_loop import AgentLoop
 from pico.cli import build_agent, build_arg_parser
-from pico.config import load_project_env
+from pico.env import load_project_env
 from pico.execution import ExecutionContext
 from pico.providers.clients import OpenAICompatibleModelClient
 from pico.security import redact_text
@@ -40,7 +40,7 @@ def client():
 
 def make(root, *, mode='auto', resume=None):
     config = PicoConfig(mode=mode, max_agent_turns=12, turn_timeout_seconds=300,
-        memory_enabled=False, allowed_write_paths=None if mode=='ask' else ('pricing.py',),
+        allowed_write_paths=None if mode=='ask' else ('pricing.py',),
         verification_command='' if mode=='ask' else shlex.quote(sys.executable)+' check.py')
     store = SessionStore(root/'.pico/sessions')
     kwargs = {'config':config,'trace':TracePrinter(sys.stdout)}
@@ -72,7 +72,7 @@ def validate(case, root):
     try:
         if case == 'cli_read':
             args = build_arg_parser().parse_args(['--cwd',str(root),'--mode','ask',
-                '--base-url',os.environ['PICO_OPENAI_API_BASE'],'--no-memory','--trace'])
+                '--trace'])
             agent = build_agent(args)
             outcome = agent.ask('Read note.txt using read_file; report the identifier and money unit.')
             checks = {'answer_correct':'COPPER-742' in outcome.answer,
@@ -116,13 +116,13 @@ def validate(case, root):
             agent.session.save()
             report['history_kind'] = 'controlled history of actual file reads; observed boundary seeded for compaction isolation'
             outcome = agent.ask('Read note.txt. Return COPPER-742 and explain the money unit. This request must remain intact.')
-            checks = {'compaction_committed':agent.session.covered>0,
+            checks = {'compaction_committed':agent.session.summary_end > 0,
                       'answer_correct':'COPPER-742' in outcome.answer,
                       'current_request_preserved':agent.session.current_user_text().startswith('Read note.txt.')}
-            report['covered'] = agent.session.covered
+            report['summary_end'] = agent.session.summary_end
         elif case == 'delegate':
             agent = make(root)
-            agent.config = replace(agent.config,verification_command='',allowed_write_paths=())
+            agent.config = replace(agent.config, allowed_write_paths=())
             outcome = agent.ask('Use delegate once for read-only investigation: ask the helper to read note.txt '
                                 'and report its identifier and money unit. Do not read it yourself or edit files.')
             checks = {'answer_correct':'COPPER-742' in outcome.answer,

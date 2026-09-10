@@ -14,7 +14,7 @@ class RunOutcome:
     turns: int = 0
     tools: int = 0
     metrics: dict = field(default_factory=dict)
-    task_diff: dict = field(default_factory=dict)
+    final_diff: dict = field(default_factory=dict)
 
     @property
     def terminal(self):
@@ -22,7 +22,7 @@ class RunOutcome:
 
     @property
     def changed_paths(self):
-        return tuple(self.task_diff.get("changed_paths", ()))
+        return tuple(self.final_diff.get("changed_paths", ()))
 
     def to_dict(self):
         return {
@@ -35,5 +35,6 @@ class RunOutcome:
             "turns": self.turns,
             "tools": self.tools,
             "metrics": dict(self.metrics),
-            "task_diff": dict(self.task_diff),
+            "final_diff": dict(self.final_diff),
+            "changed_paths": list(self.changed_paths),
         }

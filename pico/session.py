@@ -1,8 +1,7 @@
-"""Recoverable single-writer Session state.
+"""Single-writer conversation and execution state owned by SessionStore.
 
-The Session is Pico's only durable task state. It stores conversation history,
-tool phases, verification state and mutation receipts together so recovery does
-not need an event log plus a separate projection.
+Completed history is append-only JSONL. The checkpoint holds unfinished tool
+batches, summary positions, verification state and mutation receipts.
 """
 
 from __future__ import annotations
@@ -15,6 +14,14 @@ from pathlib import Path
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def new_session_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
+def new_run_id() -> str:
+    return "run_" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
 
 def new_verification() -> dict:
@@ -31,22 +38,23 @@ def new_loop_control() -> dict:
         "invalid_outputs": 0,
         "completion_blocks": 0,
         "last_completion_error": "",
-        "denied": [],
     }
 
 
 @dataclass
 class Session:
-    """One atomic snapshot for a conversation and its current task."""
+    """In-memory conversation plus the execution state needed for recovery."""
 
     store: object = field(repr=False, compare=False)
     id: str
     workspace_root: str
     history: list[dict] = field(default_factory=list)
+    summary_end: int = 0
+    request_start: int = -1
+    _stored_count: int = field(default=0, repr=False)
+    _stored_bytes: int = field(default=0, repr=False)
     summary: str = ""
-    covered: int = 0
     observed: int = 0
-    request_start: int = 0
     run: dict = field(default_factory=dict)
     loop_control: dict = field(default_factory=new_loop_control)
     verification_required: bool = False
@@ -65,7 +73,7 @@ class Session:
     def create(cls, store, workspace_root, *, session_id=None):
         return cls(
             store=store,
-            id=session_id or uuid.uuid4().hex[:16],
+            id=session_id or new_session_id(),
             workspace_root=str(Path(workspace_root).resolve()),
         )
 
@@ -73,8 +81,9 @@ class Session:
         return self.store.save(self)
 
     def append_user(self, content: str):
+        content = str(content)
         self.request_start = len(self.history)
-        self.history.append({"kind": "user", "content": str(content)})
+        self.history.append({"kind": "user", "content": content})
 
     def append_feedback(self, content: str):
         self.history.append({"kind": "feedback", "content": str(content)})
@@ -237,20 +246,17 @@ class Session:
         return recovered
 
     def current_user_text(self) -> str:
-        if not self.history:
-            return ""
-        entry = self.history[self.request_start]
-        return str(entry.get("content", "")) if entry.get("kind") == "user" else ""
+        return self.history[self.request_start].get("content", "") if self.request_start >= 0 else ""
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "workspace_root": self.workspace_root,
             "history": self.history,
-            "summary": self.summary,
-            "covered": self.covered,
-            "observed": self.observed,
+            "summary_end": self.summary_end,
             "request_start": self.request_start,
+            "summary": self.summary,
+            "observed": self.observed,
             "run": self.run,
             "loop_control": self.loop_control,
             "verification_required": self.verification_required,

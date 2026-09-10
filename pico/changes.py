@@ -6,7 +6,7 @@ from pathlib import Path
 from .mutations import content_revision, unified_text_diff
 
 
-def build_task_diff(session, artifacts):
+def build_final_diff(session, artifacts):
     grouped = {}
     for receipt in session.mutations:
         if receipt.get("status") == "not_applied":

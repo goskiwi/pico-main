@@ -17,8 +17,8 @@ from pathlib import Path
 REPO=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(REPO))
 from pico import Pico, PicoConfig, SessionStore, Workspace
-from pico.config import load_project_env
 from pico.context_manager import ContextBudgetExceeded
+from pico.env import load_project_env
 from pico.providers.clients import OpenAICompatibleModelClient
 from pico.security import redact_text
 from pico.trace import TracePrinter
@@ -91,7 +91,7 @@ def run(root,instance,variant,run_name,max_turns,max_seconds):
     # A broken environment must not consume model calls or be scored as a model failure.
     if original['exit_code'] not in (0,1) or '1 failed' not in original['stdout']:
         raise RuntimeError('Original acceptance did not show exactly one expected failure; inspect before-tests.txt')
-    config=PicoConfig(mode='auto',memory_enabled=False,
+    config=PicoConfig(mode='auto',
         max_agent_turns=max_turns,turn_timeout_seconds=max_seconds,provider_context_limit_tokens=272000,
         max_new_tokens=16000,compaction_reserve_tokens=208000,
         compaction_keep_recent_tokens=4000,summary_max_output_tokens=12000,
@@ -104,7 +104,7 @@ def run(root,instance,variant,run_name,max_turns,max_seconds):
     agent=Pico.create(model,Workspace.build(workspace),session_store=SessionStore(workspace/'.pico/sessions'),
                       config=config,trace=TracePrinter(sys.stdout))
     code=row['text'].split('<code>\n',1)[1].rsplit('</code>',1)[0]
-    agent.session.append_user('Repository context for the next coding task follows as historical source data.')
+    agent.session.append_feedback('Repository context for the next coding task follows as historical source data.')
     agent.session.append_feedback('Official LongSWE-Bench source at the initial checkout:\n'+code)
     # Do not seed observed: the model must actually see the full source first.
     agent.session.save()
@@ -127,7 +127,7 @@ def run(root,instance,variant,run_name,max_turns,max_seconds):
         'dataset_bucket':'128K','dataset_num_tokens':row['num_tokens'],'num_files':row['num_files'],
         'code_tokens_local':agent.context.count_tokens(code),'window':272000,'output_reserve':16000,
         'compaction_threshold':64000,'summary_output_limit':12000,'recent_tokens':4000,
-        'memory':False,'max_turns':max_turns,'max_seconds':max_seconds,
+        'memory':'empty at run start','max_turns':max_turns,'max_seconds':max_seconds,
         'run_name':run_name,
         'method':'native multi-turn adaptation with original code context; local macOS/Python 3.10 tests, not Docker',
         'prompt':prompt}

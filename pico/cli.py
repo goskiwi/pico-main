@@ -2,39 +2,40 @@
 
 import argparse
 import json
-import shlex
+import math
+import shutil
 import sys
-from pathlib import Path
+import textwrap
 
-from .config import load_project_env, provider_env
+from .config import PicoConfig
+from .env import load_project_env, provider_env
+from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .runtime import Pico
-from .runtime_config import PicoConfig
 from .session_store import SessionStore
 from .trace import TracePrinter
-from .workspace import Workspace
+from .workspace import Workspace, middle
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
-DEFAULT_SECRET_ENV_NAMES = (
-    "PICO_OPENAI_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_API_TOKEN",
-    "PICO_RIGHT_CODES_API_KEY",
-    "RIGHT_CODES_API_KEY",
-    "GITHUB_PAT",
-    "GH_PAT",
+WELCOME_ART = (
+    "        /\\___/\\\\",
+    "       (  o o  )",
+    "       /   ^   \\\\",
+    "      /|       |\\\\",
 )
-
-
-def detect_verification_command(repo_root):
-    tests = Path(repo_root).resolve() / "tests"
-    if tests.is_dir() and not tests.is_symlink() and any(
-        path.is_file() and not path.is_symlink() for path in tests.rglob("test_*.py")
-    ):
-        return f"{shlex.quote(sys.executable)} -m pytest -q"
-    return ""
-
-
+WELCOME_NAME = "pico"
+WELCOME_SUBTITLE = "local coding agent"
+WELCOME_STATUS = "calm shell, ready for work"
+HELP_DETAILS = textwrap.dedent(
+    """\
+    Commands:
+    /help    Show this help message.
+    /state   Show the current Runtime run state.
+    /session Show the path to the saved Session snapshot.
+    /reset   Reset the current Session.
+    /exit    Exit the agent.
+    """
+).strip()
 def _terminal_approval(name, args, plan):
     request = {
         "arguments": args,
@@ -50,48 +51,36 @@ def _terminal_approval(name, args, plan):
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _model_client(args):
+def _build_model_client(args):
     model = args.model or provider_env("PICO_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
-    configured_base = args.base_url or provider_env("PICO_OPENAI_API_BASE")
+    configured_base = provider_env("PICO_OPENAI_API_BASE")
     api_key = provider_env("PICO_OPENAI_API_KEY")
     if not api_key and not configured_base:
         raise RuntimeError(
-            "Set PICO_OPENAI_API_KEY or pass --base-url for an intentional no-auth endpoint."
+            "Set PICO_OPENAI_API_KEY or PICO_OPENAI_API_BASE for an intentional no-auth endpoint."
         )
+    try:
+        temperature = float(provider_env("PICO_OPENAI_TEMPERATURE", "0.2"))
+        timeout = float(provider_env("PICO_OPENAI_TIMEOUT", "300"))
+    except ValueError:
+        raise ValueError("PICO_OPENAI_TEMPERATURE and PICO_OPENAI_TIMEOUT must be numbers") from None
+    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+        raise ValueError("PICO_OPENAI_TEMPERATURE must be between 0 and 2")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("PICO_OPENAI_TIMEOUT must be positive")
     return OpenAICompatibleModelClient(
         model=model,
         base_url=configured_base or DEFAULT_OPENAI_BASE_URL,
         api_key=api_key,
-        temperature=args.temperature,
-        timeout=args.openai_timeout,
+        temperature=temperature,
+        timeout=timeout,
     )
 
 
 def build_agent(args):
     workspace = Workspace.build(args.cwd)
     load_project_env(workspace.root, boundary=workspace.root)
-    secret_names = set(DEFAULT_SECRET_ENV_NAMES)
-    secret_names.update(name.upper() for name in args.secret_env_names)
-    config = PicoConfig(
-        mode=args.mode,
-        max_agent_turns=args.max_agent_turns,
-        max_parallel_tools=args.max_parallel_tools,
-        max_new_tokens=args.max_new_tokens,
-        secret_env_names=frozenset(secret_names),
-        allowed_tools=tuple(args.allowed_tools) if args.allowed_tools else None,
-        turn_timeout_seconds=args.turn_timeout,
-        provider_context_limit_tokens=args.provider_context_limit,
-        compaction_reserve_tokens=args.compaction_reserve_tokens,
-        compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
-        summary_max_output_tokens=args.summary_max_output_tokens,
-        verification_command=(
-            args.verify_command.strip() or detect_verification_command(workspace.root)
-        ),
-        allowed_write_paths=(
-            tuple(args.allowed_write_paths) if args.allowed_write_paths else None
-        ),
-        memory_enabled=not args.no_memory,
-    )
+    config = PicoConfig(mode=args.mode)
     store = SessionStore(workspace.root / ".pico" / "sessions")
     session_id = args.resume
     if session_id == "latest":
@@ -105,7 +94,7 @@ def build_agent(args):
         else {"session_store": store}
     )
     return constructor(
-        _model_client(args),
+        _build_model_client(args),
         workspace,
         config=config,
         trace=TracePrinter(sys.stderr) if args.trace else None,
@@ -119,49 +108,14 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="A readable local coding-agent runtime.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt")
     parser.add_argument("--cwd", default=".")
     parser.add_argument("--resume", help="Session id or latest")
     parser.add_argument("--mode", choices=("ask", "code", "auto"), default=defaults.mode)
     parser.add_argument("--model")
-    parser.add_argument("--base-url")
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--openai-timeout", type=int, default=300)
     parser.add_argument("--trace", action="store_true")
-    parser.add_argument("--max-agent-turns", type=int, default=defaults.max_agent_turns)
-    parser.add_argument("--max-parallel-tools", type=int, default=defaults.max_parallel_tools)
-    parser.add_argument("--max-new-tokens", type=int, default=defaults.max_new_tokens)
-    parser.add_argument("--turn-timeout", type=int, default=defaults.turn_timeout_seconds)
-    parser.add_argument(
-        "--provider-context-limit",
-        type=int,
-        default=defaults.provider_context_limit_tokens,
-    )
-    parser.add_argument(
-        "--compaction-reserve-tokens",
-        type=int,
-        default=defaults.compaction_reserve_tokens,
-    )
-    parser.add_argument(
-        "--compaction-keep-recent-tokens",
-        type=int,
-        default=defaults.compaction_keep_recent_tokens,
-    )
-    parser.add_argument(
-        "--summary-max-output-tokens",
-        type=int,
-        default=defaults.summary_max_output_tokens,
-    )
-    parser.add_argument("--verify-command", default="")
-    parser.add_argument("--allow-tool", dest="allowed_tools", action="append", default=[])
-    parser.add_argument(
-        "--allow-write", dest="allowed_write_paths", action="append", default=[]
-    )
-    parser.add_argument(
-        "--secret-env-name", dest="secret_env_names", action="append", default=[]
-    )
-    parser.add_argument("--no-memory", action="store_true")
     return parser
 
 
@@ -175,6 +129,53 @@ def _print_outcome(outcome):
     print(outcome.answer)
 
 
+def build_welcome(agent, model):
+    width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
+    inner = width - 4
+    gap = 3
+    left_width = (inner - gap) // 2
+    right_width = inner - gap - left_width
+
+    def row(value):
+        body = middle(value, inner)
+        return f"| {body.ljust(inner)} |"
+
+    def divider(char="-"):
+        return "+" + char * (width - 2) + "+"
+
+    def center(value):
+        body = middle(value, inner)
+        return f"| {body.center(inner)} |"
+
+    def cell(label, value, size):
+        return middle(f"{label:<9} {value}", size).ljust(size)
+
+    def pair(left_label, left_value, right_label, right_value):
+        left = cell(left_label, left_value, left_width)
+        right = cell(right_label, right_value, right_width)
+        return f"| {left}{' ' * gap}{right} |"
+
+    observation = agent.workspace.observe(
+        command_runner=agent.command_runner,
+        execution_context=ExecutionContext.root(max_seconds=5),
+    )
+    rows = [center(value) for value in WELCOME_ART]
+    rows.extend(
+        [
+            center(WELCOME_NAME),
+            center(WELCOME_SUBTITLE),
+            center(WELCOME_STATUS),
+            divider("-"),
+            row(""),
+            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
+            pair("MODEL", model, "HEAD", observation.head),
+            pair("MODE", agent.config.mode, "SESSION", agent.session.id),
+            row(""),
+        ]
+    )
+    return "\n".join([divider("="), *rows, divider("=")])
+
+
 def main(argv=None):
     args = build_arg_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -182,7 +183,8 @@ def main(argv=None):
     except (RuntimeError, ValueError) as exc:
         print(f"pico: {exc}", file=sys.stderr)
         return 2
-    print(f"Pico | {agent.config.mode} | {agent.workspace.root} | {agent.session.id}")
+    model = getattr(agent.model_client, "model", args.model or DEFAULT_OPENAI_MODEL)
+    print(build_welcome(agent, model))
     if args.prompt:
         outcome = agent.ask(" ".join(args.prompt).strip())
         _print_outcome(outcome)
@@ -197,6 +199,9 @@ def main(argv=None):
             continue
         if value in {"/exit", "/quit"}:
             return 0
+        if value == "/help":
+            print(HELP_DETAILS)
+            continue
         if value == "/session":
             print(agent.session.path)
             continue

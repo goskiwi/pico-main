@@ -38,7 +38,7 @@ READ_FILE_MAX_LINES = 2000
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
-RUN_COMMAND_TIMEOUT_SECONDS = 120
+RUN_SHELL_TIMEOUT_SECONDS = 120
 
 
 class ToolArgs(BaseModel):
@@ -52,7 +52,7 @@ class ListFilesArgs(ToolArgs):
 
 
 class ReadFileArgs(ToolArgs):
-    path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
+    path: str = Field(min_length=1, description="File path relative to workspace root, or the exact current conversation transcript path provided in context.")
     start_line: int = Field(default=1, ge=1)
     end_line: int = Field(default=200, ge=1)
 
@@ -65,7 +65,7 @@ class ReadArtifactArgs(ToolArgs):
 
 class SearchArgs(ToolArgs):
     pattern: str = Field(min_length=1)
-    path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
+    path: str = Field(default=".", description="Path relative to workspace root; '.' is workspace root. The exact current conversation transcript path is also readable.")
 
 
 class RunShellArgs(ToolArgs):
@@ -148,7 +148,7 @@ def _validate_read_file(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args["path"])
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}",
-                               structured={"path": path.relative_to(workspace_root).as_posix(), "revision": "absent"})
+                               structured={"path": _display_path(path, workspace_root), "revision": "absent"})
     if not path.is_file():
         raise ToolFailureError("invalid_path_type", "path is not a file")
     if int(args.get("end_line", 200)) < int(args.get("start_line", 1)):
@@ -254,6 +254,10 @@ def tool_list_files(context, args, *, path_resolver, workspace_root):
     )
 
 
+def _display_path(path, root):
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+
+
 def tool_read_file(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args["path"])
     start_line = int(args.get("start_line", 1))
@@ -289,7 +293,7 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
     if truncated:
         body += "\n[read output truncated; narrow the line range or search for specific content]"
     revision = "sha256:" + digest.hexdigest()
-    relative = path.relative_to(workspace_root).as_posix()
+    relative = _display_path(path, workspace_root)
     return ToolRunnerResult(
         body,
         structured={
@@ -459,7 +463,7 @@ def tool_search(context, args, *, path_resolver, workspace_root):
             "",
             failure=FailureInfo("search_unavailable", "ripgrep (rg) is not installed; install it and retry", "user_action_required"),
         )
-    relative_path = path.relative_to(workspace_root).as_posix() or "."
+    relative_path = _display_path(path, workspace_root) or "."
     return _bounded_rg_search(workspace_root, relative_path, pattern, executable, context.execution_context)
 
 
@@ -517,7 +521,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
     result = command_runner.run(
         shell_argv(command),
         cwd=workspace_root,
-        timeout=RUN_COMMAND_TIMEOUT_SECONDS,
+        timeout=RUN_SHELL_TIMEOUT_SECONDS,
         env={},
         execution_context=context.execution_context,
     )
@@ -589,14 +593,13 @@ def _workspace_file_plan(context, args, *, path_resolver, workspace_root):
     return ToolExecutionPlan("workspace", ((logical, path),))
 
 
-def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner):
+def build_tool_registry(*, workspace_root, path_resolver, read_path_resolver, artifact_store, redact_text, mutation_service, command_runner):
     """Each tool declares its schema, policy, validator, runner and effects together."""
     return {
         "list_files": {
             "args_schema": ListFilesArgs,
             "risky": False,
             "manual_observation": True,
-            "concurrency": "parallel",
             "description": "List a sorted directory page. Continue with next_offset; restart at zero if the directory changes.",
             "validate": partial(_validate_list_files, path_resolver=path_resolver),
             "run": partial(tool_list_files, path_resolver=path_resolver, workspace_root=workspace_root),
@@ -605,16 +608,14 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "args_schema": ReadFileArgs,
             "risky": False,
             "manual_observation": True,
-            "concurrency": "parallel",
             "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
-            "validate": partial(_validate_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
-            "run": partial(tool_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
+            "validate": partial(_validate_read_file, path_resolver=read_path_resolver, workspace_root=workspace_root),
+            "run": partial(tool_read_file, path_resolver=read_path_resolver, workspace_root=workspace_root),
         },
         "read_artifact": {
             "args_schema": ReadArtifactArgs,
             "risky": False,
             "manual_observation": True,
-            "concurrency": "parallel",
             "description": "Read up to 8 KiB from a truncated tool-output artifact in the current run.",
             "validate": partial(_validate_read_artifact, artifact_store=artifact_store),
             "run": partial(tool_read_artifact, artifact_store=artifact_store, redact_text=redact_text),
@@ -623,10 +624,9 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "args_schema": SearchArgs,
             "risky": False,
             "manual_observation": True,
-            "concurrency": "parallel",
             "description": "Search the workspace with ripgrep (rg must be installed).",
-            "validate": partial(_validate_search, path_resolver=path_resolver),
-            "run": partial(tool_search, path_resolver=path_resolver, workspace_root=workspace_root),
+            "validate": partial(_validate_search, path_resolver=read_path_resolver),
+            "run": partial(tool_search, path_resolver=read_path_resolver, workspace_root=workspace_root),
         },
         "run_shell": {
             "args_schema": RunShellArgs,
