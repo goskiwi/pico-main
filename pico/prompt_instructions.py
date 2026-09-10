@@ -28,7 +28,7 @@ def build_prompt_instructions():
             (
                 "Only the schemas supplied in the Responses tools field for this turn may be called; ToolRuntime validates them again locally.",
                 "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking but never exposes run_command.",
-                "Call independent tools together when their arguments do not depend on another call's result. Runtime executes explicitly parallel-safe tools concurrently and gives every other tool an exclusive ordered execution boundary.",
+                "Runtime executes tool calls in the model's original order.",
                 "Use run_command only for diagnostics expected not to modify repository files; mutating shell commands are not supported by this Runtime.",
             ),
         ),

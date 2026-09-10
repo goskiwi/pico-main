@@ -31,7 +31,6 @@ class PicoConfig:
 
     mode: str = "code"
     max_agent_turns: int = 32
-    max_parallel_tools: int = 4
     max_new_tokens: int = 32000
     secret_env_names: frozenset[str] = field(default_factory=frozenset)
     allowed_tools: tuple[str, ...] | None = None
@@ -54,9 +53,6 @@ class PicoConfig:
         max_agent_turns = int(self.max_agent_turns)
         if max_agent_turns < 1:
             raise ValueError("max_agent_turns must be positive")
-        max_parallel_tools = int(self.max_parallel_tools)
-        if max_parallel_tools < 1:
-            raise ValueError("max_parallel_tools must be positive")
         turn_timeout_seconds = int(self.turn_timeout_seconds)
         if turn_timeout_seconds < 1:
             raise ValueError("turn_timeout_seconds must be positive")
@@ -88,7 +84,6 @@ class PicoConfig:
         normalized = {
             "mode": str(self.mode),
             "max_agent_turns": max_agent_turns,
-            "max_parallel_tools": max_parallel_tools,
             "max_new_tokens": max_new_tokens,
             "secret_env_names": frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())

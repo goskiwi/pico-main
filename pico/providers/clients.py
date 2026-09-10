@@ -960,7 +960,7 @@ class OpenAICompatibleModelClient:
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
             "tool_choice": "required",
-            "parallel_tool_calls": True,
+            "parallel_tool_calls": False,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature

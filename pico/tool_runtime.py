@@ -7,7 +7,6 @@ from copy import deepcopy
 from contextlib import ExitStack
 from functools import partial
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,13 +49,6 @@ ASK_TOOL_NAMES = frozenset(
     }
 )
 EFFECT_SETTLEMENT_TIMEOUT_SECONDS = 30
-
-
-@dataclass(frozen=True)
-class PreparedParallelCall:
-    call: ToolCall
-    tool: dict
-    context: ToolContext
 
 
 @dataclass(slots=True)
@@ -483,34 +475,6 @@ class ToolRuntime:
         return calls
 
     @staticmethod
-    def _parallel_safe(tool):
-        return bool(
-            tool.get("concurrency") == "parallel"
-            and not tool.get("risky", False)
-            and not tool.get("workspace_mutating", False)
-            and not tool.get("state_mutating", False)
-        )
-
-    def _prepare_parallel_call(self, call, surface):
-        tool, rejection = self._resolve_tool(call, surface, record=False)
-        if rejection is not None:
-            return rejection
-        if not self._parallel_safe(tool):
-            raise RuntimeError(f"tool is not parallel-safe: {call.name}")
-        execution = (
-            self.runtime.run.execution_context.child()
-            if self.runtime.run.execution_context is not None
-            else None
-        )
-        context = self.context(call_id=call.call_id, execution_context=execution)
-        call, rejection = self._validate_call(
-            call, tool, context, record=False
-        )
-        if rejection is not None:
-            return rejection
-        return PreparedParallelCall(call, tool, context)
-
-    @staticmethod
     def _invoke_runner(tool, context, args):
         execution = context.execution_context
         if execution is not None:
@@ -518,54 +482,9 @@ class ToolRuntime:
         result = tool["run"](context, args)
         if not isinstance(result, ToolRunnerResult):
             raise TypeError("tool runner must return ToolRunnerResult")
-        if execution is not None and tool.get("concurrency") == "parallel":
-            execution.check_active()
         return result
 
-    def _parallel_outcome(self, prepared, result):
-        call = prepared.call
-        if isinstance(result, BaseException):
-            typed = result if isinstance(result, ToolFailureError) else None
-            interrupted = isinstance(
-                result,
-                (ExecutionCancelled, ExecutionDeadlineExceeded),
-            )
-            return self._outcome(
-                call,
-                "error",
-                "failed",
-                "none",
-                "",
-                failure=(typed.failure if typed else None)
-                or FailureInfo(
-                    "operation_interrupted" if interrupted else "observation_failed",
-                    str(result),
-                    "user_action_required" if interrupted else "retry_after_change",
-                ),
-                structured=typed.structured if typed else None,
-            )
-        return self._result_outcome(call, result, parallel=True)
-
-    def _result_outcome(self, call, result, preimages=None, *, parallel=False):
-        if parallel and (result.effect_scope != "none" or result.affected_paths):
-            paths = tuple(result.affected_paths)
-            return self._outcome(
-                call,
-                "partial_success",
-                "completed",
-                "unknown",
-                result.content,
-                failure=FailureInfo(
-                    "parallel_tool_reported_side_effect",
-                    "parallel-safe tool reported a side effect",
-                    "user_action_required",
-                ),
-                affected_paths=paths,
-                effect_scope=result.effect_scope,
-                structured=attach_preimage_artifacts(
-                    result.structured, preimages or {}
-                ),
-            )
+    def _result_outcome(self, call, result, preimages=None):
         status, side_effect, paths = classify_runner_result(
             result.failure,
             result.affected_paths,
@@ -700,81 +619,11 @@ class ToolRuntime:
             ),
         )
 
-    def _execute_parallel_segment(self, calls, surface):
-        prepared = [self._prepare_parallel_call(call, surface) for call in calls]
-        run_log = self.runtime.run.run_log
-        outcomes = []
-        index = 0
-        while index < len(prepared):
-            item = prepared[index]
-            if isinstance(item, ToolOutcome):
-                run_log.append_tool_result(item)
-                outcomes.append(item)
-                index += 1
-                continue
-            group = []
-            while index < len(prepared) and isinstance(
-                prepared[index], PreparedParallelCall
-            ):
-                group.append(prepared[index])
-                index += 1
-            for candidate in group:
-                run_log.append_tool_started(
-                    candidate.call,
-                    effect_scope="none",
-                    potential_effects=[],
-                    operation={},
-                )
-            with ThreadPoolExecutor(
-                max_workers=min(self.runtime.config.max_parallel_tools, len(group)),
-                thread_name_prefix="pico-tool",
-            ) as pool:
-                futures = [
-                    pool.submit(
-                        self._invoke_runner,
-                        candidate.tool,
-                        candidate.context,
-                        candidate.call.args,
-                    )
-                    for candidate in group
-                ]
-                raw_results = []
-                for future in futures:
-                    try:
-                        raw_results.append(future.result())
-                    except Exception as exc:  # noqa: BLE001 - tool runner boundary
-                        raw_results.append(exc)
-            for candidate, raw in zip(group, raw_results):
-                outcome = self._parallel_outcome(candidate, raw)
-                run_log.append_tool_result(outcome)
-                outcomes.append(outcome)
-        return tuple(outcomes)
-
     def execute_pending_group(self, group_id, surface):
         if not isinstance(surface, ResolvedToolSurface):
             raise TypeError("group execution requires its resolved Tool surface")
         calls = self._pending_group(group_id)
-        outcomes = []
-        parallel = []
-
-        def flush():
-            if parallel:
-                outcomes.extend(
-                    self._execute_parallel_segment(
-                        tuple(parallel), surface
-                    )
-                )
-                parallel.clear()
-
-        for call in calls:
-            tool = surface.definitions.get(call.name)
-            if tool is not None and self._parallel_safe(tool):
-                parallel.append(call)
-                continue
-            flush()
-            outcomes.append(self._execute(call, surface))
-        flush()
-        return tuple(outcomes)
+        return tuple(self._execute(call, surface) for call in calls)
 
     def execute_manual(self, name, args=None):
         call = ToolCall(str(name), dict(args or {}))
@@ -986,14 +835,9 @@ class ToolRuntime:
                     call,
                     execution,
                     preimages,
-                    parallel=self._parallel_safe(tool),
                 )
         except Exception as exc:  # noqa: BLE001 - tool boundary
-            if self._parallel_safe(tool):
-                outcome = self._parallel_outcome(
-                    PreparedParallelCall(call, tool, context), exc
-                )
-            elif potential_paths:
+            if potential_paths:
                 effects_after = self._effect_snapshot(
                     agent,
                     potential_paths,

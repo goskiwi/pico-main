@@ -216,7 +216,6 @@ def build_agent(args):
     config = PicoConfig(
         mode=args.mode,
         max_agent_turns=args.max_agent_turns,
-        max_parallel_tools=args.max_parallel_tools,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=set(configured_secret_names),
         turn_timeout_seconds=args.turn_timeout,
@@ -343,12 +342,6 @@ def build_arg_parser():
         type=int,
         default=defaults.max_agent_turns,
         help="Maximum main Agent model turns in one active ask/resume call.",
-    )
-    parser.add_argument(
-        "--max-parallel-tools",
-        type=int,
-        default=defaults.max_parallel_tools,
-        help="Maximum parallel-safe tool runners executing at the same time.",
     )
     parser.add_argument(
         "--max-new-tokens",
