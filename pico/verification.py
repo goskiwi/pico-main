@@ -487,7 +487,7 @@ def run_verification(
 ):
     if agent.run.execution_context is None:
         raise RuntimeError("verification requires an active ExecutionContext")
-    execution_context = agent.run.execution_context.child()
+    execution_context = agent.run.execution_context
     return verify_workspace(
         root=agent.workspace.root,
         command=policy.command,

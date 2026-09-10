@@ -14,6 +14,8 @@ Pico → AgentLoop → ModelClient
 
 项目不包含 RepoMap、Subagent、Child Worktree 或 Patch Integration。
 
+第一次读代码请从 [面试阅读主线](READING.md) 开始。按一次任务的调用顺序阅读，再根据追问进入恢复和文件安全细节。
+
 ## 快速开始
 
 ```bash
@@ -81,7 +83,11 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。
+主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file`、`verify` 和 `submit_final`。每轮只接受一个调用；有固定验收命令时才开放无参数 `verify`。
+
+`verify` 由模型主动触发中途检查，`submit_final` 在需要验收时强制重新验证。中途入口不能保证模型一定及时调用。
+
+`RunEvidence` 只维护文件变化、不确定副作用、最新验证和最后修改序号。完整读取、修改和验证历史保存在 RunLog 中；模型和工具用量统计继续保留在 Metrics 中。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。

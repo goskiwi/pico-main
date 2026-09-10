@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 
 
@@ -20,18 +19,15 @@ class ExecutionCancelled(RuntimeError):
 class CancellationToken:
     _event: threading.Event = field(default_factory=threading.Event)
     _reason: str = ""
-    parent: CancellationToken | None = None
 
     @property
     def requested(self):
-        return self._event.is_set() or bool(self.parent and self.parent.requested)
+        return self._event.is_set()
 
     @property
     def reason(self):
         if self._event.is_set():
             return self._reason
-        if self.parent and self.parent.requested:
-            return self.parent.reason
         return ""
 
     def request(self, reason="user_cancelled"):
@@ -39,32 +35,19 @@ class CancellationToken:
             self._reason = str(reason or "user_cancelled")
             self._event.set()
 
-    def child(self):
-        """Return a token cancelled by its parent but independently stoppable."""
-        return CancellationToken(parent=self)
-
     def wait(self, timeout):
-        """Wait until cancellation, including cancellation inherited from a parent."""
-        timeout = max(0.0, float(timeout))
-        deadline = time.monotonic() + timeout
-        while not self.requested:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            self._event.wait(min(remaining, 0.05))
-        return True
+        """Wake immediately when cancellation is requested."""
+        return self._event.wait(max(0.0, float(timeout)))
 
 
 @dataclass
 class ExecutionContext:
-    execution_id: str
     deadline: float
     token: CancellationToken
 
     @classmethod
     def root(cls, *, max_seconds, token=None, deadline=None):
         return cls(
-            execution_id="exec_" + uuid.uuid4().hex,
             deadline=(
                 float(deadline)
                 if deadline is not None
@@ -76,13 +59,6 @@ class ExecutionContext:
     @classmethod
     def standalone(cls, *, max_seconds):
         return cls.root(max_seconds=max_seconds)
-
-    def child(self):
-        return ExecutionContext(
-            execution_id="exec_" + uuid.uuid4().hex,
-            deadline=self.deadline,
-            token=self.token,
-        )
 
     def remaining_seconds(self):
         return max(0.0, self.deadline - time.monotonic())

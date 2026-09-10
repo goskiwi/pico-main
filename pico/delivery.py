@@ -59,8 +59,7 @@ def build_final_diff(runtime):
     )
     if not diff_text:
         return FinalDiff()
-    external_paths = tuple(sorted({item["path"] for item in projection.evidence.external_changes}
-                                  & set(projection.evidence.changed_paths)))
+    external_paths = projection.evidence.external_paths
     if external_paths:
         diff_text = ("Tracked-file workspace delta; includes observed external changes, not solely Agent-authored: "
                      + ", ".join(external_paths) + "\n\n" + diff_text)

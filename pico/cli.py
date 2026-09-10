@@ -201,10 +201,10 @@ def _outcome_summary(agent, outcome):
     elif not agent.config.verification_command:
         verification = "unavailable"
     else:
-        records = agent.run.evidence.verifications
+        record = agent.run.evidence.latest_verification
         verification = (
-            str(records[-1].get("status", "not run"))
-            if records
+            str(record.get("status", "not run"))
+            if record
             else "not run"
         )
     lines = [

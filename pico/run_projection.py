@@ -165,7 +165,7 @@ class RunProjection:
             ):
                 raise ValueError("terminal final Diff does not match net changes")
             if final_diff is not None:
-                external = {item["path"] for item in self.evidence.external_changes} & set(self.evidence.changed_paths)
+                external = set(self.evidence.external_paths)
                 if set(final_diff.external_paths) != external:
                     raise ValueError("terminal final Diff omits or misstates observed external changes")
 

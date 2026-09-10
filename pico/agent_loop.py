@@ -46,47 +46,40 @@ class AgentLoop:
         directive = LoopDirective("continue")
         try:
             while directive.kind == "continue":
-                stop_reason = self.lifecycle.execution_stop()
-                if stop_reason:
-                    directive = LoopDirective("stop", stop_reason)
-                    break
-                if (
-                    self.agent.run.metrics.model_request_count
-                    - loop_state.starting_model_request_count
-                    >= self.agent.config.max_agent_turns
-                ):
-                    directive = LoopDirective("stop", "agent_turn_limit")
-                    break
-
-                try:
-                    turn = self._next_model_turn(loop_state)
-                    stop_reason = self.lifecycle.execution_stop()
-                    if stop_reason:
-                        directive = LoopDirective("stop", stop_reason)
-                    elif turn.action.kind == "tool":
-                        directive = self._handle_tool_turn(
-                            loop_state, turn
-                        )
-                    elif turn.action.kind == "invalid":
-                        directive = self._handle_invalid_output(
-                            loop_state, turn
-                        )
-                    else:
-                        directive = self._handle_final_action(loop_state, turn)
-                except ProviderContextOverflow:
-                    if self._recover_context_overflow(loop_state):
-                        continue
-                    raise
-                except BaseException:
-                    stop_reason = self.lifecycle.execution_stop()
-                    if not stop_reason:
-                        raise
-                    directive = LoopDirective("stop", stop_reason)
+                directive = self._step(loop_state)
             return self._settle(loop_state, directive)
         except BaseException:
             self.agent.run.execution_context = None
             reload_current_run(self.agent)
             raise
+
+    def _step(self, loop_state):
+        """One model decision: execute a tool, correct output, or verify completion."""
+        stop = self.lifecycle.execution_stop()
+        if stop:
+            return LoopDirective("stop", stop)
+        used = self.agent.run.metrics.model_request_count - loop_state.starting_model_request_count
+        if used >= self.agent.config.max_agent_turns:
+            return LoopDirective("stop", "agent_turn_limit")
+        try:
+            turn = self._next_model_turn(loop_state)
+            stop = self.lifecycle.execution_stop()
+            if stop:
+                return LoopDirective("stop", stop)
+            if turn.action.kind == "tool":
+                return self._handle_tool_turn(loop_state, turn)
+            if turn.action.kind == "invalid":
+                return self._handle_invalid_output(loop_state, turn)
+            return self._handle_final_action(loop_state, turn)
+        except ProviderContextOverflow:
+            if self._recover_context_overflow(loop_state):
+                return LoopDirective("continue")
+            raise
+        except BaseException:
+            stop = self.lifecycle.execution_stop()
+            if not stop:
+                raise
+            return LoopDirective("stop", stop)
 
     def _settle(self, loop_state, directive):
         if directive.kind == "complete":

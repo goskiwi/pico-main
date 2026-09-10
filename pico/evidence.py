@@ -1,4 +1,4 @@
-"""Small event projection for observations, effects, net changes, and verification."""
+"""Current file changes, uncertain effects and latest verification, rebuilt from RunLog."""
 
 from __future__ import annotations
 
@@ -7,14 +7,6 @@ from pathlib import Path
 
 from .mutations import ABSENT_REVISION, file_revision, unified_text_diff
 
-OBSERVATION_TOOLS = frozenset(
-    {
-        "list_files",
-        "read_file",
-        "read_artifact",
-        "search",
-    }
-)
 WORKSPACE_SCOPES = frozenset({"workspace"})
 
 
@@ -34,6 +26,7 @@ class FileChange:
     first_before_artifact_id: str
     current_after_state: str
     last_mutation_sequence: int
+    external_change_observed: bool = False
 
     @property
     def net_changed(self):
@@ -55,6 +48,7 @@ class FileChange:
             "current_after_state": self.current_after_state,
             "last_mutation_sequence": self.last_mutation_sequence,
             "net_changed": self.net_changed,
+            "external_change_observed": self.external_change_observed,
         }
 
 @dataclass
@@ -186,18 +180,6 @@ class RunChangeSet:
         return "".join(rendered)
 
 
-def _observation_from_event(event, outcome):
-    structured = dict(outcome.get("structured", {}) or {})
-    return {
-        "tool_call_id": str(outcome.get("tool_call_id", "")),
-        "tool": str(outcome.get("tool_name", "")),
-        "status": str(outcome.get("status", "error")),
-        "execution_state": str(outcome.get("execution_state", "failed")),
-        "event_sequence": int(event.sequence),
-        "path": str(structured.get("path", "")),
-    }
-
-
 def _effect_from_event(event, outcome):
     structured = dict(outcome.get("structured", {}) or {})
     return {
@@ -236,18 +218,19 @@ def verification_is_current(
 
 @dataclass
 class RunEvidence:
-    observations: list[dict] = field(default_factory=list)
-    effects: list[dict] = field(default_factory=list)
-    verifications: list[dict] = field(default_factory=list)
+    """Only current decision state; full history remains in RunLog."""
+
     change_set: RunChangeSet = field(default_factory=RunChangeSet)
-    external_changes: list[dict] = field(default_factory=list)
+    uncertain_effects: list[dict] = field(default_factory=list)
+    latest_verification: dict | None = None
+    last_workspace_mutation_sequence: int = 0
 
     def apply_event(self, event):
         if event.kind == "verification_result":
-            self.verifications.append(dict(event.payload))
+            self.latest_verification = dict(event.payload)
             changes = event.payload["workspace_changes"]
             if changes is None or changes:
-                self.effects.append(_effect_from_event(event, {
+                self._record_effect(event, {
                     "tool_call_id": event.event_id,
                     "tool_name": "verification",
                     "status": "error",
@@ -255,52 +238,52 @@ class RunEvidence:
                     "side_effect_state": "unknown",
                     "affected_paths": changes or (),
                     "effect_scope": "workspace",
-                }))
+                })
             return self
         if event.kind != "tool_result":
             return self
-        outcome = dict(event.payload.get("outcome", {}) or {})
-        structured = dict(outcome.get("structured", {}) or {})
-        if outcome.get("tool_name") == "verify" and "verification" in structured:
-            record = structured["verification"]
-            if not isinstance(record, dict):
-                raise ValueError("verify tool result requires a verification record")
-            self.verifications.append(dict(record))
-        if outcome.get("tool_name") == "read_file":
-            observed = structured
-            path, revision = observed.get("path"), observed.get("revision")
+        outcome = event.payload["outcome"]
+        structured = outcome.get("structured", {})
+        if outcome["tool_name"] == "verify" and "verification" in structured:
+            self.latest_verification = dict(structured["verification"])
+        if outcome["tool_name"] == "read_file":
+            path, revision = structured.get("path"), structured.get("revision")
             missing = (outcome.get("failure") or {}).get("code") == "missing_path"
             known = self.change_set.files.get(path)
-            if (
-                known is not None
-                and revision
-                and (
-                    outcome.get("status") == "success"
-                    or (missing and revision == ABSENT_REVISION)
-                )
-                and revision != known.current_after_state
-            ):
-                self.external_changes.append({"path": path, "before_state": known.current_after_state,
-                                              "after_state": revision, "event_sequence": event.sequence})
+            if (known is not None and revision
+                    and (outcome["status"] == "success" or (missing and revision == ABSENT_REVISION))
+                    and revision != known.current_after_state):
                 known.current_after_state = revision
-        if str(outcome.get("tool_name", "")) in OBSERVATION_TOOLS:
-            self.observations.append(_observation_from_event(event, outcome))
-        if str(outcome.get("side_effect_state", "none")) != "none":
-            effect = _effect_from_event(event, outcome)
-            self.effects.append(effect)
-            self.change_set.apply_effect(effect)
+                known.last_mutation_sequence = event.sequence
+                known.external_change_observed = True
+                self.last_workspace_mutation_sequence = event.sequence
+        if outcome["side_effect_state"] != "none":
+            self._record_effect(event, outcome)
         return self
 
-    @property
-    def successful_observation_count(self):
-        return sum(
-            item["status"] == "success" and item["execution_state"] == "completed"
-            for item in self.observations
-        )
+    def _record_effect(self, event, outcome):
+        effect = _effect_from_event(event, outcome)
+        if effect["effect_scope"] in WORKSPACE_SCOPES:
+            self.last_workspace_mutation_sequence = event.sequence
+        if effect["side_effect_state"] in {"changed", "partial"}:
+            paths = {item["path"] for item in effect["path_transitions"]}
+            if set(effect["affected_paths"]) - paths:
+                # A diagnostic command can report changed paths without edit receipts.
+                # Keep it unresolved instead of inventing a reconstructable change.
+                effect["side_effect_state"] = "unknown"
+            else:
+                self.change_set.apply_effect(effect)
+        if effect["side_effect_state"] in {"partial", "unknown"}:
+            self.uncertain_effects.append(effect)
 
     @property
     def changed_paths(self):
         return list(self.change_set.net_changed_paths)
+
+    @property
+    def external_paths(self):
+        return tuple(path for path in self.change_set.net_changed_paths
+                     if self.change_set.files[path].external_change_observed)
 
     @property
     def touched_paths(self):
@@ -310,74 +293,33 @@ class RunEvidence:
     def has_net_workspace_change(self):
         return bool(self.change_set.net_changed_paths)
 
-    @property
-    def last_workspace_mutation_sequence(self):
-        return max(
-            [
-                int(item["event_sequence"])
-                for item in self.effects
-                if item["effect_scope"] in WORKSPACE_SCOPES
-            ] + [int(item["event_sequence"]) for item in self.external_changes],
-            default=0,
-        )
-
-    def latest_verification_for_state(
-        self,
-        mutation_sequence,
-        changed_path_states,
-        command,
-    ):
-        return next(
-            (
-                record
-                for record in reversed(self.verifications)
-                if verification_is_current(
-                    record,
-                    mutation_sequence,
-                    changed_path_states,
-                    command,
-                )
-            ),
-            None,
-        )
+    def latest_verification_for_state(self, mutation_sequence, changed_path_states, command):
+        record = self.latest_verification
+        if record is not None and verification_is_current(
+            record, mutation_sequence, changed_path_states, command,
+        ):
+            return record
+        return None
 
     def partial_workspace_effects(self):
-        """Historical interrupted/failed mutations, independent of later edits."""
-        return [
-            effect
-            for effect in self.effects
-            if effect["effect_scope"] in WORKSPACE_SCOPES
-            and effect["side_effect_state"] == "partial"
-        ]
+        return [effect for effect in self.uncertain_effects
+                if effect["effect_scope"] in WORKSPACE_SCOPES
+                and effect["side_effect_state"] == "partial"]
 
     def unverifiable_effects(self):
-        """Effects that a verifier of the tracked workspace cannot account for."""
-        return [
-            effect
-            for effect in self.effects
-            if effect["side_effect_state"] in {"partial", "unknown"}
-            and (
-                effect["side_effect_state"] == "unknown"
+        return [effect for effect in self.uncertain_effects
+                if effect["side_effect_state"] == "unknown"
                 or effect["effect_scope"] not in WORKSPACE_SCOPES
-                or not effect["affected_paths"]
-            )
-        ]
+                or not effect["affected_paths"]]
 
     def to_dict(self):
         return {
-            "successful_observation_count": self.successful_observation_count,
-            "observations": [dict(item) for item in self.observations],
-            "effects": [
-                {
-                    **dict(item),
-                    "affected_paths": list(item["affected_paths"]),
-                    "path_transitions": [
-                        dict(transition) for transition in item["path_transitions"]
-                    ],
-                }
-                for item in self.effects
-            ],
             "change_set": self.change_set.to_dict(),
-            "verifications": [dict(item) for item in self.verifications],
-            "external_changes": [dict(item) for item in self.external_changes],
+            "uncertain_effects": [
+                {**effect, "affected_paths": list(effect["affected_paths"]),
+                 "path_transitions": [dict(item) for item in effect["path_transitions"]]}
+                for effect in self.uncertain_effects
+            ],
+            "latest_verification": dict(self.latest_verification) if self.latest_verification else None,
+            "last_workspace_mutation_sequence": self.last_workspace_mutation_sequence,
         }

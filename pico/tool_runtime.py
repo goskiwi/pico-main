@@ -908,44 +908,27 @@ class ToolRuntime:
                     potential_scope=potential_scope,
                 )
             else:
-                effects_after = self._effect_snapshot(
-                    agent,
-                    potential_paths,
-                    settling=True,
-                )
-                detected_paths = effect_diff(effects_before, effects_after)
+                # No planned file paths means both snapshots are empty.
+                # Command effects remain unknown on an untyped exception.
                 typed_error = exc if isinstance(exc, ToolFailureError) else None
-                paths = [] if typed_error else detected_paths
-                unknown = bool(
-                    not typed_error and workspace_mutating and not potential_paths
-                )
-                uncertain = bool(paths or unknown)
-                transitions = path_transitions(
-                    effects_before,
-                    effects_after,
-                    preimages,
-                    paths,
-                )
+                unknown = bool(not typed_error and workspace_mutating)
                 outcome = self._outcome(
                     call,
-                    "partial_success" if uncertain else "error",
+                    "partial_success" if unknown else "error",
                     "failed",
-                    "partial" if paths else ("unknown" if unknown else "none"),
+                    "unknown" if unknown else "none",
                     "",
                     failure=(typed_error.failure if typed_error else None)
                     or FailureInfo(
-                        "tool_partial_success"
-                        if paths
-                        else ("tool_effect_unknown" if unknown else "tool_failed"),
+                        "tool_effect_unknown" if unknown else "tool_failed",
                         str(exc),
-                        "no_retry" if uncertain else "retry_after_change",
+                        "no_retry" if unknown else "retry_after_change",
                     ),
-                    affected_paths=paths,
                     effect_scope=potential_scope,
                     structured=(
                         typed_error.structured
                         if typed_error
-                        else {"path_transitions": transitions}
+                        else {"path_transitions": []}
                     ),
                 )
 
