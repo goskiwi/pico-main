@@ -29,8 +29,9 @@ uv run pico --cwd /path/to/repo --resume latest "继续任务"
 
 ```dotenv
 PICO_OPENAI_API_KEY=your-key
-PICO_OPENAI_API_BASE=https://example.com/v1
-PICO_OPENAI_MODEL=gpt-5.4
+PICO_OPENAI_API_BASE=https://api.deepseek.com
+PICO_OPENAI_MODEL=deepseek-v4-flash
+PICO_OPENAI_REASONING_EFFORT=none
 ```
 
 CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理，项目验收由 Runtime 自动发现；模型温度和请求超时通过环境变量配置。
@@ -108,4 +109,4 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 5. `pico/run_log.py` 与 `pico/run_projection.py`
 6. `pico/prompt_builder.py`
 
-Provider、命令执行、Artifact 和底层 Git 状态采集是基础设施，第一次阅读主链时可以跳过。
+Provider 通过 OpenAI SDK 调用 Responses API；Pico 只维护消息回放、工具解析和用量。命令执行、Artifact 和底层 Git 状态采集第一次阅读主链时可以跳过。

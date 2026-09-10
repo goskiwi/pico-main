@@ -42,7 +42,7 @@ verify 提供中途验收能力，由模型决定调用时机；最终验收是 
 
 输出过大：artifacts.py。主循环只拿预览和工件引用，全文按需读取。
 
-传输细节：providers/clients.py。当前仍为手写 Responses 适配，第一次阅读可跳过网络异常分支。
+模型接入：providers/clients.py。OpenAI SDK 负责 HTTP、SSE 和标准重试；Pico 负责消息回放、单工具解析、用量和上下文溢出映射。
 
 ## 本次改动与验证
 
@@ -51,6 +51,6 @@ verify 提供中途验收能力，由模型决定调用时机；最终验收是 
 定向检查覆盖：编辑—中途验收—再编辑—最终验收，日志重放，未开始调用恢复，外部修改导致验证失效，部分修改与未知命令副作用区分，取消信号。
 这些是本地确定性检查，不是真实 LLM 修复基准成绩。
 
-SDK 替换仍未落地：2026-09-11 使用临时安装的 OpenAI Python SDK 向当前环境配置的代理发起 Responses 工具调用探测，收到 HTTP 503，消息为 Pricing configuration is temporarily unavailable。尚未得到成功响应，不能确认工具配对、用量、超时与取消兼容。没有修改项目依赖或模型配置。
+SDK 替换已落地：2026-09-11 使用 OpenAI Python SDK 调用 DeepSeek 官方 Responses API，`deepseek-v4-flash` 在 `reasoning.effort=none` 下成功完成 `write_file → verify → submit_final`，固定验收通过并返回 usage。SDK 接管 HTTP、SSE 与标准重试；Pico 用剩余 deadline 限制请求，并在读取流事件时检查取消。
 
 摘要结束序号、上下文整体重写、普遍合并文件仍暂缓。当前分支继续作为阅读版本，不引入另一套架构。

@@ -61,10 +61,8 @@ def _build_model_client(args):
     model = args.model or provider_env("PICO_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
     configured_base_url = provider_env("PICO_OPENAI_API_BASE")
     api_key = provider_env("PICO_OPENAI_API_KEY")
-    if not api_key and not configured_base_url:
-        raise RuntimeError(
-            "Set PICO_OPENAI_API_KEY or PICO_OPENAI_API_BASE for an intentional no-auth endpoint."
-        )
+    if not api_key:
+        raise RuntimeError("Set PICO_OPENAI_API_KEY.")
     try:
         temperature = float(provider_env("PICO_OPENAI_TEMPERATURE", "0.2"))
         timeout = float(provider_env("PICO_OPENAI_TIMEOUT", "300"))
@@ -82,6 +80,7 @@ def _build_model_client(args):
         api_key=api_key,
         temperature=temperature,
         timeout=timeout,
+        reasoning_effort=provider_env("PICO_OPENAI_REASONING_EFFORT"),
     )
 
 
