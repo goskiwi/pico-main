@@ -1,46 +1,46 @@
-"""Pico composition root and small public runtime facade."""
+"""Pico's composition root and small public facade."""
 
 from __future__ import annotations
-
-import uuid
-from datetime import datetime, timezone
 
 from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
+from .context_manager import ContextManager
+from .memory import MemoryStore
+from .model_usage import MeteredClient, ModelUsage
 from .mutations import WorkspaceMutationService
-from .prompt_builder import PromptBuilder
-from .repo_map import RepoMap
-from .run_lifecycle import RunLifecycle, load_resumable_run
-from .run_projection import RunOutcome
+from .outcome import RunOutcome
 from .runtime_config import PicoConfig
-from .runtime_dependencies import RuntimeDependencies
-from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
-from .verification import run_verification
-from .workspace import clip
+from .trace import TracePrinter
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
 
 class Pico:
-    """Coordinate model, state, prompt, tools, and long-lived dependencies."""
+    """Own one Session and the services used to advance it."""
 
     def __init__(self):
-        raise TypeError("Use Pico.create() for a new Session or Pico.resume() for recovery")
+        raise TypeError("Use Pico.create() or Pico.resume()")
 
     @classmethod
     def create(cls, model_client, workspace, *, session_store, session_id=None, **options):
-        """Create a new Session and assemble its runtime without recovery IO."""
         session = session_store.create(workspace.root, session_id=session_id)
         return cls._assemble(model_client, workspace, session, **options)
 
     @classmethod
     def resume(cls, model_client, workspace, *, session, **options):
-        """Restore an existing Session, including an orphaned unfinished Run."""
+        if session.workspace_root != str(workspace.root.resolve()):
+            raise ValueError("session belongs to another workspace")
         runtime = cls._assemble(model_client, workspace, session, **options)
-        load_resumable_run(runtime)
+        recovered = runtime.session.recover()
+        if recovered:
+            runtime.session.append_feedback(
+                "Recovered interrupted operations without replaying them. "
+                "Inspect current state before proposing another mutation."
+            )
+            runtime.session.save()
         return runtime
 
     @classmethod
@@ -56,51 +56,37 @@ class Pico:
         session: Session,
         *,
         config: PicoConfig | None = None,
-        run_store=None,
         trace=None,
         command_runner=None,
         command_runner_factory=None,
-        subagent_model_client_factory=None,
-        parent_execution_context=None,
-        check_runner=None,
         approval_handler=None,
+        parent_execution_context=None,
+        child=False,
     ):
-        self.model_client = model_client
-        self.config = config if config is not None else PicoConfig()
+        self.usage = ModelUsage()
+        self.model_client = MeteredClient(model_client, self.usage)
         self.workspace = workspace
-        self.run = ActiveRunState()
         self.session = session
-
-        effective_run_store = run_store or session.store.runs(session.id, trace=trace)
-        artifacts = ArtifactStore(effective_run_store, self.redact_text)
-        mutations = WorkspaceMutationService(self.workspace.root)
-
-        if command_runner_factory is None:
-            command_runner_factory = CommandRunner
-        effective_command_runner = (
-            command_runner or command_runner_factory(self.workspace.root)
-        )
-        self.dependencies = RuntimeDependencies(
-            run_store=effective_run_store,
-            artifacts=artifacts,
-            mutations=mutations,
-            command_runner=effective_command_runner,
-            command_runner_factory=command_runner_factory,
-            repo_map=RepoMap(self.workspace.root),
-            parent_execution_context=parent_execution_context,
-            check_runner=check_runner,
-            approval_handler=approval_handler,
-        )
-        if subagent_model_client_factory is not None:
-            from .subagents.runner import SubagentRunner
-
-            self.dependencies.subagents = SubagentRunner(
-                self,
-                subagent_model_client_factory,
+        self.config = config or PicoConfig()
+        self.trace = trace if trace is not None else TracePrinter(None)
+        self.approval_handler = approval_handler
+        factory = command_runner_factory or CommandRunner
+        self.command_runner_factory = factory
+        self.command_runner = command_runner or factory(workspace.root)
+        self.mutations = WorkspaceMutationService(workspace.root)
+        self.artifacts = ArtifactStore(session.store, self.redact_text)
+        if self.trace is not None and hasattr(self.trace, "bind"):
+            self.trace.bind(
+                session.store.directory(session.id) / "trace.jsonl",
+                self.redact_facts,
             )
-
+        self.memory = MemoryStore(workspace.root / ".pico" / "memory.json", self.redact_text)
+        self.current_memories = []
+        self.child = child
+        self.parent_execution_context = parent_execution_context
+        self.execution_context = None
         self.tools = ToolRuntime(self)
-        self.prompt = PromptBuilder(self)
+        self.context = ContextManager(self)
 
     def redact_text(self, text):
         return securitylib.redact_text(
@@ -108,81 +94,56 @@ class Pico:
             secret_env_names=self.config.secret_env_names,
         )
 
-    def emit_event(self, event_type, payload=None):
-        task_state = self.run.projection
-        run_log = self.run.run_log
-        if task_state.contract is None or run_log is None:
-            raise RuntimeError("Run event requires an active contract and RunLog")
-        if self.run.projection.run_id != run_log.run_id:
-            raise RuntimeError("active Projection and RunLog belong to different Runs")
-        payload = securitylib.redact_facts(payload or {}, self.redact_text)
-        entry = run_log.append(event_type, payload)
-        return entry
-
-    def append_model_instruction(self, instruction, *, evidence=""):
-        run_log = self.run.run_log
-        if run_log is None:
-            raise RuntimeError("Runtime instruction requires an active RunLog")
-        instruction = self.redact_text(str(instruction))
-        evidence = self.redact_text(str(evidence))
-        descriptor = {}
-        if evidence:
-            descriptor = self.dependencies.artifacts.write_tool_output(
-                self.run.projection.run_id,
-                f"runtime_instruction_{len(run_log.events) + 1}",
-                evidence,
-            )
-            evidence = (
-                clip(evidence, 2000)
-                + "\n[Full untrusted evidence: artifact_id="
-                + descriptor["artifact_id"]
-                + ". Use read_artifact to inspect it.]"
-            )
-        return run_log.append_model_instruction(
-            instruction,
-            evidence=evidence,
-            evidence_artifact_id=str(descriptor.get("artifact_id", "")),
-        )
-
-    def run_verification(self, started_workspace_mutation_sequence, policy):
-        return run_verification(
-            self,
-            started_workspace_mutation_sequence,
-            policy,
-        )
-
-    def read_run_events(self, run_id):
-        return self.dependencies.run_store.read_events(run_id)
+    def redact_facts(self, value):
+        return securitylib.redact_facts(value, self.redact_text)
 
     def ask(self, user_message) -> RunOutcome:
         from .agent_loop import AgentLoop
 
-        return AgentLoop(self).run(user_message)
-
-    @staticmethod
-    def new_run_id():
-        return (
-            "run_"
-            + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            + "-"
-            + uuid.uuid4().hex[:6]
-        )
-
-    def reset(self):
-        execution = self.run.execution_context
-        if execution is not None:
-            execution.request_stop("user_reset")
-            return
-        run_log = self.run.run_log
-        if run_log is not None and not self.run.projection.terminal:
-            RunLifecycle(self).reset_dormant()
-            return
-        self.session.set_active_run("")
-        self.run = ActiveRunState()
-        self.model_client.reset_action_session()
+        if self.execution_context is not None:
+            raise RuntimeError("a Session may have only one active request")
+        self.session = self.session.store.load(self.session.id, self.workspace.root)
+        self.session.recover()
+        self.session.save()
+        self.tools.read_versions.clear()
+        try:
+            return AgentLoop(self).run(user_message)
+        finally:
+            self.execution_context = None
 
     def cancel_current_run(self, reason="user_cancelled"):
-        if self.run.execution_context is None:
+        if self.execution_context is None:
             return False
-        self.run.execution_context.request_stop(reason)
+        self.execution_context.request_stop(reason)
         return True
+
+    def reset(self):
+        if self.execution_context is not None:
+            self.execution_context.request_stop("user_reset")
+            return
+        self.session.run = {"status": "reset"}
+        self.session.save()
+        replacement = self.session.store.create(self.workspace.root)
+        self.session = replacement
+        self.artifacts = ArtifactStore(replacement.store, self.redact_text)
+        if self.trace is not None and hasattr(self.trace, "bind"):
+            self.trace.bind(
+                replacement.store.directory(replacement.id) / "trace.jsonl",
+                self.redact_facts,
+            )
+        self.current_memories = []
+        self.tools = ToolRuntime(self)
+        self.model_client.reset_action_session()
+
+    def emit_trace(self, kind, **payload):
+        if self.trace is None:
+            return
+        event = getattr(self.trace, "event", None)
+        try:
+            if callable(event):
+                event(kind, payload)
+            elif callable(self.trace):
+                self.trace(kind, payload)
+        except (OSError, ValueError):
+            # Diagnostic output never controls durable Session state.
+            pass

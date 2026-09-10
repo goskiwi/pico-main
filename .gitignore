@@ -59,6 +59,15 @@ output/
 
 # Local docs not intended for publication
 docs/*
+!docs/architecture.md
+!docs/review-fixes.md
+!docs/live-validation-2btocken.md
+!docs/longswe-128k-experiment.md
+!docs/longswe-128k-budget64.md
+!docs/repomap-upstream-experiment.md
+!docs/repomap-navigation-v2.md
+!docs/repomap-jinja-async.md
+!docs/edit-verification.md
 !docs/learning-path.md
 !docs/resume-project.md
 !docs/review-pack/

@@ -5,12 +5,10 @@ from __future__ import annotations
 import os
 import stat
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 
 from .command_runner import shell_argv
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
-from .task_state import TaskContract
 from .workspace import IGNORED_PATH_NAMES, Workspace, normalize_relative_file
 
 VERIFICATION_SNAPSHOT_MAX_ENTRIES = 20_000
@@ -19,22 +17,6 @@ GIT_SNAPSHOT_TIMEOUT_SECONDS = 10
 
 class RepositorySnapshotError(RuntimeError):
     """The Runtime could not establish one trustworthy repository baseline."""
-
-
-@dataclass(frozen=True)
-class ResolvedVerificationPolicy:
-    """One completion attempt's immutable verification requirement and command."""
-
-    command: str
-    verify_net_changes: bool
-
-    @classmethod
-    def resolve(cls, contract: TaskContract, command):
-        command = str(command or "").strip()
-        return cls(
-            command=command,
-            verify_net_changes=bool(contract.verify_changes or command),
-        )
 
 
 def capture_changed_path_states(root, changed_paths, *, execution_context):
@@ -337,6 +319,7 @@ def verify_workspace(
     started_workspace_mutation_sequence,
     changed_paths,
     execution_context,
+    observed_state,
 ):
     command = str(command or "").strip()
     if not command:
@@ -389,7 +372,8 @@ def verify_workspace(
         record["exit_code"] = result.returncode
         record["output"] = redact_text(
             "\n".join(filter(None, [result.stdout.strip(), result.stderr.strip()]))
-        )[:4000]
+        )
+        record["output_limited"] = result.output_limited
         if result.infrastructure_error:
             record["status"] = "infrastructure_error"
         else:
@@ -404,6 +388,7 @@ def verify_workspace(
     except Exception as exc:  # noqa: BLE001 - verifier infrastructure errors are audit facts
         record["output"] = redact_text(f"{type(exc).__name__}: {exc}")
     after = int(mutation_sequence_provider())
+    finished_changed_path_states = {}
     try:
         finished_changed_path_states = capture_changed_path_states(
             root,
@@ -415,6 +400,7 @@ def verify_workspace(
             command_runner=command_runner,
             execution_context=execution_context,
         )
+        observed_state(finished_workspace_state)
     except (ExecutionCancelled, ExecutionDeadlineExceeded) as exc:
         record["status"] = "failed"
         record["workspace_changes"] = None
@@ -466,26 +452,3 @@ def verify_workspace(
             "\n".join([*reasons, record["output"]]).strip()
         )[:4000]
     return record
-
-
-def run_verification(
-    agent,
-    started_workspace_mutation_sequence,
-    policy: ResolvedVerificationPolicy,
-):
-    if agent.run.execution_context is None:
-        raise RuntimeError("verification requires an active ExecutionContext")
-    execution_context = agent.run.execution_context.child()
-    return verify_workspace(
-        root=agent.workspace.root,
-        command=policy.command,
-        command_runner=agent.dependencies.command_runner,
-        timeout_seconds=agent.config.turn_timeout_seconds,
-        redact_text=agent.redact_text,
-        mutation_sequence_provider=lambda: (
-            agent.run.evidence.last_workspace_mutation_sequence
-        ),
-        started_workspace_mutation_sequence=(started_workspace_mutation_sequence),
-        changed_paths=agent.run.evidence.changed_paths,
-        execution_context=execution_context,
-    )

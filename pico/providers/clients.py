@@ -403,8 +403,14 @@ def _action_result_items(pending_call_ids, results):
     ]
 
 
+def _input_items(value):
+    if isinstance(value, list):
+        return list(value)
+    return [{"role": "user", "content": [{"type": "input_text", "text": str(value)}]}]
+
+
 def _estimate_action_input_tokens(action_input, input_text, instructions, action_tools, token_counter):
-    items = action_input or [{"role": "user", "content": [{"type": "input_text", "text": str(input_text)}]}]
+    items = action_input or _input_items(input_text)
     return token_counter(json.dumps(
         {"instructions": str(instructions), "tools": list(action_tools), "input": items},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -525,12 +531,7 @@ class FakeModelClient:
     ):
         execution_context.check_active()
         if not self._action_input:
-            self._action_input.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": str(input_text)}],
-                }
-        )
+            self._action_input.extend(_input_items(input_text))
         self.action_tool_surfaces.append(tuple(tool["name"] for tool in action_tools))
         self.instruction_prompts.append(str(instructions))
         output = self.complete(
@@ -991,6 +992,7 @@ class OpenAICompatibleModelClient:
         deadline = time.monotonic() + max(0.001, total_timeout)
 
         for attempt in range(attempts):
+            self.request_attempts = attempt + 1
             execution_context.check_active()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1134,12 +1136,7 @@ class OpenAICompatibleModelClient:
     ):
         execution_context.check_active()
         if not self._action_input:
-            self._action_input.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": str(input_text)}],
-                }
-            )
+            self._action_input.extend(_input_items(input_text))
         if self._pending_call_ids:
             raise RuntimeError("pending Responses function calls have no recorded outputs")
         self.last_completion_metadata = {}

@@ -7,8 +7,8 @@ import hashlib
 import os
 import re
 import threading
-from dataclasses import dataclass
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import ToolFailureError
@@ -306,7 +306,7 @@ class WorkspaceMutationService:
                 raise RevisionConflict(logical_path, expected_revision, actual)
             yield raw, actual
 
-    def edit(self, path, old_text, new_text, expected_revision, *, original):
+    def edit(self, path, old_text, new_text, expected_revision, *, original, before_commit):
         """Apply an edit using bytes supplied by prepare_edit, while its lock is held."""
         target = self._target(path)
         logical_path = target.relative_to(self.root)
@@ -340,6 +340,7 @@ class WorkspaceMutationService:
                 replacement = new_text.replace("\n", newline)
                 payload = (text[:match.start()] + replacement + text[match.end():]).encode("utf-8")
             after = content_revision(payload)
+            before_commit(after)
             if actual != after:
                 self._commit(target, logical_path, payload, expected_revision)
         return MutationReceipt(

@@ -4,8 +4,6 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
-from functools import partial
-
 import hashlib
 import json
 import os
@@ -13,6 +11,7 @@ import selectors
 import shutil
 import subprocess
 import time
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,7 +31,6 @@ from .verification import (
     capture_repository_state,
     repository_state_changes,
 )
-from .working_state import normalize_working_update
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
@@ -70,7 +68,7 @@ class SearchArgs(ToolArgs):
     path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
 
 
-class RunCommandArgs(ToolArgs):
+class RunShellArgs(ToolArgs):
     command: str = Field(min_length=1)
 
 
@@ -83,23 +81,10 @@ class EditFileArgs(ToolArgs):
     path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
     old_text: str = Field(min_length=1)
     new_text: str
-    expected_revision: str = Field(
-        pattern=r"^sha256:[a-f0-9]{64}$",
-        description="Exact sha256 revision returned by read_file",
-    )
 
 
 class SubmitFinalArgs(ToolArgs):
     answer: str = Field(min_length=1)
-
-
-class UpdateWorkingStateArgs(ToolArgs):
-    add_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Explicit requirements from the user; not inferred permissions.")
-    remove_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing requirements withdrawn or superseded by the user.")
-    add_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Chosen approaches with brief reasons; not claims of verified success.")
-    remove_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing decisions that were superseded or contradicted by evidence.")
-    add_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Specific unfinished actions for this task.")
-    remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing actions completed, cancelled, or superseded.")
 
 
 def function_schema(args_schema: type[BaseModel]) -> dict[str, Any]:
@@ -227,21 +212,12 @@ def _validate_edit_file(context, args, *, mutation_service):
     return args
 
 
-def _validate_working_state(context, args):
-    state = context.working_state
-    if state is None or not context.tool_call_id:
-        raise ValueError("working state updates require an active Run tool call")
-    normalized = normalize_working_update(args)
-    state.updated(normalized)
-    return normalized
-
-
-def _validate_run_command(context, args, *, command_runner):
+def _validate_run_shell(context, args, *, command_runner):
     command = str(args["command"]).strip()
     if not command:
-        raise ValueError("run_command requires a non-blank command")
+        raise ValueError("run_shell requires a non-blank command")
     if command_runner is None:
-        raise RuntimeError("run_command requires a CommandRunner")
+        raise RuntimeError("run_shell requires a CommandRunner")
     return {"command": command}
 
 
@@ -502,11 +478,12 @@ def tool_write_file(context, args, *, mutation_service, workspace_root):
     )
 
 
-def tool_edit_file(context, args, *, mutation_service, workspace_root, original):
+def tool_edit_file(context, args, *, mutation_service, workspace_root, original, expected_revision, before_commit):
     _logical, path = context.execution_plan.paths[0]
     old_text = str(args.get("old_text", ""))
     receipt = mutation_service.edit(
-        path, old_text, str(args["new_text"]), args["expected_revision"], original=original
+        path, old_text, str(args["new_text"]), expected_revision, original=original,
+        before_commit=before_commit,
     )
     relative = path.relative_to(workspace_root).as_posix()
     return ToolRunnerResult(
@@ -519,11 +496,7 @@ def tool_edit_file(context, args, *, mutation_service, workspace_root, original)
     )
 
 
-def tool_update_working_state(_context, _args):
-    return ToolRunnerResult("working state update accepted")
-
-
-def tool_run_command(context, args, *, command_runner, workspace_root):
+def tool_run_shell(context, args, *, command_runner, workspace_root):
     command = str(args["command"])
     try:
         before = capture_repository_state(
@@ -655,13 +628,13 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "validate": partial(_validate_search, path_resolver=path_resolver),
             "run": partial(tool_search, path_resolver=path_resolver, workspace_root=workspace_root),
         },
-        "run_command": {
-            "args_schema": RunCommandArgs,
+        "run_shell": {
+            "args_schema": RunShellArgs,
             "risky": True,
             "workspace_mutating": True,
             "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
-            "validate": partial(_validate_run_command, command_runner=command_runner),
-            "run": partial(tool_run_command, command_runner=command_runner, workspace_root=workspace_root),
+            "validate": partial(_validate_run_shell, command_runner=command_runner),
+            "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
         },
         "write_file": {
             "args_schema": WriteFileArgs,
@@ -678,16 +651,9 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's line-number prefixes. Use the revision from the read or successful edit result metadata.",
+            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's line-number prefixes. Read the file first. Runtime internally checks the observed version and rejects external changes; reread after a conflict.",
             "validate": partial(_validate_edit_file, mutation_service=mutation_service),
             "run": partial(tool_edit_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
-        },
-        "update_working_state": {
-            "args_schema": UpdateWorkingStateArgs,
-            "risky": False,
-            "description": "Maintain optional task notes for multi-step work, not a source of permissions or verified results. Update when planning, when user requirements change, when evidence revises a decision, or when a stage finishes; skip simple tasks and do not call every turn. Current user requirements and new execution evidence take precedence over old notes. Remove obsolete notes and finished actions. Do not copy files, logs, test output or guesses. Runtime owns the goal, permissions and completion verification.",
-            "validate": _validate_working_state,
-            "run": tool_update_working_state,
         },
     }

@@ -1,27 +1,20 @@
-"""命令行入口。
-
-这个模块负责把“用户怎么启动 pico”翻译成 runtime 能理解的对象：
-解析参数、构建窄模型适配器、工作区快照、恢复或新建 session，
-最后进入 one-shot 或交互式循环。
-"""
+"""Command-line composition and presentation."""
 
 import argparse
 import json
-import os
 import shlex
-import shutil
 import sys
-import textwrap
 from pathlib import Path
 
 from .config import load_project_env, provider_env
-from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
-from .runtime import Pico, PicoConfig, SessionStore
+from .runtime import Pico
+from .runtime_config import PicoConfig
+from .session_store import SessionStore
 from .trace import TracePrinter
-from .working_state import WorkingState
-from .workspace import Workspace, middle
+from .workspace import Workspace
 
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_SECRET_ENV_NAMES = (
     "PICO_OPENAI_API_KEY",
     "OPENAI_API_KEY",
@@ -32,51 +25,22 @@ DEFAULT_SECRET_ENV_NAMES = (
     "GH_PAT",
 )
 
-WELCOME_ART = (
-    "        /\\___/\\\\",
-    "       (  o o  )",
-    "       /   ^   \\\\",
-    "      /|       |\\\\",
-)
-WELCOME_NAME = "pico"
-WELCOME_SUBTITLE = "local coding agent"
-WELCOME_STATUS = "calm shell, ready for work"
-HELP_DETAILS = textwrap.dedent(
-    """\
-    Commands:
-    /help    Show this help message.
-    /state   Show the current Run WorkingState.
-    /session Show the path to the saved session file.
-    /reset   Stop the active Run and clear the Session pointer.
-    /exit    Exit the agent.
-    """
-).strip()
-
-
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
-SECRET_ENV_NAMES_VAR = "PICO_SECRET_ENV_NAMES"
-
 
 def detect_verification_command(repo_root):
-    """Choose the one conservative verifier Pico currently understands."""
-
     tests = Path(repo_root).resolve() / "tests"
     if tests.is_dir() and not tests.is_symlink() and any(
-        path.is_file() and not path.is_symlink()
-        for path in tests.rglob("test_*.py")
+        path.is_file() and not path.is_symlink() for path in tests.rglob("test_*.py")
     ):
         return f"{shlex.quote(sys.executable)} -m pytest -q"
     return ""
 
 
-def resolve_verification_command(repo_root, explicit_command):
-    explicit = str(explicit_command or "").strip()
-    return explicit or detect_verification_command(repo_root)
-
-
 def _terminal_approval(name, args, plan):
-    request = {"arguments": args, "targets": [str(target) for _path, target in plan.paths],
-               "operation": plan.operation}
+    request = {
+        "arguments": args,
+        "targets": [str(target) for _logical, target in plan.paths],
+        "operation": plan.operation or name,
+    }
     try:
         answer = input(
             f"approve {name} {json.dumps(request, ensure_ascii=True)}? [y/N] "
@@ -86,389 +50,161 @@ def _terminal_approval(name, args, plan):
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _effective_model(args):
-    # 模型选择优先级：
-    # 1. 用户显式传入 --model
-    # 2. OpenAI-compatible 环境变量
-    # 3. 代码里的默认值
-    explicit_model = getattr(args, "model", None)
-    if explicit_model:
-        return explicit_model
-    return provider_env("PICO_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
-
-
-def _configured_secret_names(args):
-    configured_secret_names = set(DEFAULT_SECRET_ENV_NAMES)
-    configured_secret_names.update(str(name).upper() for name in args.secret_env_names)
-    extra_names = os.environ.get(SECRET_ENV_NAMES_VAR, "")
-    if extra_names.strip():
-        configured_secret_names.update(
-            item.strip().upper() for item in extra_names.split(",") if item.strip()
-        )
-    return sorted(configured_secret_names)
-
-
-def _build_model_client(args):
-    """Build the single supported Responses transport."""
-    model = _effective_model(args)
-    configured_base_url = getattr(args, "base_url", None) or provider_env(
-        "PICO_OPENAI_API_BASE"
-    )
+def _model_client(args):
+    model = args.model or provider_env("PICO_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    configured_base = args.base_url or provider_env("PICO_OPENAI_API_BASE")
     api_key = provider_env("PICO_OPENAI_API_KEY")
-    if not api_key and not configured_base_url:
+    if not api_key and not configured_base:
         raise RuntimeError(
-            "PICO_OPENAI_API_KEY is not configured. Set it in the project "
-            ".env.local/.env, or pass --base-url for an intentional no-auth "
-            "OpenAI-compatible endpoint."
+            "Set PICO_OPENAI_API_KEY or pass --base-url for an intentional no-auth endpoint."
         )
-    base_url = configured_base_url or DEFAULT_OPENAI_BASE_URL
     return OpenAICompatibleModelClient(
         model=model,
-        base_url=base_url,
+        base_url=configured_base or DEFAULT_OPENAI_BASE_URL,
         api_key=api_key,
         temperature=args.temperature,
         timeout=args.openai_timeout,
     )
 
 
-def build_welcome(agent, model):
-    width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
-    inner = width - 4
-    gap = 3
-    left_width = (inner - gap) // 2
-    right_width = inner - gap - left_width
-
-    def row(text):
-        body = middle(text, width - 4)
-        return f"| {body.ljust(width - 4)} |"
-
-    def divider(char="-"):
-        return "+" + char * (width - 2) + "+"
-
-    def center(text):
-        body = middle(text, inner)
-        return f"| {body.center(inner)} |"
-
-    def cell(label, value, size):
-        body = middle(f"{label:<9} {value}", size)
-        return body.ljust(size)
-
-    def pair(left_label, left_value, right_label, right_value):
-        left = cell(left_label, left_value, left_width)
-        right = cell(right_label, right_value, right_width)
-        return f"| {left}{' ' * gap}{right} |"
-
-    observation = agent.workspace.observe(
-        command_runner=agent.dependencies.command_runner,
-        execution_context=ExecutionContext.root(max_seconds=5),
-    )
-    line = divider("=")
-    rows = [center(text) for text in WELCOME_ART]
-    rows.extend(
-        [
-            center(WELCOME_NAME),
-            center(WELCOME_SUBTITLE),
-            center(WELCOME_STATUS),
-            divider("-"),
-            row(""),
-            row(
-                "WORKSPACE  "
-                + middle(agent.workspace.cwd, inner - 11)
-            ),
-            pair("MODEL", model, "HEAD", observation.head),
-            pair(
-                "MODE",
-                agent.config.mode,
-                "SESSION",
-                agent.session.id,
-            ),
-            row(
-                "VERIFY     "
-                + (agent.config.verification_command or "unavailable")
-            ),
-            row(""),
-        ]
-    )
-    return "\n".join([line, *rows, line])
-
-
 def build_agent(args):
-    """根据 CLI 参数装配出一个可运行的 Pico 实例。
-
-    为什么存在：
-    命令行参数只是字符串和开关，runtime 需要的是已经装配好的对象图：
-    Responses client、workspace snapshot、session store、secret 配置等。
-    这个函数负责把“启动参数”翻译成“agent 运行现场”。
-    输入 / 输出：
-    - 输入：`argparse` 解析后的 `args`
-    - 输出：一个新的 `Pico`，或一个从旧 session 恢复出来的 `Pico`
-    在 agent 链路里的位置：
-    它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
-    得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
-    """
-    # 这里是 CLI 到 runtime 的装配点：
-    # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型和 session。
     workspace = Workspace.build(args.cwd)
     load_project_env(workspace.root, boundary=workspace.root)
-    configured_secret_names = _configured_secret_names(args)
-    store = SessionStore(workspace.root / ".pico" / "sessions")
-    model = _build_model_client(args)
+    secret_names = set(DEFAULT_SECRET_ENV_NAMES)
+    secret_names.update(name.upper() for name in args.secret_env_names)
     config = PicoConfig(
         mode=args.mode,
         max_agent_turns=args.max_agent_turns,
         max_parallel_tools=args.max_parallel_tools,
         max_new_tokens=args.max_new_tokens,
-        secret_env_names=set(configured_secret_names),
+        secret_env_names=frozenset(secret_names),
+        allowed_tools=tuple(args.allowed_tools) if args.allowed_tools else None,
         turn_timeout_seconds=args.turn_timeout,
         provider_context_limit_tokens=args.provider_context_limit,
         compaction_reserve_tokens=args.compaction_reserve_tokens,
         compaction_keep_recent_tokens=args.compaction_keep_recent_tokens,
         summary_max_output_tokens=args.summary_max_output_tokens,
-        verification_command=resolve_verification_command(
-            workspace.root,
-            args.verify_command,
+        verification_command=(
+            args.verify_command.strip() or detect_verification_command(workspace.root)
         ),
+        allowed_write_paths=(
+            tuple(args.allowed_write_paths) if args.allowed_write_paths else None
+        ),
+        memory_enabled=not args.no_memory,
     )
-
-    def child_model_client_factory(_spec):
-        return _build_model_client(args)
-
+    store = SessionStore(workspace.root / ".pico" / "sessions")
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest_active()
         if not session_id:
-            raise ValueError("no unfinished Session is available to resume")
-    start = Pico.resume if session_id else Pico.create
-    session_options = {"session": store.load(session_id)} if session_id else {"session_store": store}
-    return start(
-        model_client=model,
-        workspace=workspace,
-        trace=TracePrinter(sys.stderr) if args.trace else None,
-        config=config,
-        subagent_model_client_factory=child_model_client_factory,
-        approval_handler=_terminal_approval,
-        **session_options,
+            raise ValueError("no unfinished Session is available")
+    constructor = Pico.resume if session_id else Pico.create
+    session_args = (
+        {"session": store.load(session_id, workspace.root)}
+        if session_id
+        else {"session_store": store}
     )
-
-
-def _working_state_text(agent):
-    task = agent.run.projection
-    if task.contract is None:
-        return WorkingState().render_panel()
-    return "Task goal:\n- " + task.contract.goal + "\n\n" + task.working.render_panel()
-
-
-def _outcome_summary(agent, outcome):
-    changed = ", ".join(outcome.changed_paths) or "none"
-    if not outcome.changed_paths:
-        verification = "not required"
-    elif not agent.config.verification_command:
-        verification = "unavailable"
-    else:
-        records = agent.run.evidence.verifications
-        verification = (
-            str(records[-1].get("status", "not run"))
-            if records
-            else "not run"
-        )
-    lines = [
-        f"Status: {outcome.status}",
-        f"Changed: {changed}",
-        f"Verification: {verification}",
-        f"Run: {outcome.run_id}",
-    ]
-    if outcome.status != "completed" and outcome.stop_reason:
-        lines.insert(1, f"Stop reason: {outcome.stop_reason}")
-    if outcome.final_diff and outcome.final_diff.external_paths:
-        lines.append("Diff includes observed external changes (not solely Agent-authored): "
-                     + ", ".join(outcome.final_diff.external_paths))
-    return "\n".join(lines)
-
-
-def _print_outcome(agent, outcome):
-    print(_outcome_summary(agent, outcome))
-    print()
-    print(outcome.answer)
+    return constructor(
+        _model_client(args),
+        workspace,
+        config=config,
+        trace=TracePrinter(sys.stderr) if args.trace else None,
+        approval_handler=_terminal_approval,
+        **session_args,
+    )
 
 
 def build_arg_parser():
     defaults = PicoConfig()
     parser = argparse.ArgumentParser(
+        description="A readable local coding-agent runtime.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Minimal coding agent runtime for an OpenAI-compatible "
-            "Responses endpoint."
-        ),
     )
-    parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
-    parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument(
-        "--trace", action="store_true",
-        help="Print live Runtime events to stderr (without prompt or file contents).",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name override. Defaults to PICO_OPENAI_MODEL or gpt-5.4.",
-    )
-    parser.add_argument(
-        "--base-url", default=None, help="OpenAI-compatible API base URL."
-    )
-    parser.add_argument(
-        "--openai-timeout",
-        type=int,
-        default=300,
-        help="OpenAI-compatible request timeout in seconds.",
-    )
-    parser.add_argument(
-        "--resume", default=None, help="Session id to resume or 'latest'."
-    )
-    parser.add_argument(
-        "--mode",
-        choices=("ask", "code", "auto"),
-        default=defaults.mode,
-        help=(
-            "Ask is observation-only; Code asks before risky actions; Auto "
-            "automates bounded file changes but never exposes run_command."
-        ),
-    )
-    parser.add_argument(
-        "--secret-env-name",
-        dest="secret_env_names",
-        action="append",
-        default=[],
-        help=(
-            "Extra environment variable names to treat as secrets for "
-            "event/artifact redaction."
-        ),
-    )
-    parser.add_argument(
-        "--max-agent-turns",
-        type=int,
-        default=defaults.max_agent_turns,
-        help="Maximum main Agent model turns in one active ask/resume call.",
-    )
-    parser.add_argument(
-        "--max-parallel-tools",
-        type=int,
-        default=defaults.max_parallel_tools,
-        help="Maximum parallel-safe tool runners executing at the same time.",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=defaults.max_new_tokens,
-        help=(
-            "Maximum total model output tokens per action, including reasoning "
-            "tokens, visible text, and function-call arguments."
-        ),
-    )
-    parser.add_argument(
-        "--turn-timeout",
-        type=int,
-        default=defaults.turn_timeout_seconds,
-        help="Active ask/resume deadline in seconds.",
-    )
+    parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt")
+    parser.add_argument("--cwd", default=".")
+    parser.add_argument("--resume", help="Session id or latest")
+    parser.add_argument("--mode", choices=("ask", "code", "auto"), default=defaults.mode)
+    parser.add_argument("--model")
+    parser.add_argument("--base-url")
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--openai-timeout", type=int, default=300)
+    parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--max-agent-turns", type=int, default=defaults.max_agent_turns)
+    parser.add_argument("--max-parallel-tools", type=int, default=defaults.max_parallel_tools)
+    parser.add_argument("--max-new-tokens", type=int, default=defaults.max_new_tokens)
+    parser.add_argument("--turn-timeout", type=int, default=defaults.turn_timeout_seconds)
     parser.add_argument(
         "--provider-context-limit",
         type=int,
         default=defaults.provider_context_limit_tokens,
-        help="Model context window used for prompt budgeting, compaction, and Responses rotation.",
     )
     parser.add_argument(
         "--compaction-reserve-tokens",
         type=int,
         default=defaults.compaction_reserve_tokens,
-        help="Context tokens reserved before automatic Run Log compaction.",
     )
     parser.add_argument(
         "--compaction-keep-recent-tokens",
         type=int,
         default=defaults.compaction_keep_recent_tokens,
-        help="Approximate recent Run Log tokens retained after compaction.",
     )
     parser.add_argument(
         "--summary-max-output-tokens",
         type=int,
         default=defaults.summary_max_output_tokens,
-        help="Maximum output tokens for the separate history-summary request.",
+    )
+    parser.add_argument("--verify-command", default="")
+    parser.add_argument("--allow-tool", dest="allowed_tools", action="append", default=[])
+    parser.add_argument(
+        "--allow-write", dest="allowed_write_paths", action="append", default=[]
     )
     parser.add_argument(
-        "--verify-command",
-        default=defaults.verification_command,
-        help=(
-            "Override the Runtime verifier. When omitted, CLI detects Python "
-            "tests/test_*.py; otherwise verification is unavailable."
-        ),
+        "--secret-env-name", dest="secret_env_names", action="append", default=[]
     )
-    parser.add_argument(
-        "--temperature", type=float, default=0.2, help="Sampling temperature."
-    )
+    parser.add_argument("--no-memory", action="store_true")
     return parser
 
 
-def main(argv=None):
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if raw_argv[:1] == ["run"]:
-        from .run_cli import run_main
+def _print_outcome(outcome):
+    print(f"Status: {outcome.status}")
+    print(f"Verification: {outcome.verification}")
+    print(f"Session: {outcome.session_id}")
+    if outcome.stop_reason:
+        print(f"Stop reason: {outcome.stop_reason}")
+    print()
+    print(outcome.answer)
 
-        return run_main(raw_argv[1:])
-    args = build_arg_parser().parse_args(raw_argv)
+
+def main(argv=None):
+    args = build_arg_parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
         agent = build_agent(args)
     except (RuntimeError, ValueError) as exc:
         print(f"pico: {exc}", file=sys.stderr)
         return 2
-
-    model = getattr(
-        agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
-    )
-    print(build_welcome(agent, model=model))
-
+    print(f"Pico | {agent.config.mode} | {agent.workspace.root} | {agent.session.id}")
     if args.prompt:
-        # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
-        prompt = " ".join(args.prompt).strip()
-        if prompt:
-            print()
-            try:
-                outcome = agent.ask(prompt)
-            except RuntimeError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
-            _print_outcome(agent, outcome)
-            return 0 if outcome.status == "completed" else 1
-        return 0
-
+        outcome = agent.ask(" ".join(args.prompt).strip())
+        _print_outcome(outcome)
+        return 0 if outcome.status == "completed" else 1
     while True:
-        # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 Run Log 和由它投影的 WorkingState 会跨恢复轮次延续。
         try:
-            user_input = input("\npico> ").strip()
+            value = input("\npico> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-
-        if not user_input:
+        if not value:
             continue
-        if user_input in {"/exit", "/quit"}:
+        if value in {"/exit", "/quit"}:
             return 0
-        if user_input == "/help":
-            print(HELP_DETAILS)
-            continue
-        if user_input == "/state":
-            print(_working_state_text(agent))
-            continue
-        if user_input == "/session":
+        if value == "/session":
             print(agent.session.path)
             continue
-        if user_input == "/reset":
+        if value == "/state":
+            print(json.dumps(agent.session.run, indent=2, ensure_ascii=False))
+            continue
+        if value == "/reset":
             agent.reset()
             print("session reset")
             continue
-
-        print()
-        try:
-            outcome = agent.ask(user_input)
-            _print_outcome(agent, outcome)
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
+        _print_outcome(agent.ask(value))

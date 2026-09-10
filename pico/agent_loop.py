@@ -1,341 +1,257 @@
-"""Model/tool turn control for one Pico request."""
+"""The only model/tool loop in Pico."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+import json
+import time
+import uuid
 
-from .completion_controller import CompletionController
-from .context_manager import render_runtime_feedback
+from .changes import build_task_diff
+from .completion import CompletionController
+from .context_manager import ContextBudgetExceeded
+from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
+from .outcome import RunOutcome
 from .providers import ProviderContextOverflow
-from .run_lifecycle import RunLifecycle, reload_current_run
-from .run_projection import RunOutcome
-
-if TYPE_CHECKING:
-    from .runtime import Pico
-
-
-@dataclass(frozen=True)
-class ModelTurn:
-    action: Any
-    instructions: str
-    tool_surface: Any
-
-
-@dataclass(slots=True)
-class LoopDirective:
-    """One internal decision returned to the sole Agent loop orchestrator."""
-
-    kind: Literal["continue", "complete", "stop"]
-    detail: str = ""
+from .session import new_loop_control, new_verification, utc_now
 
 
 class AgentLoop:
-    def __init__(self, agent: Pico):
-        self.agent = agent
-        self.lifecycle = RunLifecycle(agent)
-        self.completion = CompletionController(agent)
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.completion = CompletionController(runtime)
 
-    def run(
-        self,
-        user_message,
-    ) -> RunOutcome:
-        loop_state = self.lifecycle.initialize(
-            user_message,
+    def run(self, user_message):  # noqa: C901 - one visible orchestration loop
+        runtime = self.runtime
+        session = runtime.session
+        runtime.usage.reset()
+        self._start_task(str(user_message))
+        runtime.model_client.reset_action_session()
+        execution = (
+            runtime.parent_execution_context.child()
+            if runtime.parent_execution_context is not None
+            else ExecutionContext.root(max_seconds=runtime.config.turn_timeout_seconds)
         )
-        directive = LoopDirective("continue")
+        runtime.execution_context = execution
+        runtime.emit_trace("run_started", session_id=session.id, run_id=session.run["id"])
+        runtime.current_memories = []
+        started = time.monotonic()
+        turns = tools = 0
+        answer = stop_reason = ""
+        status = "stopped"
+        overflow_retried = False
         try:
-            while directive.kind == "continue":
-                stop_reason = self.lifecycle.execution_stop()
-                if stop_reason:
-                    directive = LoopDirective("stop", stop_reason)
-                    break
-                if (
-                    self.agent.run.metrics.model_request_count
-                    - loop_state.starting_model_request_count
-                    >= self.agent.config.max_agent_turns
-                ):
-                    directive = LoopDirective("stop", "agent_turn_limit")
-                    break
-
+            self._recall(user_message, execution)
+            while turns < runtime.config.max_agent_turns:
+                execution.check_active()
+                # Every request sends the current Session projection in full.
+                runtime.model_client.reset_action_session()
+                surface = runtime.tools.resolve_surface()
+                instructions, input_text = runtime.context.build(surface, execution)
+                sent_end = len(session.history)
+                turns += 1
+                session.run["turns"] = turns
+                session.save()
+                runtime.emit_trace("model_requested", turn=turns)
                 try:
-                    turn = self._next_model_turn(loop_state)
-                    stop_reason = self.lifecycle.execution_stop()
-                    if stop_reason:
-                        directive = LoopDirective("stop", stop_reason)
-                    elif turn.action.kind == "tool":
-                        directive = self._handle_tool_turn(
-                            loop_state, turn
-                        )
-                    elif turn.action.kind == "invalid":
-                        directive = self._handle_invalid_output(
-                            loop_state, turn
-                        )
-                    else:
-                        directive = self._handle_final_action(loop_state, turn)
+                    action = runtime.model_client.complete_action(
+                        input_text,
+                        runtime.config.max_new_tokens,
+                        instructions=instructions,
+                        action_tools=surface.action_tools,
+                        execution_context=execution.child(),
+                    )
                 except ProviderContextOverflow:
-                    if self._recover_context_overflow(loop_state):
-                        continue
-                    raise
-                except BaseException:
-                    stop_reason = self.lifecycle.execution_stop()
-                    if not stop_reason:
+                    if overflow_retried:
                         raise
-                    directive = LoopDirective("stop", stop_reason)
-            return self._settle(loop_state, directive)
-        except BaseException:
-            self.agent.run.execution_context = None
-            reload_current_run(self.agent)
-            raise
-
-    def _settle(self, loop_state, directive):
-        if directive.kind == "complete":
-            try:
-                return self.lifecycle.finish_success(
-                    directive.detail,
-                    run_started_at=loop_state.run_started_at,
+                    runtime.context.build(surface, execution, force=True)
+                    overflow_retried = True
+                    continue
+                overflow_retried = False
+                if action.kind != "invalid":
+                    session.observed = sent_end
+                session.run["usage"] = runtime.usage.snapshot()
+                runtime.emit_trace(
+                    "model_finished",
+                    turn=turns,
+                    action=action.kind,
+                    usage=getattr(runtime.model_client, "last_completion_metadata", {}),
                 )
-            except BaseException:
-                stop_reason = self.lifecycle.execution_stop()
-                if not stop_reason:
-                    raise
-                directive = LoopDirective("stop", stop_reason)
-        if directive.kind == "stop":
-            return self.lifecycle.finish_stopped(
-                directive.detail,
-                run_started_at=loop_state.run_started_at,
-            )
-        raise RuntimeError("Agent loop exited without a terminal directive")
 
-    def _next_model_turn(self, loop_state):
-        agent = self.agent
-        tool_surface = agent.tools.resolve_surface()
-        prompt = self._prepare_prompt(loop_state, tool_surface)
-        action = self._request_action(
-            loop_state,
-            prompt,
-            tool_surface,
-        )
-        loop_state.overflow_recovery_attempted = False
-        return ModelTurn(
-            action=action,
-            instructions=prompt.instructions,
-            tool_surface=tool_surface,
-        )
+                if action.kind == "tool":
+                    _index, entry = session.begin_tool_turn(
+                        action.tool_calls, runtime.redact_facts
+                    )
+                    session.save()
+                    if runtime.context.refresh_rules():
+                        runtime.tools.reject_group(entry, action.tool_calls)
+                        continue
+                    outcomes = runtime.tools.execute_group(
+                        action.tool_calls, entry, execution.child(), surface
+                    )
+                    tools += len(outcomes)
+                    runtime.emit_trace(
+                        "tools_finished",
+                        count=len(outcomes),
+                        statuses=[outcome.status for outcome in outcomes],
+                    )
+                    session.run["tools"] = tools
+                    session.loop_control["invalid_outputs"] = 0
+                    session.save()
+                    continue
 
-    def _prepare_prompt(self, loop_state, tool_surface):
-        agent = self.agent
-        if loop_state.prompt_snapshot is not None:
-            _prompt, prior_surface = loop_state.prompt_snapshot
-            if prior_surface.names != tool_surface.names or prior_surface.policy != tool_surface.policy:
-                agent.model_client.reset_action_session()
-                loop_state.prompt_snapshot = None
-                loop_state.provider_context_tokens = None
-                agent.emit_event(
-                    "provider_session_reset",
-                    {
-                        "reason": "tool_surface_changed",
-                        "tool_names": list(tool_surface.names),
-                    },
+                if action.kind == "invalid":
+                    session.loop_control["invalid_outputs"] += 1
+                    session.append_feedback(
+                        "Invalid model output: " + str(action.content)
+                    )
+                    session.save()
+                    runtime.model_client.reset_action_session()
+                    if session.loop_control["invalid_outputs"] >= 8:
+                        stop_reason = "invalid_output_limit"
+                        break
+                    continue
+
+                session.loop_control["invalid_outputs"] = 0
+                session.append_final(action.content)
+                session.save()
+                decision = self.completion.check(action.content, execution.child())
+                if decision.allowed:
+                    answer = decision.detail
+                    status = "completed"
+                    break
+                session.loop_control["completion_blocks"] += 1
+                session.loop_control["last_completion_error"] = decision.error
+                session.append_feedback(
+                    "Runtime completion check: "
+                    + json.dumps(
+                        {
+                            "status": decision.status,
+                            "error": decision.error,
+                            "detail": decision.detail,
+                            "data": decision.data,
+                        },
+                        ensure_ascii=False,
+                    )
                 )
-        if loop_state.prompt_snapshot is None:
-            inputs, compaction_metadata, history_override = self.lifecycle.prepare_compaction(
-                loop_state.user_message,
-                tool_surface=tool_surface,
-                provider_context_tokens=loop_state.provider_context_tokens,
-            )
-            prompt, _metadata = agent.prompt.build(
-                inputs,
-                provider_context_tokens=loop_state.provider_context_tokens,
-                compaction_metadata=compaction_metadata,
-                history_override=history_override,
-            )
-            loop_state.provider_context_tokens = None
-            loop_state.prompt_snapshot = (prompt, tool_surface)
-        else:
-            prompt, _surface = loop_state.prompt_snapshot
-        return prompt
-
-    def _request_action(
-        self,
-        loop_state,
-        prompt,
-        tool_surface,
-    ):
-        agent = self.agent
-        input_tokens = agent.model_client.estimate_action_input_tokens(
-            prompt.input_text, instructions=prompt.instructions,
-            action_tools=tool_surface.action_tools, token_counter=agent.prompt.count_tokens,
-        )
-        if loop_state.overflow_recovery_attempted and input_tokens >= loop_state.last_request_input_tokens:
-            raise ProviderContextOverflow(
-                "context overflow recovery did not reduce the full request "
-                f"({loop_state.last_request_input_tokens} -> {input_tokens} estimated input tokens); "
-                "check the model context/output limits or reduce required context"
-            )
-        loop_state.last_request_input_tokens = input_tokens
-        agent.emit_event("model_requested")
-        action = agent.model_client.complete_action(
-            prompt.input_text,
-            agent.config.max_new_tokens,
-            instructions=prompt.instructions,
-            action_tools=tool_surface.action_tools,
-            execution_context=agent.run.execution_context,
-        )
-        completion_metadata = dict(
-            getattr(agent.model_client, "last_completion_metadata", {}) or {}
-        )
-        agent.emit_event(
-            "turn_metrics",
-            {
-                "input_tokens": completion_metadata.get("input_tokens"),
-                "cached_tokens": completion_metadata.get("cached_tokens"),
-                "output_tokens": completion_metadata.get("output_tokens"),
-            },
-        )
-        return action
-
-    def _provider_high_watermark(self):
-        config = self.agent.config
-        return (
-            config.provider_context_limit_tokens
-            - config.compaction_reserve_tokens
-        )
-
-    def _continue_provider(self, loop_state, turn, provider_results):
-        agent = self.agent
-        provider_results = tuple(str(result) for result in provider_results)
-        projected_tokens = agent.model_client.projected_context_tokens(
-            provider_results,
-            instructions=turn.instructions,
-            action_tools=turn.tool_surface.action_tools,
-            token_counter=agent.prompt.count_tokens,
-        )
-        if projected_tokens >= self._provider_high_watermark():
-            threshold_tokens = self._provider_high_watermark()
-            agent.model_client.reset_action_session()
-            loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = projected_tokens
-            agent.emit_event(
-                "provider_session_reset",
+                session.save()
+                if decision.status == "stop":
+                    answer, stop_reason = decision.detail, decision.error
+                    break
+                if session.loop_control["completion_blocks"] >= 3:
+                    answer, stop_reason = decision.detail, "completion_block_limit"
+                    break
+                runtime.model_client.reset_action_session()
+            else:
+                stop_reason = "agent_turn_limit"
+        except ExecutionCancelled as exc:
+            stop_reason = str(exc) or "user_cancelled"
+        except ExecutionDeadlineExceeded:
+            stop_reason = "deadline_exceeded"
+        except ContextBudgetExceeded as exc:
+            stop_reason = "context_budget_exceeded: " + str(exc)
+        except Exception as exc:  # noqa: BLE001 - persist a stopped Session on runtime failure
+            stop_reason = runtime.redact_text(f"runtime_error: {type(exc).__name__}: {exc}")
+        finally:
+            session.recover()
+            session.run.update(
                 {
-                    "reason": "context_high_watermark",
-                    "input_tokens": agent.model_client.last_completion_metadata.get("input_tokens"),
-                    "projected_input_tokens": projected_tokens,
-                    "threshold_tokens": threshold_tokens,
-                },
+                    "status": status,
+                    "stop_reason": stop_reason,
+                    "turns": turns,
+                    "tools": tools,
+                    "ended_at": utc_now(),
+                    "usage": runtime.usage.snapshot(),
+                }
             )
-            return
-        agent.model_client.record_action_results(provider_results)
-
-    def _recover_context_overflow(self, loop_state):
-        if loop_state.overflow_recovery_attempted:
-            return False
-        loop_state.overflow_recovery_attempted = True
-        loop_state.prompt_snapshot = None
-        loop_state.provider_context_tokens = (
-            self.agent.config.provider_context_limit_tokens
-        )
-        self.agent.model_client.reset_action_session()
-        self.agent.emit_event(
-            "provider_session_reset",
-            {"reason": "context_overflow_retry"},
-        )
-        return True
-
-    def _handle_tool_turn(self, loop_state, turn):
-        agent = self.agent
-        calls = turn.action.tool_calls
-        loop_state.invalid_output_count = 0
-        loop_state.completion_block_count = 0
-        group = agent.run.run_log.append_tool_calls(calls)
-        if agent.prompt.refresh_repository_instructions():
-            # The calls were proposed without these rules. Close the entire
-            # group without effects, then let the model reconsider it.
-            for call in calls:
-                agent.tools._rejected(
-                    call, "repository_instructions_changed",
-                    "No tool executed. Repository instructions were loaded or changed; "
-                    "review their directory scopes and propose the appropriate calls again.",
-                    recovery="retry_after_change", record=True,
+            session.save()
+            runtime.emit_trace("run_finished", status=status, stop_reason=stop_reason)
+        if status != "completed":
+            answer = "Task not completed: " + stop_reason + ("\n" + answer if answer else "")
+        if session.unconfirmed:
+            answer += "\n\nRemaining uncertainty: " + ", ".join(
+                item["id"] for item in session.unconfirmed
+            )
+        memory_changes = []
+        if status == "completed" and runtime.config.memory_enabled:
+            try:
+                memory_changes = runtime.memory.extract(
+                    session, runtime.model_client, execution.child()
                 )
-            agent.model_client.reset_action_session()
-            loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = None
-            agent.emit_event("provider_session_reset", {
-                "reason": "repository_instructions_changed",
-            })
-            return LoopDirective("continue")
-        outcomes = agent.tools.execute_pending_group(
-            group.event_id,
-            turn.tool_surface,
-        )
-
-        provider_results = [outcome.render_for_model() for outcome in outcomes]
-        self._continue_provider(
-            loop_state,
-            turn,
-            provider_results,
-        )
-        return LoopDirective("continue")
-
-    def _handle_invalid_output(self, loop_state, turn):
-        loop_state.invalid_output_count += 1
-        self.agent.append_model_instruction(
-            turn.action.content,
-        )
-        self._continue_provider(loop_state, turn, (turn.action.content,))
-        if loop_state.invalid_output_count >= 8:
-            return LoopDirective("stop", "invalid_output_limit")
-        return LoopDirective("continue")
-
-    def _handle_final_action(self, loop_state, turn):
-        final = turn.action.content.strip()
-        verification_policy = self.completion.resolve_verification_policy()
-        assessment = self.completion.assess(final, verification_policy)
-        if assessment.verification_required:
-            self.lifecycle.run_completion_verification(verification_policy)
-            assessment = self.completion.assess_verification(
-                final,
-                verification_policy,
-            )
-        if assessment.allowed:
-            return LoopDirective("complete", assessment.instruction)
-        return self._block_completion(
-            loop_state,
-            turn,
-            assessment.status,
-            assessment.instruction,
-            assessment.evidence,
-        )
-        return None
-
-    def _block_completion(
-        self,
-        loop_state,
-        turn,
-        status,
-        instruction,
-        evidence,
-    ):
-        self.agent.append_model_instruction(
-            instruction,
-            evidence=evidence,
-        )
-        self.agent.emit_event(
-            "completion_blocked",
-            {
-                "status": status,
-                "instruction": instruction,
-                "evidence": evidence,
+            except Exception as exc:  # noqa: BLE001 - optional memory cannot undo completion
+                runtime.emit_trace("memory_failed", error=runtime.redact_text(str(exc)))
+                memory_changes = []
+        session.run["usage"] = runtime.usage.snapshot()
+        session.save()
+        task_diff = build_task_diff(session, runtime.artifacts)
+        return RunOutcome(
+            session_id=session.id,
+            status=status,
+            answer=runtime.redact_text(answer),
+            run_id=session.run["id"],
+            stop_reason=stop_reason,
+            verification=session.verification["status"],
+            turns=turns,
+            tools=tools,
+            metrics={
+                **session.run.get("usage", {}),
+                "seconds": round(time.monotonic() - started, 3),
+                "memory_changes": len(memory_changes),
             },
+            task_diff=task_diff,
         )
-        loop_state.completion_block_count += 1
-        if loop_state.completion_block_count >= 3:
-            return LoopDirective("stop", "completion_block_limit")
-        self._continue_provider(
-            loop_state,
-            turn,
-            (render_runtime_feedback(self.agent.run.projection.runtime_feedback),),
-        )
-        return LoopDirective("continue")
+
+    def _start_task(self, user_message):
+        session = self.runtime.session
+        config = self.runtime.config
+        completed = session.run.get("status") in {"completed", "reset"}
+        if completed:
+            session.loop_control = new_loop_control()
+            session.verification = new_verification()
+            session.verification_required = False
+            session.unconfirmed = []
+            session.mutations = []
+            session.file_states = {}
+            session.task_policy = {}
+        elif session.verification["status"] == "passed":
+            session.verification.update(status="stale", workspace_state=None)
+        current_paths = session.task_policy.get("write_paths", config.allowed_write_paths)
+        requested_paths = config.allowed_write_paths
+        if config.mode == "ask":
+            effective_paths = []
+        elif current_paths is None:
+            effective_paths = None if requested_paths is None else list(requested_paths)
+        elif requested_paths is None:
+            effective_paths = list(current_paths)
+        else:
+            allowed = set(requested_paths)
+            effective_paths = [path for path in current_paths if path in allowed]
+        session.task_policy = {
+            "write_paths": effective_paths,
+            "verification_floor": bool(
+                session.task_policy.get("verification_floor")
+                or (config.verification_command and config.mode != "ask")
+            ),
+        }
+        session.verification_required |= session.task_policy["verification_floor"]
+        session.append_user(self.runtime.redact_text(user_message))
+        session.run = {
+            "id": uuid.uuid4().hex[:16],
+            "status": "running",
+            "started_at": utc_now(),
+            "turns": 0,
+            "tools": 0,
+            "usage": self.runtime.usage.snapshot(),
+        }
+        session.save()
+
+    def _recall(self, message, execution):
+        if not self.runtime.config.memory_enabled:
+            return
+        try:
+            self.runtime.current_memories = self.runtime.memory.recall(
+                str(message), self.runtime.model_client, execution.child()
+            )
+        except (ExecutionCancelled, ExecutionDeadlineExceeded):
+            raise
+        except Exception as exc:  # noqa: BLE001 - optional recall is diagnosed
+            self.runtime.emit_trace("memory_failed", error=self.runtime.redact_text(str(exc)))

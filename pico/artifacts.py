@@ -18,8 +18,8 @@ ARTIFACT_SCHEMA_VERSION = "artifact-v3"
 
 
 class ArtifactStore:
-    def __init__(self, run_store, redactor):
-        self.run_store = run_store
+    def __init__(self, storage, redactor):
+        self.storage = storage
         self.redactor = redactor
         self._verified_page_source = None
 
@@ -28,7 +28,7 @@ class ArtifactStore:
         digest = hashlib.sha256(safe_content.encode("utf-8")).hexdigest()
         call_digest = hashlib.sha256(str(call_id).encode("utf-8")).hexdigest()
         artifact_id = f"tool_{call_digest[:16]}_{digest[:10]}"
-        root = self.run_store.artifact_dir(run_id).resolve()
+        root = self.storage.artifact_dir(run_id).resolve()
         root.mkdir(parents=True, exist_ok=True)
         content_path = self._artifact_path(root, artifact_id, ".txt")
         descriptor_path = self._artifact_path(root, artifact_id, ".json")
@@ -48,7 +48,7 @@ class ArtifactStore:
     def write_workspace_preimage(self, run_id, call_id, logical_path, source):
         """Copy an original byte stream; edit supplies its already-read bytes."""
 
-        root = self.run_store.artifact_dir(run_id).resolve()
+        root = self.storage.artifact_dir(run_id).resolve()
         root.mkdir(parents=True, exist_ok=True)
         key_digest = hashlib.sha256(
             f"{call_id}:{logical_path}".encode()
@@ -104,7 +104,7 @@ class ArtifactStore:
     def _write_internal(self, run_id, artifact_id, content, *, kind, metadata):
         data = str(content).encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
-        root = self.run_store.artifact_dir(run_id).resolve()
+        root = self.storage.artifact_dir(run_id).resolve()
         root.mkdir(parents=True, exist_ok=True)
         content_path = self._internal_artifact_path(root, artifact_id, ".txt")
         descriptor_path = self._internal_artifact_path(root, artifact_id, ".json")
@@ -124,7 +124,7 @@ class ArtifactStore:
         return descriptor
 
     def _read_verified(self, run_id, artifact_id):
-        root = self.run_store.artifact_dir(run_id).resolve()
+        root = self.storage.artifact_dir(run_id).resolve()
         descriptor_path = self._artifact_path(root, artifact_id, ".json")
         if not descriptor_path.exists():
             raise ValueError("artifact descriptor is missing")
@@ -179,7 +179,7 @@ class ArtifactStore:
         return path
 
     def read_internal(self, run_id, artifact_id, *, expected_kind=None):
-        root = self.run_store.artifact_dir(run_id).resolve()
+        root = self.storage.artifact_dir(run_id).resolve()
         descriptor_path = self._internal_artifact_path(root, artifact_id, ".json")
         content_path = self._internal_artifact_path(root, artifact_id, ".txt")
         if not descriptor_path.is_file() or not content_path.is_file():

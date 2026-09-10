@@ -42,11 +42,11 @@ class PicoConfig:
     summary_max_output_tokens: int = 16000
     verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
-    repo_map_enabled: bool = True
+    memory_enabled: bool = True
 
     def __post_init__(self):
-        if not isinstance(self.repo_map_enabled, bool):
-            raise TypeError("repo_map_enabled must be a boolean")
+        if not isinstance(self.memory_enabled, bool):
+            raise TypeError("memory_enabled must be a boolean")
         if self.mode not in {"ask", "code", "auto"}:
             raise ValueError("mode must be ask, code, or auto")
         if not isinstance(self.verification_command, str):
@@ -57,9 +57,8 @@ class PicoConfig:
         max_agent_turns = int(self.max_agent_turns)
         if max_agent_turns < 1:
             raise ValueError("max_agent_turns must be positive")
-        max_parallel_tools = int(self.max_parallel_tools)
-        if max_parallel_tools < 1:
-            raise ValueError("max_parallel_tools must be positive")
+        if type(self.max_parallel_tools) is not int or not 1 <= self.max_parallel_tools <= 4:
+            raise ValueError("max_parallel_tools must be between 1 and 4")
         turn_timeout_seconds = int(self.turn_timeout_seconds)
         if turn_timeout_seconds < 1:
             raise ValueError("turn_timeout_seconds must be positive")
@@ -91,7 +90,6 @@ class PicoConfig:
         normalized = {
             "mode": str(self.mode),
             "max_agent_turns": max_agent_turns,
-            "max_parallel_tools": max_parallel_tools,
             "max_new_tokens": max_new_tokens,
             "secret_env_names": frozenset(
                 str(name).upper() for name in (self.secret_env_names or ())
