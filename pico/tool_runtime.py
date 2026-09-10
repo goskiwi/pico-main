@@ -78,6 +78,7 @@ class ToolRuntime:
 
     def __init__(self, runtime: Pico):
         self.runtime = runtime
+        self.read_versions: dict[str, str] = {}
         self.registry = self._build_registry()
         self._apply_allowlist(self.registry)
 
@@ -186,13 +187,6 @@ class ToolRuntime:
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
         )
-        from .checks import build_tool_registry as build_check_registry
-
-        tools.update(
-            build_check_registry(
-                check_runner=runtime.dependencies.check_runner
-            )
-        )
         return tools
 
     def _apply_allowlist(self, tools):
@@ -250,7 +244,7 @@ class ToolRuntime:
     def _tool_allowed_by_mode(name, mode):
         if mode == "ask":
             return name in ASK_TOOL_NAMES
-        return not (mode == "auto" and name == "run_command")
+        return not (mode == "auto" and name == "run_shell")
 
     def resolve_surface(self, *, manual=False):
         """Resolve one authoritative Tool set for advertisement and execution."""
@@ -668,10 +662,18 @@ class ToolRuntime:
     def _execute_edit(self, call, tool, context, plan):
         agent = self.runtime
         logical, path = plan.paths[0]
+        expected_revision = self.read_versions.get(logical)
+        if expected_revision is None:
+            return self._rejected(
+                call,
+                "read_required",
+                "read the file before editing it",
+                "retry_after_change",
+            )
         with ExitStack() as stack:
             try:
                 raw, revision = stack.enter_context(agent.dependencies.mutations.prepare_edit(
-                    path, call.args["expected_revision"],
+                    path, expected_revision,
                     execution_context=context.execution_context,
                 ))
                 before = {logical: revision}
@@ -701,7 +703,14 @@ class ToolRuntime:
                 "before_artifact_id": descriptor["artifact_id"],
             }])
             context.execution_plan = plan
-            bound = {**tool, "run": partial(tool["run"], original=raw)}
+            bound = {
+                **tool,
+                "run": partial(
+                    tool["run"],
+                    original=raw,
+                    expected_revision=expected_revision,
+                ),
+            }
             try:
                 result = self._invoke_runner(bound, context, call.args)
             except Exception as exc:  # noqa: BLE001 - mutation runner boundary
@@ -941,6 +950,15 @@ class ToolRuntime:
 
     def prepare_outcome(self, outcome):
         """Prepare executed and recovered facts through the same output boundary."""
+        path = outcome.structured.get("path")
+        if path and outcome.status == "success":
+            revision = (
+                outcome.structured.get("revision")
+                if outcome.tool_name == "read_file"
+                else outcome.structured.get("after_revision")
+            )
+            if revision and outcome.tool_name in {"read_file", "write_file", "edit_file"}:
+                self.read_versions[path] = revision
         if outcome.tool_name == "read_file":
             observed = outcome.structured
             known = self.runtime.run.evidence.change_set.files.get(observed.get("path"))

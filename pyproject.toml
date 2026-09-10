@@ -17,16 +17,11 @@ pico = "pico.cli:main"
 
 [dependency-groups]
 dev = [
-  "pytest>=8.3.5",
   "ruff>=0.4.4",
 ]
 
 [tool.setuptools.packages.find]
 include = ["pico*", "applications*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
 
 [tool.ruff.lint]
 extend-select = ["C901"]

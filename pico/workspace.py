@@ -67,14 +67,7 @@ class WorkspaceObservation:
     head: str
     status: str
     status_lines: tuple[str, ...] = ()
-    staged_files: int | None = None
-    unstaged_files: int | None = None
-    untracked_files: int | None = None
-    conflicted_files: int | None = None
-    additions: int | None = None
-    deletions: int | None = None
-    binary_files: int | None = None
-    status_truncated: bool = False
+    truncated: bool = False
 
     def render(self, *, root, logical_cwd):
         lines = [
@@ -91,22 +84,16 @@ class WorkspaceObservation:
             return "\n".join(lines)
         state = "status unavailable; do not assume clean" if self.status == "unavailable" else self.status
         lines.append(f"- Git snapshot (at context build): {self.head}; {state}.")
-        if self.conflicted_files:
-            lines.append(f"- Merge conflicts: {self.conflicted_files} paths.")
+        if any(
+            line[:2] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+            for line in self.status_lines
+        ):
+            lines.append("- Merge conflicts are present in the listed paths.")
         if self.status_lines:
             lines.append("Existing changes (Git short status):")
             lines.extend(f"  {line}" for line in self.status_lines)
-        if self.status_truncated:
-            counts = ", ".join(
-                f"{name}={value}" for name, value in (
-                    ("staged", self.staged_files),
-                    ("unstaged", self.unstaged_files),
-                    ("untracked", self.untracked_files),
-                    ("conflicted", self.conflicted_files),
-                ) if value
-            )
-            lines.append("- Change list truncated; not all paths are shown."
-                         + (f" Full-status counts: {counts}." if counts else ""))
+        if self.truncated:
+            lines.append("- Change list truncated; not all paths are shown.")
         return "\n".join(lines)
 
 
@@ -177,40 +164,6 @@ class Workspace:
             return "detached " + commit_stdout[:12]
         return "unavailable"
 
-    @staticmethod
-    def _status_counts(status_lines):
-        staged = unstaged = untracked = conflicted = 0
-        conflict_codes = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
-        for line in status_lines:
-            code = line[:2]
-            if code == "??":
-                untracked += 1
-                continue
-            if code in conflict_codes:
-                conflicted += 1
-            if code[:1] not in {" ", "?"}:
-                staged += 1
-            if code[1:2] not in {" ", "?"}:
-                unstaged += 1
-        return staged, unstaged, untracked, conflicted
-
-    @staticmethod
-    def _diff_counts(payload):
-        additions = deletions = binary = 0
-        for line in payload.splitlines():
-            columns = line.split("\t", 2)
-            if len(columns) < 2:
-                continue
-            if columns[0] == "-" or columns[1] == "-":
-                binary += 1
-                continue
-            try:
-                additions += int(columns[0])
-                deletions += int(columns[1])
-            except ValueError:
-                continue
-        return additions, deletions, binary
-
     def observe(self, *, command_runner, execution_context):
         execution_context.check_active()
         if self.repository != "git":
@@ -238,12 +191,6 @@ class Workspace:
             self.root,
             ("status", "--short", *pathspec),
         )
-        diff = self._git(
-            command_runner,
-            execution_context,
-            self.root,
-            ("diff", "--numstat", "HEAD", *pathspec),
-        )
         if status.infrastructure_error or status.returncode != 0:
             return WorkspaceObservation(
                 repository="git",
@@ -262,27 +209,12 @@ class Workspace:
             visible_chars += cost
         status_lines = tuple(visible_lines)
         truncated = len(status_lines) < len(all_status_lines)
-        counts = self._status_counts(all_status_lines)
-        diff_counts = (
-            self._diff_counts(
-                diff.stdout.decode("utf-8", errors="replace")
-            )
-            if not diff.infrastructure_error and diff.returncode == 0
-            else (None, None, None)
-        )
         return WorkspaceObservation(
             repository="git",
             head=head,
             status="dirty" if raw_status else "clean",
             status_lines=status_lines,
-            staged_files=counts[0],
-            unstaged_files=counts[1],
-            untracked_files=counts[2],
-            conflicted_files=counts[3],
-            additions=diff_counts[0],
-            deletions=diff_counts[1],
-            binary_files=diff_counts[2],
-            status_truncated=truncated,
+            truncated=truncated,
         )
 
     def text(self, *, command_runner, execution_context):

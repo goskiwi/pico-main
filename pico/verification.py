@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
+import sys
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,16 @@ from .workspace import IGNORED_PATH_NAMES, Workspace, normalize_relative_file
 
 VERIFICATION_SNAPSHOT_MAX_ENTRIES = 20_000
 GIT_SNAPSHOT_TIMEOUT_SECONDS = 10
+
+
+def detect_verification_command(repo_root):
+    tests = Path(repo_root).resolve() / "tests"
+    if tests.is_dir() and not tests.is_symlink() and any(
+        path.is_file() and not path.is_symlink()
+        for path in tests.rglob("test_*.py")
+    ):
+        return f"{shlex.quote(sys.executable)} -m pytest -q"
+    return ""
 
 
 class RepositorySnapshotError(RuntimeError):

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactStore
-from .command_runner import CommandResult, CommandRunner
+from .command_runner import CommandRunner
 from .mutations import WorkspaceMutationService
 from .run_store import RunStore
 
@@ -21,5 +21,4 @@ class RuntimeDependencies:
     artifacts: ArtifactStore
     mutations: WorkspaceMutationService
     command_runner: CommandRunner
-    check_runner: Callable[..., CommandResult] | None = None
     approval_handler: Callable[[str, dict, ToolExecutionPlan], bool] | None = None

@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
+from .config import PicoConfig
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .run_lifecycle import RunLifecycle, load_resumable_run
 from .run_projection import RunOutcome
-from .runtime_config import PicoConfig
 from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
-from .verification import run_verification
+from .verification import detect_verification_command, run_verification
 from .workspace import clip
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
@@ -26,48 +27,31 @@ __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 class Pico:
     """Coordinate model, state, prompt, tools, and long-lived dependencies."""
 
-    def __init__(self):
-        raise TypeError("Use Pico.create() for a new Session or Pico.resume() for recovery")
-
-    @classmethod
-    def create(cls, model_client, workspace, *, session_store, session_id=None, **options):
-        """Create a new Session and assemble its runtime without recovery IO."""
-        session = session_store.create(workspace.root, session_id=session_id)
-        return cls._assemble(model_client, workspace, session, **options)
-
-    @classmethod
-    def resume(cls, model_client, workspace, *, session, **options):
-        """Restore an existing Session, including an orphaned unfinished Run."""
-        runtime = cls._assemble(model_client, workspace, session, **options)
-        load_resumable_run(runtime)
-        return runtime
-
-    @classmethod
-    def _assemble(cls, model_client, workspace, session, **options):
-        runtime = cls.__new__(cls)
-        runtime._initialize(model_client, workspace, session, **options)
-        return runtime
-
-    def _initialize(
+    def __init__(
         self,
         model_client,
         workspace,
         session: Session,
         *,
         config: PicoConfig | None = None,
-        run_store=None,
         trace=None,
         command_runner=None,
-        check_runner=None,
         approval_handler=None,
     ):
+        if session.workspace_root != workspace.root.resolve():
+            raise ValueError("session belongs to another workspace")
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
+        if not self.config.verification_command.strip():
+            self.config = replace(
+                self.config,
+                verification_command=detect_verification_command(workspace.root),
+            )
         self.workspace = workspace
         self.run = ActiveRunState()
         self.session = session
 
-        effective_run_store = run_store or session.store.runs(session.id, trace=trace)
+        effective_run_store = session.store.runs(session.id, trace=trace)
         artifacts = ArtifactStore(effective_run_store, self.redact_text)
         mutations = WorkspaceMutationService(self.workspace.root)
 
@@ -77,18 +61,15 @@ class Pico:
             artifacts=artifacts,
             mutations=mutations,
             command_runner=effective_command_runner,
-            check_runner=check_runner,
             approval_handler=approval_handler,
         )
 
         self.tools = ToolRuntime(self)
         self.prompt = PromptBuilder(self)
+        load_resumable_run(self)
 
     def redact_text(self, text):
-        return securitylib.redact_text(
-            text,
-            secret_env_names=self.config.secret_env_names,
-        )
+        return securitylib.redact_text(text)
 
     def emit_event(self, event_type, payload=None):
         task_state = self.run.projection
@@ -139,6 +120,8 @@ class Pico:
     def ask(self, user_message) -> RunOutcome:
         from .agent_loop import AgentLoop
 
+        # Require a fresh read before editing in each new user request.
+        self.tools.read_versions.clear()
         return AgentLoop(self).run(user_message)
 
     @staticmethod

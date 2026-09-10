@@ -38,7 +38,7 @@ READ_FILE_MAX_LINES = 2000
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
-RUN_COMMAND_TIMEOUT_SECONDS = 120
+RUN_SHELL_TIMEOUT_SECONDS = 120
 
 
 class ToolArgs(BaseModel):
@@ -68,7 +68,7 @@ class SearchArgs(ToolArgs):
     path: str = Field(default=".", description="Path relative to workspace root, not startup directory; '.' is workspace root.")
 
 
-class RunCommandArgs(ToolArgs):
+class RunShellArgs(ToolArgs):
     command: str = Field(min_length=1)
 
 
@@ -81,10 +81,6 @@ class EditFileArgs(ToolArgs):
     path: str = Field(min_length=1, description="File path relative to workspace root, not startup directory.")
     old_text: str = Field(min_length=1)
     new_text: str
-    expected_revision: str = Field(
-        pattern=r"^sha256:[a-f0-9]{64}$",
-        description="Exact sha256 revision returned by read_file",
-    )
 
 
 class SubmitFinalArgs(ToolArgs):
@@ -216,12 +212,12 @@ def _validate_edit_file(context, args, *, mutation_service):
     return args
 
 
-def _validate_run_command(context, args, *, command_runner):
+def _validate_run_shell(context, args, *, command_runner):
     command = str(args["command"]).strip()
     if not command:
-        raise ValueError("run_command requires a non-blank command")
+        raise ValueError("run_shell requires a non-blank command")
     if command_runner is None:
-        raise RuntimeError("run_command requires a CommandRunner")
+        raise RuntimeError("run_shell requires a CommandRunner")
     return {"command": command}
 
 
@@ -482,11 +478,23 @@ def tool_write_file(context, args, *, mutation_service, workspace_root):
     )
 
 
-def tool_edit_file(context, args, *, mutation_service, workspace_root, original):
+def tool_edit_file(
+    context,
+    args,
+    *,
+    mutation_service,
+    workspace_root,
+    original,
+    expected_revision,
+):
     _logical, path = context.execution_plan.paths[0]
     old_text = str(args.get("old_text", ""))
     receipt = mutation_service.edit(
-        path, old_text, str(args["new_text"]), args["expected_revision"], original=original
+        path,
+        old_text,
+        str(args["new_text"]),
+        expected_revision,
+        original=original,
     )
     relative = path.relative_to(workspace_root).as_posix()
     return ToolRunnerResult(
@@ -499,7 +507,7 @@ def tool_edit_file(context, args, *, mutation_service, workspace_root, original)
     )
 
 
-def tool_run_command(context, args, *, command_runner, workspace_root):
+def tool_run_shell(context, args, *, command_runner, workspace_root):
     command = str(args["command"])
     try:
         before = capture_repository_state(
@@ -520,7 +528,7 @@ def tool_run_command(context, args, *, command_runner, workspace_root):
     result = command_runner.run(
         shell_argv(command),
         cwd=workspace_root,
-        timeout=RUN_COMMAND_TIMEOUT_SECONDS,
+        timeout=RUN_SHELL_TIMEOUT_SECONDS,
         env={},
         execution_context=context.execution_context,
     )
@@ -627,13 +635,13 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "validate": partial(_validate_search, path_resolver=path_resolver),
             "run": partial(tool_search, path_resolver=path_resolver, workspace_root=workspace_root),
         },
-        "run_command": {
-            "args_schema": RunCommandArgs,
+        "run_shell": {
+            "args_schema": RunShellArgs,
             "risky": True,
             "workspace_mutating": True,
             "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
-            "validate": partial(_validate_run_command, command_runner=command_runner),
-            "run": partial(tool_run_command, command_runner=command_runner, workspace_root=workspace_root),
+            "validate": partial(_validate_run_shell, command_runner=command_runner),
+            "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
         },
         "write_file": {
             "args_schema": WriteFileArgs,

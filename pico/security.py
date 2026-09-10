@@ -4,10 +4,20 @@ import os
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
+EXTRA_SECRET_ENV_NAMES = "PICO_SECRET_ENV_NAMES"
+DEFAULT_SECRET_ENV_NAMES = frozenset({
+    "PICO_OPENAI_API_KEY", "OPENAI_API_KEY", "OPENAI_API_TOKEN",
+    "PICO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "GITHUB_PAT", "GH_PAT",
+})
 
 
-def _normalized_secret_names(secret_env_names):
-    return {str(name).upper() for name in (secret_env_names or ())}
+def configured_secret_env_names(env=None):
+    env = os.environ if env is None else env
+    return DEFAULT_SECRET_ENV_NAMES | {
+        name.strip().upper()
+        for name in str(env.get(EXTRA_SECRET_ENV_NAMES, "")).split(",")
+        if name.strip()
+    }
 
 
 def looks_sensitive_env_name(name):
@@ -15,26 +25,26 @@ def looks_sensitive_env_name(name):
     return any(upper.endswith(marker) for marker in SENSITIVE_ENV_NAME_MARKERS)
 
 
-def is_secret_env_name(name, secret_env_names=None):
+def is_secret_env_name(name, env=None):
     upper = str(name).upper()
-    return upper in _normalized_secret_names(secret_env_names) or looks_sensitive_env_name(upper)
+    return upper in configured_secret_env_names(env) or looks_sensitive_env_name(upper)
 
 
-def detected_secret_env_items(env=None, secret_env_names=None):
+def detected_secret_env_items(env=None):
     env = os.environ if env is None else env
     items = [
         (name, value)
         for name, value in env.items()
-        if is_secret_env_name(name, secret_env_names=secret_env_names) and value
+        if is_secret_env_name(name, env=env) and value
     ]
     items.sort(key=lambda item: item[0])
     return items
 
 
-def redact_text(text, env=None, secret_env_names=None):
+def redact_text(text, env=None):
     text = str(text)
     for _, value in sorted(
-        detected_secret_env_items(env=env, secret_env_names=secret_env_names),
+        detected_secret_env_items(env=env),
         key=lambda item: len(item[1]),
         reverse=True,
     ):

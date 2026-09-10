@@ -31,6 +31,10 @@ PICO_OPENAI_API_BASE=https://example.com/v1
 PICO_OPENAI_MODEL=gpt-5.4
 ```
 
+CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理，项目验收由 Runtime 自动发现；模型温度和请求超时通过环境变量配置。
+
+`pico/config.py` 定义 Runtime 配置，`pico/env.py` 只负责加载项目环境变量。
+
 ## 核心对象
 
 - `Pico`：组装模型、工作区、Session、工具和运行依赖。
@@ -67,7 +71,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 ## 一次任务
 
-1. CLI 创建或加载 Session。
+1. CLI 创建或加载 Session，通过唯一的 `Pico(..., session=session)` 入口组装 Runtime。
 2. `Pico.ask()` 创建新 Run，恢复时继续 Session 指向的未完成 Run。
 3. `PromptBuilder` 从 RunLog 投影出模型需要的上下文。
 4. 模型返回工具调用或 `submit_final`。
@@ -77,13 +81,13 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_command`、`write_file`、`edit_file` 和 `submit_final`。
+主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。
 - Auto 模式允许受限文件修改，但不开放通用命令。
 - 文件路径必须位于 Workspace 内，`.git` 和 `.pico` 不对模型开放。
-- `edit_file` 使用读取时 Revision，写入前再次检查，并通过临时文件原子替换。
+- `edit_file` 只接收路径和替换内容；Runtime 内部绑定本轮读取到的 Revision，写入前再次检查，并通过临时文件原子替换。
 - 修改前像和工具阶段先落盘；中断后根据记录与当前文件状态判断未执行、已修改或未知，不盲目重放。
 - 模型的最终回答不是完成证明；Runtime 独立执行配置的验证并生成最终 Diff。
 
