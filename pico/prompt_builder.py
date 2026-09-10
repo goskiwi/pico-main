@@ -65,7 +65,7 @@ class ModelPrompt:
 
 
 class PromptBuilder:
-    """Own prompt construction and compaction planning; delegate only text and budget helpers."""
+    """Own prompt construction and compaction planning."""
 
     def __init__(self, runtime: Pico):
         self.runtime = runtime
@@ -457,7 +457,6 @@ class PromptBuilder:
                     )
                 ),
             ),
-            "repo_map": self._repo_map_text(user_message, working_text),
             "working_state": working_text,
             "task_request": "task_request:\n" + json.dumps(goal, ensure_ascii=False),
             **context.runtime_feedback_sections(feedback),
@@ -467,35 +466,3 @@ class PromptBuilder:
                 else ""
             ),
         }
-
-    def _repo_map_text(self, query, working_text):
-        if not self.runtime.config.repo_map_enabled:
-            return ""
-        contract = self.runtime.run.projection.contract
-        evidence = self.runtime.run.evidence
-        parts = []
-        if contract is not None and contract.goal:
-            parts.append("Task goal:\n" + contract.goal)
-        query = str(query).strip()
-        if query:
-            parts.append("Current request:\n" + query)
-        if working_text:
-            parts.append("Current working state:\n" + working_text)
-        active_paths = {
-            str(item.get("path", "")).strip()
-            for item in evidence.observations
-            if item.get("status") == "success" and item.get("path")
-        }
-        active_paths.update(evidence.touched_paths)
-        if active_paths:
-            parts.append(
-                "Active paths:\n"
-                + "\n".join(f"- {path}" for path in sorted(active_paths))
-            )
-        result = self.runtime.dependencies.repo_map.render(
-            "\n\n".join(parts),
-            budget_tokens=self.section_caps["repo_map"],
-            max_results=24,
-            token_counter=self.count_tokens,
-        )
-        return result.text if result.details.get("selected_count", 0) else ""

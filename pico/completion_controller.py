@@ -52,8 +52,7 @@ class CompletionController:
         policy: ResolvedVerificationPolicy,
     ) -> CompletionDecision:
         blocker = (
-            self._static_blocker()
-            or self._effect_blocker()
+            self._effect_blocker()
             or self._task_requirement_blocker()
             or self._workspace_drift_blocker()
         )
@@ -186,16 +185,6 @@ class CompletionController:
                 "ask_mode_violation",
                 "Ask mode produced workspace changes; restore them or reset the Run.",
                 ", ".join(evidence.touched_paths),
-            )
-        return None
-
-    def _static_blocker(self):
-        issue = self.runtime.run.projection.children.completion_issue()
-        if issue:
-            return (
-                "subtasks_incomplete",
-                "Resolve incomplete Child work before submitting completion.",
-                issue,
             )
         return None
 

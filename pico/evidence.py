@@ -13,7 +13,6 @@ OBSERVATION_TOOLS = frozenset(
         "read_file",
         "read_artifact",
         "search",
-        "delegate",
     }
 )
 WORKSPACE_SCOPES = frozenset({"workspace"})

@@ -9,11 +9,9 @@ import tiktoken
 
 DEFAULT_SECTION_CAPS = {
     "workspace": 600,
-    "repo_map": 1200,
 }
 FIXED_SECTION_ALLOCATION_ORDER = (
     "workspace",
-    "repo_map",
 )
 CONTEXT_ALLOCATION_ORDER = (
     *FIXED_SECTION_ALLOCATION_ORDER,
@@ -22,7 +20,6 @@ CONTEXT_ALLOCATION_ORDER = (
 CONTEXT_WIRE_ORDER = (
     "runtime_evidence",
     "workspace",
-    "repo_map",
     "history",
     "working_state",
 )

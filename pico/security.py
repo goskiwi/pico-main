@@ -48,7 +48,7 @@ def redact_facts(value, redactor, key=""):
         "path", "affected_paths", "changed_paths", "repository_changes", "revision",
         "expected_revision", "actual_revision", "before_revision", "after_revision",
         "before_state", "after_state", "before_artifact_id", "artifact_id",
-        "child_id", "child_run_id", "base_sha", "sha256", "status", "role",
+        "sha256", "status",
         "started_changed_path_states", "finished_changed_path_states",
         "workspace_root", "workspace_changes", "run_id", "session_id",
     }:

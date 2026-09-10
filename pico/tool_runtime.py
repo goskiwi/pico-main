@@ -177,19 +177,6 @@ class ToolRuntime:
                     effect_scope=effect_scope if changed or unknown else "none",
                     structured={"path_transitions": transitions},
                 )
-            if started is not None:
-                if call.name == "delegate":
-                    from .subagents.runner import recover_delegate
-
-                    outcome = recover_delegate(runtime, call)
-                elif call.name == "integrate_child":
-                    from .subagents.integration import PatchIntegrator
-
-                    outcome = PatchIntegrator(runtime).recover_applied(
-                        call,
-                        started,
-                        outcome,
-                    )
             outcome = self.prepare_outcome(outcome)
             entry = run_log.append_tool_result(
                 outcome,
@@ -209,16 +196,10 @@ class ToolRuntime:
             command_runner=runtime.dependencies.command_runner,
         )
         from .checks import build_tool_registry as build_check_registry
-        from .subagents.tools import build_tool_registry as build_subagent_registry
 
         tools.update(
             build_check_registry(
                 check_runner=runtime.dependencies.check_runner
-            )
-        )
-        tools.update(
-            build_subagent_registry(
-                service=runtime.dependencies.subagents
             )
         )
         return tools
@@ -820,8 +801,6 @@ class ToolRuntime:
 
     def _check_plan_scope(self, call, plan, allowed_paths):
         self._require_write_scope((path for path, _target in plan.paths), allowed_paths)
-        if call.name == "delegate" and call.args.get("role") == "implement":
-            self._require_write_scope(call.args["allowed_write_paths"], allowed_paths)
 
     def _approval_failure(self, name, args, surface, plan):
         if surface.mode == "auto":
@@ -937,10 +916,6 @@ class ToolRuntime:
                         source = args["path"] if name in {"write_file", "edit_file"} else logical
                         if agent.workspace.resolve_tool_path(source) != target:
                             raise ValueError("approved target changed; request approval again")
-                    if name == "integrate_child":
-                        agent.run.projection.children.record(args["child_id"]).completed()
-                        if plan.operation["verification_command"] != str(agent.config.verification_command or "").strip():
-                            raise ValueError("verification command changed during approval")
                 except ValueError as exc:
                     return self._rejected(call, "approval_context_changed", str(exc), "retry_after_change")
         try:

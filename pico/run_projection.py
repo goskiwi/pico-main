@@ -9,7 +9,6 @@ from typing import Any
 from .contracts import ToolCall, ToolOutcome
 from .delivery import FinalDiff
 from .evidence import RunEvidence
-from .subagents.contracts import ChildState
 from .task_state import TaskContract
 from .working_state import WorkingState
 
@@ -173,7 +172,6 @@ class RunProjection:
     working: WorkingState = field(default_factory=WorkingState)
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
-    children: ChildState = field(default_factory=ChildState)
     status: str = "not_started"
     stop_reason: str = ""
     final_answer: str = ""
@@ -201,13 +199,6 @@ class RunProjection:
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
         self.pending_group.check_event(event)
-        if kind == "tool_started":
-            self.children.check_started(
-                self.pending_group.find(event.call_id), payload, self.run_id
-            )
-        elif kind == "tool_result":
-            self.children.check_result(self.pending_group.remaining[0], payload["outcome"])
-
         if kind in {"assistant_final", "run_stopped"}:
             raw = payload.get("final_diff")
             final_diff = FinalDiff.from_dict(raw) if raw is not None else None
@@ -262,14 +253,6 @@ class RunProjection:
         self.working.apply_event(event)
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
-        if event.kind == "tool_result":
-            self.children.apply_result(
-                self.pending_group.remaining[0], event.payload["outcome"]
-            )
-        if event.kind == "tool_started":
-            self.children.apply_started(
-                self.pending_group.find(event.call_id), event.payload, self.run_id
-            )
         self.pending_group.apply_event(event)
         if event.kind == "assistant_tool_calls":
             self.runtime_feedback = None

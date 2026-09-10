@@ -75,9 +75,7 @@ class CodingWorkflow:
         model_client,
         *,
         config: PicoConfig | None = None,
-        subagent_model_client_factory=None,
         command_runner=None,
-        command_runner_factory=None,
     ):
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
@@ -87,24 +85,18 @@ class CodingWorkflow:
             )
         if self.config.mode != "auto":
             raise ValueError("CodingWorkflow requires Auto mode")
-        self.subagent_model_client_factory = subagent_model_client_factory
         self.command_runner = command_runner
-        self.command_runner_factory = command_runner_factory
 
     def run(self, repository_root, request, *, commit_message=""):
         root = _repository_root(repository_root)
         dirty_before = _dirty_paths(root)
         runtime_workspace = Workspace.build(root, repo_root_override=root)
-        agent = Pico(
+        agent = Pico.create(
             model_client=self.model_client,
             workspace=runtime_workspace,
             config=self.config,
             command_runner=self.command_runner,
-            command_runner_factory=self.command_runner_factory,
-            subagent_model_client_factory=self.subagent_model_client_factory,
-            session=SessionStore(root / ".pico" / "sessions").create(
-                runtime_workspace.root
-            ),
+            session_store=SessionStore(root / ".pico" / "sessions"),
         )
         outcome = agent.ask(request)
         changed_paths = outcome.changed_paths

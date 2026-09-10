@@ -221,9 +221,6 @@ class RunLifecycle:
 
     def _root_execution(self):
         runtime = self.runtime
-        parent = runtime.dependencies.parent_execution_context
-        if parent is not None:
-            return parent.child()
         return ExecutionContext.root(
             max_seconds=runtime.config.turn_timeout_seconds,
         )

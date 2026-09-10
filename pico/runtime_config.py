@@ -42,11 +42,8 @@ class PicoConfig:
     summary_max_output_tokens: int = 16000
     verification_command: str = ""
     allowed_write_paths: tuple[str, ...] | None = None
-    repo_map_enabled: bool = True
 
     def __post_init__(self):
-        if not isinstance(self.repo_map_enabled, bool):
-            raise TypeError("repo_map_enabled must be a boolean")
         if self.mode not in {"ask", "code", "auto"}:
             raise ValueError("mode must be ask, code, or auto")
         if not isinstance(self.verification_command, str):

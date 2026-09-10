@@ -120,11 +120,8 @@ class CompactionSummarizer:
             metadata = {key: value for key, value in outcome.structured.items() if key in {
                 "path", "start_line", "end_line", "exit_code", "stop_reason",
                 "output_limited", "offset", "end_offset", "next_offset", "has_more",
-                "truncated", "total_bytes", "role", "result", "status", "changed_paths", "external_change_observed",
+                "truncated", "total_bytes", "status", "changed_paths", "external_change_observed",
             }}
-            patch = outcome.structured.get("patch")
-            if isinstance(patch, dict) and patch.get("changed_paths"):
-                metadata["child_patch_paths"] = patch["changed_paths"]
             if metadata:
                 record["metadata"] = metadata
             if outcome.status != "success":

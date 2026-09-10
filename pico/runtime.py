@@ -10,7 +10,6 @@ from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
-from .repo_map import RepoMap
 from .run_lifecycle import RunLifecycle, load_resumable_run
 from .run_projection import RunOutcome
 from .runtime_config import PicoConfig
@@ -59,9 +58,6 @@ class Pico:
         run_store=None,
         trace=None,
         command_runner=None,
-        command_runner_factory=None,
-        subagent_model_client_factory=None,
-        parent_execution_context=None,
         check_runner=None,
         approval_handler=None,
     ):
@@ -75,29 +71,15 @@ class Pico:
         artifacts = ArtifactStore(effective_run_store, self.redact_text)
         mutations = WorkspaceMutationService(self.workspace.root)
 
-        if command_runner_factory is None:
-            command_runner_factory = CommandRunner
-        effective_command_runner = (
-            command_runner or command_runner_factory(self.workspace.root)
-        )
+        effective_command_runner = command_runner or CommandRunner(self.workspace.root)
         self.dependencies = RuntimeDependencies(
             run_store=effective_run_store,
             artifacts=artifacts,
             mutations=mutations,
             command_runner=effective_command_runner,
-            command_runner_factory=command_runner_factory,
-            repo_map=RepoMap(self.workspace.root),
-            parent_execution_context=parent_execution_context,
             check_runner=check_runner,
             approval_handler=approval_handler,
         )
-        if subagent_model_client_factory is not None:
-            from .subagents.runner import SubagentRunner
-
-            self.dependencies.subagents = SubagentRunner(
-                self,
-                subagent_model_client_factory,
-            )
 
         self.tools = ToolRuntime(self)
         self.prompt = PromptBuilder(self)

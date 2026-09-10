@@ -230,9 +230,6 @@ def build_agent(args):
         ),
     )
 
-    def child_model_client_factory(_spec):
-        return _build_model_client(args)
-
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest_active()
@@ -245,7 +242,6 @@ def build_agent(args):
         workspace=workspace,
         trace=TracePrinter(sys.stderr) if args.trace else None,
         config=config,
-        subagent_model_client_factory=child_model_client_factory,
         approval_handler=_terminal_approval,
         **session_options,
     )
