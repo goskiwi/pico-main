@@ -86,18 +86,18 @@ class PromptBuilder:
         paths = []
         log = self.runtime.run.run_log
         for event in log.events if log is not None else ():
-            if event.kind != "assistant_tool_calls":
+            if event.kind != "assistant_tool_call":
                 continue
-            for call in event.tool_calls:
-                if call.name not in {"list_files", "search", "read_file", "write_file", "edit_file"}:
-                    continue
-                raw = call.args.get("path", ".")
-                if not isinstance(raw, str):
-                    continue
-                try:
-                    paths.append(self.runtime.workspace.resolve_tool_path(raw))
-                except ValueError:
-                    continue  # Invalid paths remain the ToolRuntime's responsibility.
+            call = event.tool_call
+            if call.name not in {"list_files", "search", "read_file", "write_file", "edit_file"}:
+                continue
+            raw = call.args.get("path", ".")
+            if not isinstance(raw, str):
+                continue
+            try:
+                paths.append(self.runtime.workspace.resolve_tool_path(raw))
+            except ValueError:
+                continue  # Invalid paths remain the ToolRuntime's responsibility.
         current = load_repository_instructions(
             self.runtime.workspace.root, self.runtime.workspace.cwd, access_paths=paths
         )
@@ -273,7 +273,7 @@ class PromptBuilder:
     def plan_compaction(self, inputs, *, provider_context_tokens=None):
         """Plan semantic compaction or return a bounded read-only fallback."""
         run_log = self.runtime.run.run_log
-        if run_log is None or run_log.pending_tool_calls():
+        if run_log is None or run_log.pending_tool_call() is not None:
             return (None, None, None)
         history = self._history()
         config = self.runtime.config

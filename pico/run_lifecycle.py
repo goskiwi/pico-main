@@ -82,9 +82,9 @@ def load_resumable_run(runtime: Pico):
 def reload_current_run(runtime: Pico):
     """Replace possibly ambiguous in-memory state with its durable snapshot."""
 
-    run_id = str(runtime.run.projection.run_id)
-    if not run_id:
+    if runtime.run.run_log is None:
         return load_resumable_run(runtime)
+    run_id = runtime.run.run_log.run_id
     run_log = runtime.dependencies.run_store.load_run(run_id)
     projection = run_log.projection
     runtime.run = _state_from_snapshot(runtime, run_log)
@@ -97,16 +97,15 @@ def reload_current_run(runtime: Pico):
 
 def _reload_if_snapshot_is_stale(runtime: Pico):
     run = runtime.run
-    run_id = str(run.projection.run_id)
-    if not run_id or run.run_log is None or not run.run_log.events:
+    if run.run_log is None or not run.run_log.events:
         return run
+    run_id = run.run_log.run_id
     last_event = run.run_log.events[-1]
-    projection_cursor = run.projection.last_cursor
-    durable_cursor = runtime.dependencies.run_store.cursor(run_id)
+    projection_sequence = run.projection.last_sequence
+    durable_sequence = runtime.dependencies.run_store.last_sequence(run_id)
     if (
-        projection_cursor.sequence != last_event.sequence
-        or projection_cursor.event_id != last_event.event_id
-        or projection_cursor != durable_cursor
+        projection_sequence != last_event.sequence
+        or projection_sequence != durable_sequence
     ):
         return reload_current_run(runtime)
     return run
@@ -179,13 +178,11 @@ class RunLifecycle:
                 runtime.session.set_active_run(runtime.run.projection.run_id)
             return True
 
-        if (
-            runtime.run.projection.contract is not None
-            and not runtime.run.projection.terminal
-        ):
-            raise RuntimeError("unfinished Run is not dormant and cannot be resumed")
-        if runtime.run.run_log is not None and runtime.run.projection.contract is None:
-            raise RuntimeError("Run state contains a Run Log without a TaskContract")
+        if runtime.run.run_log is not None:
+            if runtime.run.projection.contract is None:
+                raise RuntimeError("Run Log has no TaskContract")
+            if not runtime.run.projection.terminal:
+                raise RuntimeError("unfinished Run is not dormant and cannot be resumed")
 
         run_id = runtime.new_run_id()
         contract = self._task_contract(

@@ -63,33 +63,32 @@ def _validate_model_instruction_payload(kind, payload):
         raise ValueError("model_instruction evidence artifact is invalid")
 
 
+def _validate_completion_blocked_payload(kind, payload):
+    _exact_payload(kind, payload, {"status"})
+    if not isinstance(payload["status"], str) or not payload["status"].strip():
+        raise ValueError("completion_blocked requires a status")
+
+
 def _validate_user_payload(kind, payload):
     _exact_payload(kind, payload, {"contract"})
     TaskContract.from_dict(payload["contract"])
 
 
-def _tool_calls(payload):
-    return tuple(
-        ToolCall(str(item["name"]), item["args"], str(item["call_id"]))
-        for item in payload["calls"]
+def _tool_call(payload):
+    return ToolCall(
+        str(payload["name"]),
+        payload["args"],
+        str(payload["call_id"]),
     )
 
 
-def _validate_tool_calls_payload(kind, payload):
-    _exact_payload(kind, payload, {"calls"})
-    if not isinstance(payload["calls"], list) or not payload["calls"]:
-        raise ValueError("assistant_tool_calls requires at least one call")
-    for item in payload["calls"]:
-        if not isinstance(item, dict) or set(item) != {"name", "args", "call_id"}:
-            raise ValueError("assistant_tool_calls has an invalid call")
-        if not isinstance(item["call_id"], str) or not item["call_id"].strip():
-            raise ValueError("assistant_tool_calls calls require call ids")
-        if not isinstance(item["name"], str) or not item["name"].strip():
-            raise ValueError("assistant_tool_calls calls require tool names")
-    calls = _tool_calls(payload)
-    call_ids = tuple(call.call_id for call in calls)
-    if len(set(call_ids)) != len(call_ids):
-        raise ValueError("assistant_tool_calls call ids must be unique")
+def _validate_tool_call_payload(kind, payload):
+    _exact_payload(kind, payload, {"name", "args", "call_id"})
+    if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
+        raise ValueError("assistant_tool_call requires a call id")
+    if not isinstance(payload["name"], str) or not payload["name"].strip():
+        raise ValueError("assistant_tool_call requires a tool name")
+    _tool_call(payload)
 
 
 def _validate_tool_started_payload(kind, payload):
@@ -221,7 +220,8 @@ _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_model_instruction_payload,
-    "assistant_tool_calls": _validate_tool_calls_payload,
+    "completion_blocked": _validate_completion_blocked_payload,
+    "assistant_tool_call": _validate_tool_call_payload,
     "tool_started": _validate_tool_started_payload,
     "tool_result": _validate_tool_result_payload,
     "verification_result": _validate_verification_payload,
@@ -311,10 +311,10 @@ class RunEvent:
         return ""
 
     @property
-    def tool_calls(self):
-        if self.kind != "assistant_tool_calls":
-            return ()
-        return _tool_calls(self.payload)
+    def tool_call(self):
+        if self.kind != "assistant_tool_call":
+            return None
+        return _tool_call(self.payload)
 
     @property
     def args(self):
@@ -421,14 +421,13 @@ class RunLog:
             self.store.trace(entry)
         return entry
 
-    def pending_tool_starts(self):
-        starts = {}
+    def pending_tool_start(self):
         for entry in reversed(self._events):
-            if entry.kind == "assistant_tool_calls":
+            if entry.kind == "assistant_tool_call":
                 break
             if entry.kind == "tool_started":
-                starts[entry.call_id] = entry
-        return starts
+                return entry
+        return None
 
     def append_user(self, contract):
         if not isinstance(contract, TaskContract):
@@ -442,21 +441,15 @@ class RunLog:
         self._require_no_pending()
         return self.append("user_guidance", {"content": content})
 
-    def append_tool_calls(self, calls):
-        calls = tuple(calls)
-        if not calls:
-            raise ValueError("tool call sequence cannot be empty")
+    def append_tool_call(self, call):
+        if not isinstance(call, ToolCall):
+            raise TypeError("tool call must be a ToolCall")
         return self.append(
-            "assistant_tool_calls",
+            "assistant_tool_call",
             {
-                "calls": [
-                    {
-                        "name": call.name,
-                        "args": dict(call.args),
-                        "call_id": call.call_id,
-                    }
-                    for call in calls
-                ],
+                "name": call.name,
+                "args": dict(call.args),
+                "call_id": call.call_id,
             },
         )
 
@@ -540,17 +533,14 @@ class RunLog:
         return self.append("run_stopped", payload)
 
     def pending_call_id(self):
-        return self.projection.pending_call_id or ""
+        return self.projection.pending_call_id
 
-    def pending_group_id(self):
-        return self.projection.pending_group.group_id
-
-    def pending_tool_calls(self):
-        return tuple(self.projection.pending_group.remaining)
+    def pending_tool_call(self):
+        return self.projection.pending_tool.call
 
     def _require_no_pending(self):
-        if self.pending_tool_calls():
-            raise RuntimeError("pending tool calls must receive results first")
+        if self.pending_tool_call() is not None:
+            raise RuntimeError("pending tool call must receive a result first")
 
 
     def append_compaction(self, content, covered_event_ids):
@@ -562,7 +552,7 @@ class RunLog:
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]
         if remaining and remaining[0].kind == "tool_result":
-            raise ValueError("compaction cannot split a tool call/result group")
+            raise ValueError("compaction cannot split a tool call/result pair")
         return self.append(
             "compaction",
             {

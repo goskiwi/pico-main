@@ -9,7 +9,6 @@ from pathlib import Path
 
 from .artifacts import ArtifactStore
 from .run_log import RunEvent, RunLog, replay_events
-from .run_projection import RunCursor
 
 RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -26,7 +25,7 @@ class RunStore:
         self.root = Path(root).resolve()
         self.trace = trace
         self.root.mkdir(parents=True, exist_ok=True)
-        self._cursors: dict[str, RunCursor] = {}
+        self._sequences: dict[str, int] = {}
 
     def run_dir(self, run_id):
         directory = self.root / _run_id(run_id)
@@ -89,17 +88,13 @@ class RunStore:
         return events
 
     def _remember_cursor(self, run_id, events):
-        self._cursors[_run_id(run_id)] = (
-            RunCursor(events[-1].sequence, events[-1].event_id)
-            if events
-            else RunCursor()
-        )
+        self._sequences[_run_id(run_id)] = events[-1].sequence if events else 0
 
-    def cursor(self, run_id):
+    def last_sequence(self, run_id):
         run_id = _run_id(run_id)
-        if run_id not in self._cursors:
+        if run_id not in self._sequences:
             self.read_events(run_id)
-        return self._cursors.get(run_id, RunCursor())
+        return self._sequences.get(run_id, 0)
 
     def _append_event(self, entry):
         """Persist a complete event; only RunLog authorizes new events."""
@@ -112,7 +107,7 @@ class RunStore:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        self._cursors[entry.run_id] = RunCursor(entry.sequence, entry.event_id)
+        self._sequences[entry.run_id] = entry.sequence
 
     def load_run(self, run_id):
         """Load one ready RunLog whose Projection comes from the same snapshot."""

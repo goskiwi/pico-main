@@ -10,7 +10,7 @@ class TracePrinter:
         self.run_id = None
         self.turn = 0
         self.request_started = None
-        self.calls = {}
+        self.call = None
 
     def write(self, message):
         if self.stream is None:
@@ -34,7 +34,7 @@ class TracePrinter:
             self.run_id = event.run_id
             self.turn = 0
             self.request_started = None
-            self.calls.clear()
+            self.call = None
             self.write(f"[Trace Run] {event.run_id}")
         message = self._message(event)
         if message:
@@ -54,17 +54,18 @@ class TracePrinter:
             return (f"[Model {self.turn}] returned · input={payload.get('input_tokens')} "
                     f"cached={cached_text} "
                     f"output={payload.get('output_tokens')} · {elapsed:.2f}s")
-        if kind == "assistant_tool_calls":
-            self.calls = {call.call_id: call for call in event.tool_calls}
-            return f"[Tools] accepted {len(self.calls)} call(s)"
+        if kind == "assistant_tool_call":
+            self.call = event.tool_call
+            return f"[Tool {self.call.call_id}] accepted {self._label(self.call)}"
         if kind == "tool_started":
-            call = self.calls.get(event.call_id)
+            call = self.call if self.call and self.call.call_id == event.call_id else None
             label = self._label(call) if call else payload['tool_name']
             return f"[Tool {event.call_id}] {label} · started"
         if kind == "tool_result":
             outcome = payload['outcome']
-            call = self.calls.get(event.call_id)
+            call = self.call if self.call and self.call.call_id == event.call_id else None
             label = self._label(call) if call else outcome['tool_name']
+            self.call = None
             return (f"[Tool {event.call_id}] {label} · {outcome['status']} "
                     f"· effect={outcome['side_effect_state']}")
         if kind == "compaction":

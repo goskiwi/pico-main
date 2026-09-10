@@ -1,10 +1,9 @@
 """Mutable state belonging to the currently active or latest run."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .execution import ExecutionContext
 from .run_log import RunLog
-from .run_projection import RunProjection
 
 
 @dataclass(slots=True)
@@ -13,18 +12,12 @@ class ActiveRunState:
 
     run_log: RunLog | None = None
     execution_context: ExecutionContext | None = None
-    _empty_projection: RunProjection = field(
-        default_factory=RunProjection,
-        repr=False,
-    )
 
     @property
     def projection(self):
-        return (
-            self.run_log.projection
-            if self.run_log is not None
-            else self._empty_projection
-        )
+        if self.run_log is None:
+            raise RuntimeError("Run state has no RunLog")
+        return self.run_log.projection
 
     @property
     def evidence(self):

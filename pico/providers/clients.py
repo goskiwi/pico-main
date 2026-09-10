@@ -380,18 +380,17 @@ def _read_http_failure(exc):
     return status, body, headers, context_overflow
 
 
-def _action_result_items(pending_call_ids, results):
+def _action_result_items(pending_call_id, results):
     results = tuple(str(result) for result in results)
-    if pending_call_ids:
-        if len(results) != len(pending_call_ids):
-            raise ValueError("provider continuation requires one result per call")
+    if pending_call_id:
+        if len(results) != 1:
+            raise ValueError("provider continuation requires exactly one result")
         return [
             {
                 "type": "function_call_output",
-                "call_id": call_id,
-                "output": result,
+                "call_id": pending_call_id,
+                "output": results[0],
             }
-            for call_id, result in zip(pending_call_ids, results)
         ]
     if len(results) != 1:
         raise ValueError("provider correction requires exactly one result")
@@ -471,7 +470,7 @@ class FakeModelClient:
         self.recorded_action_results = []
         self.recorded_action_result_groups = []
         self._action_input = []
-        self._pending_call_ids = ()
+        self._pending_call_id = ""
         self._replay_context_tokens = None
 
     @staticmethod
@@ -483,11 +482,11 @@ class FakeModelClient:
         self.recorded_action_result_groups.append(group)
         self.recorded_action_results.extend(group)
         self._action_input.extend(self._result_items(group))
-        self._pending_call_ids = ()
+        self._pending_call_id = ""
         self._replay_context_tokens = None
 
     def _result_items(self, results):
-        return _action_result_items(self._pending_call_ids, results)
+        return _action_result_items(self._pending_call_id, results)
 
     def projected_context_tokens(
         self,
@@ -540,19 +539,14 @@ class FakeModelClient:
         )
         if isinstance(output, ModelAction):
             replay_items = ()
-            pending_call_ids = ()
+            pending_call_id = ""
             if output.kind == "tool":
-                replay_items = tuple(
-                    _function_call_replay_item(call)
-                    for call in output.tool_calls
-                )
-                pending_call_ids = tuple(
-                    call.call_id for call in output.tool_calls
-                )
+                replay_items = (_function_call_replay_item(output.tool_call),)
+                pending_call_id = output.tool_call.call_id
             turn = _ParsedProviderTurn(
                 output,
                 replay_items=replay_items,
-                pending_call_ids=pending_call_ids,
+                pending_call_id=pending_call_id,
             )
         elif isinstance(output, dict):
             turn = _parse_provider_turn(output, action_tools)
@@ -562,7 +556,7 @@ class FakeModelClient:
         self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
-            self._pending_call_ids = turn.pending_call_ids
+            self._pending_call_id = turn.pending_call_id
         return turn.action
 
 
@@ -673,18 +667,19 @@ class _ParsedProviderTurn:
 
     action: ModelAction
     replay_items: tuple[dict, ...] = ()
-    pending_call_ids: tuple[str, ...] = ()
+    pending_call_id: str = ""
     usage: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.action.kind == "invalid" and (
-            self.replay_items or self.pending_call_ids
+            self.replay_items or self.pending_call_id
         ):
             raise ValueError("invalid provider turns cannot carry replay state")
-        if self.action.kind == "tool" and self.pending_call_ids != tuple(
-            call.call_id for call in self.action.tool_calls
+        if (
+            self.action.kind == "tool"
+            and self.pending_call_id != self.action.tool_call.call_id
         ):
-            raise ValueError("provider turn call ids do not match its action")
+            raise ValueError("provider turn call id does not match its action")
 
     @classmethod
     def invalid(cls, message, usage=None):
@@ -837,13 +832,12 @@ def _parse_provider_turn(data, action_tools):
             "expected at least one function call, received 0", usage
         )
 
-    final_calls = [call for call in parsed_calls if call.name == "submit_final"]
-    if final_calls:
-        if len(parsed_calls) != 1:
-            return _ParsedProviderTurn.invalid(
-                "submit_final must be the only call in its model response", usage
-            )
-        call = final_calls[0]
+    if len(parsed_calls) != 1:
+        return _ParsedProviderTurn.invalid(
+            "Pico accepts exactly one function call per model response", usage
+        )
+    call = parsed_calls[0]
+    if call.name == "submit_final":
         answer = call.args.get("answer")
         if (
             set(call.args) != {"answer"}
@@ -854,21 +848,16 @@ def _parse_provider_turn(data, action_tools):
                 "submit_final requires one non-empty string answer", usage
             )
         action = ModelAction.final(answer)
-    elif len(parsed_calls) > 1:
-        try:
-            action = ModelAction.tools(parsed_calls)
-        except ValueError as exc:
-            return _ParsedProviderTurn.invalid(str(exc), usage)
     else:
         action = ModelAction.tool(
-            parsed_calls[0].name,
-            parsed_calls[0].args,
-            call_id=parsed_calls[0].call_id,
+            call.name,
+            call.args,
+            call_id=call.call_id,
         )
     return _ParsedProviderTurn(
         action=action,
         replay_items=replay_items,
-        pending_call_ids=tuple(call.call_id for call in parsed_calls),
+        pending_call_id=call.call_id,
         usage=usage,
     )
 
@@ -892,7 +881,7 @@ class OpenAICompatibleModelClient:
 
     def reset_action_session(self):
         self._action_input = []
-        self._pending_call_ids = ()
+        self._pending_call_id = ""
         self._replay_context_tokens = None
 
     def new_isolated_client(self):
@@ -915,11 +904,11 @@ class OpenAICompatibleModelClient:
         return int(token_counter(serialized))
 
     def _result_items(self, results):
-        return _action_result_items(self._pending_call_ids, results)
+        return _action_result_items(self._pending_call_id, results)
 
     def record_action_results(self, results):
         self._action_input.extend(self._result_items(results))
-        self._pending_call_ids = ()
+        self._pending_call_id = ""
         self._replay_context_tokens = None
 
     def projected_context_tokens(
@@ -1140,8 +1129,8 @@ class OpenAICompatibleModelClient:
                     "content": [{"type": "input_text", "text": str(input_text)}],
                 }
             )
-        if self._pending_call_ids:
-            raise RuntimeError("pending Responses function calls have no recorded outputs")
+        if self._pending_call_id:
+            raise RuntimeError("pending Responses function call has no recorded output")
         self.last_completion_metadata = {}
         payload = self._build_payload(
             max_new_tokens,
@@ -1155,5 +1144,5 @@ class OpenAICompatibleModelClient:
         self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
-            self._pending_call_ids = turn.pending_call_ids
+            self._pending_call_id = turn.pending_call_id
         return turn.action

@@ -71,7 +71,7 @@ class ResolvedToolSurface:
 
 
 def _run_id(agent):
-    return str(agent.run.projection.run_id or "manual")
+    return agent.run.run_log.run_id if agent.run.run_log is not None else "manual"
 
 
 class ToolRuntime:
@@ -84,99 +84,89 @@ class ToolRuntime:
         self._apply_allowlist(self.registry)
 
     def reconcile_interrupted(self):
-        """Close pending Tool transactions without replaying their Runners."""
+        """Close one interrupted Tool transaction without replaying its Runner."""
 
         runtime = self.runtime
         run_log = runtime.run.run_log
         if run_log is None:
-            return ()
-        pending_calls = run_log.pending_tool_calls()
-        if not pending_calls:
-            return ()
-        started_by_id = run_log.pending_tool_starts()
-        reconciled = []
+            return None
+        call = run_log.pending_tool_call()
+        if call is None:
+            return None
+        started = run_log.pending_tool_start()
         observation_context = ExecutionContext.standalone(
             max_seconds=EFFECT_SETTLEMENT_TIMEOUT_SECONDS
         )
-        for call in pending_calls:
-            started = started_by_id.get(call.call_id)
-            if started is None:
-                detail = (
-                    "tool call was persisted but never entered execution; "
-                    "reassess the current task, permissions and inputs before issuing a new call; "
-                    "the old call will not be replayed automatically"
-                )
-                outcome = ToolOutcome(
-                    tool_call_id=call.call_id,
-                    tool_name=call.name,
-                    status="error",
-                    execution_state="not_started",
-                    side_effect_state="none",
-                    content="",
-                    failure=FailureInfo(
-                        "operation_not_started",
-                        detail,
-                        "retry_after_change",
-                    ),
-                )
-            else:
-                potential = list(started.payload.get("potential_effects", []))
-                changed = []
-                transitions = []
-                for effect in potential:
-                    logical = str(effect.get("path", ""))
-                    if not logical:
-                        continue
-                    path = Path(logical)
-                    if not path.is_absolute():
-                        path = runtime.workspace.resolve_path(logical)
-                    before = str(effect.get("before_state", ""))
-                    before_artifact_id = str(effect.get("before_artifact_id", ""))
-                    after = runtime.workspace.path_state(
-                        path,
-                        execution_context=observation_context,
-                    )
-                    if before != after:
-                        changed.append(logical)
-                        transitions.append(
-                            {
-                                "path": logical,
-                                "before_state": before,
-                                "after_state": after,
-                                "before_artifact_id": before_artifact_id,
-                            }
-                        )
-                effect_scope = str(started.payload.get("effect_scope", "none"))
-                unknown = effect_scope == "workspace" and not potential
-                uncertain = bool(changed or unknown)
-                detail = "tool execution was interrupted before a durable result"
-                outcome = ToolOutcome(
-                    tool_call_id=call.call_id,
-                    tool_name=call.name,
-                    status="partial_success" if uncertain else "error",
-                    execution_state="failed",
-                    side_effect_state=(
-                        "partial"
-                        if changed
-                        else ("unknown" if unknown else "none")
-                    ),
-                    content="",
-                    failure=FailureInfo(
-                        "operation_interrupted",
-                        detail,
-                        "no_retry" if uncertain else "retry_after_change",
-                    ),
-                    affected_paths=tuple(changed),
-                    effect_scope=effect_scope if changed or unknown else "none",
-                    structured={"path_transitions": transitions},
-                )
-            outcome = self.prepare_outcome(outcome)
-            entry = run_log.append_tool_result(
-                outcome,
-                recovered_from_interruption=True,
+        if started is None:
+            outcome = ToolOutcome(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                status="error",
+                execution_state="not_started",
+                side_effect_state="none",
+                content="",
+                failure=FailureInfo(
+                    "operation_not_started",
+                    "The tool call was saved but never started; reassess it instead "
+                    "of replaying it automatically.",
+                    "retry_after_change",
+                ),
             )
-            reconciled.append((outcome, entry))
-        return tuple(reconciled)
+        else:
+            potential = list(started.payload.get("potential_effects", []))
+            changed = []
+            transitions = []
+            for effect in potential:
+                logical = str(effect.get("path", ""))
+                if not logical:
+                    continue
+                path = Path(logical)
+                if not path.is_absolute():
+                    path = runtime.workspace.resolve_path(logical)
+                before = str(effect.get("before_state", ""))
+                after = runtime.workspace.path_state(
+                    path,
+                    execution_context=observation_context,
+                )
+                if before != after:
+                    changed.append(logical)
+                    transitions.append(
+                        {
+                            "path": logical,
+                            "before_state": before,
+                            "after_state": after,
+                            "before_artifact_id": str(
+                                effect.get("before_artifact_id", "")
+                            ),
+                        }
+                    )
+            effect_scope = str(started.payload.get("effect_scope", "none"))
+            unknown = effect_scope == "workspace" and not potential
+            uncertain = bool(changed or unknown)
+            outcome = ToolOutcome(
+                tool_call_id=call.call_id,
+                tool_name=call.name,
+                status="partial_success" if uncertain else "error",
+                execution_state="failed",
+                side_effect_state=(
+                    "partial" if changed else ("unknown" if unknown else "none")
+                ),
+                content="",
+                failure=FailureInfo(
+                    "operation_interrupted",
+                    "Tool execution was interrupted before a durable result.",
+                    "no_retry" if uncertain else "retry_after_change",
+                ),
+                affected_paths=tuple(changed),
+                effect_scope=effect_scope if uncertain else "none",
+                structured={"path_transitions": transitions},
+            )
+        outcome = self.prepare_outcome(outcome)
+        entry = run_log.append_tool_result(
+            outcome,
+            recovered_from_interruption=True,
+        )
+        return outcome, entry
 
     def _build_registry(self):
         runtime = self.runtime
@@ -280,7 +270,8 @@ class ToolRuntime:
         return validated
 
     def _effective_policy(self):
-        contract = self.runtime.run.projection.contract
+        run_log = self.runtime.run.run_log
+        contract = run_log.projection.contract if run_log is not None else None
         mode = self.runtime.config.mode
         if mode == "ask" or (
             contract is not None and contract.write_scope.mode == "none"
@@ -366,7 +357,7 @@ class ToolRuntime:
     def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
         return ToolContext(
-            run_id=str(runtime.run.projection.run_id or "manual"),
+            run_id=runtime.run.run_log.run_id if runtime.run.run_log else "manual",
             tool_call_id=str(call_id),
             execution_context=(
                 execution_context
@@ -400,10 +391,10 @@ class ToolRuntime:
         run_log = agent.run.run_log
         if run_log is None:
             return None
-        pending = run_log.pending_tool_calls()
-        if not pending:
+        pending = run_log.pending_tool_call()
+        if pending is None:
             raise RuntimeError("active Run has no pending tool call")
-        if str(call_id) not in {call.call_id for call in pending}:
+        if str(call_id) != pending.call_id:
             raise RuntimeError("tool execution does not match the pending Run call")
         return run_log
 
@@ -466,7 +457,6 @@ class ToolRuntime:
         if (
             effect_scope != "workspace"
             or agent.run.run_log is None
-            or agent.run.projection.contract is None
         ):
             return {}
         artifacts = {}
@@ -509,20 +499,18 @@ class ToolRuntime:
             )
         return ToolCall(call.name, args, call.call_id), None
 
-    def _pending_group(self, group_id):
+    def _pending_call(self, call_id):
         runtime = self.runtime
         if runtime.run.resumable:
-            raise RuntimeError("a dormant Run must be resumed before grouped execution")
-        if runtime.run.projection.contract is None or runtime.run.run_log is None:
-            raise RuntimeError("pending grouped execution requires an active Run")
+            raise RuntimeError("a dormant Run must be resumed before tool execution")
+        if runtime.run.run_log is None:
+            raise RuntimeError("pending tool execution requires an active Run")
         if runtime.run.projection.terminal:
-            raise RuntimeError("terminal Run cannot execute a tool group")
-        if runtime.run.run_log.pending_group_id() != str(group_id):
-            raise RuntimeError("group id does not match the pending tool calls")
-        calls = runtime.run.run_log.pending_tool_calls()
-        if not calls:
-            raise RuntimeError("active Run has no pending tool calls")
-        return calls
+            raise RuntimeError("terminal Run cannot execute a tool call")
+        call = runtime.run.run_log.pending_tool_call()
+        if call is None or call.call_id != str(call_id):
+            raise RuntimeError("call id does not match the pending tool call")
+        return call
 
     @staticmethod
     def _invoke_runner(tool, context, args):
@@ -669,11 +657,10 @@ class ToolRuntime:
             ),
         )
 
-    def execute_pending_group(self, group_id, surface):
+    def execute_pending_call(self, call_id, surface):
         if not isinstance(surface, ResolvedToolSurface):
-            raise TypeError("group execution requires its resolved Tool surface")
-        calls = self._pending_group(group_id)
-        return tuple(self._execute(call, surface) for call in calls)
+            raise TypeError("tool execution requires its resolved Tool surface")
+        return self._execute(self._pending_call(call_id), surface)
 
     def execute_manual(self, name, args=None):
         call = ToolCall(str(name), dict(args or {}))
@@ -686,7 +673,7 @@ class ToolRuntime:
                 "no_retry",
                 record=False,
             )
-        if agent.run.projection.contract is not None:
+        if agent.run.run_log is not None:
             return self._rejected(
                 call,
                 "run_protocol_violation",
@@ -842,7 +829,11 @@ class ToolRuntime:
         drift = tracked_workspace_drift(
             effects_before,
             potential_scope,
-            agent.run.evidence.change_set.files,
+            (
+                agent.run.evidence.change_set.files
+                if agent.run.run_log is not None
+                else {}
+            ),
         )
         if drift:
             paths = ", ".join(item["path"] for item in drift)
@@ -1023,7 +1014,12 @@ class ToolRuntime:
                 self.read_versions[path] = revision
         if outcome.tool_name == "read_file":
             observed = outcome.structured
-            known = self.runtime.run.evidence.change_set.files.get(observed.get("path"))
+            run_log = self.runtime.run.run_log
+            known = (
+                run_log.projection.evidence.change_set.files.get(observed.get("path"))
+                if run_log is not None
+                else None
+            )
             if (
                 known is not None
                 and observed.get("revision")

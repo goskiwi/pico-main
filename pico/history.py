@@ -10,7 +10,7 @@ CONTEXT_KINDS = frozenset(
     {
         "user_message",
         "user_guidance",
-        "assistant_tool_calls",
+        "assistant_tool_call",
         "tool_result",
         "model_instruction",
         "assistant_final",
@@ -45,10 +45,9 @@ class RunHistory:
 
     def context_events(self):
         call_ids = {
-            call.call_id
+            entry.tool_call.call_id
             for entry in self._events
-            if entry.kind == "assistant_tool_calls"
-            for call in entry.tool_calls
+            if entry.kind == "assistant_tool_call"
         }
         return tuple(
             entry
@@ -81,25 +80,21 @@ class RunHistory:
         events = tuple(events)
         while index < len(events):
             entry = events[index]
-            if entry.kind != "assistant_tool_calls":
+            if entry.kind != "assistant_tool_call":
                 if entry.kind == "tool_result":
                     raise RuntimeError("Run Log contains an orphan tool result")
                 units.append((entry,))
                 index += 1
                 continue
-            expected_ids = tuple(call.call_id for call in entry.tool_calls)
-            end = index + 1 + len(expected_ids)
-            if end > len(events):
+            if index + 1 >= len(events):
                 if allow_incomplete:
                     return None
                 raise RuntimeError("Run Log contains an incomplete tool transaction")
-            results = events[index + 1 : end]
-            if tuple(result.call_id for result in results) != expected_ids or any(
-                result.kind != "tool_result" for result in results
-            ):
+            result = events[index + 1]
+            if result.kind != "tool_result" or result.call_id != entry.tool_call.call_id:
                 raise RuntimeError("Run Log tool transaction is not contiguous")
-            units.append((entry, *results))
-            index = end
+            units.append((entry, result))
+            index += 2
         return units
 
     @staticmethod
@@ -136,35 +131,31 @@ class RunHistory:
             ):
                 index += 1
                 continue
-            if entry.kind != "assistant_tool_calls":
+            if entry.kind != "assistant_tool_call":
                 if entry.kind == "tool_result":
                     raise RuntimeError("Run Log contains an orphan tool result")
                 units.append((cls._event_fact(entry),))
                 index += 1
                 continue
-            calls = entry.tool_calls
-            end = index + 1 + len(calls)
-            if end > len(events):
+            if index + 1 >= len(events):
                 if allow_incomplete:
                     return None
                 raise RuntimeError("Run Log contains an incomplete tool transaction")
-            results = events[index + 1 : end]
-            if tuple(result.call_id for result in results) != tuple(
-                call.call_id for call in calls
-            ) or any(result.kind != "tool_result" for result in results):
+            call = entry.tool_call
+            result = events[index + 1]
+            if result.kind != "tool_result" or result.call_id != call.call_id:
                 raise RuntimeError("Run Log tool transaction is not contiguous")
-            for call, result in zip(calls, results):
-                call_fact = _ProjectedFact(
-                    "tool_call",
-                    {
-                        "name": call.name,
-                        "args": dict(call.args),
-                        "call_id": call.call_id,
-                    },
-                    (entry.event_id,),
-                )
-                units.append((call_fact, cls._event_fact(result)))
-            index = end
+            call_fact = _ProjectedFact(
+                "tool_call",
+                {
+                    "name": call.name,
+                    "args": dict(call.args),
+                    "call_id": call.call_id,
+                },
+                (entry.event_id,),
+            )
+            units.append((call_fact, cls._event_fact(result)))
+            index += 2
         return units
 
     @staticmethod

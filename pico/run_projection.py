@@ -13,15 +13,6 @@ from .task_state import TaskContract
 
 
 @dataclass(frozen=True)
-class RunCursor:
-    sequence: int = 0
-    event_id: str = ""
-
-    def to_dict(self):
-        return {"sequence": self.sequence, "event_id": self.event_id}
-
-
-@dataclass(frozen=True)
 class RuntimeFeedback:
     instruction: str
     evidence: str = ""
@@ -53,6 +44,12 @@ class RunMetrics:
                 self.executed_tool_count += 1
                 self.tool_counts[tool] = self.tool_counts.get(tool, 0) + 1
             self.outcome_counts[status] = self.outcome_counts.get(status, 0) + 1
+            if tool == "verify":
+                verification = dict(outcome.get("structured", {})).get("verification", {})
+                verification_status = str(verification.get("status", "unknown"))
+                self.verification_counts[verification_status] = (
+                    self.verification_counts.get(verification_status, 0) + 1
+                )
         elif kind == "verification_result":
             status = str(payload.get("status", "unknown"))
             self.verification_counts[status] = (
@@ -74,93 +71,54 @@ class RunMetrics:
 
 
 @dataclass
-class PendingToolGroup:
-    """Own active tool batch state and event ordering."""
-    _pending_calls: tuple[ToolCall, ...] = ()
-    group_id: str = ""
-    _started_call_ids: set[str] = field(default_factory=set)
-    _last_started_ordinal: int = -1
-    _start_phase_result_count: int = 0
-    _result_count: int = 0
+class PendingToolCall:
+    """Track the one tool transaction that may need recovery."""
 
-    def check_event(self, event):  # noqa: C901 - ordered tool protocol
+    call: ToolCall | None = None
+    started: bool = False
+
+    def check_event(self, event):
         kind, payload = event.kind, event.payload
-        if kind == "assistant_tool_calls":
-            if self._pending_calls:
-                raise ValueError("Run Log already has pending tool calls")
+        if kind == "assistant_tool_call":
+            if self.call is not None:
+                raise ValueError("Run Log already has a pending tool call")
         elif kind == "tool_started":
-            call_id = str(payload["tool_call_id"])
-            call = self.find(call_id)
-            if call is None:
+            if self.call is None:
                 raise ValueError("tool_started must match a pending tool call")
-            if str(payload["tool_name"]) != call.name:
+            if str(payload["tool_call_id"]) != self.call.call_id:
+                raise ValueError("tool_started must match the pending call id")
+            if str(payload["tool_name"]) != self.call.name:
                 raise ValueError(
                     "tool_started tool name does not match the pending call"
                 )
-            if call_id in self._started_call_ids:
+            if self.started:
                 raise ValueError("pending tool call already started")
-            ordinal = self._pending_calls.index(call)
-            expected_ordinal = max(self._result_count, self._last_started_ordinal + 1)
-            if ordinal != expected_ordinal:
-                raise ValueError("tool_started calls must preserve group order")
-            unresolved_started = self._result_count <= self._last_started_ordinal
-            if (
-                unresolved_started
-                and self._result_count != self._start_phase_result_count
-            ):
-                raise ValueError(
-                    "tool_started cannot cross an unfinished execution barrier"
-                )
         elif kind == "tool_result":
             outcome = ToolOutcome.from_dict(payload["outcome"])
-            call_id = outcome.tool_call_id
-            if not self._pending_calls or self._result_count >= len(self._pending_calls):
-                raise ValueError("tool_result requires pending tool calls")
-            call = self._pending_calls[self._result_count]
-            if call_id != call.call_id:
-                raise ValueError("tool_result calls must preserve group order")
-            if outcome.tool_name != call.name:
+            if self.call is None:
+                raise ValueError("tool_result requires a pending tool call")
+            if outcome.tool_call_id != self.call.call_id:
+                raise ValueError("tool_result must match the pending call id")
+            if outcome.tool_name != self.call.name:
                 raise ValueError(
                     "tool_result tool name does not match the pending call"
                 )
-            started = call_id in self._started_call_ids
-            if outcome.execution_state == "not_started" and started:
+            if outcome.execution_state == "not_started" and self.started:
                 raise ValueError("started tool cannot finish as not_started")
-            if outcome.execution_state != "not_started" and not started:
+            if outcome.execution_state != "not_started" and not self.started:
                 raise ValueError("executed tool_result requires tool_started")
-        elif self._pending_calls and kind not in {"tool_started", "tool_result"}:
-            raise ValueError("pending tool calls must receive results first")
-
-    def find(self, call_id):
-        return next(
-            (call for call in self._pending_calls if call.call_id == call_id), None
-        )
-
-    def _begin_calls(self, calls, group_id=""):
-        self._pending_calls = tuple(calls)
-        self.group_id = group_id
-        self._started_call_ids.clear()
-        self._last_started_ordinal = -1
-        self._start_phase_result_count = 0
-        self._result_count = 0
-
-
-    @property
-    def remaining(self):
-        return self._pending_calls[self._result_count:]
+        elif self.call is not None and kind not in {"tool_started", "tool_result"}:
+            raise ValueError("pending tool call must receive a result first")
 
     def apply_event(self, event):
-        if event.kind == "assistant_tool_calls":
-            self._begin_calls(event.tool_calls, event.event_id)
+        if event.kind == "assistant_tool_call":
+            self.call = event.tool_call
+            self.started = False
         elif event.kind == "tool_started":
-            if self._result_count > self._last_started_ordinal:
-                self._start_phase_result_count = self._result_count
-            self._started_call_ids.add(event.call_id)
-            self._last_started_ordinal = self._pending_calls.index(self.find(event.call_id))
+            self.started = True
         elif event.kind == "tool_result":
-            self._result_count += 1
-            if self._result_count == len(self._pending_calls):
-                self._begin_calls(())
+            self.call = None
+            self.started = False
 
 
 @dataclass
@@ -173,14 +131,14 @@ class RunProjection:
     status: str = "not_started"
     stop_reason: str = ""
     final_answer: str = ""
-    pending_group: PendingToolGroup = field(default_factory=PendingToolGroup)
+    pending_tool: PendingToolCall = field(default_factory=PendingToolCall)
     runtime_feedback: RuntimeFeedback | None = None
     final_diff: FinalDiff | None = None
-    last_cursor: RunCursor = field(default_factory=RunCursor)
+    last_sequence: int = 0
 
     def check_event(self, event):
         kind, payload = event.kind, event.payload
-        expected = self.last_cursor.sequence + 1
+        expected = self.last_sequence + 1
         if event.sequence != expected:
             raise ValueError("Run Log sequence is not contiguous")
         if event.event_id != f"{event.run_id}:event:{expected:06d}":
@@ -196,7 +154,7 @@ class RunProjection:
             raise ValueError("Run Log must begin with user_message")
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
-        self.pending_group.check_event(event)
+        self.pending_tool.check_event(event)
         if kind in {"assistant_final", "run_stopped"}:
             raw = payload.get("final_diff")
             final_diff = FinalDiff.from_dict(raw) if raw is not None else None
@@ -216,13 +174,8 @@ class RunProjection:
         return self.status in {"completed", "stopped"}
 
     @property
-    def pending_call_ids(self):
-        return tuple(call.call_id for call in self.pending_group.remaining)
-
-    @property
     def pending_call_id(self):
-        ids = self.pending_call_ids
-        return ids[0] if len(ids) == 1 else None
+        return self.pending_tool.call.call_id if self.pending_tool.call else ""
 
     @property
     def model_request_count(self):
@@ -250,8 +203,8 @@ class RunProjection:
             self.status = "running"
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
-        self.pending_group.apply_event(event)
-        if event.kind == "assistant_tool_calls":
+        self.pending_tool.apply_event(event)
+        if event.kind == "assistant_tool_call":
             self.runtime_feedback = None
         elif event.kind == "model_instruction":
             self.runtime_feedback = RuntimeFeedback(
@@ -267,7 +220,7 @@ class RunProjection:
             self.final_answer = str(event.payload.get("content", ""))
             raw = event.payload.get("final_diff")
             self.final_diff = FinalDiff.from_dict(raw) if raw is not None else None
-        self.last_cursor = RunCursor(event.sequence, event.event_id)
+        self.last_sequence = event.sequence
         return self
 
     def summary(self):
@@ -298,9 +251,9 @@ class RunProjection:
                 if self.runtime_feedback is not None
                 else None
             ),
-            "pending_call_ids": list(self.pending_call_ids),
+            "pending_call_id": self.pending_call_id,
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
-            "run_cursor": self.last_cursor.to_dict(),
+            "last_sequence": self.last_sequence,
         }
 
 

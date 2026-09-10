@@ -245,20 +245,19 @@ class AgentLoop:
 
     def _handle_tool_turn(self, loop_state, turn):
         agent = self.agent
-        calls = turn.action.tool_calls
+        call = turn.action.tool_call
+        if call is None:
+            raise RuntimeError("tool turn is missing its tool call")
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
-        group = agent.run.run_log.append_tool_calls(calls)
+        agent.run.run_log.append_tool_call(call)
         if agent.prompt.refresh_repository_instructions():
-            # The calls were proposed without these rules. Close the entire
-            # group without effects, then let the model reconsider it.
-            for call in calls:
-                agent.tools._rejected(
-                    call, "repository_instructions_changed",
-                    "No tool executed. Repository instructions were loaded or changed; "
-                    "review their directory scopes and propose the appropriate calls again.",
-                    recovery="retry_after_change", record=True,
-                )
+            agent.tools._rejected(
+                call, "repository_instructions_changed",
+                "The tool was not executed. Repository instructions were loaded or "
+                "changed; review their directory scope and propose the call again.",
+                recovery="retry_after_change", record=True,
+            )
             agent.model_client.reset_action_session()
             loop_state.prompt_snapshot = None
             loop_state.provider_context_tokens = None
@@ -266,16 +265,15 @@ class AgentLoop:
                 "reason": "repository_instructions_changed",
             })
             return LoopDirective("continue")
-        outcomes = agent.tools.execute_pending_group(
-            group.event_id,
+        outcome = agent.tools.execute_pending_call(
+            call.call_id,
             turn.tool_surface,
         )
 
-        provider_results = [outcome.render_for_model() for outcome in outcomes]
         self._continue_provider(
             loop_state,
             turn,
-            provider_results,
+            (outcome.render_for_model(),),
         )
         return LoopDirective("continue")
 
@@ -324,11 +322,7 @@ class AgentLoop:
         )
         self.agent.emit_event(
             "completion_blocked",
-            {
-                "status": status,
-                "instruction": instruction,
-                "evidence": evidence,
-            },
+            {"status": status},
         )
         loop_state.completion_block_count += 1
         if loop_state.completion_block_count >= 3:

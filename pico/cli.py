@@ -181,9 +181,9 @@ def build_agent(args):
 
 
 def _run_state_text(agent):
-    task = agent.run.projection
-    if task.contract is None:
+    if agent.run.run_log is None:
         return "Run: not started"
+    task = agent.run.projection
     changed = ", ".join(task.evidence.changed_paths) or "none"
     return "\n".join(
         (
