@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from html import escape
 
@@ -120,7 +119,6 @@ class CompactionSummary:
 class CompactionSummarizer:
     def __init__(self, client_factory):
         self.client_factory = client_factory
-        self.calls = []
 
     @staticmethod
     def _semantic_record(entry):
@@ -251,7 +249,6 @@ evidence was omitted, not that work succeeded or facts are absent."""
         input_text = task_context + "\n\n" + history_text
         try:
             client = self.client_factory()
-            started = time.monotonic()
             action = client.complete_action(
                 input_text,
                 max_output_tokens,
@@ -259,7 +256,6 @@ evidence was omitted, not that work succeeded or facts are absent."""
                 action_tools=[SUMMARY_TOOL],
                 execution_context=execution_context,
             )
-            duration_ms = int((time.monotonic() - started) * 1000)
             if (
                 action.kind != "tool"
                 or action.tool_call is None
@@ -269,16 +265,6 @@ evidence was omitted, not that work succeeded or facts are absent."""
                     "summary model did not return submit_compaction_summary"
                 )
             summary = CompactionSummary.from_dict(action.tool_call.args)
-            self.calls.append(
-                {
-                    "duration_ms": duration_ms,
-                    "input_tokens": count_tokens(input_text) + request_overhead,
-                    "max_output_tokens": max_output_tokens,
-                    "completion_metadata": dict(
-                        getattr(client, "last_completion_metadata", {}) or {}
-                    ),
-                }
-            )
             return summary.render()
         except SemanticCompactionError:
             raise

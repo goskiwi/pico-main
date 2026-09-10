@@ -373,10 +373,6 @@ class RunLog:
         self.projection = RunProjection()
 
 
-    @property
-    def generation(self):
-        return 1 + sum(event.kind == "compaction" for event in self._events)
-
     @classmethod
     def _from_events(cls, events, store, *, expected_run_id):
         """Restore the writer and its Projection from one storage snapshot."""

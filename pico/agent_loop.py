@@ -132,15 +132,13 @@ class AgentLoop:
                     },
                 )
         if loop_state.prompt_snapshot is None:
-            inputs, compaction_metadata, history_override = self.lifecycle.prepare_compaction(
+            inputs, history_override = self.lifecycle.prepare_compaction(
                 loop_state.user_message,
                 tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
             )
-            prompt, _metadata = agent.prompt.build(
+            prompt = agent.prompt.build(
                 inputs,
-                provider_context_tokens=loop_state.provider_context_tokens,
-                compaction_metadata=compaction_metadata,
                 history_override=history_override,
             )
             loop_state.provider_context_tokens = None

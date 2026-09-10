@@ -260,13 +260,6 @@ class RunHistory:
         return (
             summary,
             [entry.event_id for entry in compacted],
-            {
-                "mode": "semantic_history",
-                "covered_events": len(compacted),
-                "retained_events": sum(len(unit) for unit in units[cut:]),
-                "retained_tokens": retained_tokens,
-                "summary_tokens": history_token_counter(render((), summary=summary)),
-            },
         )
 
     @staticmethod
@@ -291,24 +284,18 @@ class RunHistory:
         return active, units or []
 
     def render_projection(self):
-        active, units = self._active_projection_units()
+        _active, units = self._active_projection_units()
         facts = tuple(fact for unit in units for fact in unit)
+        if not facts:
+            return ""
         lines = ["Current run events:"]
         lines.extend(self._render_fact(fact) for fact in facts)
-        if len(lines) == 1:
-            lines.append("- empty")
-        source_ids = self._source_ids(units)
-        return "\n".join(lines), {
-            "active_count": len(active),
-            "selected_count": len(source_ids),
-            "omitted_count": max(0, len(active) - len(source_ids)),
-            "artifact_references": sum(bool(fact.artifact_id) for fact in facts),
-        }
+        return "\n".join(lines)
 
     def render_compacted_projection(self, *, retain_tokens, token_counter):
         """Render committed summaries followed by a bounded per-Call suffix."""
 
-        active, units = self._active_projection_units()
+        _active, units = self._active_projection_units()
         summaries = tuple(
             unit for unit in units if len(unit) == 1 and unit[0].kind == "compaction"
         )
@@ -335,38 +322,19 @@ class RunHistory:
 
         minimum = render_selected([])
         if minimum[1] > limit:
-            return "", {
-                "active_count": len(active),
-                "selected_count": 0,
-                "omitted_count": len(active),
-                "artifact_references": 0,
-                "projection_mode": "compacted_call_transactions",
-                "retained_tokens": 0,
-            }
+            return ""
         retained = self._select_recent(
             recent,
             limit=limit,
             render=render_selected,
         )
-        text, retained_tokens = render_selected(retained)
-        selected = (*summaries, *retained) if include_summaries else tuple(retained)
-        retained_facts = tuple(fact for unit in selected for fact in unit)
-        selected_ids = self._source_ids(selected)
-        return text, {
-            "active_count": len(active),
-            "selected_count": len(selected_ids),
-            "omitted_count": max(0, len(active) - len(selected_ids)),
-            "artifact_references": sum(
-                bool(fact.artifact_id) for fact in retained_facts
-            ),
-            "projection_mode": "compacted_call_transactions",
-            "retained_tokens": retained_tokens,
-        }
+        text, _retained_tokens = render_selected(retained)
+        return text
 
     def render_recent_projection(self, *, retain_tokens, token_counter):
         """Render a suffix that is bounded and independently complete per Call."""
 
-        active, units = self._active_projection_units()
+        _active, units = self._active_projection_units()
         limit = max(0, int(retain_tokens))
 
         def render(selected):
@@ -380,23 +348,7 @@ class RunHistory:
 
         minimum = render([])
         if minimum[1] > limit:
-            return "", {
-                "active_count": len(active),
-                "selected_count": 0,
-                "omitted_count": len(active),
-                "artifact_references": 0,
-                "retained_tokens": 0,
-            }
+            return ""
         retained = self._select_recent(units, limit=limit, render=render)
-        text, retained_tokens = render(retained)
-        retained_facts = tuple(fact for unit in retained for fact in unit)
-        selected_ids = self._source_ids(retained)
-        return text, {
-            "active_count": len(active),
-            "selected_count": len(selected_ids),
-            "omitted_count": max(0, len(active) - len(selected_ids)),
-            "artifact_references": sum(
-                bool(fact.artifact_id) for fact in retained_facts
-            ),
-            "retained_tokens": retained_tokens,
-        }
+        text, _retained_tokens = render(retained)
+        return text

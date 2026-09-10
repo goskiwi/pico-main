@@ -123,14 +123,13 @@ class RunLifecycle:
         provider_context_tokens=None,
     ):
         inputs = self.runtime.prompt.prepare(user_message, tool_surface=tool_surface)
-        plan, metadata, history = self.runtime.prompt.plan_compaction(
+        plan, history = self.runtime.prompt.plan_compaction(
             inputs,
             provider_context_tokens=provider_context_tokens,
         )
         if plan is not None:
             self.runtime.run.run_log.append_compaction(*plan)
-            metadata["committed"] = True
-        return inputs, metadata, history
+        return inputs, history
 
     def initialize(
         self,

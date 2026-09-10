@@ -41,11 +41,8 @@ class Tokenizer:
 
 def _render_context(raw, available, *, section_caps, count_tokens, history):
     rendered = _required_context(raw)
-    budgets = {key: None for key in rendered}
     if count_tokens(_assemble_input(raw, rendered)) > available:
         raise ContextBudgetExceeded("required Runtime context exceeds the model budget")
-    clipped = []
-    history_metadata = None
 
     def fit(section, text, budget):
         if section == "history":
@@ -57,15 +54,12 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
                     raw, rendered, count_tokens=count_tokens
                 ),
             )
-        return (
-            _clip_complete_lines(
-                text,
-                budget,
-                token_counter=_context_section_token_counter(
-                    raw, rendered, section, count_tokens=count_tokens
-                ),
+        return _clip_complete_lines(
+            text,
+            budget,
+            token_counter=_context_section_token_counter(
+                raw, rendered, section, count_tokens=count_tokens
             ),
-            None,
         )
 
     for section in CONTEXT_ALLOCATION_ORDER:
@@ -74,41 +68,17 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
             continue
         remaining = max(0, available - count_tokens(_assemble_input(raw, rendered)))
         budget = remaining if section == "history" else section_caps[section]
-        value, selected_metadata = fit(section, text, budget)
-        if selected_metadata is not None:
-            history_metadata = selected_metadata
+        value = fit(section, text, budget)
         if not value:
-            clipped.append(section)
             continue
         candidate = {**rendered, section: value}
         if count_tokens(_assemble_input(raw, candidate)) > available:
             budget = remaining
-            value, selected_metadata = fit(section, text, budget)
-            if selected_metadata is not None:
-                history_metadata = selected_metadata
+            value = fit(section, text, budget)
             candidate = {**rendered, section: value} if value else rendered
         if value and count_tokens(_assemble_input(raw, candidate)) <= available:
             rendered[section] = value
-            budgets[section] = budget
-            if value != text:
-                clipped.append(section)
-        else:
-            clipped.append(section)
-
-    return (
-        rendered,
-        budgets,
-        {
-            "strategy": "fixed_caps_history_remainder",
-            "available_input_tokens": available,
-            "history_budget_tokens": budgets.get("history", 0),
-            "unused_input_tokens": max(
-                0, available - count_tokens(_assemble_input(raw, rendered))
-            ),
-            "clipped_sections": list(dict.fromkeys(clipped)),
-        },
-        history_metadata,
-    )
+    return rendered
 
 
 def _fixed_context(raw, *, section_caps, count_tokens):
@@ -159,18 +129,18 @@ def _bounded_history(text, limit, *, history, token_counter):
     text = str(text).strip()
     limit = max(0, int(limit))
     if not text or limit <= 0:
-        return "", None
+        return ""
     if token_counter(text) <= limit:
-        return text, None
+        return text
     if history is None:
-        return "", None
-    bounded, metadata = history.render_recent_projection(
+        return ""
+    bounded = history.render_recent_projection(
         retain_tokens=limit,
         token_counter=token_counter,
     )
     if token_counter(bounded) > limit:
-        return "", None
-    return bounded, metadata
+        return ""
+    return bounded
 
 
 def _untrusted_envelope(context):
@@ -294,16 +264,10 @@ def render_repository_instructions(instructions):
 
 
 def render_history(history):
-    """Return the selected history text and its diagnostics together."""
+    """Render the active history selected by RunLog compaction."""
     if history is None:
-        return "", {
-            "active_count": 0,
-            "selected_count": 0,
-            "omitted_count": 0,
-            "artifact_references": 0,
-        }
-    text, metadata = history.render_projection()
-    return (text if metadata.get("selected_count", 0) else ""), metadata
+        return ""
+    return history.render_projection()
 
 
 def _history_budget(raw, available, *, fixed_context, count_tokens):

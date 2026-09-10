@@ -125,14 +125,13 @@ class PromptBuilder:
             "history_token_counter": context._history_token_counter(raw, fixed, count_tokens=self.count_tokens),
         }
 
-    def build(self, inputs, *, provider_context_tokens=None,
-              compaction_metadata=None, history_override=None):
+    def build(self, inputs, *, history_override=None):
         """Render prepared context with the current, possibly compacted history."""
         raw = inputs["raw"]
         history = self._history()
         count_tokens = self.count_tokens
         available = inputs["available"]
-        (history_text, history_metadata) = (
+        history_text = (
             context.render_history(history)
             if history_override is None
             else history_override
@@ -153,132 +152,30 @@ class PromptBuilder:
             except ValueError as exc:
                 raise context.ContextBudgetExceeded(str(exc)) from exc
             if compacted_history is not None:
-                (raw["history"], history_metadata) = compacted_history
-        (rendered_context, section_budgets, allocation, bounded_metadata) = (
-            context._render_context(
-                raw,
-                available,
-                section_caps=self.section_caps,
-                count_tokens=count_tokens,
-                history=history,
-            )
+                raw["history"] = compacted_history
+        rendered_context = context._render_context(
+            raw,
+            available,
+            section_caps=self.section_caps,
+            count_tokens=count_tokens,
+            history=history,
         )
-        if bounded_metadata is not None:
-            history_metadata = bounded_metadata
         input_text = context._assemble_input(raw, rendered_context)
-        input_text_tokens = count_tokens(input_text)
-        if input_text_tokens > available:
+        if count_tokens(input_text) > available:
             raise context.ContextBudgetExceeded(
                 "assembled prompt exceeds the available input budget"
             )
-        metadata = self._metadata(
-            inputs, raw=raw, rendered_context=rendered_context,
-            section_budgets=section_budgets, allocation=allocation,
-            history_metadata=history_metadata, input_text_tokens=input_text_tokens,
-            compaction_metadata=compaction_metadata,
-            provider_context_tokens=provider_context_tokens,
-        )
-        return ModelPrompt(self.instructions, input_text), metadata
-
-    def _metadata(self, inputs, *, raw, rendered_context, section_budgets,
-                  allocation, history_metadata, input_text_tokens,
-                  compaction_metadata, provider_context_tokens):
-        count_tokens = self.count_tokens
-        config = self.runtime.config
-        instructions_tokens = inputs["instructions_tokens"]
-        tool_schema_tokens = inputs["tool_schema_tokens"]
-        output_reserve = int(config.max_new_tokens)
-        run_log = self.runtime.run.run_log
-        run_log_generation = run_log.generation if run_log is not None else 0
-        sections = {}
-        for key in (
-            "runtime_policy",
-            "repository_instructions",
-            "task_request",
-            "runtime_instruction",
-            "latest_user_request",
-        ):
-            value = raw[key]
-            if not value:
-                continue
-            count = count_tokens(value)
-            sections[key] = {
-                "raw_tokens": count,
-                "budget_tokens": None,
-                "rendered_tokens": count,
-            }
-        for key, value in rendered_context.items():
-            sections[key] = {
-                "raw_tokens": count_tokens(raw[key]),
-                "budget_tokens": section_budgets[key],
-                "rendered_tokens": count_tokens(value),
-            }
-        if rendered_context:
-            envelope = context._untrusted_envelope(rendered_context)
-            sections["untrusted_context"] = {
-                "raw_tokens": count_tokens(
-                    context._untrusted_envelope(
-                        {
-                            key: raw[key]
-                            for key in context.CONTEXT_WIRE_ORDER
-                            if raw[key]
-                        }
-                    )
-                ),
-                "budget_tokens": None,
-                "rendered_tokens": count_tokens(envelope),
-            }
-        prompt_tokens = instructions_tokens + input_text_tokens
-        estimated_input_tokens = prompt_tokens + tool_schema_tokens
-        metadata = {
-            "prompt_tokens": prompt_tokens,
-            "instructions_tokens": instructions_tokens,
-            "input_text_tokens": input_text_tokens,
-            "tool_schema_tokens": tool_schema_tokens,
-            "estimated_input_tokens": estimated_input_tokens,
-            "reserved_output_tokens": output_reserve,
-            "within_budget": estimated_input_tokens + output_reserve
-            <= config.provider_context_limit_tokens,
-            "tokenizer": self.tokenizer.encoding.name,
-            "section_order": [
-                "runtime_policy",
-                *(
-                    ["repository_instructions"]
-                    if raw["repository_instructions"]
-                    else []
-                ),
-                "task_request",
-                *(
-                    ["runtime_instruction"]
-                    if raw["runtime_instruction"]
-                    else []
-                ),
-                *(["untrusted_context"] if rendered_context else []),
-                *(["latest_user_request"] if raw["latest_user_request"] else []),
-            ],
-            "sections": sections,
-            "included_context_sections": [
-                key for key in context.CONTEXT_WIRE_ORDER if key in rendered_context
-            ],
-            "budget_allocation": allocation,
-            "history_projection": dict(history_metadata),
-            "run_log_generation": run_log_generation,
-            "compaction": dict(compaction_metadata)
-            if compaction_metadata is not None
-            else None,
-            "provider_context_tokens": provider_context_tokens,
-        }
-        return metadata
+        return ModelPrompt(self.instructions, input_text)
 
     def plan_compaction(self, inputs, *, provider_context_tokens=None):
         """Plan semantic compaction or return a bounded read-only fallback."""
         run_log = self.runtime.run.run_log
         if run_log is None or run_log.pending_tool_call() is not None:
-            return (None, None, None)
+            return None, None
         history = self._history()
         config = self.runtime.config
         count_tokens = self.count_tokens
-        history_text, _metadata = context.render_history(history)
+        history_text = context.render_history(history)
         raw = {**inputs["raw"], "history": history_text}
         request_overhead_tokens = inputs["instructions_tokens"] + inputs["tool_schema_tokens"]
         fixed_context = inputs["fixed_context"]
@@ -295,10 +192,7 @@ class PromptBuilder:
         )
         threshold_tokens = max(1, config.provider_context_limit_tokens - reserve_tokens)
         if context_tokens < threshold_tokens:
-            return (None, None, None)
-        failure_code = ""
-        failure_detail = ""
-        compacted = None
+            return None, None
         projection_history_budget = inputs["history_budget"]
         history_token_counter = inputs["history_token_counter"]
 
@@ -350,57 +244,17 @@ class PromptBuilder:
                 summary_builder=build_summary,
             )
             if compacted is None:
-                failure_code = "semantic_summary_not_committed"
-        except SemanticCompactionError as exc:
-            failure_code = "semantic_summary_unavailable"
-            failure_detail = self.runtime.redact_text(str(exc))
-        if failure_code:
+                raise SemanticCompactionError("summary did not reduce history")
+        except SemanticCompactionError:
             history_budget = min(
                 config.compaction_keep_recent_tokens, projection_history_budget
             )
             fallback_history = history.render_recent_projection(
                 retain_tokens=history_budget, token_counter=history_token_counter
             )
-            (_text, projection_metadata) = fallback_history
-            return (
-                None,
-                {
-                    "mode": "runtime_recent_transactions",
-                    "degraded": True,
-                    "committed": False,
-                    "failure_code": failure_code,
-                    "failure_detail": failure_detail,
-                    "trigger_context_tokens": context_tokens,
-                    "local_context_tokens": local_context_tokens,
-                    "trigger_threshold_tokens": threshold_tokens,
-                    **projection_metadata,
-                },
-                fallback_history,
-            )
-        (summary, covered, metadata) = compacted
-        semantic_call = (
-            self.semantic_summarizer.calls[-1] if self.semantic_summarizer.calls else {}
-        )
-        return (
-            (summary, covered),
-            {
-                **metadata,
-                "mode": "semantic_history",
-                "degraded": False,
-                "committed": False,
-                "semantic_summary": {
-                    "status": "completed",
-                    "duration_ms": int(semantic_call.get("duration_ms", 0)),
-                    "completion_metadata": dict(
-                        semantic_call.get("completion_metadata", {})
-                    ),
-                },
-                "trigger_context_tokens": context_tokens,
-                "local_context_tokens": local_context_tokens,
-                "trigger_threshold_tokens": threshold_tokens,
-            },
-            None,
-        )
+            return None, fallback_history
+        summary, covered = compacted
+        return (summary, covered), None
 
     def _history(self):
         run_log = self.runtime.run.run_log
