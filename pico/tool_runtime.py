@@ -33,6 +33,7 @@ from .tool_execution import (
     path_transitions,
     tracked_workspace_drift,
 )
+from .verification import ResolvedVerificationPolicy
 from .workspace import clip
 
 if TYPE_CHECKING:
@@ -187,7 +188,68 @@ class ToolRuntime:
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
         )
+        if runtime.config.verification_command.strip():
+            tools["verify"] = {
+                "args_schema": toolkit.ToolArgs,
+                "risky": False,
+                "workspace_mutating": True,
+                "description": (
+                    "Run the Runtime's fixed acceptance command now. Use after a "
+                    "meaningful set of edits to get authoritative failures before "
+                    "submit_final. This tool takes no arguments and does not finish "
+                    "the task."
+                ),
+                "plan": lambda context, args: ToolExecutionPlan(
+                    "workspace",
+                    operation={
+                        "command": runtime.config.verification_command,
+                    },
+                ),
+                "run": self._run_verification,
+            }
         return tools
+
+    def _run_verification(self, context, args):
+        contract = self.runtime.run.projection.contract
+        if contract is None:
+            raise RuntimeError("Runtime verification requires an active task")
+        policy = ResolvedVerificationPolicy.resolve(
+            contract,
+            self.runtime.config.verification_command,
+        )
+        sequence = self.runtime.run.evidence.last_workspace_mutation_sequence
+        record = self.runtime.run_verification(sequence, policy)
+        status = str(record.get("status", "infrastructure_error"))
+        output = str(record.get("output", "")).strip()
+        passed = status == "passed"
+        failure = (
+            None
+            if passed
+            else FailureInfo(
+                "verification_failed"
+                if status == "failed"
+                else "verification_infrastructure_error",
+                "Runtime verification failed; inspect the output and repair the code."
+                if status == "failed"
+                else "Runtime verification could not establish a trustworthy result.",
+                "retry_after_change"
+                if status == "failed"
+                else "user_action_required",
+            )
+        )
+        changes = record["workspace_changes"]
+        return ToolRunnerResult(
+            content=(
+                ("Runtime verification passed." if passed else "Runtime verification failed.")
+                + (("\n" + output) if output else "")
+            ),
+            structured={"verification": record},
+            affected_paths=tuple(changes or ()),
+            effect_scope=(
+                "workspace" if changes is None or bool(changes) else "none"
+            ),
+            failure=failure,
+        )
 
     def _apply_allowlist(self, tools):
         allowed_tools = self.runtime.config.allowed_tools

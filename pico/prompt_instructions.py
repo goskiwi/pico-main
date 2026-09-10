@@ -30,6 +30,7 @@ def build_prompt_instructions():
                 "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking but never exposes run_shell.",
                 "Runtime executes tool calls in the model's original order.",
                 "Use run_shell only for diagnostics expected not to modify repository files; mutating shell commands are not supported by this Runtime.",
+                "When verify is available, call it after a meaningful set of edits to obtain the Runtime's fixed acceptance result; repair failures before submitting completion.",
             ),
         ),
         (
@@ -38,7 +39,7 @@ def build_prompt_instructions():
                 "When the requested work is ready, call submit_final with a concise evidence-backed answer.",
                 "Call submit_final alone; it cannot share a model response with another tool call.",
                 "After submit_final, the Runtime runs its configured verification command when required and constructs the Final Diff.",
-                "Do not run the fixed verifier or generate or inspect the Final Diff yourself; if the Runtime rejects completion, follow its instruction and submit again.",
+                "Do not invoke the fixed verification command through run_shell or generate or inspect the Final Diff yourself; use verify for an intermediate acceptance check, and if the Runtime rejects completion, follow its instruction and submit again.",
                 "Keep the final answer concise, concrete, and supported by observed evidence.",
             ),
         ),

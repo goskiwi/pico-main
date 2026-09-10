@@ -260,8 +260,14 @@ class RunEvidence:
         if event.kind != "tool_result":
             return self
         outcome = dict(event.payload.get("outcome", {}) or {})
+        structured = dict(outcome.get("structured", {}) or {})
+        if outcome.get("tool_name") == "verify" and "verification" in structured:
+            record = structured["verification"]
+            if not isinstance(record, dict):
+                raise ValueError("verify tool result requires a verification record")
+            self.verifications.append(dict(record))
         if outcome.get("tool_name") == "read_file":
-            observed = outcome.get("structured", {})
+            observed = structured
             path, revision = observed.get("path"), observed.get("revision")
             missing = (outcome.get("failure") or {}).get("code") == "missing_path"
             known = self.change_set.files.get(path)
