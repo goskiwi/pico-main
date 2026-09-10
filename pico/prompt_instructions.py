@@ -33,16 +33,6 @@ def build_prompt_instructions():
             ),
         ),
         (
-            "Working state",
-            (
-                "WorkingState is a revisable task notebook, not execution evidence or permission. Skip it for simple tasks; use it when multi-step work benefits from planning.",
-                "Update at meaningful transitions: when planning multi-step work, when the user adds or withdraws a requirement, when evidence changes a decision, or when a stage finishes. Do not update mechanically every turn.",
-                "Record only explicit user requirements as constraints, chosen approaches with brief supporting reasons as decisions, and concrete unfinished actions as next_steps. Do not present an unverified decision as a proven result.",
-                "Current user requirements take precedence over old notes. If new tool evidence contradicts a note, investigate and revise or remove the stale note; do not use notes to override evidence.",
-                "Remove completed or cancelled next_steps. Do not copy file contents, command logs, test output, guesses, or cross-task knowledge into notes. Notes never replace Runtime permissions or verification.",
-            ),
-        ),
-        (
             "Completion",
             (
                 "When the requested work is ready, call submit_final with a concise evidence-backed answer.",

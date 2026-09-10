@@ -21,7 +21,6 @@ CONTEXT_WIRE_ORDER = (
     "runtime_evidence",
     "workspace",
     "history",
-    "working_state",
 )
 
 
@@ -44,7 +43,7 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
     rendered = _required_context(raw)
     budgets = {key: None for key in rendered}
     if count_tokens(_assemble_input(raw, rendered)) > available:
-        raise ContextBudgetExceeded("current WorkingState and required input exceed the model budget")
+        raise ContextBudgetExceeded("required Runtime context exceeds the model budget")
     clipped = []
     history_metadata = None
 
@@ -132,7 +131,7 @@ def _fixed_context(raw, *, section_caps, count_tokens):
 def _required_context(raw):
     return {
         key: raw[key]
-        for key in ("runtime_evidence", "working_state")
+        for key in ("runtime_evidence",)
         if raw.get(key)
     }
 
@@ -291,19 +290,6 @@ def render_repository_instructions(instructions):
             )
         )
     lines.append("</repository_instructions>")
-    return "\n".join(lines)
-
-
-def render_working_state(working):
-    lines = []
-    for label, values in (
-        ("constraints", working.constraints),
-        ("decisions", working.decisions),
-        ("next_steps", working.next_steps),
-    ):
-        if values:
-            lines.append(label + ":")
-            lines.extend(f"- {value}" for value in values)
     return "\n".join(lines)
 
 

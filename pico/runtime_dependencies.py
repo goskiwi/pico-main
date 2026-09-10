@@ -22,4 +22,4 @@ class RuntimeDependencies:
     mutations: WorkspaceMutationService
     command_runner: CommandRunner
     check_runner: Callable[..., CommandResult] | None = None
-    approval_handler: Callable[[str, dict, "ToolExecutionPlan"], bool] | None = None
+    approval_handler: Callable[[str, dict, ToolExecutionPlan], bool] | None = None

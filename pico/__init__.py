@@ -5,7 +5,6 @@ from .runtime import Pico, PicoConfig, SessionStore
 from .session_store import Session
 from .task_state import TaskContract, WriteScope
 from .tool_runtime import ToolRuntime
-from .working_state import WorkingState
 from .workspace import Workspace
 
 __all__ = [
@@ -21,7 +20,6 @@ __all__ = [
     "ToolCall",
     "ToolOutcome",
     "ToolRuntime",
-    "WorkingState",
     "Workspace",
     "WriteScope",
 ]

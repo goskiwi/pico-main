@@ -17,7 +17,6 @@ from .execution import (
 from .history import HISTORY_OMITTED
 from .prompt_instructions import build_prompt_instructions
 from .verification import ResolvedVerificationPolicy
-from .working_state import WorkingState
 from .workspace import WORKSPACE_GIT_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
@@ -143,7 +142,7 @@ class PromptBuilder:
         if count_tokens(minimum_input) > available:
             raise context.ContextBudgetExceeded(
                 "runtime policy, repository instructions, task request, pending "
-                "Runtime instruction and WorkingState exceed the model budget"
+                "Runtime instruction and evidence exceed the model budget"
             )
         if history_override is None and history is not None:
             try:
@@ -307,6 +306,11 @@ class PromptBuilder:
             try:
                 summary = self.semantic_summarizer.summarize(
                     events,
+                    task_goal=(
+                        self.runtime.run.projection.contract.goal
+                        if self.runtime.run.projection.contract is not None
+                        else ""
+                    ),
                     execution_context=self.runtime.run.execution_context,
                     context_limit_tokens=config.provider_context_limit_tokens,
                     max_output_tokens=min(
@@ -424,8 +428,6 @@ class PromptBuilder:
         goal = contract.goal if contract is not None else str(user_message)
         history = self._history()
         latest = history.latest_user_guidance() if history is not None else ""
-        working = projection.working if contract is not None else WorkingState()
-        working_text = context.render_working_state(working)
         feedback = projection.runtime_feedback
         verification_policy = (
             ResolvedVerificationPolicy.resolve(
@@ -457,7 +459,6 @@ class PromptBuilder:
                     )
                 ),
             ),
-            "working_state": working_text,
             "task_request": "task_request:\n" + json.dumps(goal, ensure_ascii=False),
             **context.runtime_feedback_sections(feedback),
             "latest_user_request": (

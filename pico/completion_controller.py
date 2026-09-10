@@ -155,9 +155,11 @@ class CompletionController:
         if redirected:
             return (
                 "workspace_drift",
-                "Ask the user to restore the original file targets for these paths "
-                "while preserving external edits. Reading redirected paths cannot "
-                "acknowledge this drift.",
+                (
+                    "Ask the user to restore the original file targets for these paths "
+                    "while preserving external edits. Reading redirected paths cannot "
+                    "acknowledge this drift."
+                ),
                 ", ".join(redirected),
             )
         paths = ", ".join(item["path"] for item in drift)

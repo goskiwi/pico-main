@@ -154,11 +154,6 @@ class RunHistory:
             ) or any(result.kind != "tool_result" for result in results):
                 raise RuntimeError("Run Log tool transaction is not contiguous")
             for call, result in zip(calls, results):
-                if (
-                    call.name == "update_working_state"
-                    and result.outcome_status == "success"
-                ):
-                    continue
                 call_fact = _ProjectedFact(
                     "tool_call",
                     {

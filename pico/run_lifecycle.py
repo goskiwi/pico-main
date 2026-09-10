@@ -17,9 +17,9 @@ from .runtime_state import ActiveRunState
 from .task_state import TaskContract, WriteScope
 
 if TYPE_CHECKING:
-    from .tool_runtime import ResolvedToolSurface
     from .prompt_builder import ModelPrompt
     from .runtime import Pico
+    from .tool_runtime import ResolvedToolSurface
 
 
 @dataclass

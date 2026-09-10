@@ -265,11 +265,18 @@ class RunEvidence:
             path, revision = observed.get("path"), observed.get("revision")
             missing = (outcome.get("failure") or {}).get("code") == "missing_path"
             known = self.change_set.files.get(path)
-            if known is not None and revision and (outcome.get("status") == "success" or (missing and revision == ABSENT_REVISION)):
-                if revision != known.current_after_state:
-                    self.external_changes.append({"path": path, "before_state": known.current_after_state,
-                                                  "after_state": revision, "event_sequence": event.sequence})
-                    known.current_after_state = revision
+            if (
+                known is not None
+                and revision
+                and (
+                    outcome.get("status") == "success"
+                    or (missing and revision == ABSENT_REVISION)
+                )
+                and revision != known.current_after_state
+            ):
+                self.external_changes.append({"path": path, "before_state": known.current_after_state,
+                                              "after_state": revision, "event_sequence": event.sequence})
+                known.current_after_state = revision
         if str(outcome.get("tool_name", "")) in OBSERVATION_TOOLS:
             self.observations.append(_observation_from_event(event, outcome))
         if str(outcome.get("side_effect_state", "none")) != "none":

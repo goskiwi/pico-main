@@ -1,7 +1,7 @@
 """Optional diagnostic checks supplied by a trusted isolated execution backend."""
 
-from typing import Literal
 from functools import partial
+from typing import Literal
 
 from pydantic import Field
 

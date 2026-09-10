@@ -19,7 +19,6 @@ from .execution import ExecutionContext
 from .providers.clients import DEFAULT_OPENAI_BASE_URL, OpenAICompatibleModelClient
 from .runtime import Pico, PicoConfig, SessionStore
 from .trace import TracePrinter
-from .working_state import WorkingState
 from .workspace import Workspace, middle
 
 DEFAULT_SECRET_ENV_NAMES = (
@@ -45,7 +44,7 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
-    /state   Show the current Run WorkingState.
+    /state   Show the current Run state.
     /session Show the path to the saved session file.
     /reset   Stop the active Run and clear the Session pointer.
     /exit    Exit the agent.
@@ -246,11 +245,18 @@ def build_agent(args):
     )
 
 
-def _working_state_text(agent):
+def _run_state_text(agent):
     task = agent.run.projection
     if task.contract is None:
-        return WorkingState().render_panel()
-    return "Task goal:\n- " + task.contract.goal + "\n\n" + task.working.render_panel()
+        return "Run: not started"
+    changed = ", ".join(task.evidence.changed_paths) or "none"
+    return "\n".join(
+        (
+            f"Goal: {task.contract.goal}",
+            f"Status: {task.status}",
+            f"Changed: {changed}",
+        )
+    )
 
 
 def _outcome_summary(agent, outcome):
@@ -430,7 +436,7 @@ def main(argv=None):
 
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
-        # 因此 Run Log 和由它投影的 WorkingState 会跨恢复轮次延续。
+        # 因此 Run Log 和由它投影的运行状态会跨恢复轮次延续。
         try:
             user_input = input("\npico> ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -445,7 +451,7 @@ def main(argv=None):
             print(HELP_DETAILS)
             continue
         if user_input == "/state":
-            print(_working_state_text(agent))
+            print(_run_state_text(agent))
             continue
         if user_input == "/session":
             print(agent.session.path)

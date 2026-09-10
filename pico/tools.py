@@ -4,8 +4,6 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
-from functools import partial
-
 import hashlib
 import json
 import os
@@ -13,6 +11,7 @@ import selectors
 import shutil
 import subprocess
 import time
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,7 +31,6 @@ from .verification import (
     capture_repository_state,
     repository_state_changes,
 )
-from .working_state import normalize_working_update
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
@@ -91,15 +89,6 @@ class EditFileArgs(ToolArgs):
 
 class SubmitFinalArgs(ToolArgs):
     answer: str = Field(min_length=1)
-
-
-class UpdateWorkingStateArgs(ToolArgs):
-    add_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Explicit requirements from the user; not inferred permissions.")
-    remove_constraints: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing requirements withdrawn or superseded by the user.")
-    add_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Chosen approaches with brief reasons; not claims of verified success.")
-    remove_decisions: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing decisions that were superseded or contradicted by evidence.")
-    add_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Specific unfinished actions for this task.")
-    remove_next_steps: tuple[str, ...] = Field(default=(), max_length=24, description="Exact existing actions completed, cancelled, or superseded.")
 
 
 def function_schema(args_schema: type[BaseModel]) -> dict[str, Any]:
@@ -225,15 +214,6 @@ def _validate_edit_file(context, args, *, mutation_service):
         raise ToolFailureError("invalid_path_type", "path is not a file")
     _require_mutation_service(mutation_service)
     return args
-
-
-def _validate_working_state(context, args):
-    state = context.working_state
-    if state is None or not context.tool_call_id:
-        raise ValueError("working state updates require an active Run tool call")
-    normalized = normalize_working_update(args)
-    state.updated(normalized)
-    return normalized
 
 
 def _validate_run_command(context, args, *, command_runner):
@@ -519,10 +499,6 @@ def tool_edit_file(context, args, *, mutation_service, workspace_root, original)
     )
 
 
-def tool_update_working_state(_context, _args):
-    return ToolRunnerResult("working state update accepted")
-
-
 def tool_run_command(context, args, *, command_runner, workspace_root):
     command = str(args["command"])
     try:
@@ -678,12 +654,5 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "validate": partial(_validate_edit_file, mutation_service=mutation_service),
             "run": partial(tool_edit_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
-        },
-        "update_working_state": {
-            "args_schema": UpdateWorkingStateArgs,
-            "risky": False,
-            "description": "Maintain optional task notes for multi-step work, not a source of permissions or verified results. Update when planning, when user requirements change, when evidence revises a decision, or when a stage finishes; skip simple tasks and do not call every turn. Current user requirements and new execution evidence take precedence over old notes. Remove obsolete notes and finished actions. Do not copy files, logs, test output or guesses. Runtime owns the goal, permissions and completion verification.",
-            "validate": _validate_working_state,
-            "run": tool_update_working_state,
         },
     }

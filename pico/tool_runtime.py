@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from contextlib import ExitStack
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from functools import partial
 from io import BytesIO
-from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,7 +44,6 @@ ASK_TOOL_NAMES = frozenset(
         "read_file",
         "read_artifact",
         "search",
-        "update_working_state",
         "submit_final",
     }
 )
@@ -313,11 +312,6 @@ class ToolRuntime:
         return ToolContext(
             run_id=str(runtime.run.projection.run_id or "manual"),
             tool_call_id=str(call_id),
-            working_state=(
-                runtime.run.projection.working
-                if runtime.run.projection.contract is not None
-                else None
-            ),
             execution_context=(
                 execution_context
                 if execution_context is not None
@@ -697,7 +691,7 @@ class ToolRuntime:
                                       exc.failure.recovery, structured=exc.structured)
             except (ExecutionCancelled, ExecutionDeadlineExceeded):
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - mutation planning boundary
                 return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
 
             # Failure to persist intent must escape; never perform the edit or
@@ -710,7 +704,7 @@ class ToolRuntime:
             bound = {**tool, "run": partial(tool["run"], original=raw)}
             try:
                 result = self._invoke_runner(bound, context, call.args)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - mutation runner boundary
                 after = self._effect_snapshot(agent, plan.paths, settling=True)
                 outcome = self._observed_exception_outcome(
                     call, exc, effects_before=before, effects_after=after,
@@ -725,7 +719,7 @@ class ToolRuntime:
         self._record_tool_result(agent, outcome)
         return outcome
 
-    def _execute(self, call, surface):
+    def _execute(self, call, surface):  # noqa: C901 - tool transaction boundary
         agent = self.runtime
         name, args = call.name, call.args
         if name == "submit_final":
@@ -770,7 +764,7 @@ class ToolRuntime:
         try:
             potential_scope, potential_paths = plan.effect_scope, plan.paths
             effects_before = {} if name == "edit_file" else self._effect_snapshot(agent, potential_paths)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - effect planning boundary
             return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
         if name == "edit_file":
             return self._execute_edit(call, tool, context, plan)
@@ -950,9 +944,19 @@ class ToolRuntime:
         if outcome.tool_name == "read_file":
             observed = outcome.structured
             known = self.runtime.run.evidence.change_set.files.get(observed.get("path"))
-            if known is not None and observed.get("revision") and observed["revision"] != known.current_after_state:
-                if outcome.status == "success" or (outcome.failure and outcome.failure.code == "missing_path"):
-                    outcome = replace(outcome, structured={**observed, "external_change_observed": True})
+            if (
+                known is not None
+                and observed.get("revision")
+                and observed["revision"] != known.current_after_state
+                and (
+                    outcome.status == "success"
+                    or (outcome.failure and outcome.failure.code == "missing_path")
+                )
+            ):
+                outcome = replace(
+                    outcome,
+                    structured={**observed, "external_change_observed": True},
+                )
         failure = outcome.failure
         if failure is not None:
             failure = replace(failure, detail=self.runtime.redact_text(failure.detail))

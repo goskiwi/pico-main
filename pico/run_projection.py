@@ -10,7 +10,6 @@ from .contracts import ToolCall, ToolOutcome
 from .delivery import FinalDiff
 from .evidence import RunEvidence
 from .task_state import TaskContract
-from .working_state import WorkingState
 
 
 @dataclass(frozen=True)
@@ -169,7 +168,6 @@ class RunProjection:
     run_id: str = ""
     session_id: str = ""
     contract: TaskContract | None = None
-    working: WorkingState = field(default_factory=WorkingState)
     evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
     status: str = "not_started"
@@ -250,7 +248,6 @@ class RunProjection:
         if event.kind == "user_message":
             self.contract = TaskContract.from_dict(event.payload["contract"])
             self.status = "running"
-        self.working.apply_event(event)
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
         self.pending_group.apply_event(event)
@@ -283,7 +280,6 @@ class RunProjection:
             },
             "task": {
                 "contract": self.contract.to_dict(),
-                "working": self.working.to_dict(),
                 "lifecycle": {
                     "status": self.status,
                     "stop_reason": self.stop_reason,

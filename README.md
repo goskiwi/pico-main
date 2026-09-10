@@ -52,6 +52,19 @@ Session 不保存完整对话：
 
 一个 Session 可以连续运行多个任务；`active_run_id` 只在任务未完成时指向需要恢复的 Run。
 
+## 上下文与压缩
+
+Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔记：
+
+```text
+完整 RunLog
+→ 上一次摘要 + 新增的较早历史
+→ 新的结构化摘要
+→ 摘要 + 近期完整交互 + 最新用户请求 + 当前真实状态
+```
+
+摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有工具与验证结果可以证明工作完成。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace、仓库规则和验证状态每次由 Runtime 获取。摘要是有损历史上下文，不能作为权限或执行事实。
+
 ## 一次任务
 
 1. CLI 创建或加载 Session。
@@ -64,7 +77,7 @@ Session 不保存完整对话：
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_command`、`write_file`、`edit_file`、`update_working_state` 和 `submit_final`。
+主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_command`、`write_file`、`edit_file` 和 `submit_final`。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。
