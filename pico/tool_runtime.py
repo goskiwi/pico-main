@@ -79,7 +79,7 @@ class ToolRuntime:
 
     def __init__(self, runtime: Pico):
         self.runtime = runtime
-        self.read_versions: dict[str, str] = {}
+        self.observed_revisions: dict[str, str] = {}
         self.registry = self._build_registry()
         self._apply_allowlist(self.registry)
 
@@ -711,7 +711,7 @@ class ToolRuntime:
     def _execute_edit(self, call, tool, context, plan):
         agent = self.runtime
         logical, path = plan.paths[0]
-        expected_revision = self.read_versions.get(logical)
+        expected_revision = self.observed_revisions.get(logical)
         if expected_revision is None:
             return self._rejected(
                 call,
@@ -994,7 +994,7 @@ class ToolRuntime:
                 else outcome.structured.get("after_revision")
             )
             if revision and outcome.tool_name in {"read_file", "write_file", "edit_file"}:
-                self.read_versions[path] = revision
+                self.observed_revisions[path] = revision
         if outcome.tool_name == "read_file":
             observed = outcome.structured
             run_log = self.runtime.run.run_log

@@ -121,7 +121,7 @@ class Pico:
         from .agent_loop import AgentLoop
 
         # Require a fresh read before editing in each new user request.
-        self.tools.read_versions.clear()
+        self.tools.observed_revisions.clear()
         return AgentLoop(self).run(user_message)
 
     @staticmethod

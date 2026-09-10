@@ -658,7 +658,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "risky": True,
             "workspace_mutating": True,
             "state_mutating": True,
-            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text as small as possible while still unique; do not include large unchanged regions. old_text must contain only actual file content: exclude read_file's line-number prefixes. Use the revision from the read or successful edit result metadata.",
+            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Call read_file first; Runtime binds the observed revision internally and checks it again before writing. Keep old_text small but unique and exclude read_file's line-number prefixes.",
             "validate": partial(_validate_edit_file, mutation_service=mutation_service),
             "run": partial(tool_edit_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
