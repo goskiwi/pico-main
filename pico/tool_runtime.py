@@ -182,7 +182,6 @@ class ToolRuntime:
             tools["verify"] = {
                 "args_schema": toolkit.ToolArgs,
                 "risky": False,
-                "workspace_mutating": True,
                 "description": (
                     "Run the Runtime's fixed acceptance command now. Use after a "
                     "meaningful set of edits to get authoritative failures before "
@@ -425,9 +424,7 @@ class ToolRuntime:
             if not isinstance(plan, ToolExecutionPlan):
                 raise TypeError("tool planner must return ToolExecutionPlan")
             return plan
-        return ToolExecutionPlan(
-            "workspace" if tool.get("workspace_mutating", False) else "none"
-        )
+        return ToolExecutionPlan("none")
 
     @staticmethod
     def _effect_snapshot(agent, paths, *, settling=False):
@@ -790,7 +787,6 @@ class ToolRuntime:
         tool, admission_rejection = self._resolve_tool(call, surface)
         if admission_rejection is not None:
             return admission_rejection
-        workspace_mutating = bool(tool.get("workspace_mutating", False))
         context = self.context(call_id=call.call_id)
         call, validation_rejection = self._validate_call(
             call, tool, context
@@ -799,6 +795,7 @@ class ToolRuntime:
             return validation_rejection
         args = call.args
         plan = context.execution_plan
+        workspace_mutating = plan.effect_scope == "workspace"
         try:
             self._check_plan_scope(call, plan, surface.allowed_write_paths)
         except ValueError as exc:

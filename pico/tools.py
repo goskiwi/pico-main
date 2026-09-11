@@ -600,6 +600,13 @@ def _workspace_file_plan(context, args, *, path_resolver, workspace_root):
     return ToolExecutionPlan("workspace", ((logical, path),))
 
 
+def _run_shell_plan(context, args):
+    return ToolExecutionPlan(
+        "workspace",
+        operation={"command": args["command"]},
+    )
+
+
 def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner):
     """Each tool declares its schema, policy, validator, runner and effects together."""
     return {
@@ -638,15 +645,14 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "run_shell": {
             "args_schema": RunShellArgs,
             "risky": True,
-            "workspace_mutating": True,
             "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
             "validate": partial(_validate_run_shell, command_runner=command_runner),
             "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
+            "plan": _run_shell_plan,
         },
         "write_file": {
             "args_schema": WriteFileArgs,
             "risky": True,
-            "workspace_mutating": True,
             "state_mutating": True,
             "description": "Create a new UTF-8 text file. The target must not already exist; read and use edit_file for every change to an existing file.",
             "validate": partial(_validate_write_file, mutation_service=mutation_service, workspace_root=workspace_root),
@@ -656,7 +662,6 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "edit_file": {
             "args_schema": EditFileArgs,
             "risky": True,
-            "workspace_mutating": True,
             "state_mutating": True,
             "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Call read_file first; Runtime binds the observed revision internally and checks it again before writing. Keep old_text small but unique and exclude read_file's line-number prefixes.",
             "validate": partial(_validate_edit_file, mutation_service=mutation_service),
