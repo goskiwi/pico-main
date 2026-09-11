@@ -613,7 +613,6 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "list_files": {
             "args_schema": ListFilesArgs,
             "risky": False,
-            "manual_observation": True,
             "description": "List a sorted directory page. Continue with next_offset; restart at zero if the directory changes.",
             "validate": partial(_validate_list_files, path_resolver=path_resolver),
             "run": partial(tool_list_files, path_resolver=path_resolver, workspace_root=workspace_root),
@@ -621,7 +620,6 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "read_file": {
             "args_schema": ReadFileArgs,
             "risky": False,
-            "manual_observation": True,
             "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
             "validate": partial(_validate_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
             "run": partial(tool_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
@@ -629,7 +627,6 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "read_artifact": {
             "args_schema": ReadArtifactArgs,
             "risky": False,
-            "manual_observation": True,
             "description": "Read up to 8 KiB from a truncated tool-output artifact in the current run.",
             "validate": partial(_validate_read_artifact, artifact_store=artifact_store),
             "run": partial(tool_read_artifact, artifact_store=artifact_store, redact_text=redact_text),
@@ -637,7 +634,6 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "search": {
             "args_schema": SearchArgs,
             "risky": False,
-            "manual_observation": True,
             "description": "Search the workspace with ripgrep (rg must be installed).",
             "validate": partial(_validate_search, path_resolver=path_resolver),
             "run": partial(tool_search, path_resolver=path_resolver, workspace_root=workspace_root),

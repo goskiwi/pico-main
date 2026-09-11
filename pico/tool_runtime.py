@@ -59,7 +59,6 @@ class ResolvedToolSurface:
     allowed_write_paths: tuple[str, ...] | None
     definitions: dict[str, dict]
     action_tools: tuple[dict, ...]
-    exclusions: dict[str, FailureInfo]
 
     @property
     def names(self):
@@ -81,7 +80,7 @@ class ToolRuntime:
         self.runtime = runtime
         self.observed_revisions: dict[str, str] = {}
         self.registry = self._build_registry()
-        self._apply_allowlist(self.registry)
+        self._validate_allowlist(self.registry)
 
     def reconcile_interrupted(self):
         """Close one interrupted Tool transaction without replaying its Runner."""
@@ -240,25 +239,13 @@ class ToolRuntime:
             failure=failure,
         )
 
-    def _apply_allowlist(self, tools):
+    def _validate_allowlist(self, tools):
         allowed_tools = self.runtime.config.allowed_tools
         if allowed_tools is None:
-            return tools
+            return
         unknown = [name for name in allowed_tools if name not in tools]
         if unknown:
             raise ValueError(f"unknown allowed tool: {', '.join(unknown)}")
-        unavailable = [
-            name
-            for name in allowed_tools
-            if not tools[name].get("available", True)
-        ]
-        if unavailable:
-            raise ValueError(
-                "configured tool executor is unavailable: "
-                + ", ".join(unavailable)
-            )
-        allowed = set(allowed_tools)
-        return {name: tool for name, tool in tools.items() if name in allowed}
 
     def _validate_args(self, name, args, tool, context):
         validated = tool["args_schema"].model_validate(args or {}).model_dump()
@@ -298,59 +285,27 @@ class ToolRuntime:
             return name in ASK_TOOL_NAMES
         return not (mode == "auto" and name == "run_shell")
 
-    def resolve_surface(self, *, manual=False):
+    def resolve_surface(self):
         """Resolve one authoritative Tool set for advertisement and execution."""
 
         mode, allowed_write_paths = self._effective_policy()
         definitions = {}
-        exclusions = {}
         configured = self.runtime.config.allowed_tools
         for name, tool in self.registry.items():
             if configured is not None and name not in configured:
-                exclusions[name] = FailureInfo(
-                    "tool_not_allowed",
-                    "tool outside run surface",
-                    "no_retry",
-                )
                 continue
-            if not tool.get("available", True):
-                exclusions[name] = FailureInfo(
-                    "tool_unavailable",
-                    f"{name} executor is unavailable",
-                    "user_action_required",
-                )
-                continue
-            if manual:
-                if not tool.get("manual_observation", False):
-                    exclusions[name] = FailureInfo(
-                        "manual_mutation_forbidden",
-                        "manual mode permits observation tools only; mutations "
-                        "require an active Run",
-                        "no_retry",
-                    )
-                    continue
-            elif not self._tool_allowed_by_mode(name, mode):
-                exclusions[name] = FailureInfo(
-                    "tool_not_allowed",
-                    f"tool is unavailable in {mode} mode",
-                    "no_retry",
-                )
+            if not self._tool_allowed_by_mode(name, mode):
                 continue
             # Freeze this turn's definition membership and callbacks without
             # coupling execution to later Registry dictionary mutations.
             definitions[name] = dict(tool)
 
-        action_tools = (
-            ()
-            if manual
-            else tuple(toolkit.build_action_tools(definitions))
-        )
+        action_tools = tuple(toolkit.build_action_tools(definitions))
         return ResolvedToolSurface(
             mode=mode,
             allowed_write_paths=allowed_write_paths,
             definitions=definitions,
             action_tools=action_tools,
-            exclusions=exclusions,
         )
 
     def context(self, *, call_id, execution_context=None):
@@ -369,21 +324,18 @@ class ToolRuntime:
         tool = surface.definitions.get(call.name)
         if tool is not None:
             return tool, None
-        failure = surface.exclusions.get(call.name)
-        if failure is not None:
-            return None, self._rejected(
-                call,
-                failure.code,
-                failure.detail,
-                failure.recovery,
-                record=record,
-            )
         if call.name not in self.registry:
             return None, self._rejected(
                 call, "unknown_tool", "unknown tool", "retry_after_change",
                 record=record,
             )
-        raise RuntimeError(f"resolved Tool surface is incomplete for {call.name}")
+        return None, self._rejected(
+            call,
+            "tool_not_allowed",
+            f"{call.name} is unavailable in {surface.mode} mode",
+            "no_retry",
+            record=record,
+        )
 
     @staticmethod
     def _recorded_run_log(agent, call_id):
@@ -658,29 +610,6 @@ class ToolRuntime:
         if not isinstance(surface, ResolvedToolSurface):
             raise TypeError("tool execution requires its resolved Tool surface")
         return self._execute(self._pending_call(call_id), surface)
-
-    def execute_manual(self, name, args=None):
-        call = ToolCall(str(name), dict(args or {}))
-        agent = self.runtime
-        if agent.run.resumable:
-            return self._rejected(
-                call,
-                "run_protocol_violation",
-                "a dormant Run must be resumed before manual tools",
-                "no_retry",
-                record=False,
-            )
-        if agent.run.run_log is not None:
-            return self._rejected(
-                call,
-                "run_protocol_violation",
-                "manual tools require no active or terminal Run",
-                "no_retry",
-                record=False,
-            )
-        return self._execute(
-            call, self.resolve_surface( manual=True),
-        )
 
     def _check_plan_scope(self, call, plan, allowed_paths):
         self._require_write_scope((path for path, _target in plan.paths), allowed_paths)
