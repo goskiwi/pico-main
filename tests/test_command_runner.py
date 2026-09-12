@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -11,6 +12,60 @@ from pico.tools import tool_run_shell
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_large_output_is_drained_into_bounded_buffers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = CommandRunner(directory, max_output_bytes=1024)
+            result = runner.run(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.write('o'*200000); sys.stderr.write('e'*200000)",
+                ),
+                cwd=directory,
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(result.output_limited)
+            self.assertGreater(result.stdout_discarded_bytes, 0)
+            self.assertGreater(result.stderr_discarded_bytes, 0)
+            self.assertIn("stdout truncated; discarded", result.stdout)
+            self.assertIn("stderr truncated; discarded", result.stderr)
+            self.assertLess(len(result.stdout.encode()) + len(result.stderr.encode()), 1400)
+
+    def test_exact_internal_output_reports_overflow_instead_of_using_a_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = CommandRunner(directory, max_output_bytes=1024)
+            result = runner.run_bytes(
+                (sys.executable, "-c", "print('x'*10000)"),
+                cwd=directory,
+                timeout=5,
+                require_complete_output=True,
+            )
+
+            self.assertTrue(result.output_limited)
+            self.assertTrue(result.infrastructure_error)
+
+    def test_descendant_holding_pipes_is_killed_after_a_bounded_grace_period(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = CommandRunner(directory, max_output_bytes=1024)
+            source = (
+                "import subprocess,sys; "
+                "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']); "
+                "print('leader done')"
+            )
+            started = time.monotonic()
+            result = runner.run(
+                (sys.executable, "-c", source),
+                cwd=directory,
+                timeout=5,
+            )
+
+            self.assertLess(time.monotonic() - started, 4)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stop_reason, "pipe_held_open")
+            self.assertIn("leader done", result.stdout)
+
     def test_timeout_terminates_the_process_group_and_keeps_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = CommandRunner(directory, max_output_bytes=1024)

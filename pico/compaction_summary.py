@@ -140,6 +140,7 @@ class CompactionSummarizer:
                 "path", "start_line", "end_line", "exit_code", "stop_reason",
                 "output_limited", "offset", "end_offset", "next_offset", "has_more",
                 "truncated", "total_bytes", "status", "changed_paths", "external_change_observed",
+                "stdout_discarded_bytes", "stderr_discarded_bytes",
             }}
             if metadata:
                 record["metadata"] = metadata

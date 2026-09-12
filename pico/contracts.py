@@ -341,6 +341,7 @@ class ToolOutcome:
                 "total_lines", "offset", "end_offset", "next_offset", "total_bytes",
                 "has_more", "truncated", "artifact_id", "exit_code", "stop_reason",
                 "output_limited", "status", "external_change_observed",
+                "stdout_discarded_bytes", "stderr_discarded_bytes",
             }
             payload["structured"] = {
                 key: value for key, value in payload.get("structured", {}).items()

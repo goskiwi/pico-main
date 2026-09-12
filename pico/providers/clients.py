@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 
 from openai import (
@@ -272,15 +273,18 @@ class OpenAICompatibleModelClient:
         self.temperature = temperature
         self.timeout = float(timeout)
         self.reasoning_effort = str(reasoning_effort or "").strip()
-        self._client = OpenAI(
+        self._client = self._new_sdk_client()
+        self.last_completion_metadata = {}
+        self.reset_action_session()
+
+    def _new_sdk_client(self):
+        return OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=self.timeout,
             max_retries=2,
             http_client=DefaultHttpxClient(follow_redirects=False),
         )
-        self.last_completion_metadata = {}
-        self.reset_action_session()
 
     def reset_action_session(self):
         self._action_input = []
@@ -354,6 +358,30 @@ class OpenAICompatibleModelClient:
     def _request(self, payload, execution_context):
         timeout = execution_context.bounded_timeout(self.timeout)
         client = self._client.with_options(timeout=timeout)
+        watcher_done = threading.Event()
+        interrupted = threading.Event()
+
+        def close_on_stop():
+            while not watcher_done.wait(
+                min(0.05, max(0.0, execution_context.remaining_seconds()))
+            ):
+                if (
+                    execution_context.token.requested
+                    or execution_context.remaining_seconds() <= 0
+                ):
+                    interrupted.set()
+                    try:
+                        client.close()
+                    except Exception:  # noqa: BLE001, S110 - best-effort close
+                        pass
+                    return
+
+        watcher = threading.Thread(
+            target=close_on_stop,
+            name="pico-model-cancellation",
+            daemon=True,
+        )
+        watcher.start()
         response = None
         try:
             stream = client.responses.create(**payload)
@@ -365,6 +393,7 @@ class OpenAICompatibleModelClient:
                     }:
                         response = event.response
         except APIStatusError as exc:
+            execution_context.check_active()
             if _context_overflow(exc):
                 raise ProviderContextOverflow(
                     "provider context window exceeded"
@@ -373,7 +402,16 @@ class OpenAICompatibleModelClient:
                 f"Provider HTTP {exc.status_code}: {exc.message}"
             ) from exc
         except (APIConnectionError, APITimeoutError) as exc:
+            execution_context.check_active()
             raise RuntimeError(f"Provider transport failed: {exc}") from exc
+        except BaseException:
+            execution_context.check_active()
+            raise
+        finally:
+            watcher_done.set()
+            watcher.join(timeout=0.1)
+            if interrupted.is_set():
+                self._client = self._new_sdk_client()
         execution_context.check_active()
         if response is None:
             raise RuntimeError("Provider stream ended without a terminal response")

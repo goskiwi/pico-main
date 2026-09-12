@@ -77,6 +77,7 @@ def _run_git(
         timeout=GIT_SNAPSHOT_TIMEOUT_SECONDS,
         env={},
         execution_context=execution_context,
+        require_complete_output=True,
     )
     if result.stop_reason:
         execution_context.check_active()

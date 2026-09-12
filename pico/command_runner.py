@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from .execution import ExecutionContext
 DEFAULT_COMMAND_MAX_OUTPUT_BYTES = 1_048_576
 COMMAND_POLL_SECONDS = 0.05
 COMMAND_TERMINATE_SECONDS = 1.0
+COMMAND_PIPE_GRACE_SECONDS = 1.0
+COMMAND_READ_CHUNK_BYTES = 64 * 1024
 
 
 def shell_argv(command):
@@ -33,6 +36,8 @@ class CommandResult:
     stderr: str = ""
     stop_reason: str = ""
     output_limited: bool = False
+    stdout_discarded_bytes: int = 0
+    stderr_discarded_bytes: int = 0
     infrastructure_error: bool = False
 
 
@@ -44,15 +49,17 @@ class RawCommandResult:
     stdout: bytes = b""
     stderr: bytes = b""
     stop_reason: str = ""
+    output_limited: bool = False
+    stdout_discarded_bytes: int = 0
+    stderr_discarded_bytes: int = 0
     infrastructure_error: bool = False
 
 
 class CommandRunner:
     """Run a trusted command locally with deadline and process-group cleanup.
 
-    Output is collected by :meth:`subprocess.Popen.communicate` and truncated
-    only after the process exits.  ``max_output_bytes`` bounds the returned
-    result, not peak memory while the child is running.
+    Reader threads continuously drain both pipes into bounded buffers. Bytes
+    beyond the limit are counted and discarded while the process continues.
     """
 
     def __init__(self, workspace_root, *, max_output_bytes=None):
@@ -87,16 +94,20 @@ class CommandRunner:
             execution_context=execution_context,
             input_bytes=input_bytes,
         )
-        rendered_stdout, rendered_stderr, limited = self._truncate_output(
-            raw.stdout,
-            raw.stderr,
+        rendered_stdout = self._render_output(
+            raw.stdout, "stdout", raw.stdout_discarded_bytes
+        )
+        rendered_stderr = self._render_output(
+            raw.stderr, "stderr", raw.stderr_discarded_bytes
         )
         return CommandResult(
             returncode=raw.returncode,
             stdout=rendered_stdout,
             stderr=rendered_stderr,
             stop_reason=raw.stop_reason,
-            output_limited=limited,
+            output_limited=raw.output_limited,
+            stdout_discarded_bytes=raw.stdout_discarded_bytes,
+            stderr_discarded_bytes=raw.stderr_discarded_bytes,
             infrastructure_error=raw.infrastructure_error,
         )
 
@@ -109,6 +120,7 @@ class CommandRunner:
         env=None,
         execution_context=None,
         input_bytes=None,
+        require_complete_output=False,
     ):
         """Run one process while preserving stdout and stderr as exact bytes."""
 
@@ -149,45 +161,71 @@ class CommandRunner:
             )
 
         stop_reason = ""
-        stdout = b""
-        stderr = b""
-        pending_input = input_bytes
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        discarded = {"stdout": 0, "stderr": 0}
+        stream_limit = max(1, self.max_output_bytes // 2)
+
+        def drain(name, stream):
+            try:
+                while True:
+                    chunk = stream.read(COMMAND_READ_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    available = max(0, stream_limit - len(buffers[name]))
+                    buffers[name].extend(chunk[:available])
+                    discarded[name] += max(0, len(chunk) - available)
+            except (OSError, ValueError):
+                return
+
+        readers = [
+            threading.Thread(
+                target=drain,
+                args=(name, stream),
+                name=f"pico-{name}-drain",
+                daemon=True,
+            )
+            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        ]
+        for reader in readers:
+            reader.start()
         try:
-            while True:
-                if context.token.requested:
-                    stop_reason = context.token.reason or "user_cancelled"
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    stop_reason = "deadline_exceeded"
-                    break
-                try:
-                    stdout, stderr = process.communicate(
-                        input=pending_input,
-                        timeout=min(COMMAND_POLL_SECONDS, remaining)
-                    )
-                    pending_input = None
-                    break
-                except subprocess.TimeoutExpired:
-                    pending_input = None
-                    continue
+            if input_bytes is not None and process.stdin is not None:
+                process.stdin.write(input_bytes)
+                process.stdin.close()
+            stop_reason = self._wait_for_process(process, context, deadline)
         except BaseException:
-            self._terminate_process_group(process)
+            self._signal_process_group(process, signal.SIGKILL)
+            self._close_pipes(process)
             raise
 
         if stop_reason:
-            stdout, stderr = self._terminate_process_group(process)
-        if not stop_reason:
-            return RawCommandResult(
-                returncode=int(process.returncode or 0),
-                stdout=bytes(stdout or b""),
-                stderr=bytes(stderr or b""),
-            )
+            self._stop_process_group(process)
+        else:
+            pipe_deadline = time.monotonic() + COMMAND_PIPE_GRACE_SECONDS
+            for reader in readers:
+                reader.join(max(0.0, pipe_deadline - time.monotonic()))
+            if any(reader.is_alive() for reader in readers):
+                stop_reason = "pipe_held_open"
+                self._stop_process_group(process)
+
+        self._close_pipes(process)
+        for reader in readers:
+            reader.join(COMMAND_POLL_SECONDS)
+        limited = bool(discarded["stdout"] or discarded["stderr"])
+        infrastructure_error = bool(require_complete_output and limited)
         return RawCommandResult(
-            returncode=None,
-            stdout=bytes(stdout or b""),
-            stderr=bytes(stderr or b""),
+            returncode=(
+                None
+                if stop_reason and stop_reason != "pipe_held_open"
+                else int(process.returncode or 0)
+            ),
+            stdout=bytes(buffers["stdout"]),
+            stderr=bytes(buffers["stderr"]),
             stop_reason=stop_reason,
+            output_limited=limited,
+            stdout_discarded_bytes=discarded["stdout"],
+            stderr_discarded_bytes=discarded["stderr"],
+            infrastructure_error=infrastructure_error,
         )
 
     def _contained_cwd(self, cwd):
@@ -232,51 +270,43 @@ class CommandRunner:
         return environment
 
     @staticmethod
-    def _terminate_process_group(process):
+    def _signal_process_group(process, sig):
+        try:
+            os.killpg(process.pid, sig)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _wait_for_process(process, context, deadline):
+        while process.poll() is None:
+            if context.token.requested:
+                return context.token.reason or "user_cancelled"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "deadline_exceeded"
+            context.token.wait(min(COMMAND_POLL_SECONDS, remaining))
+        return ""
+
+    @classmethod
+    def _stop_process_group(cls, process):
         for sig in (signal.SIGTERM, signal.SIGKILL):
+            cls._signal_process_group(process, sig)
             try:
-                os.killpg(process.pid, sig)
-            except OSError:
-                pass
-            try:
-                stdout, stderr = process.communicate(timeout=COMMAND_TERMINATE_SECONDS)
-                # EOF and the leader's exit do not mean its process group exited.
-                # Finish the signal sequence even when descendants closed the pipes.
-                if sig == signal.SIGKILL:
-                    return stdout, stderr
+                process.wait(timeout=COMMAND_TERMINATE_SECONDS)
             except subprocess.TimeoutExpired as exc:
-                stdout, stderr = exc.output or b"", exc.stderr or b""
-        # Descendants may have detached while retaining our pipes. Stop reading
-        # after the kill grace period instead of waiting for their eventual EOF.
+                if sig == signal.SIGKILL:
+                    raise RuntimeError("process group did not stop after SIGKILL") from exc
+
+    @staticmethod
+    def _close_pipes(process):
         for pipe in (process.stdout, process.stderr):
             if pipe is not None:
                 pipe.close()
-        try:
-            process.wait(timeout=0)
-        except subprocess.TimeoutExpired:
-            pass
-        return stdout, stderr
 
-    def _truncate_output(self, stdout, stderr):
-        stdout = bytes(stdout or b"")
-        stderr = bytes(stderr or b"")
-        limit = self.max_output_bytes
-        if len(stdout) + len(stderr) <= limit:
-            return (
-                stdout.decode("utf-8", errors="replace"),
-                stderr.decode("utf-8", errors="replace"),
-                False,
-            )
-        stdout_budget = limit // 2
-        stderr_budget = limit - stdout_budget
-        if len(stdout) < stdout_budget:
-            stderr_budget += stdout_budget - len(stdout)
-            stdout_budget = len(stdout)
-        elif len(stderr) < stderr_budget:
-            stdout_budget += stderr_budget - len(stderr)
-            stderr_budget = len(stderr)
-        return (
-            stdout[:stdout_budget].decode("utf-8", errors="replace"),
-            stderr[:stderr_budget].decode("utf-8", errors="replace"),
-            True,
-        )
+    @staticmethod
+    def _render_output(payload, name, discarded_bytes):
+        text = bytes(payload or b"").decode("utf-8", errors="replace")
+        if discarded_bytes:
+            marker = f"[{name} truncated; discarded {discarded_bytes} bytes]"
+            text = text.rstrip("\n") + "\n" + marker
+        return text

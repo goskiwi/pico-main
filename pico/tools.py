@@ -600,6 +600,8 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
             "exit_code": result.returncode,
             "stop_reason": result.stop_reason,
             "output_limited": result.output_limited,
+            "stdout_discarded_bytes": result.stdout_discarded_bytes,
+            "stderr_discarded_bytes": result.stderr_discarded_bytes,
             "repository_changes": list(changes[:20]),
         },
         effect_scope=effect_scope,
