@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from .completion_controller import CompletionController
-from .context_manager import render_runtime_feedback
+from .prompt_builder import render_runtime_feedback
 from .providers import ProviderContextOverflow
 from .run_lifecycle import RunLifecycle, reload_current_run
 from .run_projection import RunOutcome
@@ -132,15 +132,12 @@ class AgentLoop:
                     },
                 )
         if loop_state.prompt_snapshot is None:
-            inputs, history_override = self.lifecycle.prepare_compaction(
+            inputs = self.lifecycle.prepare_compaction(
                 loop_state.user_message,
                 tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
             )
-            prompt = agent.prompt.build(
-                inputs,
-                history_override=history_override,
-            )
+            prompt = agent.prompt.build(inputs)
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, tool_surface)
         else:

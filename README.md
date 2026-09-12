@@ -70,7 +70,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 → 摘要 + 近期完整交互 + 最新用户请求 + 当前真实状态
 ```
 
-摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有工具与验证结果可以证明工作完成。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace、仓库规则和验证状态每次由 Runtime 获取。摘要是有损历史上下文，不能作为权限或执行事实。
+摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有工具与验证结果可以证明工作完成。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace、根 `AGENTS.md` 和验证状态每次由 Runtime 获取；不发现或加载嵌套规则。摘要是有损历史上下文，不能作为权限或执行事实。
 
 ## 一次任务
 

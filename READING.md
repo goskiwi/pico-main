@@ -53,4 +53,4 @@ verify 提供中途验收能力，由模型决定调用时机；最终验收是 
 
 SDK 替换已落地：2026-09-11 使用 OpenAI Python SDK 调用 DeepSeek 官方 Responses API，`deepseek-v4-flash` 在 `reasoning.effort=none` 下成功完成 `write_file → verify → submit_final`，固定验收通过并返回 usage。SDK 接管 HTTP、SSE 与标准重试；Pico 用剩余 deadline 限制请求，并在读取流事件时检查取消。
 
-摘要结束序号、上下文整体重写、普遍合并文件仍暂缓。当前分支继续作为阅读版本，不引入另一套架构。
+History 先形成完整工具事务，ContextManager 只做一次预算选择，PromptBuilder 负责采集、摘要协调和最终渲染。规则范围固定为仓库根 `AGENTS.md`。

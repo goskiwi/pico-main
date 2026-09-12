@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from pico import context_manager
+from pico.prompt_builder import _assemble_input, render_history
 from pico.run_log import RunLog
 from pico.run_store import RunStore
 from pico.task_state import TaskContract, WriteScope
@@ -45,16 +46,17 @@ def measure(size):
                 "runtime_evidence": "",
                 "latest_user_request": "",
                 "workspace": "Workspace: benchmark",
-                "history": context_manager.render_history(history),
+                "history": render_history(history),
             }
-            rendered = context_manager._render_context(
+            rendered = context_manager.select_context(
                 raw,
                 8_000,
                 section_caps=context_manager.DEFAULT_SECTION_CAPS,
                 count_tokens=tokenizer.count,
                 history=history,
+                render_input=_assemble_input,
             )
-            return context_manager._assemble_input(raw, rendered)
+            return _assemble_input(raw, rendered)
 
         context_seconds, _context = elapsed(build_context)
         return {

@@ -1,9 +1,6 @@
-"""Text rendering and token-budget helpers for PromptBuilder."""
+"""Pure token budgeting and complete-History selection for PromptBuilder."""
 
 from __future__ import annotations
-
-import json
-from html import escape
 
 import tiktoken
 
@@ -17,13 +14,6 @@ CONTEXT_ALLOCATION_ORDER = (
     *FIXED_SECTION_ALLOCATION_ORDER,
     "history",
 )
-CONTEXT_WIRE_ORDER = (
-    "runtime_evidence",
-    "workspace",
-    "history",
-)
-
-
 class ContextBudgetExceeded(RuntimeError):
     pass
 
@@ -39,9 +29,17 @@ class Tokenizer:
         return len(self.encoding.encode(str(text or ""), disallowed_special=()))
 
 
-def _render_context(raw, available, *, section_caps, count_tokens, history):
+def select_context(
+    raw,
+    available,
+    *,
+    section_caps,
+    count_tokens,
+    history,
+    render_input,
+):
     rendered = _required_context(raw)
-    if count_tokens(_assemble_input(raw, rendered)) > available:
+    if count_tokens(render_input(raw, rendered)) > available:
         raise ContextBudgetExceeded("required Runtime context exceeds the model budget")
 
     def fit(section, text, budget):
@@ -50,15 +48,22 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
                 text,
                 budget,
                 history=history,
-                token_counter=_history_token_counter(
-                    raw, rendered, count_tokens=count_tokens
+                token_counter=history_token_counter(
+                    raw,
+                    rendered,
+                    count_tokens=count_tokens,
+                    render_input=render_input,
                 ),
             )
         return _clip_complete_lines(
             text,
             budget,
             token_counter=_context_section_token_counter(
-                raw, rendered, section, count_tokens=count_tokens
+                raw,
+                rendered,
+                section,
+                count_tokens=count_tokens,
+                render_input=render_input,
             ),
         )
 
@@ -66,22 +71,22 @@ def _render_context(raw, available, *, section_caps, count_tokens, history):
         text = raw[section]
         if not text:
             continue
-        remaining = max(0, available - count_tokens(_assemble_input(raw, rendered)))
+        remaining = max(0, available - count_tokens(render_input(raw, rendered)))
         budget = remaining if section == "history" else section_caps[section]
         value = fit(section, text, budget)
         if not value:
             continue
         candidate = {**rendered, section: value}
-        if count_tokens(_assemble_input(raw, candidate)) > available:
+        if count_tokens(render_input(raw, candidate)) > available:
             budget = remaining
             value = fit(section, text, budget)
             candidate = {**rendered, section: value} if value else rendered
-        if value and count_tokens(_assemble_input(raw, candidate)) <= available:
+        if value and count_tokens(render_input(raw, candidate)) <= available:
             rendered[section] = value
     return rendered
 
 
-def _fixed_context(raw, *, section_caps, count_tokens):
+def fixed_context(raw, *, section_caps, count_tokens, render_input):
     rendered = _required_context(raw)
     for section in FIXED_SECTION_ALLOCATION_ORDER:
         if not raw[section]:
@@ -90,7 +95,11 @@ def _fixed_context(raw, *, section_caps, count_tokens):
             raw[section],
             section_caps[section],
             token_counter=_context_section_token_counter(
-                raw, rendered, section, count_tokens=count_tokens
+                raw,
+                rendered,
+                section,
+                count_tokens=count_tokens,
+                render_input=render_input,
             ),
         )
         if value:
@@ -134,6 +143,14 @@ def _bounded_history(text, limit, *, history, token_counter):
         return text
     if history is None:
         return ""
+    compacted = history.render_compacted_projection(
+        retain_tokens=limit,
+        token_counter=token_counter,
+    )
+    if compacted is not None:
+        if token_counter(compacted) > limit:
+            return ""
+        return compacted
     bounded = history.render_recent_projection(
         retain_tokens=limit,
         token_counter=token_counter,
@@ -143,134 +160,31 @@ def _bounded_history(text, limit, *, history, token_counter):
     return bounded
 
 
-def _untrusted_envelope(context):
-    lines = ['<untrusted_context trust="untrusted_data">']
-    for section in CONTEXT_WIRE_ORDER:
-        value = str(context.get(section, "")).strip()
-        if not value:
-            continue
-        lines.extend(
-            (
-                f'<section name="{section}">',
-                escape(value, quote=False),
-                "</section>",
-            )
-        )
-    lines.append("</untrusted_context>")
-    return "\n".join(lines)
-
-
-def _context_section_token_counter(raw, context, section, *, count_tokens):
+def _context_section_token_counter(
+    raw, context, section, *, count_tokens, render_input
+):
     base_context = {key: value for key, value in context.items() if key != section}
-    base_tokens = count_tokens(_assemble_input(raw, base_context))
+    base_tokens = count_tokens(render_input(raw, base_context))
 
     def count(text):
         candidate = {**base_context, section: str(text)}
         return max(
             0,
-            count_tokens(_assemble_input(raw, candidate)) - base_tokens,
+            count_tokens(render_input(raw, candidate)) - base_tokens,
         )
 
     return count
 
 
-def _history_token_counter(raw, context, *, count_tokens):
+def history_token_counter(raw, context, *, count_tokens, render_input):
     return _context_section_token_counter(
-        {**raw, "history": ""}, context, "history", count_tokens=count_tokens
+        {**raw, "history": ""},
+        context,
+        "history",
+        count_tokens=count_tokens,
+        render_input=render_input,
     )
-
-
-def runtime_feedback_sections(feedback):
-    if feedback is None:
-        return {"runtime_instruction": "", "runtime_evidence": ""}
-    return {
-        "runtime_instruction": "runtime_instruction:\n" + json.dumps(
-            {"instruction": feedback.instruction}, ensure_ascii=False, sort_keys=True,
-        ),
-        "runtime_evidence": (
-            "runtime_evidence:\n" + json.dumps(
-                {"content": feedback.evidence, "artifact_id": feedback.evidence_artifact_id},
-                ensure_ascii=False, sort_keys=True,
-            )
-            if feedback.evidence or feedback.evidence_artifact_id else ""
-        ),
-    }
-
-
-def render_runtime_feedback(feedback):
-    sections = runtime_feedback_sections(feedback)
-    parts = [sections["runtime_instruction"]]
-    if sections["runtime_evidence"]:
-        parts.append(_untrusted_envelope({"runtime_evidence": sections["runtime_evidence"]}))
-    return "\n\n".join(parts)
-
-
-def _assemble_input(raw, context):
-    parts = [raw["runtime_policy"]]
-    if raw["repository_instructions"]:
-        parts.append(raw["repository_instructions"])
-    parts.append(raw["task_request"])
-    if raw["runtime_instruction"]:
-        parts.append(raw["runtime_instruction"])
-    if context:
-        parts.append(_untrusted_envelope(context))
-    if raw["latest_user_request"]:
-        parts.append(raw["latest_user_request"])
-    return "\n\n".join(parts)
-
-
-def render_runtime_policy(contract, mode, paths, verify_changes):
-    if contract is None:
-        policy = {
-            "mode": "unavailable",
-            "verify_changes": False,
-            "write_scope": {"mode": "unavailable"},
-        }
-    else:
-        if mode == "ask":
-            write_scope = {"mode": "none"}
-        elif paths is None:
-            write_scope = {"mode": "workspace"}
-        else:
-            write_scope = {"mode": "paths", "paths": list(paths)}
-        policy = {
-            "mode": mode,
-            "verify_changes": bool(verify_changes),
-            "write_scope": write_scope,
-        }
-    return "runtime_policy:\n" + json.dumps(
-        policy,
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
-def render_repository_instructions(instructions):
-    if not instructions:
-        return ""
-    lines = ["<repository_instructions>"]
-    for path, content in instructions.items():
-        lines.extend(
-            (
-                f'<instructions path="{escape(path, quote=True)}">',
-                "Applies only to this directory and its descendants: "
-                + escape(path.rpartition("/")[0] or ".", quote=False),
-                escape(content, quote=False),
-                "</instructions>",
-            )
-        )
-    lines.append("</repository_instructions>")
-    return "\n".join(lines)
-
-
-def render_history(history):
-    """Render the active history selected by RunLog compaction."""
-    if history is None:
-        return ""
-    return history.render_projection()
-
-
-def _history_budget(raw, available, *, fixed_context, count_tokens):
+def history_budget(raw, available, *, fixed_context, count_tokens, render_input):
     empty_history = {**raw, "history": ""}
-    minimum = _assemble_input(empty_history, fixed_context)
+    minimum = render_input(empty_history, fixed_context)
     return max(0, available - count_tokens(minimum))
