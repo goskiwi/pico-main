@@ -235,7 +235,7 @@ class RunProjection:
         if event.kind == "failure_observed":
             key = tuple(
                 str(event.payload[name])
-                for name in ("category", "code", "tool_name", "target")
+                for name in ("category", "code", "tool_name", "identity")
             )
             if key == self.failure_key:
                 self.failure_count += 1

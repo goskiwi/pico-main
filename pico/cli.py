@@ -162,7 +162,12 @@ def build_agent(args):
     workspace = Workspace.build(args.cwd)
     load_project_env(workspace.root, boundary=workspace.root)
     store = SessionStore(workspace.root / ".pico" / "sessions")
-    config = PicoConfig(mode=args.mode)
+    model_window = provider_env("PICO_MODEL_CONTEXT_WINDOW")
+    config = PicoConfig(
+        mode=args.mode,
+        context_budget_tokens=int(provider_env("PICO_CONTEXT_BUDGET", "272000")),
+        model_context_window_tokens=int(model_window) if model_window else None,
+    )
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest_active()

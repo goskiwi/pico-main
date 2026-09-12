@@ -144,6 +144,44 @@ class CompletionRequirementTests(unittest.TestCase):
 
 
 class RepeatedFailureTests(unittest.TestCase):
+    def test_different_edit_arguments_are_not_the_same_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
+            agent, _ = build_agent(root, [
+                ModelAction.tool("read_file", {"path": "subject.txt"}),
+                *[ModelAction.tool("edit_file", {
+                    "path": "subject.txt", "old_text": f"missing-{index}",
+                    "new_text": "beta",
+                }) for index in range(4)],
+                ModelAction.final("No matching text was found."),
+            ])
+            outcome = agent.ask("Try distinct edits")
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(agent.run.projection.failure_count, 1)
+            self.assertEqual((root / "subject.txt").read_text(), "alpha\n")
+
+    def test_argument_key_order_and_call_id_do_not_reset_identical_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actions = [ModelAction.tool("read_file", args, call_id=f"read-{index}")
+                       for index, args in enumerate([
+                           {"path": "missing.txt", "start_line": 1},
+                           {"start_line": 1, "path": "missing.txt"},
+                       ] * 2)]
+            agent, _ = build_agent(Path(directory), actions)
+            outcome = agent.ask("Read a missing file")
+            self.assertEqual(outcome.stop_reason, "repeated_failure")
+            self.assertEqual(agent.run.projection.failure_count, 4)
+
+    def test_different_model_errors_do_not_accumulate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = build_agent(Path(directory), [
+                *[ModelAction.protocol_error(f"different error {i}") for i in range(4)],
+                ModelAction.final("Recovered."),
+            ])
+            outcome = agent.ask("Exercise distinct errors")
+            self.assertEqual(outcome.status, "completed")
+
     def test_third_identical_failure_warns_and_fourth_stops(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(

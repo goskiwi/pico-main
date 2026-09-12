@@ -111,7 +111,7 @@ def build_agent(
             mode="auto",
             verification_command=verification,
             verification_required=verification_required,
-            provider_context_limit_tokens=32_000,
+            context_budget_tokens=32_000,
             compaction_reserve_tokens=4_000,
             compaction_keep_recent_tokens=2_000,
             max_new_tokens=1_000,

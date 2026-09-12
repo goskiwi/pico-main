@@ -93,6 +93,34 @@ class CheckpointRecoveryTests(unittest.TestCase):
             self.assertEqual(event.sequence, 1)
             self.assertEqual(store.read_events(log.run_id)[0], event)
 
+    def test_incomplete_checkpoint_history_rebuilds_from_intact_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, log = self._new_log(directory, interval=1)
+            call = ToolCall("write_file", {"path": "x", "content": "a"}, "write")
+            log.append_tool_intent(call, effect_scope="workspace",
+                                   potential_effects=[], operation={})
+            log.append_tool_settlement(ToolOutcome(
+                "write", "write_file", "success", "completed", "none", "done",
+            ))
+            expected = replay_events(store.read_events(log.run_id)).summary()
+            checkpoint = store.checkpoint_path(log.run_id)
+            value = json.loads(checkpoint.read_text())
+            value["history"]["events"] = [
+                event for event in value["history"]["events"]
+                if event["kind"] != "tool_settlement"
+            ]
+            checkpoint.write_text(json.dumps(value))
+            restored = RunStore(Path(directory) / "runs").load_run(log.run_id)
+            self.assertEqual(restored.projection.summary(), expected)
+            repaired = json.loads(checkpoint.read_text())
+            self.assertIn("tool_settlement", [e["kind"] for e in repaired["history"]["events"]])
+
+            # Recovery must not silently accept a damaged authoritative log.
+            checkpoint.write_text("{broken")
+            store.events_path(log.run_id).write_text("{broken}\n")
+            with self.assertRaises(ValueError):
+                RunStore(Path(directory) / "runs").load_run(log.run_id)
+
     def test_pending_intent_is_replayed_only_from_the_tail(self):
         with tempfile.TemporaryDirectory() as directory:
             _store, log = self._new_log(directory, interval=1)
@@ -165,7 +193,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                     "category": "completion",
                     "code": "verification_failed",
                     "tool_name": "",
-                    "target": "tests",
+                    "identity": "tests",
                 },
             )
             offset = store.events_path(log.run_id).stat().st_size

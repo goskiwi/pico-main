@@ -32,7 +32,8 @@ class PicoConfig:
     max_new_tokens: int = 32000
     allowed_tools: tuple[str, ...] | None = None
     turn_timeout_seconds: int = 600
-    provider_context_limit_tokens: int = 272000
+    context_budget_tokens: int = 272000
+    model_context_window_tokens: int | None = None
     compaction_reserve_tokens: int = 32000
     compaction_keep_recent_tokens: int = 20000
     summary_max_output_tokens: int = 16000
@@ -53,7 +54,7 @@ class PicoConfig:
             "max_agent_turns": int(self.max_agent_turns),
             "max_new_tokens": int(self.max_new_tokens),
             "turn_timeout_seconds": int(self.turn_timeout_seconds),
-            "provider_context_limit_tokens": int(self.provider_context_limit_tokens),
+            "context_budget_tokens": int(self.context_budget_tokens),
             "compaction_reserve_tokens": int(self.compaction_reserve_tokens),
             "compaction_keep_recent_tokens": int(self.compaction_keep_recent_tokens),
             "summary_max_output_tokens": int(self.summary_max_output_tokens),
@@ -63,17 +64,25 @@ class PicoConfig:
             "summary_max_output_tokens",
         )):
             raise ValueError("runtime limits must be positive")
-        if values["provider_context_limit_tokens"] <= values["max_new_tokens"]:
-            raise ValueError("provider context limit must exceed max_new_tokens")
+        if values["context_budget_tokens"] <= values["max_new_tokens"]:
+            raise ValueError("context budget must exceed max_new_tokens")
+        model_window = self.model_context_window_tokens
+        if model_window is not None:
+            model_window = int(model_window)
+            if model_window < 1:
+                raise ValueError("model context window must be positive")
+            if values["context_budget_tokens"] > model_window:
+                raise ValueError("context budget must not exceed the configured model context window")
         if values["compaction_reserve_tokens"] < values["max_new_tokens"]:
             raise ValueError("compaction reserve must be at least max_new_tokens")
-        if values["compaction_reserve_tokens"] >= values["provider_context_limit_tokens"]:
-            raise ValueError("compaction reserve must be smaller than the provider context limit")
-        available = values["provider_context_limit_tokens"] - values["compaction_reserve_tokens"]
+        if values["compaction_reserve_tokens"] >= values["context_budget_tokens"]:
+            raise ValueError("compaction reserve must be smaller than the context budget")
+        available = values["context_budget_tokens"] - values["compaction_reserve_tokens"]
         if not 1 <= values["compaction_keep_recent_tokens"] <= available:
             raise ValueError("compaction keep_recent must fit below the compaction threshold")
         normalized = {
             "mode": str(self.mode),
+            "model_context_window_tokens": model_window,
             **values,
             "allowed_tools": _allowed_tools(self.allowed_tools),
             "verification_command": self.verification_command,

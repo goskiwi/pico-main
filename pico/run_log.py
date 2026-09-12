@@ -73,13 +73,13 @@ def _validate_completion_blocked_payload(kind, payload):
 
 
 def _validate_failure_observed_payload(kind, payload):
-    _exact_payload(kind, payload, {"category", "code", "tool_name", "target"})
+    _exact_payload(kind, payload, {"category", "code", "tool_name", "identity"})
     if not isinstance(payload["category"], str) or not payload["category"]:
         raise ValueError("failure_observed requires a category")
     if not isinstance(payload["code"], str) or not payload["code"]:
         raise ValueError("failure_observed requires a code")
     if not isinstance(payload["tool_name"], str) or not isinstance(
-        payload["target"], str
+        payload["identity"], str
     ):
         raise TypeError("failure_observed identity fields must be text")
 

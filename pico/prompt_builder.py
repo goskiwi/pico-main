@@ -188,7 +188,7 @@ class PromptBuilder:
         raw = self._raw_sections(user_message, tool_surface)
         instructions_tokens = self.count_tokens(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(tool_surface)
-        available = (self.runtime.config.provider_context_limit_tokens
+        available = (self.runtime.config.context_budget_tokens
                      - self.runtime.config.max_new_tokens - instructions_tokens - tool_schema_tokens)
         fixed = context.fixed_context(
             raw,
@@ -269,7 +269,7 @@ class PromptBuilder:
         reserve_tokens = max(
             int(config.max_new_tokens), config.compaction_reserve_tokens
         )
-        threshold_tokens = max(1, config.provider_context_limit_tokens - reserve_tokens)
+        threshold_tokens = max(1, config.context_budget_tokens - reserve_tokens)
         if context_tokens < threshold_tokens:
             return None
         projection_history_budget = inputs["history_budget"]
@@ -285,7 +285,7 @@ class PromptBuilder:
                         else ""
                     ),
                     execution_context=self.runtime.run.execution_context,
-                    context_limit_tokens=config.provider_context_limit_tokens,
+                    context_limit_tokens=config.context_budget_tokens,
                     max_output_tokens=min(
                         config.summary_max_output_tokens, max_summary_tokens
                     ),

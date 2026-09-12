@@ -17,7 +17,7 @@ from tests.support import build_agent
 
 
 class RepositoryInstructionTests(unittest.TestCase):
-    def test_root_rules_refresh_before_execution_and_nested_rules_are_ignored(self):
+    def test_root_rules_refresh_before_next_request_including_final(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "AGENTS.md").write_text("ROOT_RULE_V1\n", encoding="utf-8")
@@ -35,7 +35,6 @@ class RepositoryInstructionTests(unittest.TestCase):
             agent, model = build_agent(
                 root,
                 [
-                    ModelAction.tool("read_file", {"path": "nested/subject.txt"}),
                     ModelAction.tool("read_file", {"path": "nested/subject.txt"}),
                     ModelAction.final("Read with current rules."),
                 ],
@@ -56,10 +55,13 @@ class RepositoryInstructionTests(unittest.TestCase):
                 for event in agent.run.run_log.events
                 if event.kind == "tool_exchange"
             )
-            self.assertEqual(
-                first.payload["outcome"]["failure"]["code"],
-                "repository_instructions_changed",
-            )
+            self.assertEqual(first.payload["outcome"]["status"], "success")
+            self.assertEqual(len(model.requests), 2)
+            self.assertNotIn("deeper rules take precedence", model.requests[1]["instructions"])
+            resets = [e for e in agent.read_run_events(outcome.run_id)
+                      if e.kind == "provider_session_reset"]
+            self.assertEqual(len(resets), 1)
+            self.assertEqual(resets[0].payload["reason"], "repository_instructions_changed")
 
 
 class ContextSelectionTests(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -118,6 +119,13 @@ class AgentLoop:
 
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
+        if agent.prompt.refresh_repository_instructions():
+            agent.model_client.reset_action_session()
+            loop_state.prompt_snapshot = None
+            loop_state.provider_context_tokens = None
+            agent.emit_event("provider_session_reset", {
+                "reason": "repository_instructions_changed",
+            })
         if loop_state.prompt_snapshot is not None:
             _prompt, prior_surface = loop_state.prompt_snapshot
             if prior_surface.names != tool_surface.names or prior_surface.policy != tool_surface.policy:
@@ -186,7 +194,7 @@ class AgentLoop:
     def _provider_high_watermark(self):
         config = self.agent.config
         return (
-            config.provider_context_limit_tokens
+            config.context_budget_tokens
             - config.compaction_reserve_tokens
         )
 
@@ -222,7 +230,7 @@ class AgentLoop:
         loop_state.overflow_recovery_attempted = True
         loop_state.prompt_snapshot = None
         loop_state.provider_context_tokens = (
-            self.agent.config.provider_context_limit_tokens
+            self.agent.config.context_budget_tokens
         )
         self.agent.model_client.reset_action_session()
         self.agent.emit_event(
@@ -237,27 +245,14 @@ class AgentLoop:
         if call is None:
             raise RuntimeError("tool turn is missing its tool call")
         loop_state.invalid_output_count = 0
-        if agent.prompt.refresh_repository_instructions():
-            agent.tools._rejected(
-                call, "repository_instructions_changed",
-                "The tool was not executed. Repository instructions were loaded or "
-                "changed; review their directory scope and propose the call again.",
-                recovery="retry_after_change", record=True,
-            )
-            agent.model_client.reset_action_session()
-            loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = None
-            agent.emit_event("provider_session_reset", {
-                "reason": "repository_instructions_changed",
-            })
-            return LoopDirective("continue")
         outcome = agent.tools.execute_call(call, turn.tool_surface)
         if outcome.status != "success":
             warning, stop = self._observe_failure(
                 "tool",
                 outcome.failure.code if outcome.failure else outcome.status,
                 tool_name=outcome.tool_name,
-                target=str(call.args.get("path", call.args.get("command", ""))),
+                target=call.args,
+                detail=outcome.failure.detail if outcome.failure else outcome.content,
             )
             if stop:
                 return LoopDirective("stop", "repeated_failure")
@@ -279,6 +274,7 @@ class AgentLoop:
         warning, stop = self._observe_failure(
             "model",
             turn.action.kind,
+            detail=turn.action.content,
         )
         instruction = turn.action.content
         if warning:
@@ -327,6 +323,7 @@ class AgentLoop:
             "completion",
             status,
             target=self.completion.resolve_verification_policy().command,
+            detail=evidence,
         )
         if warning:
             instruction = instruction + "\n\n" + warning
@@ -344,21 +341,24 @@ class AgentLoop:
         )
         return LoopDirective("continue")
 
-    def _observe_failure(self, category, code, *, tool_name="", target=""):
+    def _observe_failure(self, category, code, *, tool_name="", target="", detail=""):
         self.agent.emit_event(
             "failure_observed",
             {
                 "category": str(category),
                 "code": str(code),
                 "tool_name": str(tool_name),
-                "target": str(target),
+                "identity": json.dumps(
+                    {"input": target, "detail": detail},
+                    sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                ),
             },
         )
         count = self.agent.run.projection.failure_count
         warning = ""
         if count == 3:
             warning = (
-                "The same failure has occurred three times without relevant "
-                "progress. Change the approach or the related state before retrying."
+                "The same failure has occurred three times with identical input "
+                "and error details. Change the approach before retrying."
             )
         return warning, count >= 4

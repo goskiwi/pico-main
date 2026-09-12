@@ -82,7 +82,10 @@ def read_run_checkpoint(path, *, expected_run_id):
             != f"{event.run_id}:event:{event.sequence:06d}"
         ):
             raise ValueError("Run checkpoint History event is inconsistent")
-    RunHistory._history_units(events)
+    try:
+        RunHistory._history_units(events)
+    except RuntimeError as exc:
+        raise ValueError("Run checkpoint History contains an incomplete transaction") from exc
     latest_raw = history["latest_user_guidance"]
     latest = RunEvent.from_dict(latest_raw) if latest_raw is not None else None
     if latest is not None and (
