@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+import selectors
 import signal
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +58,7 @@ class RawCommandResult:
 class CommandRunner:
     """Run a trusted command locally with deadline and process-group cleanup.
 
-    Reader threads continuously drain both pipes into bounded buffers. Bytes
+    A selector waits for pipe readiness and drains into bounded buffers. Bytes
     beyond the limit are counted and discarded while the process continues.
     """
 
@@ -150,6 +150,7 @@ class CommandRunner:
                 stderr=subprocess.PIPE,
                 stdin=(subprocess.PIPE if input_bytes is not None else None),
                 start_new_session=True,
+                bufsize=0,
             )
         except OSError as exc:
             return RawCommandResult(
@@ -160,57 +161,17 @@ class CommandRunner:
                 infrastructure_error=True,
             )
 
-        stop_reason = ""
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
         discarded = {"stdout": 0, "stderr": 0}
-        stream_limit = max(1, self.max_output_bytes // 2)
-
-        def drain(name, stream):
-            try:
-                while True:
-                    chunk = stream.read(COMMAND_READ_CHUNK_BYTES)
-                    if not chunk:
-                        return
-                    available = max(0, stream_limit - len(buffers[name]))
-                    buffers[name].extend(chunk[:available])
-                    discarded[name] += max(0, len(chunk) - available)
-            except (OSError, ValueError):
-                return
-
-        readers = [
-            threading.Thread(
-                target=drain,
-                args=(name, stream),
-                name=f"pico-{name}-drain",
-                daemon=True,
-            )
-            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
-        ]
-        for reader in readers:
-            reader.start()
         try:
-            if input_bytes is not None and process.stdin is not None:
-                process.stdin.write(input_bytes)
-                process.stdin.close()
-            stop_reason = self._wait_for_process(process, context, deadline)
+            stop_reason = self._collect_output(
+                process, context, deadline, input_bytes, buffers, discarded
+            )
         except BaseException:
-            self._signal_process_group(process, signal.SIGKILL)
-            self._close_pipes(process)
-            raise
-
-        if stop_reason:
             self._stop_process_group(process)
-        else:
-            pipe_deadline = time.monotonic() + COMMAND_PIPE_GRACE_SECONDS
-            for reader in readers:
-                reader.join(max(0.0, pipe_deadline - time.monotonic()))
-            if any(reader.is_alive() for reader in readers):
-                stop_reason = "pipe_held_open"
-                self._stop_process_group(process)
-
-        self._close_pipes(process)
-        for reader in readers:
-            reader.join(COMMAND_POLL_SECONDS)
+            raise
+        finally:
+            self._close_pipes(process)
         limited = bool(discarded["stdout"] or discarded["stderr"])
         infrastructure_error = bool(require_complete_output and limited)
         return RawCommandResult(
@@ -276,16 +237,71 @@ class CommandRunner:
         except OSError:
             pass
 
-    @staticmethod
-    def _wait_for_process(process, context, deadline):
-        while process.poll() is None:
-            if context.token.requested:
-                return context.token.reason or "user_cancelled"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return "deadline_exceeded"
-            context.token.wait(min(COMMAND_POLL_SECONDS, remaining))
-        return ""
+    def _collect_output(self, process, context, deadline, input_bytes, buffers, discarded):
+        stop_reason = ""
+        pipe_deadline = None
+        input_view = memoryview(input_bytes or b"")
+        with selectors.DefaultSelector() as selector:
+            for name in ("stdout", "stderr"):
+                stream = getattr(process, name)
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            if process.stdin is not None:
+                if input_view:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                else:
+                    process.stdin.close()
+            while True:
+                now = time.monotonic()
+                exited = process.poll() is not None
+                if exited and not selector.get_map():
+                    break
+                if not stop_reason and (context.token.requested or now >= deadline):
+                    stop_reason = (
+                        context.token.reason or "user_cancelled"
+                        if context.token.requested else "deadline_exceeded"
+                    )
+                    self._stop_process_group(process)
+                    pipe_deadline = time.monotonic() + COMMAND_PIPE_GRACE_SECONDS
+                if exited and pipe_deadline is None:
+                    pipe_deadline = now + COMMAND_PIPE_GRACE_SECONDS
+                if pipe_deadline is not None and time.monotonic() >= pipe_deadline:
+                    if not stop_reason:
+                        stop_reason = "pipe_held_open"
+                        self._stop_process_group(process)
+                    break
+                next_deadline = pipe_deadline if stop_reason else min(deadline, pipe_deadline or deadline)
+                wait = max(0.0, min(COMMAND_POLL_SECONDS, next_deadline - time.monotonic()))
+                for key, _mask in selector.select(wait):
+                    input_view = self._consume_ready_pipe(
+                        selector, key, input_view, buffers, discarded
+                    )
+        return stop_reason
+
+    def _consume_ready_pipe(self, selector, key, input_view, buffers, discarded):
+        stream, name = key.fileobj, key.data
+        try:
+            if name == "stdin":
+                try:
+                    written = os.write(stream.fileno(), input_view[:COMMAND_READ_CHUNK_BYTES])
+                    input_view = input_view[written:]
+                except BrokenPipeError:
+                    input_view = input_view[len(input_view):]
+                if not input_view:
+                    selector.unregister(stream)
+                    stream.close()
+            else:
+                chunk = os.read(stream.fileno(), COMMAND_READ_CHUNK_BYTES)
+                if not chunk:
+                    selector.unregister(stream)
+                else:
+                    available = max(0, self.max_output_bytes // 2 - len(buffers[name]))
+                    buffers[name].extend(chunk[:available])
+                    discarded[name] += max(0, len(chunk) - available)
+        except BlockingIOError:
+            pass  # Readiness may change before the nonblocking operation.
+        return input_view
 
     @classmethod
     def _stop_process_group(cls, process):
@@ -299,7 +315,7 @@ class CommandRunner:
 
     @staticmethod
     def _close_pipes(process):
-        for pipe in (process.stdout, process.stderr):
+        for pipe in (process.stdin, process.stdout, process.stderr):
             if pipe is not None:
                 pipe.close()
 

@@ -1,6 +1,9 @@
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +15,63 @@ from pico.tools import tool_run_shell
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_detached_descendant_does_not_block_pipe_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "descendant.pid"
+            source = (
+                "import subprocess,sys,pathlib; "
+                "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(15)'],start_new_session=True); "
+                "pathlib.Path('descendant.pid').write_text(str(p.pid)); "
+                "print('leader done',flush=True)"
+            )
+            try:
+                start = time.monotonic()
+                result = CommandRunner(directory).run(
+                    (sys.executable, "-c", source), cwd=directory, timeout=5,
+                )
+                self.assertLess(time.monotonic() - start, 3)
+                self.assertEqual(result.stop_reason, "pipe_held_open")
+                self.assertIn("leader done", result.stdout)
+            finally:
+                if pid_path.exists():
+                    try:
+                        os.kill(int(pid_path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_input_and_both_output_pipes_do_not_deadlock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = ("import sys; sys.stdout.write('o'*200000); sys.stdout.flush(); "
+                      "sys.stderr.write('e'*200000); sys.stderr.flush(); "
+                      "assert len(sys.stdin.buffer.read()) == 200000")
+            result = CommandRunner(directory, max_output_bytes=1024).run_bytes(
+                (sys.executable, "-c", source), cwd=directory, timeout=5,
+                input_bytes=b"x" * 200000,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stop_reason, "")
+            self.assertEqual(len(result.stdout), 512)
+            self.assertEqual(len(result.stderr), 512)
+            self.assertEqual(result.stdout_discarded_bytes, 200000 - 512)
+            self.assertEqual(result.stderr_discarded_bytes, 200000 - 512)
+
+    def test_cancel_with_blocked_stdin_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExecutionContext.root(max_seconds=5)
+            timer = threading.Timer(0.2, context.request_stop)
+            timer.start()
+            start = time.monotonic()
+            try:
+                result = CommandRunner(directory).run_bytes(
+                    (sys.executable, "-c", "import time; time.sleep(15)"),
+                    cwd=directory, timeout=5, execution_context=context,
+                    input_bytes=b"x" * 200000,
+                )
+            finally:
+                timer.cancel()
+            self.assertLess(time.monotonic() - start, 3)
+            self.assertEqual(result.stop_reason, "user_cancelled")
+
     def test_large_output_is_drained_into_bounded_buffers(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = CommandRunner(directory, max_output_bytes=1024)

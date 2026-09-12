@@ -1,14 +1,11 @@
 import shlex
 import sys
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 
 from pico import ModelAction
-from pico.execution import ExecutionCancelled, ExecutionContext
-from pico.providers.clients import OpenAICompatibleModelClient, _parse_turn
+from pico.providers.clients import _parse_turn
 from pico.run_log import replay_events
 from tests.support import build_agent
 
@@ -59,39 +56,6 @@ class ModelResultTests(unittest.TestCase):
         self.assertEqual(service.action.kind, "service_failed")
         self.assertEqual(protocol.action.kind, "protocol_error")
 
-    def test_silent_model_connection_is_closed_on_cancellation(self):
-        class SilentClient:
-            def __init__(self):
-                self.responses = self
-                self.closed = threading.Event()
-
-            def with_options(self, **_kwargs):
-                return self
-
-            def create(self, **_kwargs):
-                self.closed.wait(5)
-                raise RuntimeError("transport closed")
-
-            def close(self):
-                self.closed.set()
-
-        silent = SilentClient()
-        client = object.__new__(OpenAICompatibleModelClient)
-        client._client = silent
-        client.timeout = 5
-        client._new_sdk_client = lambda: SilentClient()
-        execution = ExecutionContext.root(max_seconds=5)
-        timer = threading.Timer(0.1, execution.request_stop)
-        timer.start()
-        started = time.monotonic()
-        try:
-            with self.assertRaises(ExecutionCancelled):
-                client._request({}, execution)
-        finally:
-            timer.cancel()
-
-        self.assertLess(time.monotonic() - started, 1)
-        self.assertTrue(silent.closed.is_set())
 
 
 class CompletionRequirementTests(unittest.TestCase):

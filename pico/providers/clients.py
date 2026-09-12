@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
 from dataclasses import dataclass, field
 
 from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
-    DefaultHttpxClient,
-    OpenAI,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
 )
 
 from ..contracts import ModelAction, ToolCall
@@ -273,17 +273,16 @@ class OpenAICompatibleModelClient:
         self.temperature = temperature
         self.timeout = float(timeout)
         self.reasoning_effort = str(reasoning_effort or "").strip()
-        self._client = self._new_sdk_client()
         self.last_completion_metadata = {}
         self.reset_action_session()
 
-    def _new_sdk_client(self):
-        return OpenAI(
+    def _new_sdk_client(self, timeout):
+        return AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=self.timeout,
+            timeout=timeout,
             max_retries=2,
-            http_client=DefaultHttpxClient(follow_redirects=False),
+            http_client=DefaultAsyncHttpxClient(follow_redirects=False),
         )
 
     def reset_action_session(self):
@@ -356,66 +355,53 @@ class OpenAICompatibleModelClient:
         return payload
 
     def _request(self, payload, execution_context):
+        # Each synchronous call owns its event loop and HTTP resources.
+        # Provider conversation replay remains on this adapter.
+        return asyncio.run(self._request_async(payload, execution_context))
+
+    async def _request_async(self, payload, execution_context):
         timeout = execution_context.bounded_timeout(self.timeout)
-        client = self._client.with_options(timeout=timeout)
-        watcher_done = threading.Event()
-        interrupted = threading.Event()
 
-        def close_on_stop():
-            while not watcher_done.wait(
-                min(0.05, max(0.0, execution_context.remaining_seconds()))
-            ):
-                if (
-                    execution_context.token.requested
-                    or execution_context.remaining_seconds() <= 0
-                ):
-                    interrupted.set()
-                    try:
-                        client.close()
-                    except Exception:  # noqa: BLE001, S110 - best-effort close
-                        pass
-                    return
+        async def receive():
+            async with self._new_sdk_client(timeout) as client:
+                stream = await client.responses.create(**payload)
+                response = None
+                async with stream:
+                    async for event in stream:
+                        execution_context.check_active()
+                        if event.type in {
+                            "response.completed", "response.incomplete", "response.failed",
+                        }:
+                            response = event.response
+                if response is None:
+                    raise RuntimeError("Provider stream ended without a terminal response")
+                return response.model_dump(mode="json")
 
-        watcher = threading.Thread(
-            target=close_on_stop,
-            name="pico-model-cancellation",
-            daemon=True,
-        )
-        watcher.start()
-        response = None
+        request = asyncio.create_task(receive())
         try:
-            stream = client.responses.create(**payload)
-            with stream:
-                for event in stream:
-                    execution_context.check_active()
-                    if event.type in {
-                        "response.completed", "response.incomplete", "response.failed",
-                    }:
-                        response = event.response
+            while not request.done():
+                execution_context.check_active()
+                await asyncio.wait(
+                    {request},
+                    timeout=min(0.05, execution_context.remaining_seconds()),
+                )
+            execution_context.check_active()
+            return await request
         except APIStatusError as exc:
             execution_context.check_active()
             if _context_overflow(exc):
-                raise ProviderContextOverflow(
-                    "provider context window exceeded"
-                ) from exc
+                raise ProviderContextOverflow("provider context window exceeded") from exc
             raise RuntimeError(
                 f"Provider HTTP {exc.status_code}: {exc.message}"
             ) from exc
         except (APIConnectionError, APITimeoutError) as exc:
             execution_context.check_active()
             raise RuntimeError(f"Provider transport failed: {exc}") from exc
-        except BaseException:
-            execution_context.check_active()
-            raise
         finally:
-            watcher_done.set()
-            watcher.join(timeout=0.1)
-            if interrupted.is_set():
-                self._client = self._new_sdk_client()
-        execution_context.check_active()
-        if response is None:
-            raise RuntimeError("Provider stream ended without a terminal response")
-        return response.model_dump(mode="json")
+            if not request.done():
+                request.cancel()
+            # Await cancellation so the response and HTTP client close before return.
+            await asyncio.gather(request, return_exceptions=True)
 
     def complete_action(self, input_text, max_new_tokens, *, instructions,
                         action_tools, execution_context: ExecutionContext):
