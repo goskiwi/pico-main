@@ -120,37 +120,32 @@ class AgentLoop:
     def _prepare_prompt(self, loop_state, tool_surface):
         agent = self.agent
         if agent.prompt.refresh_repository_instructions():
-            agent.model_client.reset_action_session()
-            loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = None
-            agent.emit_event("provider_session_reset", {
-                "reason": "repository_instructions_changed",
-            })
+            self._reset_context(loop_state, "repository_instructions_changed")
         if loop_state.prompt_snapshot is not None:
             _prompt, prior_surface = loop_state.prompt_snapshot
             if prior_surface.names != tool_surface.names or prior_surface.policy != tool_surface.policy:
-                agent.model_client.reset_action_session()
-                loop_state.prompt_snapshot = None
-                loop_state.provider_context_tokens = None
-                agent.emit_event(
-                    "provider_session_reset",
-                    {
-                        "reason": "tool_surface_changed",
-                        "tool_names": list(tool_surface.names),
-                    },
+                self._reset_context(
+                    loop_state, "tool_surface_changed",
+                    tool_names=list(tool_surface.names),
                 )
         if loop_state.prompt_snapshot is None:
-            inputs = self.lifecycle.prepare_compaction(
+            prompt = agent.prompt.build_for_run(
                 loop_state.user_message,
                 tool_surface=tool_surface,
                 provider_context_tokens=loop_state.provider_context_tokens,
             )
-            prompt = agent.prompt.build(inputs)
             loop_state.provider_context_tokens = None
             loop_state.prompt_snapshot = (prompt, tool_surface)
         else:
             prompt, _surface = loop_state.prompt_snapshot
         return prompt
+
+    def _reset_context(self, loop_state, reason=None, *, provider_context_tokens=None, **details):
+        self.agent.model_client.reset_action_session()
+        loop_state.prompt_snapshot = None
+        loop_state.provider_context_tokens = provider_context_tokens
+        if reason is not None:
+            self.agent.emit_event("provider_session_reset", {"reason": reason, **details})
 
     def _request_action(
         self,
@@ -209,17 +204,12 @@ class AgentLoop:
         )
         if projected_tokens >= self._provider_high_watermark():
             threshold_tokens = self._provider_high_watermark()
-            agent.model_client.reset_action_session()
-            loop_state.prompt_snapshot = None
-            loop_state.provider_context_tokens = projected_tokens
-            agent.emit_event(
-                "provider_session_reset",
-                {
-                    "reason": "context_high_watermark",
-                    "input_tokens": agent.model_client.last_completion_metadata.get("input_tokens"),
-                    "projected_input_tokens": projected_tokens,
-                    "threshold_tokens": threshold_tokens,
-                },
+            self._reset_context(
+                loop_state, "context_high_watermark",
+                provider_context_tokens=projected_tokens,
+                input_tokens=agent.model_client.last_completion_metadata.get("input_tokens"),
+                projected_input_tokens=projected_tokens,
+                threshold_tokens=threshold_tokens,
             )
             return
         agent.model_client.record_action_results(provider_results)
@@ -228,14 +218,9 @@ class AgentLoop:
         if loop_state.overflow_recovery_attempted:
             return False
         loop_state.overflow_recovery_attempted = True
-        loop_state.prompt_snapshot = None
-        loop_state.provider_context_tokens = (
-            self.agent.config.context_budget_tokens
-        )
-        self.agent.model_client.reset_action_session()
-        self.agent.emit_event(
-            "provider_session_reset",
-            {"reason": "context_overflow_retry"},
+        self._reset_context(
+            loop_state, "context_overflow_retry",
+            provider_context_tokens=self.agent.config.context_budget_tokens,
         )
         return True
 
@@ -258,9 +243,7 @@ class AgentLoop:
                 return LoopDirective("stop", "repeated_failure")
             if warning:
                 agent.append_model_instruction(warning)
-                agent.model_client.reset_action_session()
-                loop_state.prompt_snapshot = None
-                loop_state.provider_context_tokens = None
+                self._reset_context(loop_state)
                 return LoopDirective("continue")
         self._continue_provider(
             loop_state,
@@ -292,14 +275,7 @@ class AgentLoop:
     def _handle_final_action(self, loop_state, turn):
         loop_state.invalid_output_count = 0
         final = turn.action.content.strip()
-        verification_policy = self.completion.resolve_verification_policy()
-        assessment = self.completion.assess(final, verification_policy)
-        if assessment.verification_required:
-            self.lifecycle.run_completion_verification(verification_policy)
-            assessment = self.completion.assess_verification(
-                final,
-                verification_policy,
-            )
+        assessment = self.completion.evaluate(final)
         if assessment.allowed:
             return LoopDirective("complete", assessment.instruction)
         return self._block_completion(
@@ -309,7 +285,6 @@ class AgentLoop:
             assessment.instruction,
             assessment.evidence,
         )
-        return None
 
     def _block_completion(
         self,

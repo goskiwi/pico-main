@@ -11,11 +11,60 @@ from pico import (
     ToolOutcome,
     WriteScope,
 )
+from pico.providers import ProviderContextOverflow
 from pico.run_log import RunEvent, RunLog, replay_events
 from tests.support import build_agent, verification_command
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_context_overflow_rebuilds_then_completes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, model = build_agent(Path(directory), [])
+            with mock.patch.object(model, "complete_action", side_effect=[
+                ProviderContextOverflow("window exceeded"), ModelAction.final("Recovered"),
+            ]) as request, mock.patch.object(
+                model, "estimate_action_input_tokens", side_effect=[6000, 1000],
+            ):
+                outcome = agent.ask("Inspect")
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(request.call_count, 2)
+            events = agent.read_run_events(outcome.run_id)
+            resets = [e for e in events if e.kind == "provider_session_reset"]
+            self.assertEqual([e.payload["reason"] for e in resets], ["context_overflow_retry"])
+            self.assertEqual(replay_events(events).summary(), agent.run.projection.summary())
+
+    def test_context_overflow_without_reduction_does_not_request_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, model = build_agent(Path(directory), [])
+            with mock.patch.object(model, "complete_action", side_effect=ProviderContextOverflow("window exceeded")) as request, mock.patch.object(
+                model, "estimate_action_input_tokens", return_value=6000,
+            ), self.assertRaisesRegex(ProviderContextOverflow, "did not reduce"):
+                agent.ask("Inspect")
+            self.assertEqual(request.call_count, 1)
+            self.assertTrue(agent.run.resumable)
+
+    def test_cancellation_after_verification_preserves_evidence_before_stopping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subject.txt").write_text("alpha\n")
+            agent, _ = build_agent(root, [ModelAction.final("Ready")],
+                                   verification=verification_command("subject.txt", "alpha\n"),
+                                   verification_required=True)
+            verify = agent.run_verification
+            def verify_then_cancel(sequence, policy):
+                result = verify(sequence, policy)
+                agent.cancel_current_run()
+                return result
+            with mock.patch.object(agent, "run_verification", side_effect=verify_then_cancel):
+                outcome = agent.ask("Check the file")
+            self.assertEqual(outcome.stop_reason, "user_cancelled")
+            self.assertEqual(agent.run.evidence.latest_verification["status"], "passed")
+            events = agent.read_run_events(outcome.run_id)
+            self.assertLess(next(e.sequence for e in events if e.kind == "verification_result"),
+                            next(e.sequence for e in events if e.kind == "run_stopped"))
+            self.assertEqual(agent.session.active_run_id, "")
+            self.assertIsNone(agent.run.execution_context)
+
     def test_read_edit_verify_and_complete_through_pico_ask(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

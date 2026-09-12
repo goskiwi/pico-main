@@ -110,22 +110,6 @@ class RunLifecycle:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
-    def prepare_compaction(
-        self,
-        user_message,
-        *,
-        tool_surface,
-        provider_context_tokens=None,
-    ):
-        inputs = self.runtime.prompt.prepare(user_message, tool_surface=tool_surface)
-        plan = self.runtime.prompt.plan_compaction(
-            inputs,
-            provider_context_tokens=provider_context_tokens,
-        )
-        if plan is not None:
-            self.runtime.run.run_log.append_compaction(*plan)
-        return inputs
-
     def initialize(
         self,
         user_message,
@@ -227,22 +211,6 @@ class RunLifecycle:
             return str(exc) or "user_cancelled"
         return ""
 
-    def run_completion_verification(self, policy):
-        """Execute and persist one completion verification attempt."""
-
-        runtime = self.runtime
-        sequence = runtime.run.evidence.last_workspace_mutation_sequence
-        trace = runtime.dependencies.run_store.trace
-        if trace is not None:
-            trace.write("[Verification] checking…")
-        current = runtime.run_verification(sequence, policy)
-        if current is not None:
-            runtime.emit_event("verification_result", current)
-        # Preserve verifier facts before a stop requested while it was running.
-        if runtime.run.execution_context is not None:
-            runtime.run.execution_context.check_active()
-        return current
-
     def finish_success(self, final, *, run_started_at) -> RunOutcome:
         runtime = self.runtime
         final_diff = build_final_diff(runtime)
@@ -252,14 +220,7 @@ class RunLifecycle:
             final_diff,
             turn_duration_ms=int((time.monotonic() - run_started_at) * 1000),
         )
-        outcome = RunOutcome(runtime.run.projection)
-        try:
-            runtime.session.set_active_run("")
-        finally:
-            execution = runtime.run.execution_context
-            if execution is not None:
-                runtime.run.execution_context = None
-        return outcome
+        return self._finish_session()
 
     def finish_stopped(self, stop_reason, *, run_started_at=None) -> RunOutcome:
         final, stop_reason = self._stopped_result(stop_reason)
@@ -275,14 +236,19 @@ class RunLifecycle:
             ),
         )
         runtime = self.runtime
+        outcome = self._finish_session()
+        if stop_reason == "user_reset":
+            runtime.run = ActiveRunState()
+            runtime.model_client.reset_action_session()
+        return outcome
+
+    def _finish_session(self):
+        runtime = self.runtime
         outcome = RunOutcome(runtime.run.projection)
         try:
             runtime.session.set_active_run("")
         finally:
             runtime.run.execution_context = None
-        if stop_reason == "user_reset":
-            runtime.run = ActiveRunState()
-            runtime.model_client.reset_action_session()
         return outcome
 
     def reset_dormant(self) -> RunOutcome:

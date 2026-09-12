@@ -8,7 +8,9 @@
 2. [agent_loop.py](pico/agent_loop.py)：先看 run，再看 _step。run 负责初始化、循环和收尾；_step 请求模型并分派一种动作。
 3. 同文件的 _next_model_turn：获取工具、准备上下文、请求模型。
 4. 同文件的 _handle_tool_turn：记录一个调用，交给 ToolRuntime，把结果交回模型。
-5. 同文件的 _handle_final_action：模型提出完成，Runtime 验收，失败则反馈并继续。
+5. 同文件的 _handle_final_action：调用 CompletionController.evaluate；由它统一检查、执行并记录验证、复查结果，失败则反馈并继续。
+
+请求准备只走 `PromptBuilder.build_for_run()`：准备预算 → 必要时生成并提交摘要 → 渲染。AgentLoop 的 `_reset_context()` 统一处理 Provider 会话与 Prompt 缓存重建。RunLifecycle 不再中转压缩或编排验收，只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`，编辑专用路径保留读取锁和版本准备。
 
 例子：read_file → edit_file → verify → edit_file → submit_final → 最终验收通过。
 第一次把 ToolRuntime 当成“执行一个工具并给出真实结果”，把 PromptBuilder 当成“构造有预算的输入”。

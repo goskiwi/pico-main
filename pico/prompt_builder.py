@@ -177,6 +177,14 @@ class PromptBuilder:
     def count_tokens(self, text):
         return self.tokenizer.count(text)
 
+    def build_for_run(self, user_message, *, tool_surface, provider_context_tokens=None):
+        """Prepare, optionally compact durably, then render one model input."""
+        inputs = self.prepare(user_message, tool_surface=tool_surface)
+        plan = self.plan_compaction(inputs, provider_context_tokens=provider_context_tokens)
+        if plan is not None:
+            self.runtime.run.run_log.append_compaction(*plan)
+        return self.build(inputs)
+
     def refresh_repository_instructions(self):
         current = load_repository_instructions(self.runtime.workspace.root)
         changed = current != self.repository_instructions

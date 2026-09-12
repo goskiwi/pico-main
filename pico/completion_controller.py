@@ -37,6 +37,31 @@ class CompletionController:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
 
+    def evaluate(self, final):
+        """Assess, verify when required, and recheck the resulting workspace."""
+        policy = self.resolve_verification_policy()
+        decision = self.assess(final, policy)
+        if decision.verification_required:
+            self._run_verification(policy)
+            decision = self.assess_verification(final, policy)
+        return decision
+
+    def _run_verification(self, policy):
+        """Execute and persist one completion verification attempt."""
+
+        runtime = self.runtime
+        sequence = runtime.run.evidence.last_workspace_mutation_sequence
+        trace = runtime.dependencies.run_store.trace
+        if trace is not None:
+            trace.write("[Verification] checking…")
+        current = runtime.run_verification(sequence, policy)
+        if current is not None:
+            runtime.emit_event("verification_result", current)
+        # Preserve verifier facts before a stop requested while it was running.
+        if runtime.run.execution_context is not None:
+            runtime.run.execution_context.check_active()
+        return current
+
     def resolve_verification_policy(self):
         contract = self.runtime.run.projection.contract
         if contract is None:

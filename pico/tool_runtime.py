@@ -70,7 +70,7 @@ class ResolvedToolSurface:
 
 
 def _run_id(agent):
-    return agent.run.run_log.run_id if agent.run.run_log is not None else "manual"
+    return ToolRuntime._recorded_run_log(agent).run_id
 
 
 class ToolRuntime:
@@ -297,7 +297,7 @@ class ToolRuntime:
     def context(self, *, call_id, execution_context=None):
         runtime = self.runtime
         return ToolContext(
-            run_id=runtime.run.run_log.run_id if runtime.run.run_log else "manual",
+            run_id=_run_id(runtime),
             tool_call_id=str(call_id),
             execution_context=(
                 execution_context
@@ -306,28 +306,26 @@ class ToolRuntime:
             ),
         )
 
-    def _resolve_tool(self, call, surface, *, record=True):
+    def _resolve_tool(self, call, surface):
         tool = surface.definitions.get(call.name)
         if tool is not None:
             return tool, None
         if call.name not in self.registry:
             return None, self._rejected(
                 call, "unknown_tool", "unknown tool", "retry_after_change",
-                record=record,
             )
         return None, self._rejected(
             call,
             "tool_not_allowed",
             f"{call.name} is unavailable in {surface.mode} mode",
             "no_retry",
-            record=record,
         )
 
     @staticmethod
     def _recorded_run_log(agent, call_id=None):
         run_log = agent.run.run_log
         if run_log is None:
-            return None
+            raise RuntimeError("tool execution requires an active Run")
         if call_id is None:
             return run_log
         pending = run_log.pending_tool_call()
@@ -340,8 +338,6 @@ class ToolRuntime:
     @classmethod
     def _record_tool_intent(cls, agent, call, *, plan, potential_effects):
         run_log = cls._recorded_run_log(agent)
-        if run_log is None:
-            return None
         return run_log.append_tool_intent(
             call,
             effect_scope=plan.effect_scope,
@@ -352,15 +348,11 @@ class ToolRuntime:
     @classmethod
     def _record_tool_settlement(cls, agent, outcome):
         run_log = cls._recorded_run_log(agent, outcome.tool_call_id)
-        if run_log is None:
-            return None
         return run_log.append_tool_settlement(outcome)
 
     @classmethod
     def _record_tool_exchange(cls, agent, call, outcome):
         run_log = cls._recorded_run_log(agent)
-        if run_log is None:
-            return None
         return run_log.append_tool_exchange(call, outcome)
 
     @staticmethod
@@ -427,7 +419,7 @@ class ToolRuntime:
             artifacts[logical] = descriptor["artifact_id"]
         return artifacts
 
-    def _validate_call(self, call, tool, context, *, record=True):
+    def _validate_call(self, call, tool, context):
         try:
             args = self._validate_args(
                 call.name, call.args, tool, context
@@ -438,14 +430,14 @@ class ToolRuntime:
                 exc.failure.code,
                 exc.failure.detail,
                 exc.failure.recovery,
-                structured=exc.structured, record=record,
+                structured=exc.structured,
             )
         except Exception as exc:  # noqa: BLE001 - validator boundary
             return None, self._rejected(
                 call,
                 "invalid_arguments",
                 str(exc),
-                "retry_after_change", record=record,
+                "retry_after_change",
             )
         return ToolCall(call.name, args, call.call_id), None
 
@@ -873,7 +865,6 @@ class ToolRuntime:
         recovery="no_retry",
         *,
         structured=None,
-        record=True,
     ):
         outcome = self._outcome(
             call,
@@ -884,8 +875,7 @@ class ToolRuntime:
             failure=FailureInfo(code, detail, recovery),
             structured=structured,
         )
-        if record:
-            self._record_tool_exchange(self.runtime, call, outcome)
+        self._record_tool_exchange(self.runtime, call, outcome)
         return outcome
 
     def _outcome(
