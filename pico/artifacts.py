@@ -21,7 +21,7 @@ class ArtifactStore:
     def __init__(self, run_store, redactor):
         self.run_store = run_store
         self.redactor = redactor
-        self._verified_page_source = None
+        self._verified_source = None
 
     def write_tool_output(self, run_id, call_id, content):
         safe_content = str(self.redactor(str(content)))
@@ -139,22 +139,28 @@ class ArtifactStore:
         stat = content_path.stat()
         version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         key = (str(content_path), version, descriptor.get("sha256"), descriptor.get("size_bytes"))
-        cached = self._verified_page_source
-        if cached is not None and cached[0] == key:
-            return descriptor, cached[1]
-        # Only reuse already-verified bytes, never read new page bytes under an
-        # old digest. A changed file or descriptor takes the full validation path.
-        self._verified_page_source = None
-        data = content_path.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
+        if self._verified_source == key:
+            return descriptor, content_path, version
+        # Verify immutable content without retaining the complete artifact in
+        # memory. A changed file or descriptor invalidates this small metadata
+        # cache and takes the full streaming validation path.
+        self._verified_source = None
+        digest = hashlib.sha256()
+        size = 0
+        with content_path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        digest = digest.hexdigest()
         if digest != descriptor.get("sha256"):
             raise ValueError("artifact digest mismatch")
-        if len(data) != int(descriptor.get("size_bytes", -1)):
+        if size != int(descriptor.get("size_bytes", -1)):
             raise ValueError("artifact size mismatch")
         after = content_path.stat()
         if version == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-            self._verified_page_source = (key, data)
-        return descriptor, data
+            self._verified_source = key
+            return descriptor, content_path, version
+        raise ValueError("artifact changed while it was being verified")
 
     @staticmethod
     def _artifact_path(root, artifact_id, suffix):
@@ -203,26 +209,43 @@ class ArtifactStore:
         return data.decode("utf-8")
 
     def read_slice(self, run_id, artifact_id, offset, max_bytes):
-        descriptor, data = self._read_verified(run_id, artifact_id)
+        descriptor, content_path, version = self._read_verified(run_id, artifact_id)
         offset = int(offset)
         max_bytes = int(max_bytes)
         if max_bytes < 4:
             raise ValueError("artifact page size must be at least 4 bytes for UTF-8")
         max_bytes = min(max_bytes, ARTIFACT_PAGE_MAX_BYTES)
-        if offset < 0 or offset > len(data):
-            raise ValueError(f"artifact offset {offset} is outside output ({len(data)} bytes)")
-        while offset < len(data) and (data[offset] & 0xC0) == 0x80:
+        total_bytes = int(descriptor["size_bytes"])
+        if offset < 0 or offset > total_bytes:
+            raise ValueError(
+                f"artifact offset {offset} is outside output ({total_bytes} bytes)"
+            )
+        with content_path.open("rb") as source:
+            source.seek(offset)
+            page = source.read(max_bytes + 4)
+        while offset < total_bytes and page and (page[0] & 0xC0) == 0x80:
             offset += 1
-        end = min(len(data), offset + max_bytes)
-        while end > offset and end < len(data) and (data[end] & 0xC0) == 0x80:
-            end -= 1
-        content = data[offset:end].decode("utf-8")
+            page = page[1:]
+        end_index = min(len(page), max_bytes)
+        while (
+            end_index > 0
+            and offset + end_index < total_bytes
+            and end_index < len(page)
+            and (page[end_index] & 0xC0) == 0x80
+        ):
+            end_index -= 1
+        end = offset + end_index
+        content = page[:end_index].decode("utf-8")
+        after = content_path.stat()
+        if version != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            self._verified_source = None
+            raise ValueError("artifact changed while its page was being read")
         return {
             "descriptor": descriptor,
             "content": content,
             "offset": offset,
             "end_offset": end,
-            "total_bytes": len(data),
+            "total_bytes": total_bytes,
         }
 
     @staticmethod

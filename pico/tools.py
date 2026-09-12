@@ -26,6 +26,11 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
+from .execution import (
+    ExecutionCancelled,
+    ExecutionContext,
+    ExecutionDeadlineExceeded,
+)
 from .verification import (
     RepositorySnapshotError,
     capture_repository_state,
@@ -39,6 +44,7 @@ SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
 RUN_SHELL_TIMEOUT_SECONDS = 120
+RUN_SHELL_SETTLEMENT_TIMEOUT_SECONDS = 30
 
 
 class ToolArgs(BaseModel):
@@ -534,13 +540,20 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
     )
     snapshot_failure = None
     try:
+        settlement_context = ExecutionContext.standalone(
+            max_seconds=RUN_SHELL_SETTLEMENT_TIMEOUT_SECONDS
+        )
         after = capture_repository_state(
             workspace_root,
             command_runner=command_runner,
-            execution_context=context.execution_context,
+            execution_context=settlement_context,
         )
         changes = repository_state_changes(before, after)
-    except RepositorySnapshotError as exc:
+    except (
+        ExecutionCancelled,
+        ExecutionDeadlineExceeded,
+        RepositorySnapshotError,
+    ) as exc:
         changes = ()
         snapshot_failure = exc
     output = "\n".join(

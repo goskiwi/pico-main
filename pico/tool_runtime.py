@@ -402,17 +402,23 @@ class ToolRuntime:
         }
 
     @staticmethod
+    def _needs_first_preimage(agent, logical, before_state):
+        return bool(
+            agent.run.run_log is not None
+            and before_state != "absent"
+            and logical not in agent.run.evidence.change_set.files
+        )
+
+    @staticmethod
     def _preimage_artifacts(agent, call, paths, states, effect_scope):
-        if (
-            effect_scope != "workspace"
-            or agent.run.run_log is None
-        ):
+        if effect_scope != "workspace":
             return {}
         artifacts = {}
         for logical, path in paths:
             before_state = states.get(logical, "absent")
-            if before_state == "absent":
-                artifacts[logical] = ""
+            if not ToolRuntime._needs_first_preimage(
+                agent, logical, before_state
+            ):
                 continue
             if not path.is_file():
                 raise ValueError(f"workspace preimage is not a file: {logical}")
@@ -658,10 +664,12 @@ class ToolRuntime:
                         call, "workspace_drift", f"workspace changed outside this Run; read_file before continuing: {logical}",
                         "retry_after_change", structured={"drift": list(drift)},
                     )
-                descriptor = agent.dependencies.artifacts.write_workspace_preimage(
-                    _run_id(agent), call.call_id, logical, BytesIO(raw),
-                )
-                preimages = {logical: descriptor["artifact_id"]}
+                preimages = {}
+                if self._needs_first_preimage(agent, logical, revision):
+                    descriptor = agent.dependencies.artifacts.write_workspace_preimage(
+                        _run_id(agent), call.call_id, logical, BytesIO(raw),
+                    )
+                    preimages[logical] = descriptor["artifact_id"]
                 context.execution_context.check_active()
             except ToolFailureError as exc:
                 return self._rejected(call, exc.failure.code, exc.failure.detail,
@@ -675,7 +683,7 @@ class ToolRuntime:
             # append a speculative rejection over an ambiguous durable write.
             self._record_tool_started(agent, call, plan=plan, potential_effects=[{
                 "path": logical, "before_state": revision,
-                "before_artifact_id": descriptor["artifact_id"],
+                "before_artifact_id": preimages.get(logical, ""),
             }])
             context.execution_plan = plan
             bound = {
