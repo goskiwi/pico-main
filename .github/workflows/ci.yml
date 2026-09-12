@@ -22,12 +22,6 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - run: uv run ruff check pico applications tests scripts
-      - run: uv run python -m compileall -q pico applications tests scripts
-      - run: uv run pytest -q
-      - name: Run retained Runtime walkthroughs
-        if: matrix.python-version == '3.12'
-        run: |
-          for script in scripts/day[1-7]_*.py; do
-            uv run python "$script"
-          done
+      - run: uv run ruff check pico applications tests benchmarks
+      - run: uv run python -m compileall -q pico applications tests benchmarks
+      - run: uv run python -m unittest discover -s tests -v
