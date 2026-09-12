@@ -14,7 +14,7 @@ from openai import (
 )
 
 from ..contracts import ModelAction, ToolCall
-from ..execution import ExecutionContext
+from ..execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 CONTEXT_OVERFLOW_CODES = {
@@ -182,23 +182,45 @@ class ParsedTurn:
 
     @property
     def accepted(self):
-        return self.action.kind != "invalid"
+        return self.action.kind in {"tool", "final"}
 
     @classmethod
-    def invalid(cls, message, usage=None):
-        return cls(ModelAction.invalid(message), usage=dict(usage or {}))
+    def failed(cls, kind, message, usage=None):
+        factory = {
+            "truncated": ModelAction.truncated,
+            "service_failed": ModelAction.service_failed,
+            "protocol_error": ModelAction.protocol_error,
+        }[kind]
+        return cls(factory(message), usage=dict(usage or {}))
 
 
 def _parse_turn(data, action_tools):
     usage = _usage(data)
-    if data.get("status") != "completed":
+    status = data.get("status")
+    if status == "incomplete":
         reason = (data.get("incomplete_details") or {}).get("reason", "")
-        return ParsedTurn.invalid(
-            f"Provider response was not completed: {reason or data.get('status')}", usage,
+        return ParsedTurn.failed(
+            "truncated",
+            f"Provider response was truncated: {reason or 'incomplete'}",
+            usage,
+        )
+    if status == "failed":
+        error = data.get("error") or {}
+        detail = error.get("message") if isinstance(error, dict) else error
+        return ParsedTurn.failed(
+            "service_failed",
+            f"Provider response failed: {detail or 'service failure'}",
+            usage,
+        )
+    if status != "completed":
+        return ParsedTurn.failed(
+            "protocol_error", f"Provider returned unknown status: {status}", usage
         )
     output = data.get("output")
     if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
-        return ParsedTurn.invalid("provider returned malformed response output", usage)
+        return ParsedTurn.failed(
+            "protocol_error", "provider returned malformed response output", usage
+        )
     declared = {str(tool["name"]) for tool in action_tools}
     replay = []
     calls = []
@@ -206,25 +228,31 @@ def _parse_turn(data, action_tools):
         if item.get("type") == "function_call":
             call, error = _tool_call(item)
             if error:
-                return ParsedTurn.invalid(error, usage)
+                return ParsedTurn.failed("protocol_error", error, usage)
             if call.name not in declared:
-                return ParsedTurn.invalid(f"unknown function call: {call.name}", usage)
+                return ParsedTurn.failed(
+                    "protocol_error", f"unknown function call: {call.name}", usage
+                )
             calls.append(call)
             replay.append(_function_call_item(call))
             continue
         normalized, error = _replay_item(item)
         if error:
-            return ParsedTurn.invalid(error, usage)
+            return ParsedTurn.failed("protocol_error", error, usage)
         replay.append(normalized)
     if len(calls) != 1:
-        return ParsedTurn.invalid(
-            "Pico requires exactly one function call per model response", usage,
+        return ParsedTurn.failed(
+            "protocol_error",
+            "Pico requires exactly one function call per model response",
+            usage,
         )
     call = calls[0]
     if call.name == "submit_final":
         answer = call.args.get("answer")
         if set(call.args) != {"answer"} or not isinstance(answer, str) or not answer.strip():
-            return ParsedTurn.invalid("submit_final requires one non-empty answer", usage)
+            return ParsedTurn.failed(
+                "protocol_error", "submit_final requires one non-empty answer", usage
+            )
         action = ModelAction.final(answer)
     else:
         action = ModelAction.tool(call.name, call.args, call_id=call.call_id)
@@ -355,13 +383,19 @@ class OpenAICompatibleModelClient:
                         action_tools, execution_context: ExecutionContext):
         if self._pending_call_id:
             raise RuntimeError("pending function call has no recorded output")
-        turn = _parse_turn(
-            self._request(
+        try:
+            response = self._request(
                 self._payload(input_text, max_new_tokens, instructions, action_tools),
                 execution_context,
-            ),
-            action_tools,
-        )
+            )
+        except ProviderContextOverflow:
+            raise
+        except (ExecutionCancelled, ExecutionDeadlineExceeded):
+            raise
+        except RuntimeError as exc:
+            turn = ParsedTurn.failed("service_failed", str(exc))
+        else:
+            turn = _parse_turn(response, action_tools)
         self.last_completion_metadata = dict(turn.usage)
         self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:

@@ -110,11 +110,11 @@ def render_runtime_feedback(feedback):
     return "\n\n".join(parts)
 
 
-def render_runtime_policy(contract, mode, paths, verify_changes):
+def render_runtime_policy(contract, mode, paths, verification_required):
     if contract is None:
         policy = {
             "mode": "unavailable",
-            "verify_changes": False,
+            "verification_required": False,
             "write_scope": {"mode": "unavailable"},
         }
     else:
@@ -126,7 +126,7 @@ def render_runtime_policy(contract, mode, paths, verify_changes):
             write_scope = {"mode": "paths", "paths": list(paths)}
         policy = {
             "mode": mode,
-            "verify_changes": bool(verify_changes),
+            "verification_required": bool(verification_required),
             "write_scope": write_scope,
         }
     return "runtime_policy:\n" + json.dumps(
@@ -371,7 +371,7 @@ class PromptBuilder:
                 tool_surface.allowed_write_paths,
                 bool(
                     verification_policy
-                    and verification_policy.verify_net_changes
+                    and verification_policy.required
                 ),
             ),
             "repository_instructions": render_repository_instructions(

@@ -31,7 +31,6 @@ class AgentLoopState:
     overflow_recovery_attempted: bool = False
     last_request_input_tokens: int = 0
     invalid_output_count: int = 0
-    completion_block_count: int = 0
     starting_model_request_count: int = 0
 
 
@@ -210,8 +209,10 @@ class RunLifecycle:
         return TaskContract(
             goal=goal,
             write_scope=WriteScope.from_policy(config.mode, config.allowed_write_paths),
-            verify_changes=(
+            verification_required=(
                 config.mode != "ask" and bool(config.verification_command)
+                if config.verification_required is None
+                else config.verification_required
             ),
         )
 
@@ -300,15 +301,15 @@ class RunLifecycle:
 
     @staticmethod
     def _stopped_result(stop):
-        if stop == "invalid_output_limit":
+        if stop == "model_failure_limit":
             final = (
                 "Stopped after too many invalid model outputs without a "
                 "valid tool call or final answer."
             )
-            stop_reason = "invalid_output_limit"
-        elif stop == "completion_block_limit":
-            final = "Stopped after repeated rejected completion attempts."
-            stop_reason = "completion_block_limit"
+            stop_reason = "model_failure_limit"
+        elif stop == "repeated_failure":
+            final = "Stopped after the same failure repeated without relevant progress."
+            stop_reason = "repeated_failure"
         elif stop == "agent_turn_limit":
             final = "Stopped after reaching the Agent turn limit."
             stop_reason = "agent_turn_limit"

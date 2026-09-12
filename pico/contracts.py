@@ -8,7 +8,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-ACTION_KINDS = frozenset({"tool", "final", "invalid"})
+ACTION_KINDS = frozenset(
+    {"tool", "final", "truncated", "service_failed", "protocol_error"}
+)
 TOOL_STATUSES = frozenset({"success", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
 SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
@@ -127,8 +129,16 @@ class ModelAction:
         return cls("final", content=content)
 
     @classmethod
-    def invalid(cls, content: str):
-        return cls("invalid", content=str(content))
+    def truncated(cls, content: str):
+        return cls("truncated", content=str(content))
+
+    @classmethod
+    def service_failed(cls, content: str):
+        return cls("service_failed", content=str(content))
+
+    @classmethod
+    def protocol_error(cls, content: str):
+        return cls("protocol_error", content=str(content))
 
 
 @dataclass(frozen=True)

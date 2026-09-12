@@ -38,14 +38,14 @@ class ResolvedVerificationPolicy:
     """One completion attempt's immutable verification requirement and command."""
 
     command: str
-    verify_net_changes: bool
+    required: bool
 
     @classmethod
     def resolve(cls, contract: TaskContract, command):
         command = str(command or "").strip()
         return cls(
             command=command,
-            verify_net_changes=bool(contract.verify_changes or command),
+            required=contract.verification_required,
         )
 
 

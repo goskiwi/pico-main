@@ -116,6 +116,9 @@ class RunProjection:
     pending_tool: PendingToolCall = field(default_factory=PendingToolCall)
     runtime_feedback: RuntimeFeedback | None = None
     final_diff: FinalDiff | None = None
+    failure_key: tuple[str, str, str, str] = ()
+    failure_count: int = 0
+    failure_warned: bool = False
     last_sequence: int = 0
 
     def check_event(self, event):
@@ -186,6 +189,21 @@ class RunProjection:
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
         self.pending_tool.apply_event(event)
+        if event.kind == "failure_observed":
+            key = tuple(
+                str(event.payload[name])
+                for name in ("category", "code", "tool_name", "target")
+            )
+            if key == self.failure_key:
+                self.failure_count += 1
+            else:
+                self.failure_key = key
+                self.failure_count = 1
+            self.failure_warned = self.failure_count >= 3
+        elif self._event_makes_progress(event):
+            self.failure_key = ()
+            self.failure_count = 0
+            self.failure_warned = False
         if event.kind in {"tool_exchange", "tool_intent"}:
             self.runtime_feedback = None
         elif event.kind == "model_instruction":
@@ -204,6 +222,22 @@ class RunProjection:
             self.final_diff = FinalDiff.from_dict(raw) if raw is not None else None
         self.last_sequence = event.sequence
         return self
+
+    @staticmethod
+    def _event_makes_progress(event):
+        if event.kind == "user_guidance":
+            return True
+        if event.kind == "verification_result":
+            return event.payload.get("status") == "passed"
+        if event.kind == "provider_session_reset":
+            return event.payload.get("reason") == "repository_instructions_changed"
+        if event.kind not in {"tool_exchange", "tool_settlement"}:
+            return False
+        outcome = event.payload["outcome"]
+        return bool(
+            outcome.get("status") == "success"
+            or outcome.get("side_effect_state") != "none"
+        )
 
     def summary(self):
         if self.contract is None:
@@ -235,6 +269,11 @@ class RunProjection:
             ),
             "pending_call_id": self.pending_call_id,
             "final_diff": self.final_diff.to_dict() if self.final_diff else None,
+            "failure_streak": {
+                "key": list(self.failure_key),
+                "count": self.failure_count,
+                "warned": self.failure_warned,
+            },
             "last_sequence": self.last_sequence,
         }
 

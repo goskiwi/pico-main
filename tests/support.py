@@ -79,8 +79,6 @@ class ScriptedModel:
         )
 
     def record_action_results(self, results):
-        if not self._pending_call_id:
-            raise RuntimeError("scripted result has no pending call")
         self.results.extend(str(item) for item in results)
         self._pending_call_id = ""
 
@@ -93,7 +91,14 @@ def verification_command(path, expected):
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
 
 
-def build_agent(root, actions, *, verification="", before_action=None):
+def build_agent(
+    root,
+    actions,
+    *,
+    verification="",
+    verification_required=None,
+    before_action=None,
+):
     root = Path(root)
     workspace = Workspace.build(root, repo_root_override=root)
     store = SessionStore(root / ".pico" / "sessions")
@@ -105,6 +110,7 @@ def build_agent(root, actions, *, verification="", before_action=None):
         config=PicoConfig(
             mode="auto",
             verification_command=verification,
+            verification_required=verification_required,
             provider_context_limit_tokens=32_000,
             compaction_reserve_tokens=4_000,
             compaction_keep_recent_tokens=2_000,

@@ -68,8 +68,8 @@ class AgentLoop:
                 return LoopDirective("stop", stop)
             if turn.action.kind == "tool":
                 return self._handle_tool_turn(loop_state, turn)
-            if turn.action.kind == "invalid":
-                return self._handle_invalid_output(loop_state, turn)
+            if turn.action.kind not in {"tool", "final"}:
+                return self._handle_model_failure(loop_state, turn)
             return self._handle_final_action(loop_state, turn)
         except ProviderContextOverflow:
             if self._recover_context_overflow(loop_state):
@@ -237,7 +237,6 @@ class AgentLoop:
         if call is None:
             raise RuntimeError("tool turn is missing its tool call")
         loop_state.invalid_output_count = 0
-        loop_state.completion_block_count = 0
         if agent.prompt.refresh_repository_instructions():
             agent.tools._rejected(
                 call, "repository_instructions_changed",
@@ -253,7 +252,21 @@ class AgentLoop:
             })
             return LoopDirective("continue")
         outcome = agent.tools.execute_call(call, turn.tool_surface)
-
+        if outcome.status != "success":
+            warning, stop = self._observe_failure(
+                "tool",
+                outcome.failure.code if outcome.failure else outcome.status,
+                tool_name=outcome.tool_name,
+                target=str(call.args.get("path", call.args.get("command", ""))),
+            )
+            if stop:
+                return LoopDirective("stop", "repeated_failure")
+            if warning:
+                agent.append_model_instruction(warning)
+                agent.model_client.reset_action_session()
+                loop_state.prompt_snapshot = None
+                loop_state.provider_context_tokens = None
+                return LoopDirective("continue")
         self._continue_provider(
             loop_state,
             turn,
@@ -261,17 +274,27 @@ class AgentLoop:
         )
         return LoopDirective("continue")
 
-    def _handle_invalid_output(self, loop_state, turn):
+    def _handle_model_failure(self, loop_state, turn):
         loop_state.invalid_output_count += 1
-        self.agent.append_model_instruction(
-            turn.action.content,
+        warning, stop = self._observe_failure(
+            "model",
+            turn.action.kind,
         )
-        self._continue_provider(loop_state, turn, (turn.action.content,))
+        instruction = turn.action.content
+        if warning:
+            instruction = instruction + "\n\n" + warning
+        self.agent.append_model_instruction(
+            instruction,
+        )
+        if stop:
+            return LoopDirective("stop", "repeated_failure")
+        self._continue_provider(loop_state, turn, (instruction,))
         if loop_state.invalid_output_count >= 8:
-            return LoopDirective("stop", "invalid_output_limit")
+            return LoopDirective("stop", "model_failure_limit")
         return LoopDirective("continue")
 
     def _handle_final_action(self, loop_state, turn):
+        loop_state.invalid_output_count = 0
         final = turn.action.content.strip()
         verification_policy = self.completion.resolve_verification_policy()
         assessment = self.completion.assess(final, verification_policy)
@@ -300,20 +323,42 @@ class AgentLoop:
         instruction,
         evidence,
     ):
-        self.agent.append_model_instruction(
-            instruction,
-            evidence=evidence,
+        warning, stop = self._observe_failure(
+            "completion",
+            status,
+            target=self.completion.resolve_verification_policy().command,
         )
+        if warning:
+            instruction = instruction + "\n\n" + warning
+        self.agent.append_model_instruction(instruction, evidence=evidence)
         self.agent.emit_event(
             "completion_blocked",
             {"status": status},
         )
-        loop_state.completion_block_count += 1
-        if loop_state.completion_block_count >= 3:
-            return LoopDirective("stop", "completion_block_limit")
+        if stop:
+            return LoopDirective("stop", "repeated_failure")
         self._continue_provider(
             loop_state,
             turn,
             (render_runtime_feedback(self.agent.run.projection.runtime_feedback),),
         )
         return LoopDirective("continue")
+
+    def _observe_failure(self, category, code, *, tool_name="", target=""):
+        self.agent.emit_event(
+            "failure_observed",
+            {
+                "category": str(category),
+                "code": str(code),
+                "tool_name": str(tool_name),
+                "target": str(target),
+            },
+        )
+        count = self.agent.run.projection.failure_count
+        warning = ""
+        if count == 3:
+            warning = (
+                "The same failure has occurred three times without relevant "
+                "progress. Change the approach or the related state before retrying."
+            )
+        return warning, count >= 4

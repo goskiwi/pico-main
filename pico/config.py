@@ -37,6 +37,7 @@ class PicoConfig:
     compaction_keep_recent_tokens: int = 20000
     summary_max_output_tokens: int = 16000
     verification_command: str = ""
+    verification_required: bool | None = None
     allowed_write_paths: tuple[str, ...] | None = None
 
     def __post_init__(self):
@@ -44,6 +45,10 @@ class PicoConfig:
             raise ValueError("mode must be ask, code, or auto")
         if not isinstance(self.verification_command, str):
             raise TypeError("verification_command must be a string")
+        if self.verification_required is not None and not isinstance(
+            self.verification_required, bool
+        ):
+            raise TypeError("verification_required must be a boolean or None")
         values = {
             "max_agent_turns": int(self.max_agent_turns),
             "max_new_tokens": int(self.max_new_tokens),
@@ -72,6 +77,7 @@ class PicoConfig:
             **values,
             "allowed_tools": _allowed_tools(self.allowed_tools),
             "verification_command": self.verification_command,
+            "verification_required": self.verification_required,
             "allowed_write_paths": _allowed_write_paths(self.allowed_write_paths),
         }
         for name, value in normalized.items():

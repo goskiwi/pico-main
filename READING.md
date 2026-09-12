@@ -21,7 +21,7 @@
 | 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 日志先记录调用和 started；没有可靠 result 时检查当前文件，不自动重放 |
 | 模型说完成可靠吗 | agent_loop.py 的 _handle_final_action；completion_controller.py；verification.py | 最终回答与完成判定分离，验收失败反馈继续修复 |
 
-verify 提供中途验收能力，由模型决定调用时机；最终验收是 Runtime 的完成条件。不要把中途入口说成自动测试调度。
+verify 提供中途验收能力，由模型决定调用时机；TaskContract 独立决定最终验收是否为完成条件，不从净修改反推。不要把中途入口说成自动测试调度。
 
 ## 第三遍：状态只回答当前问题
 

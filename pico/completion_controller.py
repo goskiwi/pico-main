@@ -192,8 +192,7 @@ class CompletionController:
     def _verification_required(self, policy: ResolvedVerificationPolicy):
         runtime = self.runtime
         required = bool(
-            policy.verify_net_changes
-            and runtime.run.evidence.has_net_workspace_change
+            policy.required
         )
         # A failed tool is historical fact. Verify its current tracked effects,
         # including changes later reverted, without requiring another mutation.

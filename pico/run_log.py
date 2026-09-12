@@ -20,6 +20,7 @@ RUN_EVENT_KINDS = frozenset(
         "model_requested",
         "turn_metrics",
         "completion_blocked",
+        "failure_observed",
         "tool_exchange",
         "tool_intent",
         "tool_settlement",
@@ -69,6 +70,18 @@ def _validate_completion_blocked_payload(kind, payload):
     _exact_payload(kind, payload, {"status"})
     if not isinstance(payload["status"], str) or not payload["status"].strip():
         raise ValueError("completion_blocked requires a status")
+
+
+def _validate_failure_observed_payload(kind, payload):
+    _exact_payload(kind, payload, {"category", "code", "tool_name", "target"})
+    if not isinstance(payload["category"], str) or not payload["category"]:
+        raise ValueError("failure_observed requires a category")
+    if not isinstance(payload["code"], str) or not payload["code"]:
+        raise ValueError("failure_observed requires a code")
+    if not isinstance(payload["tool_name"], str) or not isinstance(
+        payload["target"], str
+    ):
+        raise TypeError("failure_observed identity fields must be text")
 
 
 def _validate_user_payload(kind, payload):
@@ -231,6 +244,7 @@ _PAYLOAD_VALIDATORS = {
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_model_instruction_payload,
     "completion_blocked": _validate_completion_blocked_payload,
+    "failure_observed": _validate_failure_observed_payload,
     "tool_exchange": _validate_tool_exchange_payload,
     "tool_intent": _validate_tool_intent_payload,
     "tool_settlement": _validate_tool_settlement_payload,
