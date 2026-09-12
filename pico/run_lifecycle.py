@@ -37,7 +37,7 @@ class AgentLoopState:
 def _state_from_snapshot(runtime: Pico, run_log):
     projection = run_log.projection
     session_id = str(runtime.session.id)
-    if not run_log.events:
+    if run_log.projection.last_sequence < 1:
         raise ValueError("active Run Log is missing or empty")
     if projection.run_id != run_log.run_id or projection.session_id != session_id:
         raise ValueError("active Run does not belong to this Session")
@@ -96,16 +96,12 @@ def reload_current_run(runtime: Pico):
 
 def _reload_if_snapshot_is_stale(runtime: Pico):
     run = runtime.run
-    if run.run_log is None or not run.run_log.events:
+    if run.run_log is None or run.projection.last_sequence < 1:
         return run
     run_id = run.run_log.run_id
-    last_event = run.run_log.events[-1]
     projection_sequence = run.projection.last_sequence
     durable_sequence = runtime.dependencies.run_store.last_sequence(run_id)
-    if (
-        projection_sequence != last_event.sequence
-        or projection_sequence != durable_sequence
-    ):
+    if projection_sequence != durable_sequence:
         return reload_current_run(runtime)
     return run
 

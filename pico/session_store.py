@@ -142,7 +142,7 @@ class SessionStore:
                 continue
             candidates.append(
                 (
-                    run_log.events[-1].timestamp,
+                    run_log.projection.last_timestamp,
                     run_log.run_id,
                     session.id,
                     session,

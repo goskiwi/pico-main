@@ -59,6 +59,10 @@ Session 不保存完整对话：
 
 一个 Session 可以连续运行多个任务；`active_run_id` 只在任务未完成时指向需要恢复的 Run。
 
+长 Run 在没有 Pending Intent 的稳定边界保存可重建 Checkpoint。恢复优先读取
+Projection、有效 History 和 Checkpoint 后的 Event 尾部；Checkpoint 缺失或损坏时从
+当前格式的完整 RunLog 重建。旧 Run 格式不迁移、不兼容。
+
 ## 上下文与压缩
 
 Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔记：

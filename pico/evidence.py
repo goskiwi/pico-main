@@ -51,6 +51,31 @@ class FileChange:
             "external_change_observed": self.external_change_observed,
         }
 
+    @classmethod
+    def from_dict(cls, value):
+        expected = {
+            "path",
+            "first_before_state",
+            "first_before_artifact_id",
+            "current_after_state",
+            "last_mutation_sequence",
+            "net_changed",
+            "external_change_observed",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid checkpoint FileChange")
+        change = cls(
+            path=str(value["path"]),
+            first_before_state=str(value["first_before_state"]),
+            first_before_artifact_id=str(value["first_before_artifact_id"]),
+            current_after_state=str(value["current_after_state"]),
+            last_mutation_sequence=int(value["last_mutation_sequence"]),
+            external_change_observed=bool(value["external_change_observed"]),
+        )
+        if bool(value["net_changed"]) != change.net_changed:
+            raise ValueError("checkpoint FileChange net state is inconsistent")
+        return change
+
 @dataclass
 class RunChangeSet:
     files: dict[str, FileChange] = field(default_factory=dict)
@@ -110,6 +135,28 @@ class RunChangeSet:
                 path: self.files[path].to_dict() for path in sorted(self.files)
             },
         }
+
+    @classmethod
+    def from_dict(cls, value):
+        if not isinstance(value, dict) or set(value) != {
+            "touched_paths",
+            "net_changed_paths",
+            "files",
+        }:
+            raise ValueError("invalid checkpoint RunChangeSet")
+        if not isinstance(value["files"], dict):
+            raise TypeError("checkpoint RunChangeSet files must be an object")
+        result = cls(
+            files={
+                str(path): FileChange.from_dict(change)
+                for path, change in value["files"].items()
+            }
+        )
+        if list(value["touched_paths"]) != list(result.touched_paths):
+            raise ValueError("checkpoint touched paths are inconsistent")
+        if list(value["net_changed_paths"]) != list(result.net_changed_paths):
+            raise ValueError("checkpoint changed paths are inconsistent")
+        return result
 
     def workspace_drift(self, root):
         root = Path(root).resolve()
@@ -323,3 +370,58 @@ class RunEvidence:
             "latest_verification": dict(self.latest_verification) if self.latest_verification else None,
             "last_workspace_mutation_sequence": self.last_workspace_mutation_sequence,
         }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {
+            "change_set",
+            "uncertain_effects",
+            "latest_verification",
+            "last_workspace_mutation_sequence",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid checkpoint RunEvidence")
+        effects = value["uncertain_effects"]
+        if not isinstance(effects, list):
+            raise TypeError("checkpoint uncertain effects must be a list")
+        normalized = []
+        for effect in effects:
+            expected_effect = {
+                "tool_call_id",
+                "tool",
+                "status",
+                "execution_state",
+                "side_effect_state",
+                "affected_paths",
+                "effect_scope",
+                "event_sequence",
+                "path_transitions",
+            }
+            if not isinstance(effect, dict) or set(effect) != expected_effect:
+                raise ValueError("invalid checkpoint uncertain effect")
+            if not isinstance(effect["affected_paths"], list) or not isinstance(
+                effect["path_transitions"], list
+            ):
+                raise TypeError("checkpoint uncertain effect collections are invalid")
+            normalized.append(
+                {
+                    **effect,
+                    "affected_paths": tuple(effect.get("affected_paths", ())),
+                    "path_transitions": tuple(
+                        dict(item) for item in effect.get("path_transitions", ())
+                    ),
+                }
+            )
+        verification = value["latest_verification"]
+        if verification is not None and not isinstance(verification, dict):
+            raise TypeError("checkpoint verification must be an object or null")
+        return cls(
+            change_set=RunChangeSet.from_dict(value["change_set"]),
+            uncertain_effects=normalized,
+            latest_verification=(
+                dict(verification) if verification is not None else None
+            ),
+            last_workspace_mutation_sequence=int(
+                value["last_workspace_mutation_sequence"]
+            ),
+        )

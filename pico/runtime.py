@@ -92,7 +92,7 @@ class Pico:
         if evidence:
             descriptor = self.dependencies.artifacts.write_tool_output(
                 self.run.projection.run_id,
-                f"runtime_instruction_{len(run_log.events) + 1}",
+                f"runtime_instruction_{run_log.projection.last_sequence + 1}",
                 evidence,
             )
             evidence = (

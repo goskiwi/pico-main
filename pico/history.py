@@ -29,12 +29,27 @@ class _ProjectedFact:
 
 
 class RunHistory:
-    def __init__(self, events, *, projected_instruction_id):
+    def __init__(
+        self,
+        events,
+        *,
+        projected_instruction_id,
+        events_are_active=False,
+        latest_user_guidance_event=None,
+    ):
         self._events = tuple(events)
         self._projected_instruction_id = projected_instruction_id
+        self._events_are_active = bool(events_are_active)
+        self._latest_user_guidance_event = latest_user_guidance_event
 
     def latest_user_guidance(self):
-        entry = next(
+        entry = self.latest_user_guidance_event()
+        return entry.content if entry is not None else ""
+
+    def latest_user_guidance_event(self):
+        if self._latest_user_guidance_event is not None:
+            return self._latest_user_guidance_event
+        return next(
             (
                 candidate
                 for candidate in reversed(self._events)
@@ -42,9 +57,10 @@ class RunHistory:
             ),
             None,
         )
-        return entry.content if entry is not None else ""
 
     def context_events(self):
+        if self._events_are_active:
+            return self._events
         return tuple(
             entry
             for entry in self._events
@@ -52,6 +68,8 @@ class RunHistory:
         )
 
     def active_events(self):
+        if self._events_are_active:
+            return self._events
         active = []
         for entry in self.context_events():
             if entry.kind != "compaction":
@@ -219,7 +237,8 @@ class RunHistory:
     def plan_compaction(self, *, retain_tokens, max_history_tokens,
                         history_token_counter, summary_builder):
         active = list(self.active_events())
-        latest_guidance_id = self._latest_user_guidance_id(self._events)
+        latest_guidance = self.latest_user_guidance_event()
+        latest_guidance_id = latest_guidance.event_id if latest_guidance else ""
         pending_instruction_id = self._projected_instruction_id
         units = self._history_units(active, allow_incomplete=True)
         if units is None:
@@ -292,7 +311,11 @@ class RunHistory:
         active = self.active_events()
         units = self._projection_units(
             active,
-            projected_guidance_id=self._latest_user_guidance_id(self._events),
+            projected_guidance_id=(
+                self.latest_user_guidance_event().event_id
+                if self.latest_user_guidance_event() is not None
+                else ""
+            ),
             projected_instruction_id=self._projected_instruction_id,
             allow_incomplete=True,
         )

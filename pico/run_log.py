@@ -396,6 +396,8 @@ class RunLog:
         self.session_id = str(session_id)
         self.store = store
         self._events = []
+        self._history_events = []
+        self._latest_user_guidance_event = None
         self.projection = RunProjection()
 
 
@@ -410,21 +412,68 @@ class RunLog:
         log = cls(first.run_id, first.session_id, store)
         log._events = list(events)
         log.projection = projection
+        history = RunHistory(events, projected_instruction_id="")
+        log._history_events = list(history.active_events())
+        log._latest_user_guidance_event = history.latest_user_guidance_event()
+        return log
+
+    @classmethod
+    def _from_checkpoint(
+        cls,
+        *,
+        projection,
+        history_events,
+        latest_user_guidance_event,
+        tail_events,
+        store,
+    ):
+        log = cls(projection.run_id, projection.session_id, store)
+        log.projection = projection
+        log._history_events = list(history_events)
+        log._latest_user_guidance_event = latest_user_guidance_event
+        for event in tail_events:
+            log.projection.apply_event(event)
+            log._events.append(event)
+            log._apply_history_event(event)
         return log
 
     @property
     def events(self):
         return tuple(self._events)
 
+    @property
+    def effective_history_events(self):
+        return tuple(self._history_events)
+
+    @property
+    def latest_user_guidance_event(self):
+        return self._latest_user_guidance_event
+
     def history(self):
         feedback = self.projection.runtime_feedback
         return RunHistory(
-            self.events,
+            self._history_events,
             projected_instruction_id=feedback.event_id if feedback else "",
+            events_are_active=True,
+            latest_user_guidance_event=self._latest_user_guidance_event,
         )
 
+    def _apply_history_event(self, entry):
+        if entry.kind == "user_guidance":
+            self._latest_user_guidance_event = entry
+        if entry.kind not in CONTEXT_KINDS:
+            return
+        if entry.kind != "compaction":
+            self._history_events.append(entry)
+            return
+        covered = entry.covered_event_ids
+        prefix = tuple(item.event_id for item in self._history_events[: len(covered)])
+        if not covered or covered != prefix:
+            raise ValueError("compaction coverage must match effective History prefix")
+        self._history_events = [entry, *self._history_events[len(covered) :]]
+
     def append(self, kind, payload=None):
-        sequence = len(self._events) + 1
+        sequence = self.projection.last_sequence + 1
         entry = RunEvent(
             event_id=f"{self.run_id}:event:{sequence:06d}",
             sequence=sequence,
@@ -436,11 +485,13 @@ class RunLog:
         )
         candidate = deepcopy(self.projection)
         candidate.apply_event(entry)
-        self.store._append_event(entry)
+        event_log_offset = self.store._append_event(entry)
         self._events.append(entry)
+        self._apply_history_event(entry)
         self.projection.__dict__.update(candidate.__dict__)
         if self.store.trace is not None:
             self.store.trace(entry)
+        self.store.maybe_checkpoint(self, entry, event_log_offset)
         return entry
 
     def pending_tool_intent(self):

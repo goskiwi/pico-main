@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计阶段，暂不修改代码。
+- 状态：已实现；性能结果见 `docs/performance-baseline.md`。
 - 目标：解决超长 Run 在进程重启后需要完整读取和重放 `events.jsonl`，导致恢复时间与内存占用随事件数量线性增长的问题。
 - 约束：完整 Event Log 继续作为唯一事实源；Checkpoint 只作为可丢弃、可重建的恢复加速缓存。
 
@@ -83,7 +83,6 @@ Checkpoint 缺失、损坏或落后
 
 ```json
 {
-  "schema_version": "run-checkpoint-v1",
   "run_id": "run_001",
   "session_id": "session_001",
   "last_sequence": 10000,
@@ -95,7 +94,7 @@ Checkpoint 缺失、损坏或落后
     "status": "running",
     "stop_reason": "",
     "final_answer": "",
-    "pending_tool": {},
+    "pending": null,
     "runtime_feedback": null,
     "final_diff": null
   },
@@ -172,9 +171,8 @@ pico/run_checkpoint.py
 职责：
 
 ```python
-write_checkpoint(...)
-load_checkpoint(...)
-validate_checkpoint(...)
+write_run_checkpoint(...)
+read_run_checkpoint(...)
 ```
 
 为 `RunProjection` 增加完整的 Checkpoint 序列化与恢复能力，覆盖：
@@ -250,12 +248,11 @@ tool_intent
 
 ### 阶段六：触发策略
 
-建议触发条件：
+触发条件：
 
 ```text
-当前没有 Pending Tool
-并且
-距离上次 Checkpoint 的新增事件数或字节数达到测量阈值
+当前没有 Pending Tool，并且刚完成 Compaction，或距离上次 Checkpoint
+新增 10,000 个事件或 2 MiB 日志。
 ```
 
 自然触发点：
@@ -270,7 +267,7 @@ tool_intent
 
 ```text
 1. 读取 checkpoint.json
-2. 校验 schema_version、run_id、session_id
+2. 校验精确字段、run_id、session_id
 3. 校验 last_sequence 和 event_log_offset 范围
 4. 恢复 Projection 和 History 基线
 5. 从 byte_offset 读取 Event 尾部
