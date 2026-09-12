@@ -10,8 +10,9 @@ CONTEXT_KINDS = frozenset(
     {
         "user_message",
         "user_guidance",
-        "assistant_tool_call",
-        "tool_result",
+        "tool_exchange",
+        "tool_intent",
+        "tool_settlement",
         "model_instruction",
         "assistant_final",
         "compaction",
@@ -44,16 +45,10 @@ class RunHistory:
         return entry.content if entry is not None else ""
 
     def context_events(self):
-        call_ids = {
-            entry.tool_call.call_id
-            for entry in self._events
-            if entry.kind == "assistant_tool_call"
-        }
         return tuple(
             entry
             for entry in self._events
             if entry.kind in CONTEXT_KINDS
-            and (entry.kind != "tool_result" or entry.call_id in call_ids)
         )
 
     def active_events(self):
@@ -80,18 +75,22 @@ class RunHistory:
         events = tuple(events)
         while index < len(events):
             entry = events[index]
-            if entry.kind != "assistant_tool_call":
-                if entry.kind == "tool_result":
-                    raise RuntimeError("Run Log contains an orphan tool result")
+            if entry.kind == "tool_exchange":
+                units.append((entry,))
+                index += 1
+                continue
+            if entry.kind != "tool_intent":
+                if entry.kind == "tool_settlement":
+                    raise RuntimeError("Run Log contains an orphan tool settlement")
                 units.append((entry,))
                 index += 1
                 continue
             if index + 1 >= len(events):
                 if allow_incomplete:
                     return None
-                raise RuntimeError("Run Log contains an incomplete tool transaction")
+                raise RuntimeError("Run Log contains an incomplete tool intent")
             result = events[index + 1]
-            if result.kind != "tool_result" or result.call_id != entry.tool_call.call_id:
+            if result.kind != "tool_settlement" or result.call_id != entry.tool_call.call_id:
                 raise RuntimeError("Run Log tool transaction is not contiguous")
             units.append((entry, result))
             index += 2
@@ -104,6 +103,28 @@ class RunHistory:
             dict(entry.payload),
             (entry.event_id,),
             entry.artifact_id,
+        )
+
+    @classmethod
+    def _tool_facts(cls, call_entry, result_entry):
+        call = call_entry.tool_call
+        outcome = dict(result_entry.payload["outcome"])
+        return (
+            _ProjectedFact(
+                "tool_call",
+                {
+                    "name": call.name,
+                    "args": dict(call.args),
+                    "call_id": call.call_id,
+                },
+                (call_entry.event_id,),
+            ),
+            _ProjectedFact(
+                "tool_result",
+                {"outcome": outcome},
+                (result_entry.event_id,),
+                str(outcome.get("artifact_id", "")),
+            ),
         )
 
     @classmethod
@@ -131,30 +152,24 @@ class RunHistory:
             ):
                 index += 1
                 continue
-            if entry.kind != "assistant_tool_call":
-                if entry.kind == "tool_result":
-                    raise RuntimeError("Run Log contains an orphan tool result")
+            if entry.kind == "tool_exchange":
+                units.append(cls._tool_facts(entry, entry))
+                index += 1
+                continue
+            if entry.kind != "tool_intent":
+                if entry.kind == "tool_settlement":
+                    raise RuntimeError("Run Log contains an orphan tool settlement")
                 units.append((cls._event_fact(entry),))
                 index += 1
                 continue
             if index + 1 >= len(events):
                 if allow_incomplete:
                     return None
-                raise RuntimeError("Run Log contains an incomplete tool transaction")
-            call = entry.tool_call
+                raise RuntimeError("Run Log contains an incomplete tool intent")
             result = events[index + 1]
-            if result.kind != "tool_result" or result.call_id != call.call_id:
+            if result.kind != "tool_settlement" or result.call_id != entry.tool_call.call_id:
                 raise RuntimeError("Run Log tool transaction is not contiguous")
-            call_fact = _ProjectedFact(
-                "tool_call",
-                {
-                    "name": call.name,
-                    "args": dict(call.args),
-                    "call_id": call.call_id,
-                },
-                (entry.event_id,),
-            )
-            units.append((call_fact, cls._event_fact(result)))
+            units.append(cls._tool_facts(entry, result))
             index += 2
         return units
 

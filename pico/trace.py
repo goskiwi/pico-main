@@ -54,16 +54,15 @@ class TracePrinter:
             return (f"[Model {self.turn}] returned · input={payload.get('input_tokens')} "
                     f"cached={cached_text} "
                     f"output={payload.get('output_tokens')} · {elapsed:.2f}s")
-        if kind == "assistant_tool_call":
+        if kind == "tool_intent":
             self.call = event.tool_call
-            return f"[Tool {self.call.call_id}] accepted {self._label(self.call)}"
-        if kind == "tool_started":
-            call = self.call if self.call and self.call.call_id == event.call_id else None
-            label = self._label(call) if call else payload['tool_name']
-            return f"[Tool {event.call_id}] {label} · started"
-        if kind == "tool_result":
+            return f"[Tool {self.call.call_id}] {self._label(self.call)} · started"
+        if kind in {"tool_exchange", "tool_settlement"}:
             outcome = payload['outcome']
-            call = self.call if self.call and self.call.call_id == event.call_id else None
+            event_call = event.tool_call
+            call = event_call or (
+                self.call if self.call and self.call.call_id == event.call_id else None
+            )
             label = self._label(call) if call else outcome['tool_name']
             self.call = None
             return (f"[Tool {event.call_id}] {label} · {outcome['status']} "

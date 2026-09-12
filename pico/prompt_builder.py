@@ -86,7 +86,7 @@ class PromptBuilder:
         paths = []
         log = self.runtime.run.run_log
         for event in log.events if log is not None else ():
-            if event.kind != "assistant_tool_call":
+            if event.kind not in {"tool_exchange", "tool_intent"}:
                 continue
             call = event.tool_call
             if call.name not in {"list_files", "search", "read_file", "write_file", "edit_file"}:

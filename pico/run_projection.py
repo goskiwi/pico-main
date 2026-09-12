@@ -36,7 +36,7 @@ class RunMetrics:
         self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
         if kind == "model_requested":
             self.model_request_count += 1
-        elif kind == "tool_result":
+        elif kind in {"tool_exchange", "tool_settlement"}:
             outcome = dict(payload.get("outcome", {}) or {})
             tool = str(outcome.get("tool_name", ""))
             status = str(outcome.get("status", "unknown"))
@@ -72,53 +72,35 @@ class RunMetrics:
 
 @dataclass
 class PendingToolCall:
-    """Track the one tool transaction that may need recovery."""
+    """Track the one durable effect intent that may need recovery."""
 
     call: ToolCall | None = None
-    started: bool = False
 
     def check_event(self, event):
         kind, payload = event.kind, event.payload
-        if kind == "assistant_tool_call":
+        if kind == "tool_intent":
             if self.call is not None:
-                raise ValueError("Run Log already has a pending tool call")
-        elif kind == "tool_started":
-            if self.call is None:
-                raise ValueError("tool_started must match a pending tool call")
-            if str(payload["tool_call_id"]) != self.call.call_id:
-                raise ValueError("tool_started must match the pending call id")
-            if str(payload["tool_name"]) != self.call.name:
-                raise ValueError(
-                    "tool_started tool name does not match the pending call"
-                )
-            if self.started:
-                raise ValueError("pending tool call already started")
-        elif kind == "tool_result":
+                raise ValueError("Run Log already has a pending tool intent")
+        elif kind == "tool_settlement":
             outcome = ToolOutcome.from_dict(payload["outcome"])
             if self.call is None:
-                raise ValueError("tool_result requires a pending tool call")
+                raise ValueError("tool_settlement requires a pending tool intent")
             if outcome.tool_call_id != self.call.call_id:
-                raise ValueError("tool_result must match the pending call id")
+                raise ValueError("tool_settlement must match the pending call id")
             if outcome.tool_name != self.call.name:
                 raise ValueError(
-                    "tool_result tool name does not match the pending call"
+                    "tool_settlement tool name does not match the pending call"
                 )
-            if outcome.execution_state == "not_started" and self.started:
-                raise ValueError("started tool cannot finish as not_started")
-            if outcome.execution_state != "not_started" and not self.started:
-                raise ValueError("executed tool_result requires tool_started")
-        elif self.call is not None and kind not in {"tool_started", "tool_result"}:
-            raise ValueError("pending tool call must receive a result first")
+            if outcome.execution_state == "not_started":
+                raise ValueError("persisted tool intent cannot settle as not_started")
+        elif self.call is not None:
+            raise ValueError("pending tool intent must receive a settlement first")
 
     def apply_event(self, event):
-        if event.kind == "assistant_tool_call":
+        if event.kind == "tool_intent":
             self.call = event.tool_call
-            self.started = False
-        elif event.kind == "tool_started":
-            self.started = True
-        elif event.kind == "tool_result":
+        elif event.kind == "tool_settlement":
             self.call = None
-            self.started = False
 
 
 @dataclass
@@ -204,7 +186,7 @@ class RunProjection:
         self.evidence.apply_event(event)
         self.metrics.apply_event(event)
         self.pending_tool.apply_event(event)
-        if event.kind == "assistant_tool_call":
+        if event.kind in {"tool_exchange", "tool_intent"}:
             self.runtime_feedback = None
         elif event.kind == "model_instruction":
             self.runtime_feedback = RuntimeFeedback(

@@ -5,16 +5,14 @@ from unittest import mock
 
 from pico import (
     ModelAction,
-    Pico,
     SessionStore,
     TaskContract,
     ToolCall,
     ToolOutcome,
     WriteScope,
 )
-from pico.run_lifecycle import RunLifecycle
-from pico.run_log import RunLog, replay_events
-from tests.support import ScriptedModel, build_agent, verification_command
+from pico.run_log import RunEvent, RunLog, replay_events
+from tests.support import build_agent, verification_command
 
 
 class RuntimeContractTests(unittest.TestCase):
@@ -47,10 +45,68 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertTrue(outcome.final_diff.artifact_id)
             self.assertEqual(len(model.requests), 4)
             self.assertEqual(agent.run.evidence.latest_verification["status"], "passed")
+            tool_events = [
+                (event.kind, event.call_id)
+                for event in agent.run.run_log.events
+                if event.kind in {"tool_exchange", "tool_intent", "tool_settlement"}
+            ]
+            self.assertEqual(
+                tool_events,
+                [
+                    ("tool_exchange", "read"),
+                    ("tool_intent", "edit"),
+                    ("tool_settlement", "edit"),
+                    ("tool_intent", "verify"),
+                    ("tool_settlement", "verify"),
+                ],
+            )
             replayed = replay_events(
                 agent.read_run_events(outcome.run_id), expected_run_id=outcome.run_id
             )
             self.assertEqual(replayed.summary(), agent.run.projection.summary())
+
+    def test_pre_execution_rejection_is_one_exchange(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "subject.txt"
+            target.write_text("alpha\n", encoding="utf-8")
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "edit_file",
+                        {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
+                        call_id="edit_without_read",
+                    ),
+                    ModelAction.final("No edit was made."),
+                ],
+            )
+
+            outcome = agent.ask("Attempt an edit")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(target.read_text(), "alpha\n")
+            tool_events = [
+                event
+                for event in agent.run.run_log.events
+                if event.kind in {"tool_exchange", "tool_intent", "tool_settlement"}
+            ]
+            self.assertEqual([event.kind for event in tool_events], ["tool_exchange"])
+            rejected = ToolOutcome.from_dict(tool_events[0].payload["outcome"])
+            self.assertEqual(rejected.execution_state, "not_started")
+            self.assertEqual(rejected.failure.code, "read_required")
+
+    def test_removed_tool_event_format_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Run Log kind"):
+            RunEvent(
+                event_id="run_old:event:000001",
+                sequence=1,
+                run_id="run_old",
+                session_id="session_old",
+                kind="tool_result",
+                timestamp="2026-09-12T00:00:00+00:00",
+                payload={"outcome": {}},
+            )
 
     def test_failed_verification_is_repaired_before_completion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,28 +143,31 @@ class RuntimeContractTests(unittest.TestCase):
                 agent.run.metrics.verification_counts.get("passed", 0), 1
             )
 
-    def test_call_saved_before_start_is_not_replayed(self):
+    def test_failed_intent_persistence_prevents_the_write(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
-            agent, _model = build_agent(root, [])
-            RunLifecycle(agent).initialize("Inspect subject.txt")
-            call = ToolCall("edit_file", {"path": "subject.txt", "old_text": "alpha", "new_text": "beta"}, "pending")
-            agent.run.run_log.append_tool_call(call)
-            agent.run.execution_context = None
-
-            restored = Pico(
-                ScriptedModel([]),
-                agent.workspace,
-                session=agent.session.store.load(agent.session.id),
-                config=agent.config,
+            target = root / "subject.txt"
+            target.write_text("alpha\n", encoding="utf-8")
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool("read_file", {"path": "subject.txt"}),
+                    ModelAction.tool(
+                        "edit_file",
+                        {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
+                    ),
+                ],
             )
-            outcome, _entry = restored.tools.reconcile_interrupted()
 
-            self.assertEqual(outcome.execution_state, "not_started")
-            self.assertEqual(outcome.side_effect_state, "none")
-            self.assertEqual(outcome.failure.code, "operation_not_started")
-            self.assertEqual((root / "subject.txt").read_text(), "alpha\n")
+            with mock.patch.object(
+                RunLog,
+                "append_tool_intent",
+                side_effect=OSError("simulated intent failure"),
+            ), self.assertRaisesRegex(OSError, "intent failure"):
+                agent.ask("Replace alpha with beta")
+
+            self.assertEqual(target.read_text(), "alpha\n")
+            self.assertIsNone(agent.run.run_log.pending_tool_call())
 
     def test_crash_after_edit_before_result_is_settled_without_replay(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +185,7 @@ class RuntimeContractTests(unittest.TestCase):
                     ),
                 ],
             )
-            real_append = RunLog.append_tool_result
+            real_append = RunLog.append_tool_settlement
 
             def fail_edit_settlement(log, outcome, **kwargs):
                 if outcome.tool_name == "edit_file":
@@ -134,7 +193,7 @@ class RuntimeContractTests(unittest.TestCase):
                 return real_append(log, outcome, **kwargs)
 
             with mock.patch.object(
-                RunLog, "append_tool_result", new=fail_edit_settlement
+                RunLog, "append_tool_settlement", new=fail_edit_settlement
             ), self.assertRaisesRegex(OSError, "settlement failure"):
                 agent.ask("Replace alpha with beta")
 
@@ -157,17 +216,27 @@ class RuntimeContractTests(unittest.TestCase):
             user = log.append_user(
                 TaskContract("Inspect", WriteScope("none"), False)
             )
-            call = ToolCall("read_file", {"path": "subject.txt"}, "read")
-            call_event = log.append_tool_call(call)
-            log.append_tool_started(call, effect_scope="none", potential_effects=[], operation={})
-            log.append_tool_result(
+            call = ToolCall("write_file", {"path": "subject.txt", "content": "alpha"}, "write")
+            call_event = log.append_tool_intent(
+                call,
+                effect_scope="workspace",
+                potential_effects=[
+                    {
+                        "path": "subject.txt",
+                        "before_state": "absent",
+                        "before_artifact_id": "",
+                    }
+                ],
+                operation={},
+            )
+            log.append_tool_settlement(
                 ToolOutcome(
-                    "read",
-                    "read_file",
+                    "write",
+                    "write_file",
                     "success",
                     "completed",
                     "none",
-                    "alpha",
+                    "no change",
                 )
             )
 
@@ -221,7 +290,7 @@ class PreimageLifecycleTests(unittest.TestCase):
             failures = [
                 event.payload["outcome"]["failure"]["code"]
                 for event in agent.run.run_log.events
-                if event.kind == "tool_result"
+                if event.kind in {"tool_exchange", "tool_settlement"}
                 and event.payload["outcome"].get("failure")
             ]
             self.assertIn("revision_conflict", failures)
@@ -251,7 +320,7 @@ class PreimageLifecycleTests(unittest.TestCase):
             failure = next(
                 event.payload["outcome"]["failure"]["code"]
                 for event in agent.run.run_log.events
-                if event.kind == "tool_result"
+                if event.kind in {"tool_exchange", "tool_settlement"}
                 and event.payload["outcome"].get("failure")
             )
             self.assertEqual(failure, "text_not_found")

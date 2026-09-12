@@ -38,7 +38,7 @@ verify 提供中途验收能力，由模型决定调用时机；最终验收是 
 
 文件安全：tool_runtime.py 的 _execute_edit → mutations.py。记住读取版本、审批、前像、原子替换和写后观察。
 
-协议安全：run_projection.py 的 PendingToolCall。只有 call 和 started；调用 ID、结果配对、事件连续性仍校验。
+协议安全：run_projection.py 的 PendingToolCall。只有可能产生副作用的 Intent 才成为 pending；只读和执行前拒绝以单条 Exchange 闭合，Settlement 必须与 Intent 配对。
 
 输出过大：artifacts.py。主循环只拿预览和工件引用，全文按需读取。
 

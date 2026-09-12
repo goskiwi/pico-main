@@ -241,7 +241,6 @@ class AgentLoop:
             raise RuntimeError("tool turn is missing its tool call")
         loop_state.invalid_output_count = 0
         loop_state.completion_block_count = 0
-        agent.run.run_log.append_tool_call(call)
         if agent.prompt.refresh_repository_instructions():
             agent.tools._rejected(
                 call, "repository_instructions_changed",
@@ -256,10 +255,7 @@ class AgentLoop:
                 "reason": "repository_instructions_changed",
             })
             return LoopDirective("continue")
-        outcome = agent.tools.execute_pending_call(
-            call.call_id,
-            turn.tool_surface,
-        )
+        outcome = agent.tools.execute_call(call, turn.tool_surface)
 
         self._continue_provider(
             loop_state,

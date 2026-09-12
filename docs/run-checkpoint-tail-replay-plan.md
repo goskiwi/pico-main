@@ -218,7 +218,7 @@ Checkpoint Projection 基线
 - `RunLog.append()`
 - `RunLog._from_events()`
 - `RunLog.history()`
-- `RunLog.pending_tool_start()`
+- `RunLog.pending_tool_intent()`
 - 所有默认假设 `RunLog.events` 是完整历史的调用方
 
 完整审计和导出仍由 RunStore 提供全量读取接口，不要求活动 RunLog 常驻全部旧事件。
@@ -242,9 +242,8 @@ History Checkpoint
 Checkpoint 边界不能拆开：
 
 ```text
-assistant_tool_call
-→ tool_started
-→ tool_result
+tool_intent
+→ tool_settlement
 ```
 
 因此优先只在没有 Pending Tool 的稳定边界保存 Checkpoint。
@@ -338,9 +337,9 @@ Checkpoint + Tail Replay 的 RunProjection
 5. Checkpoint Run ID 或 Session ID 错误。
 6. Checkpoint byte offset 越界。
 7. 尾部第一条 sequence 不连续。
-8. `assistant_tool_call` 后中断。
-9. `tool_started` 后中断。
-10. `tool_result` 后中断。
+8. `tool_exchange` 提交前中断。
+9. `tool_intent` 后中断。
+10. `tool_settlement` 后中断。
 11. Compaction 后立即中断。
 12. 新 Run 初始 Checkpoint 创建过程中断。
 

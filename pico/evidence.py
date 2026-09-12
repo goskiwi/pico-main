@@ -240,7 +240,7 @@ class RunEvidence:
                     "effect_scope": "workspace",
                 })
             return self
-        if event.kind != "tool_result":
+        if event.kind not in {"tool_exchange", "tool_settlement"}:
             return self
         outcome = event.payload["outcome"]
         structured = outcome.get("structured", {})

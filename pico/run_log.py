@@ -20,7 +20,9 @@ RUN_EVENT_KINDS = frozenset(
         "model_requested",
         "turn_metrics",
         "completion_blocked",
-        "tool_started",
+        "tool_exchange",
+        "tool_intent",
+        "tool_settlement",
         "verification_result",
         "provider_session_reset",
         "run_stopped",
@@ -82,45 +84,53 @@ def _tool_call(payload):
     )
 
 
-def _validate_tool_call_payload(kind, payload):
+def _validate_call(kind, payload):
     _exact_payload(kind, payload, {"name", "args", "call_id"})
     if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
-        raise ValueError("assistant_tool_call requires a call id")
+        raise ValueError(f"{kind} requires a call id")
     if not isinstance(payload["name"], str) or not payload["name"].strip():
-        raise ValueError("assistant_tool_call requires a tool name")
+        raise ValueError(f"{kind} requires a tool name")
     _tool_call(payload)
 
 
-def _validate_tool_started_payload(kind, payload):
+def _validate_tool_exchange_payload(kind, payload):
+    _exact_payload(kind, payload, {"call", "outcome"})
+    call = _tool_call(payload["call"])
+    outcome = ToolOutcome.from_dict(payload["outcome"])
+    if (outcome.tool_call_id, outcome.tool_name) != (call.call_id, call.name):
+        raise ValueError("tool_exchange call and outcome do not match")
+    if outcome.side_effect_state != "none" or outcome.effect_scope != "none":
+        raise ValueError("tool_exchange cannot contain workspace side effects")
+
+
+def _validate_tool_intent_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
         {
-            "tool_call_id",
-            "tool_name",
+            "call",
             "effect_scope",
             "potential_effects",
             "operation",
         },
     )
-    if not str(payload["tool_call_id"]) or not str(payload["tool_name"]):
-        raise ValueError("tool_started requires call and tool names")
-    if payload["effect_scope"] not in EFFECT_SCOPES:
-        raise ValueError("tool_started has invalid effect scope")
+    _validate_call("tool_intent call", payload["call"])
+    if payload["effect_scope"] not in EFFECT_SCOPES - {"none"}:
+        raise ValueError("tool_intent requires a non-empty effect scope")
     if not isinstance(payload["potential_effects"], list) or not isinstance(
         payload["operation"], dict
     ):
-        raise TypeError("tool_started has invalid field types")
+        raise TypeError("tool_intent has invalid field types")
     for effect in payload["potential_effects"]:
         if not isinstance(effect, dict) or set(effect) != {
             "path",
             "before_state",
             "before_artifact_id",
         }:
-            raise ValueError("tool_started has invalid potential effect")
+            raise ValueError("tool_intent has invalid potential effect")
 
 
-def _validate_tool_result_payload(kind, payload):
+def _validate_tool_settlement_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
@@ -131,7 +141,7 @@ def _validate_tool_result_payload(kind, payload):
     if "recovered_from_interruption" in payload and not isinstance(
         payload["recovered_from_interruption"], bool
     ):
-        raise TypeError("tool_result recovery marker must be boolean")
+        raise TypeError("tool_settlement recovery marker must be boolean")
 
 
 def _validate_final_payload(kind, payload):
@@ -221,9 +231,9 @@ _PAYLOAD_VALIDATORS = {
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_model_instruction_payload,
     "completion_blocked": _validate_completion_blocked_payload,
-    "assistant_tool_call": _validate_tool_call_payload,
-    "tool_started": _validate_tool_started_payload,
-    "tool_result": _validate_tool_result_payload,
+    "tool_exchange": _validate_tool_exchange_payload,
+    "tool_intent": _validate_tool_intent_payload,
+    "tool_settlement": _validate_tool_settlement_payload,
     "verification_result": _validate_verification_payload,
     "assistant_final": _validate_final_payload,
     "run_stopped": _validate_stopped_payload,
@@ -297,7 +307,7 @@ class RunEvent:
             return str(self.payload.get("instruction", ""))
         if self.kind in {"user_guidance", "assistant_final"}:
             return str(self.payload.get("content", ""))
-        if self.kind == "tool_result":
+        if self.kind in {"tool_exchange", "tool_settlement"}:
             outcome = dict(self.payload.get("outcome", {}) or {})
             return str(outcome.get("content", ""))
         if self.kind == "compaction":
@@ -306,27 +316,29 @@ class RunEvent:
 
     @property
     def name(self):
-        if self.kind == "tool_result":
+        if self.kind in {"tool_exchange", "tool_settlement"}:
             return str(dict(self.payload.get("outcome", {}) or {}).get("tool_name", ""))
         return ""
 
     @property
     def tool_call(self):
-        if self.kind != "assistant_tool_call":
+        if self.kind not in {"tool_exchange", "tool_intent"}:
             return None
-        return _tool_call(self.payload)
+        return _tool_call(self.payload["call"])
 
     @property
     def args(self):
-        return dict(self.payload.get("args", {}) or {})
+        call = self.tool_call
+        return dict(call.args) if call is not None else {}
 
     @property
     def call_id(self):
-        if self.kind == "tool_result":
+        if self.kind in {"tool_exchange", "tool_settlement"}:
             return str(
                 dict(self.payload.get("outcome", {}) or {}).get("tool_call_id", "")
             )
-        return str(self.payload.get("tool_call_id", ""))
+        call = self.tool_call
+        return call.call_id if call is not None else ""
 
     @property
     def outcome_status(self):
@@ -417,11 +429,11 @@ class RunLog:
             self.store.trace(entry)
         return entry
 
-    def pending_tool_start(self):
+    def pending_tool_intent(self):
         for entry in reversed(self._events):
-            if entry.kind == "assistant_tool_call":
+            if entry.kind == "tool_settlement":
                 break
-            if entry.kind == "tool_started":
+            if entry.kind == "tool_intent":
                 return entry
         return None
 
@@ -437,19 +449,28 @@ class RunLog:
         self._require_no_pending()
         return self.append("user_guidance", {"content": content})
 
-    def append_tool_call(self, call):
+    @staticmethod
+    def _call_payload(call):
         if not isinstance(call, ToolCall):
             raise TypeError("tool call must be a ToolCall")
+        return {
+            "name": call.name,
+            "args": dict(call.args),
+            "call_id": call.call_id,
+        }
+
+    def append_tool_exchange(self, call, outcome):
+        if not isinstance(outcome, ToolOutcome):
+            raise TypeError("tool exchange requires a ToolOutcome")
         return self.append(
-            "assistant_tool_call",
+            "tool_exchange",
             {
-                "name": call.name,
-                "args": dict(call.args),
-                "call_id": call.call_id,
+                "call": self._call_payload(call),
+                "outcome": outcome.to_dict(),
             },
         )
 
-    def append_tool_started(
+    def append_tool_intent(
         self,
         call,
         *,
@@ -458,17 +479,16 @@ class RunLog:
         operation,
     ):
         return self.append(
-            "tool_started",
+            "tool_intent",
             {
-                "tool_call_id": call.call_id,
-                "tool_name": call.name,
+                "call": self._call_payload(call),
                 "effect_scope": str(effect_scope),
                 "potential_effects": list(potential_effects),
                 "operation": dict(operation),
             },
         )
 
-    def append_tool_result(
+    def append_tool_settlement(
         self,
         outcome,
         *,
@@ -480,7 +500,7 @@ class RunLog:
         if recovered_from_interruption:
             payload["recovered_from_interruption"] = True
         return self.append(
-            "tool_result",
+            "tool_settlement",
             payload,
         )
 
@@ -547,7 +567,7 @@ class RunLog:
         if covered != tuple(entry.event_id for entry in active[: len(covered)]):
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]
-        if remaining and remaining[0].kind == "tool_result":
+        if remaining and remaining[0].kind == "tool_settlement":
             raise ValueError("compaction cannot split a tool call/result pair")
         return self.append(
             "compaction",
