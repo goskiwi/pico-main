@@ -248,6 +248,7 @@ evidence was omitted, not that work succeeded or facts are absent."""
             ),
         )
         input_text = task_context + "\n\n" + history_text
+        client = None
         try:
             client = self.client_factory()
             action = client.complete_action(
@@ -259,13 +260,13 @@ evidence was omitted, not that work succeeded or facts are absent."""
             )
             if (
                 action.kind != "tool"
-                or action.tool_call is None
-                or action.tool_call.name != SUMMARY_TOOL["name"]
+                or len(action.tool_calls) != 1
+                or action.tool_calls[0].name != SUMMARY_TOOL["name"]
             ):
                 raise ValueError(
                     "summary model did not return submit_compaction_summary"
                 )
-            summary = CompactionSummary.from_dict(action.tool_call.args)
+            summary = CompactionSummary.from_dict(action.tool_calls[0].args)
             return summary.render()
         except SemanticCompactionError:
             raise
@@ -275,3 +276,7 @@ evidence was omitted, not that work succeeded or facts are absent."""
             raise SemanticCompactionError(
                 f"semantic compaction failed: {type(exc).__name__}: {exc}"
             ) from exc
+        finally:
+            close = getattr(client, "close", None) if client is not None else None
+            if callable(close):
+                close()

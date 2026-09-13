@@ -28,7 +28,7 @@ def build_prompt_instructions():
             (
                 "Only the schemas supplied in the Responses tools field for this turn may be called; ToolRuntime validates them again locally.",
                 "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking; run_shell still requires approval because it executes on the host without a sandbox.",
-                "Each model response may contain exactly one tool call; wait for its result before choosing the next action.",
+                "Each response may contain up to eight independent tool calls. Runtime executes them in source order and returns all results together; do not group calls whose arguments depend on an earlier result.",
                 "Use run_shell for tests, linters, type checks, builds, git inspection, and reproductions. Commands may create normal build or test outputs; prefer file tools for deliberate source edits so their revisions remain tracked.",
             ),
         ),

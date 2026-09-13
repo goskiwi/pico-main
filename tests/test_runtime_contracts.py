@@ -19,6 +19,94 @@ from tests.support import assert_file_command, build_agent
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_multiple_calls_execute_in_order_with_one_model_continuation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.txt").write_text("alpha\n", encoding="utf-8")
+            (root / "b.txt").write_text("beta\n", encoding="utf-8")
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tools(
+                        (
+                            ToolCall("read_file", {"path": "a.txt"}, "read-a"),
+                            ToolCall("read_file", {"path": "b.txt"}, "read-b"),
+                        )
+                    ),
+                    ModelAction.final("Read both files."),
+                ],
+            )
+
+            outcome = agent.ask("Read a.txt and b.txt")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(len(model.requests), 2)
+            self.assertEqual(len(model.result_batches), 1)
+            self.assertEqual(len(model.result_batches[0]), 2)
+            exchanges = [
+                event
+                for event in agent.run.run_log.events
+                if event.kind == "tool_exchange"
+            ]
+            self.assertEqual(
+                [event.call_id for event in exchanges],
+                ["read-a", "read-b"],
+            )
+
+    def test_multiple_mutations_keep_one_ordered_durable_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "subject.txt"
+            target.write_text("alpha\n", encoding="utf-8")
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "read_file", {"path": "subject.txt"}, call_id="read"
+                    ),
+                    ModelAction.tools(
+                        (
+                            ToolCall(
+                                "edit_file",
+                                {
+                                    "path": "subject.txt",
+                                    "old_text": "alpha\n",
+                                    "new_text": "beta\n",
+                                },
+                                "edit",
+                            ),
+                            ToolCall(
+                                "write_file",
+                                {"path": "new.txt", "content": "created\n"},
+                                "write",
+                            ),
+                        )
+                    ),
+                    ModelAction.final("Updated both files."),
+                ],
+            )
+
+            outcome = agent.ask("Update subject.txt and create new.txt")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
+            self.assertEqual((root / "new.txt").read_text(), "created\n")
+            self.assertEqual(len(model.requests), 3)
+            transactions = [
+                (event.kind, event.call_id)
+                for event in agent.run.run_log.events
+                if event.kind in {"tool_intent", "tool_settlement"}
+            ]
+            self.assertEqual(
+                transactions,
+                [
+                    ("tool_intent", "edit"),
+                    ("tool_settlement", "edit"),
+                    ("tool_intent", "write"),
+                    ("tool_settlement", "write"),
+                ],
+            )
+
     def test_terminal_record_rejects_removed_final_diff_field(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, _ = build_agent(Path(directory), [ModelAction.final("Done")])

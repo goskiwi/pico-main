@@ -249,7 +249,15 @@ def main(argv=None):
     except (RuntimeError, ValueError) as exc:
         print(f"pico: {exc}", file=sys.stderr)
         return 2
+    try:
+        return _run_main(args, agent)
+    finally:
+        close = getattr(agent.model_client, "close", None)
+        if callable(close):
+            close()
 
+
+def _run_main(args, agent):
     model = getattr(
         agent.model_client, "model", getattr(args, "model", DEFAULT_OPENAI_MODEL)
     )

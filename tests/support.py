@@ -16,11 +16,12 @@ class ScriptedModel:
         self.before_action = before_action
         self.requests = []
         self.results = []
+        self.result_batches = []
         self.last_completion_metadata = {}
-        self._pending_call_id = ""
+        self._pending_call_ids = ()
 
     def reset_action_session(self):
-        self._pending_call_id = ""
+        self._pending_call_ids = ()
 
     @staticmethod
     def estimate_action_tool_tokens(action_tools, count_tokens):
@@ -43,8 +44,8 @@ class ScriptedModel:
         execution_context,
     ):
         execution_context.check_active()
-        if self._pending_call_id:
-            raise RuntimeError("scripted call has no recorded result")
+        if self._pending_call_ids:
+            raise RuntimeError("scripted calls have no recorded results")
         index = len(self.requests)
         if self.before_action is not None:
             self.before_action(index)
@@ -65,7 +66,9 @@ class ScriptedModel:
             "output_tokens": 1,
         }
         if action.kind == "tool":
-            self._pending_call_id = action.tool_call.call_id
+            self._pending_call_ids = tuple(
+                call.call_id for call in action.tool_calls
+            )
         return action
 
     def projected_context_tokens(
@@ -79,8 +82,13 @@ class ScriptedModel:
         )
 
     def record_action_results(self, results):
-        self.results.extend(str(item) for item in results)
-        self._pending_call_id = ""
+        batch = tuple(str(item) for item in results)
+        expected = len(self._pending_call_ids) if self._pending_call_ids else 1
+        if len(batch) != expected:
+            raise ValueError("scripted continuation has the wrong result count")
+        self.result_batches.append(batch)
+        self.results.extend(batch)
+        self._pending_call_ids = ()
 
 
 def assert_file_command(path, expected):

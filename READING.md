@@ -7,7 +7,7 @@
 1. [runtime.py](pico/runtime.py)：只看 Pico 构造函数和 ask。Session 选择 Run，Pico 组装对象。
 2. [agent_loop.py](pico/agent_loop.py)：先看 run，再看 _step。run 负责初始化、循环和收尾；_step 请求模型并分派一种动作。
 3. 同文件的 _next_model_turn：获取工具、准备上下文、请求模型。
-4. 同文件的 _handle_tool_turn：记录一个调用，交给 ToolRuntime，把结果交回模型。
+4. 同文件的 _handle_tool_turn：按模型顺序逐个调用 ToolRuntime，再把这一轮的全部结果交回模型。
 5. 同文件的 _handle_final_action：调用 CompletionController.evaluate；由它检查任务边界和已跟踪文件的工作区漂移，失败则反馈并继续。
 
 请求准备只走 `PromptBuilder.build_for_run()`：准备预算 → 必要时生成并提交摘要 → 渲染。AgentLoop 的 `_reset_context()` 统一处理 Provider 会话与 Prompt 缓存重建。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`，编辑专用路径保留读取锁和版本准备。
@@ -44,7 +44,7 @@
 
 输出过大：artifacts.py。主循环只拿预览和工件引用，全文按需读取。
 
-模型接入：providers/clients.py。OpenAI SDK 负责 HTTP、SSE 和标准重试；Pico 负责消息回放、单工具解析、用量和上下文溢出映射。
+模型接入：providers/clients.py。OpenAI SDK 负责 HTTP、SSE 和标准重试；Pico 负责 Session 级连接复用、消息回放、有序多工具解析、用量和上下文溢出映射。
 
 ## 本次改动与验证
 
@@ -53,6 +53,6 @@
 定向检查覆盖：编辑—运行测试—根据失败再编辑—再次运行测试，日志重放，未开始调用恢复，工作区漂移，部分修改与未知命令副作用区分，取消信号。
 这些是本地确定性检查，不是真实 LLM 修复基准成绩。
 
-SDK 替换已落地：2026-09-11 使用 OpenAI Python SDK 调用 DeepSeek 官方 Responses API，`deepseek-v4-flash` 在 `reasoning.effort=none` 下成功完成工具调用并返回 usage。SDK 接管 HTTP、SSE 与标准重试；Pico 用剩余 deadline 限制请求，并在读取流事件时检查取消。
+真实模型回归使用 DeepSeek `deepseek-v4-flash` 完成同一项“修改函数、新增测试并运行测试”任务：串行单调用基线为 9 次模型请求、10.3 秒；有序 Multi-call 与连接复用后为 5 次请求、5.3 秒。SDK 接管 HTTP、SSE 与标准重试；Pico 用剩余 deadline 限制请求，并在读取流事件时检查取消。
 
 History 先形成完整工具事务，ContextManager 只做一次预算选择，PromptBuilder 负责采集、摘要协调和最终渲染。规则范围固定为仓库根 `AGENTS.md`。

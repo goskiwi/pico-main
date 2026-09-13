@@ -226,29 +226,39 @@ class AgentLoop:
 
     def _handle_tool_turn(self, loop_state, turn):
         agent = self.agent
-        call = turn.action.tool_call
-        if call is None:
-            raise RuntimeError("tool turn is missing its tool call")
+        calls = turn.action.tool_calls
+        if not calls:
+            raise RuntimeError("tool turn is missing tool calls")
         loop_state.invalid_output_count = 0
-        outcome = agent.tools.execute_call(call, turn.tool_surface)
-        if outcome.status != "success":
-            warning, stop = self._observe_failure(
-                "tool",
-                outcome.failure.code if outcome.failure else outcome.status,
-                tool_name=outcome.tool_name,
-                target=call.args,
-                detail=outcome.failure.detail if outcome.failure else outcome.content,
-            )
-            if stop:
-                return LoopDirective("stop", "repeated_failure")
-            if warning:
-                agent.append_model_instruction(warning)
-                self._reset_context(loop_state)
-                return LoopDirective("continue")
+        results = []
+        for call in calls:
+            stop_reason = self.lifecycle.execution_stop()
+            if stop_reason:
+                return LoopDirective("stop", stop_reason)
+            outcome = agent.tools.execute_call(call, turn.tool_surface)
+            if outcome.status != "success":
+                warning, stop = self._observe_failure(
+                    "tool",
+                    outcome.failure.code if outcome.failure else outcome.status,
+                    tool_name=outcome.tool_name,
+                    target=call.args,
+                    detail=(
+                        outcome.failure.detail
+                        if outcome.failure
+                        else outcome.content
+                    ),
+                )
+                if stop:
+                    return LoopDirective("stop", "repeated_failure")
+                if warning:
+                    agent.append_model_instruction(warning)
+                    self._reset_context(loop_state)
+                    return LoopDirective("continue")
+            results.append(outcome.render_for_model())
         self._continue_provider(
             loop_state,
             turn,
-            (outcome.render_for_model(),),
+            results,
         )
         return LoopDirective("continue")
 

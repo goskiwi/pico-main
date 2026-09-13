@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pico import ModelAction
-from pico.providers.clients import _parse_turn
+from pico import ModelAction, ToolCall
+from pico.providers.clients import _parse_turn, _result_items
 from pico.run_log import replay_events
 from tests.support import build_agent
 
@@ -35,7 +35,7 @@ class ModelResultTests(unittest.TestCase):
         )
 
         self.assertEqual(turn.action.kind, "truncated")
-        self.assertIsNone(turn.action.tool_call)
+        self.assertEqual(turn.action.tool_calls, ())
         self.assertFalse(turn.accepted)
 
     def test_service_and_protocol_failures_are_distinct(self):
@@ -53,6 +53,109 @@ class ModelResultTests(unittest.TestCase):
 
         self.assertEqual(service.action.kind, "service_failed")
         self.assertEqual(protocol.action.kind, "protocol_error")
+
+    def test_multiple_tool_calls_preserve_order_and_result_identity(self):
+        turn = _parse_turn(
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "read-a",
+                        "arguments": '{"path":"a.py"}',
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "read-b",
+                        "arguments": '{"path":"b.py"}',
+                    },
+                ],
+            },
+            self._tools(),
+        )
+
+        self.assertEqual(
+            [(call.call_id, call.name) for call in turn.action.tool_calls],
+            [("read-a", "read_file"), ("read-b", "read_file")],
+        )
+        self.assertEqual(turn.pending_call_ids, ("read-a", "read-b"))
+        self.assertEqual(
+            _result_items(turn.pending_call_ids, ("result-a", "result-b")),
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "read-a",
+                    "output": "result-a",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "read-b",
+                    "output": "result-b",
+                },
+            ],
+        )
+
+    def test_submit_final_must_be_alone(self):
+        turn = _parse_turn(
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "read",
+                        "arguments": '{"path":"a.py"}',
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "submit_final",
+                        "call_id": "final",
+                        "arguments": '{"answer":"done"}',
+                    },
+                ],
+            },
+            self._tools(),
+        )
+
+        self.assertEqual(turn.action.kind, "protocol_error")
+
+    def test_model_action_rejects_duplicate_call_ids(self):
+        with self.assertRaisesRegex(ValueError, "unique"):
+            ModelAction.tools(
+                (
+                    ToolCall("read_file", {"path": "a.py"}, "duplicate"),
+                    ToolCall("read_file", {"path": "b.py"}, "duplicate"),
+                )
+            )
+
+    def test_removed_single_call_constructor_is_rejected(self):
+        with self.assertRaises(TypeError):
+            ModelAction(
+                "tool",
+                tool_call=ToolCall("read_file", {"path": "a.py"}, "read"),
+            )
+
+    def test_more_than_eight_calls_are_rejected(self):
+        turn = _parse_turn(
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": f"read-{index}",
+                        "arguments": '{"path":"a.py"}',
+                    }
+                    for index in range(9)
+                ],
+            },
+            self._tools(),
+        )
+
+        self.assertEqual(turn.action.kind, "protocol_error")
+        self.assertIn("at most 8", turn.action.content)
 
 class RepeatedFailureTests(unittest.TestCase):
     def test_different_edit_arguments_are_not_the_same_failure(self):

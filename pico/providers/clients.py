@@ -18,6 +18,7 @@ from ..contracts import ModelAction, ToolCall
 from ..execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+MAX_TOOL_CALLS_PER_TURN = 8
 CONTEXT_OVERFLOW_CODES = {
     "context_length_exceeded",
     "context_window_exceeded",
@@ -54,16 +55,20 @@ def _context_overflow(error):
     return any(marker in lowered for marker in CONTEXT_OVERFLOW_MARKERS)
 
 
-def _result_items(pending_call_id, results):
+def _result_items(pending_call_ids, results):
+    pending_call_ids = tuple(str(call_id) for call_id in pending_call_ids)
     results = tuple(str(result) for result in results)
-    if pending_call_id:
-        if len(results) != 1:
-            raise ValueError("provider continuation requires exactly one result")
-        return [{
-            "type": "function_call_output",
-            "call_id": pending_call_id,
-            "output": results[0],
-        }]
+    if pending_call_ids:
+        if len(results) != len(pending_call_ids):
+            raise ValueError("provider continuation requires one result per call")
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result,
+            }
+            for call_id, result in zip(pending_call_ids, results, strict=True)
+        ]
     if len(results) != 1:
         raise ValueError("provider correction requires exactly one result")
     return [{
@@ -178,7 +183,7 @@ def _replay_item(item):
 class ParsedTurn:
     action: ModelAction
     replay_items: tuple[dict, ...] = ()
-    pending_call_id: str = ""
+    pending_call_ids: tuple[str, ...] = ()
     usage: dict = field(default_factory=dict)
 
     @property
@@ -193,6 +198,35 @@ class ParsedTurn:
             "protocol_error": ModelAction.protocol_error,
         }[kind]
         return cls(factory(message), usage=dict(usage or {}))
+
+
+def _action_from_calls(calls):
+    if not calls:
+        raise ValueError("Pico requires at least one function call per model response")
+    if len(calls) > MAX_TOOL_CALLS_PER_TURN:
+        raise ValueError(
+            f"Pico accepts at most {MAX_TOOL_CALLS_PER_TURN} function calls per response"
+        )
+    if len({call.call_id for call in calls}) != len(calls):
+        raise ValueError("function call ids must be unique")
+    final_calls = [call for call in calls if call.name == "submit_final"]
+    if final_calls:
+        if len(calls) != 1:
+            raise ValueError("submit_final must be the only function call")
+        answer = final_calls[0].args.get("answer")
+        if (
+            set(final_calls[0].args) != {"answer"}
+            or not isinstance(answer, str)
+            or not answer.strip()
+        ):
+            raise ValueError("submit_final requires one non-empty answer")
+        return ModelAction.final(answer), ()
+    action = (
+        ModelAction.tool(calls[0].name, calls[0].args, call_id=calls[0].call_id)
+        if len(calls) == 1
+        else ModelAction.tools(calls)
+    )
+    return action, tuple(call.call_id for call in calls)
 
 
 def _parse_turn(data, action_tools):
@@ -241,27 +275,15 @@ def _parse_turn(data, action_tools):
         if error:
             return ParsedTurn.failed("protocol_error", error, usage)
         replay.append(normalized)
-    if len(calls) != 1:
-        return ParsedTurn.failed(
-            "protocol_error",
-            "Pico requires exactly one function call per model response",
-            usage,
-        )
-    call = calls[0]
-    if call.name == "submit_final":
-        answer = call.args.get("answer")
-        if set(call.args) != {"answer"} or not isinstance(answer, str) or not answer.strip():
-            return ParsedTurn.failed(
-                "protocol_error", "submit_final requires one non-empty answer", usage
-            )
-        action = ModelAction.final(answer)
-    else:
-        action = ModelAction.tool(call.name, call.args, call_id=call.call_id)
-    return ParsedTurn(action, tuple(replay), call.call_id, usage)
+    try:
+        action, pending_call_ids = _action_from_calls(calls)
+    except ValueError as exc:
+        return ParsedTurn.failed("protocol_error", str(exc), usage)
+    return ParsedTurn(action, tuple(replay), pending_call_ids, usage)
 
 
 class OpenAICompatibleModelClient:
-    """Stateful manual replay over one stateless Responses connection."""
+    """Stateful manual replay over one session-scoped Responses transport."""
 
     conversation_mode = "responses-manual-replay-v1"
 
@@ -274,20 +296,23 @@ class OpenAICompatibleModelClient:
         self.timeout = float(timeout)
         self.reasoning_effort = str(reasoning_effort or "").strip()
         self.last_completion_metadata = {}
+        self._runner = asyncio.Runner()
+        self._sdk_client = None
+        self._closed = False
         self.reset_action_session()
 
-    def _new_sdk_client(self, timeout):
+    def _new_sdk_client(self):
         return AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            timeout=timeout,
+            timeout=self.timeout,
             max_retries=2,
             http_client=DefaultAsyncHttpxClient(follow_redirects=False),
         )
 
     def reset_action_session(self):
         self._action_input = []
-        self._pending_call_id = ""
+        self._pending_call_ids = ()
         self._replay_context_tokens = None
 
     def new_isolated_client(self):
@@ -312,11 +337,11 @@ class OpenAICompatibleModelClient:
         )
 
     def _result_items(self, results):
-        return _result_items(self._pending_call_id, results)
+        return _result_items(self._pending_call_ids, results)
 
     def record_action_results(self, results):
         self._action_input.extend(self._result_items(results))
-        self._pending_call_id = ""
+        self._pending_call_ids = ()
         self._replay_context_tokens = None
 
     def projected_context_tokens(self, results, *, instructions, action_tools,
@@ -346,7 +371,7 @@ class OpenAICompatibleModelClient:
             "include": ["reasoning.encrypted_content"],
             "tools": list(action_tools),
             "tool_choice": "required",
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": True,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
@@ -355,27 +380,29 @@ class OpenAICompatibleModelClient:
         return payload
 
     def _request(self, payload, execution_context):
-        # Each synchronous call owns its event loop and HTTP resources.
-        # Provider conversation replay remains on this adapter.
-        return asyncio.run(self._request_async(payload, execution_context))
+        if self._closed:
+            raise RuntimeError("model client is closed")
+        return self._runner.run(self._request_async(payload, execution_context))
 
     async def _request_async(self, payload, execution_context):
         timeout = execution_context.bounded_timeout(self.timeout)
 
         async def receive():
-            async with self._new_sdk_client(timeout) as client:
-                stream = await client.responses.create(**payload)
-                response = None
-                async with stream:
-                    async for event in stream:
-                        execution_context.check_active()
-                        if event.type in {
-                            "response.completed", "response.incomplete", "response.failed",
-                        }:
-                            response = event.response
-                if response is None:
-                    raise RuntimeError("Provider stream ended without a terminal response")
-                return response.model_dump(mode="json")
+            if self._sdk_client is None:
+                self._sdk_client = self._new_sdk_client()
+            client = self._sdk_client.with_options(timeout=timeout)
+            stream = await client.responses.create(**payload)
+            response = None
+            async with stream:
+                async for event in stream:
+                    execution_context.check_active()
+                    if event.type in {
+                        "response.completed", "response.incomplete", "response.failed",
+                    }:
+                        response = event.response
+            if response is None:
+                raise RuntimeError("Provider stream ended without a terminal response")
+            return response.model_dump(mode="json")
 
         request = asyncio.create_task(receive())
         try:
@@ -400,13 +427,24 @@ class OpenAICompatibleModelClient:
         finally:
             if not request.done():
                 request.cancel()
-            # Await cancellation so the response and HTTP client close before return.
+            # Await cancellation so the active response stream closes before return.
             await asyncio.gather(request, return_exceptions=True)
+
+    def close(self):
+        if self._closed:
+            return
+        try:
+            if self._sdk_client is not None:
+                self._runner.run(self._sdk_client.close())
+        finally:
+            self._sdk_client = None
+            self._runner.close()
+            self._closed = True
 
     def complete_action(self, input_text, max_new_tokens, *, instructions,
                         action_tools, execution_context: ExecutionContext):
-        if self._pending_call_id:
-            raise RuntimeError("pending function call has no recorded output")
+        if self._pending_call_ids:
+            raise RuntimeError("pending function calls have no recorded outputs")
         try:
             response = self._request(
                 self._payload(input_text, max_new_tokens, instructions, action_tools),
@@ -424,5 +462,5 @@ class OpenAICompatibleModelClient:
         self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
-            self._pending_call_id = turn.pending_call_id
+            self._pending_call_ids = turn.pending_call_ids
         return turn.action

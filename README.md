@@ -94,7 +94,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。每轮只接受一个调用。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
+主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。模型每轮可以返回最多八个彼此独立的调用，Runtime 按模型顺序串行执行并一次返回全部结果；`submit_final` 必须独占一轮。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
 
 `RunEvidence` 只维护文件变化和不确定副作用。完整工具历史保存在 RunLog 中；模型和工具用量统计保留在 Metrics 中。
 
@@ -120,7 +120,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 5. `pico/run_log.py` 与 `pico/run_projection.py`
 6. `pico/prompt_builder.py`
 
-Provider 使用 `AsyncOpenAI` 调用兼容 Responses API 的服务，对外仍提供同步调用。每次请求拥有独立的异步事件循环和 HTTP 客户端；取消或截止时间到达时取消请求任务，等待响应流与客户端清理。消息回放状态保留在 Pico Adapter 中，不依赖 HTTP 连接复用。同步入口不应直接在已有 asyncio 事件循环的线程里调用。命令执行、Artifact 和底层 Git 状态采集第一次阅读主链时可以跳过。
+Provider 使用 `AsyncOpenAI` 调用兼容 Responses API 的服务，对外仍提供同步调用。一个 Model Client 在 Session 内复用 `asyncio.Runner`、SDK Client 和 HTTP 连接池；每次请求只创建独立任务与响应流。取消或截止时间到达时仅取消当前任务，后续请求继续复用可用连接；CLI 退出时统一关闭 Client。消息回放状态保留在 Pico Adapter 中。同步入口不应直接在已有 asyncio 事件循环的线程里调用。命令执行、Artifact 和底层 Git 状态采集第一次阅读主链时可以跳过。
 
 ## 文件版本与结果展示
 
