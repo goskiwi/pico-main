@@ -139,7 +139,7 @@ class CompactionSummarizer:
             metadata = {key: value for key, value in outcome.structured.items() if key in {
                 "path", "start_line", "end_line", "exit_code", "stop_reason",
                 "output_limited", "offset", "end_offset", "next_offset", "has_more",
-                "truncated", "total_bytes", "status", "external_change_observed",
+                "truncated", "total_bytes", "status",
                 "stdout_discarded_bytes", "stderr_discarded_bytes",
             }}
             if metadata:

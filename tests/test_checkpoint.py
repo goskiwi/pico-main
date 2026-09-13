@@ -64,7 +64,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                 "event_log_offset", "state", "history",
             })
             self.assertEqual(set(value["state"]), {
-                "contract", "evidence", "metrics", "runtime_feedback",
+                "contract", "metrics", "runtime_feedback",
                 "failure_streak",
             })
             for removed in (
@@ -85,15 +85,15 @@ class CheckpointRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkpoint fields"):
                 read_run_checkpoint(path, expected_run_id=log.run_id)
 
-    def test_removed_acceptance_fields_are_rejected(self):
+    def test_removed_evidence_projection_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             store, log = self._new_log(directory, interval=1)
             path = store.checkpoint_path(log.run_id)
             value = json.loads(path.read_text())
-            value["state"]["evidence"]["latest_verification"] = None
+            value["state"]["evidence"] = {}
             path.write_text(json.dumps(value))
 
-            with self.assertRaisesRegex(ValueError, "RunEvidence"):
+            with self.assertRaisesRegex(ValueError, "checkpoint state"):
                 read_run_checkpoint(path, expected_run_id=log.run_id)
 
     def test_damaged_checkpoint_rebuilds_from_current_log(self):
@@ -230,7 +230,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                 "failure_observed",
                 {
                     "category": "completion",
-                    "code": "workspace_drift",
+                    "code": "task_requirements_missing",
                     "tool_name": "",
                     "identity": "tests",
                 },

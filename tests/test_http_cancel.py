@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 from pico.execution import ExecutionContext
 from pico.providers.clients import OpenAICompatibleModelClient
@@ -105,9 +106,8 @@ def exercise(stage, *, deadline=False):
 
 
 class HttpCancellationTests(unittest.TestCase):
-    def test_sequential_requests_reuse_one_http_connection(self):
+    def test_sequential_requests_reuse_one_sdk_transport(self):
         requests = []
-        client_ports = set()
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -121,7 +121,6 @@ class HttpCancellationTests(unittest.TestCase):
                         self.rfile.read(int(self.headers["Content-Length"]))
                     )
                 )
-                client_ports.add(self.client_address[1])
                 response = {
                     "id": f"resp_{len(requests)}",
                     "object": "response",
@@ -185,18 +184,27 @@ class HttpCancellationTests(unittest.TestCase):
             }
         ]
         try:
-            for _index in range(2):
-                action = client.complete_action(
-                    "request",
-                    100,
-                    instructions="test",
-                    action_tools=tools,
-                    execution_context=ExecutionContext.root(max_seconds=3),
-                )
-                self.assertEqual(action.kind, "final")
-                client.reset_action_session()
+            with mock.patch.object(
+                client,
+                "_new_sdk_client",
+                wraps=client._new_sdk_client,
+            ) as create:
+                transport = None
+                for _index in range(2):
+                    action = client.complete_action(
+                        "request",
+                        100,
+                        instructions="test",
+                        action_tools=tools,
+                        execution_context=ExecutionContext.root(max_seconds=3),
+                    )
+                    self.assertEqual(action.kind, "final")
+                    current = client._sdk_client._client
+                    transport = current if transport is None else transport
+                    self.assertIs(current, transport)
+                    client.reset_action_session()
+                create.assert_called_once()
             self.assertEqual(len(requests), 2)
-            self.assertEqual(len(client_ports), 1)
             client.close()
             client.close()
         finally:

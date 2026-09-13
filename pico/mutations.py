@@ -1,4 +1,4 @@
-"""Revision-bound atomic text mutations."""
+"""Exact, atomic text mutations for the current workspace state."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import difflib
 import hashlib
 import os
 import re
-import threading
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,8 +16,6 @@ ABSENT_REVISION = "absent"
 MAX_DIAGNOSTIC_LOCATIONS = 8
 MAX_DIAGNOSTIC_EXCERPT_CHARS = 2000
 DIAGNOSTIC_CONTEXT_LINES = 5
-_LOCKS: dict[str, threading.RLock] = {}
-_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -31,6 +27,16 @@ class MutationReceipt:
     @property
     def changed(self):
         return self.before_revision != self.after_revision
+
+
+@dataclass(frozen=True)
+class PreparedEdit:
+    """A validated replacement prepared from the file's current bytes."""
+
+    target: Path
+    payload: bytes
+    mode: int
+    receipt: MutationReceipt
 
 
 def content_revision(payload: bytes) -> str:
@@ -124,26 +130,6 @@ def _closest_match(text, old_text):
     }
 
 
-class RevisionConflict(ToolFailureError):
-    def __init__(self, path, expected, actual):
-        logical_path = Path(path).as_posix()
-        super().__init__(
-            "revision_conflict",
-            f"revision conflict for {logical_path}: expected {expected}, actual {actual}; read the file again",
-            structured={
-                "path": logical_path,
-                "expected_revision": str(expected),
-                "actual_revision": str(actual),
-                "recommended_next_tool": "read_file",
-                "recommended_tool_args": {
-                    "path": logical_path,
-                    "start_line": 1,
-                    "end_line": 200,
-                },
-            },
-        )
-
-
 class TextNotFound(ToolFailureError):
     def __init__(self, path, revision, *, current_text, old_text):
         logical_path = Path(path).as_posix()
@@ -226,16 +212,9 @@ def unified_text_diff(path, before, after, *, before_exists=True, after_exists=T
     return "".join(rendered)
 
 
-def _workspace_lock(root: Path):
-    key = str(root.resolve())
-    with _LOCKS_GUARD:
-        return _LOCKS.setdefault(key, threading.RLock())
-
-
 class WorkspaceMutationService:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self._lock = _workspace_lock(self.root)
 
     def _target(self, path):
         target = Path(path).resolve()
@@ -249,36 +228,16 @@ class WorkspaceMutationService:
             raise ValueError(f"path escapes workspace: {path}")
         return target
 
-    def _require_revision(self, target, logical_path, expected_revision):
-        actual = file_revision(target)
-        if actual != expected_revision:
-            raise RevisionConflict(logical_path, expected_revision, actual)
-        return actual
-
-    def _commit(self, target, logical_path, payload, expected_revision):
-        mode = target.stat().st_mode & 0o777 if target.exists() else 0o644
-        atomic_replace_bytes(
-            target,
-            payload,
-            mode=mode,
-            commit_guard=lambda: self._require_revision(
-                target,
-                logical_path,
-                expected_revision,
-            ),
-        )
-
     def write(self, path, content):
         target = self._target(path)
         logical_path = target.relative_to(self.root)
         payload = str(content).encode("utf-8")
-        with self._lock:
-            if not write_once_bytes(target, payload, mode=0o644):
-                raise ExistingFileRequiresEdit(
-                    logical_path,
-                    file_revision(target),
-                )
-            after = content_revision(payload)
+        if not write_once_bytes(target, payload, mode=0o644):
+            raise ExistingFileRequiresEdit(
+                logical_path,
+                file_revision(target),
+            )
+        after = content_revision(payload)
         return MutationReceipt(
             before_revision=ABSENT_REVISION,
             after_revision=after,
@@ -290,64 +249,69 @@ class WorkspaceMutationService:
             ),
         )
 
-    @contextmanager
-    def prepare_edit(self, path, expected_revision, *, execution_context):
-        """Keep one original byte snapshot and the write lock through publication."""
+    def prepare_edit(self, path, old_text, new_text, *, execution_context):
+        """Build one exact replacement from the file's current contents."""
         target = self._target(path)
         logical_path = target.relative_to(self.root)
-        with self._lock:
-            execution_context.check_active()
-            if not target.is_file():
-                raise ValueError("patch target is not a file")
-            raw = target.read_bytes()
-            execution_context.check_active()
-            actual = content_revision(raw)
-            if actual != expected_revision:
-                raise RevisionConflict(logical_path, expected_revision, actual)
-            yield raw, actual
-
-    def edit(self, path, old_text, new_text, expected_revision, *, original):
-        """Apply an edit using bytes supplied by prepare_edit, while its lock is held."""
-        target = self._target(path)
-        logical_path = target.relative_to(self.root)
-        with self._lock:
-            raw, actual = original, expected_revision
-            text = raw.decode("utf-8")
-            # read_file presents LF text. Match those logical line breaks against
-            # the original bytes, without normalizing the entire file on write.
-            old_text = str(old_text).replace("\r\n", "\n")
-            new_text = str(new_text).replace("\r\n", "\n")
-            pattern = re.compile(r"\r?\n".join(re.escape(line) for line in old_text.split("\n")))
-            match = pattern.search(text)
-            if match is None:
-                raise TextNotFound(
-                    logical_path,
-                    actual,
-                    current_text=text.replace("\r\n", "\n"),
-                    old_text=old_text,
-                )
-            if pattern.search(text, match.end()) is not None:
-                raise AmbiguousTextMatch(
-                    logical_path,
-                    actual,
-                    current_text=text.replace("\r\n", "\n"),
-                    old_text=old_text,
-                )
-            payload = raw
-            if old_text != new_text:
-                ending = re.search(r"\r?\n", text[match.start():]) or re.search(r"\r?\n", text)
-                newline = ending.group() if ending is not None else "\n"
-                replacement = new_text.replace("\n", newline)
-                payload = (text[:match.start()] + replacement + text[match.end():]).encode("utf-8")
-            after = content_revision(payload)
-            if actual != after:
-                self._commit(target, logical_path, payload, expected_revision)
-        return MutationReceipt(
-            before_revision=actual,
+        execution_context.check_active()
+        if not target.is_file():
+            raise ValueError("patch target is not a file")
+        mode = target.stat().st_mode & 0o777
+        raw = target.read_bytes()
+        execution_context.check_active()
+        before = content_revision(raw)
+        text = raw.decode("utf-8")
+        # read_file presents LF text. Match those logical line breaks against
+        # the current bytes, without normalizing the entire file on write.
+        old_text = str(old_text).replace("\r\n", "\n")
+        new_text = str(new_text).replace("\r\n", "\n")
+        pattern = re.compile(
+            r"\r?\n".join(re.escape(line) for line in old_text.split("\n"))
+        )
+        match = pattern.search(text)
+        if match is None:
+            raise TextNotFound(
+                logical_path,
+                before,
+                current_text=text.replace("\r\n", "\n"),
+                old_text=old_text,
+            )
+        if pattern.search(text, match.end()) is not None:
+            raise AmbiguousTextMatch(
+                logical_path,
+                before,
+                current_text=text.replace("\r\n", "\n"),
+                old_text=old_text,
+            )
+        payload = raw
+        if old_text != new_text:
+            ending = re.search(r"\r?\n", text[match.start():]) or re.search(
+                r"\r?\n", text
+            )
+            newline = ending.group() if ending is not None else "\n"
+            replacement = new_text.replace("\n", newline)
+            payload = (
+                text[:match.start()] + replacement + text[match.end():]
+            ).encode("utf-8")
+        after = content_revision(payload)
+        receipt = MutationReceipt(
+            before_revision=before,
             after_revision=after,
             diff=(
                 unified_text_diff(logical_path, text, payload.decode("utf-8"))
-                if actual != after
+                if before != after
                 else ""
             ),
         )
+        return PreparedEdit(target, payload, mode, receipt)
+
+    @staticmethod
+    def commit_edit(prepared: PreparedEdit):
+        """Publish a prepared replacement without another content read."""
+        if prepared.receipt.changed:
+            atomic_replace_bytes(
+                prepared.target,
+                prepared.payload,
+                mode=prepared.mode,
+            )
+        return prepared.receipt

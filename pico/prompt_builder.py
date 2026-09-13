@@ -97,18 +97,6 @@ def runtime_feedback_sections(feedback):
     }
 
 
-def render_runtime_feedback(feedback):
-    sections = runtime_feedback_sections(feedback)
-    parts = [sections["runtime_instruction"]]
-    if sections["runtime_evidence"]:
-        parts.append(
-            _untrusted_envelope(
-                {"runtime_evidence": sections["runtime_evidence"]}
-            )
-        )
-    return "\n\n".join(parts)
-
-
 def render_runtime_policy(contract, mode, paths):
     if contract is None:
         policy = {
@@ -180,7 +168,7 @@ class PromptBuilder:
         plan = self.plan_compaction(inputs, provider_context_tokens=provider_context_tokens)
         if plan is not None:
             self.runtime.run.run_log.append_compaction(*plan)
-        return self.build(inputs)
+        return self.build(inputs, refresh_history=plan is not None)
 
     def refresh_repository_instructions(self):
         current = load_repository_instructions(self.runtime.workspace.root)
@@ -190,7 +178,9 @@ class PromptBuilder:
 
     def prepare(self, user_message, *, tool_surface: ResolvedToolSurface):
         """Sample context and calculate budgets once for one prompt rebuild."""
-        raw = self._raw_sections(user_message, tool_surface)
+        history = self._history()
+        history_text = render_history(history)
+        raw = self._raw_sections(user_message, tool_surface, history=history)
         instructions_tokens = self.count_tokens(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(tool_surface)
         available = (self.runtime.config.context_budget_tokens
@@ -220,15 +210,19 @@ class PromptBuilder:
                 count_tokens=self.count_tokens,
                 render_input=_assemble_input,
             ),
+            "history": history,
+            "history_text": history_text,
         }
 
-    def build(self, inputs):
+    def build(self, inputs, *, refresh_history=False):
         """Render one prompt after Context performs the sole History selection."""
         raw = inputs["raw"]
-        history = self._history()
+        history = self._history() if refresh_history else inputs["history"]
         count_tokens = self.count_tokens
         available = inputs["available"]
-        history_text = render_history(history)
+        history_text = (
+            render_history(history) if refresh_history else inputs["history_text"]
+        )
         raw = {**raw, "history": history_text}
         minimum_input = _assemble_input(raw, context._required_context(raw))
         if count_tokens(minimum_input) > available:
@@ -256,10 +250,10 @@ class PromptBuilder:
         run_log = self.runtime.run.run_log
         if run_log is None or run_log.pending_tool_call() is not None:
             return None
-        history = self._history()
+        history = inputs["history"]
         config = self.runtime.config
         count_tokens = self.count_tokens
-        history_text = render_history(history)
+        history_text = inputs["history_text"]
         raw = {**inputs["raw"], "history": history_text}
         request_overhead_tokens = inputs["instructions_tokens"] + inputs["tool_schema_tokens"]
         fixed_context = inputs["fixed_context"]
@@ -353,11 +347,10 @@ class PromptBuilder:
             int(estimator(tool_surface.action_tools, self.count_tokens)),
         )
 
-    def _raw_sections(self, user_message, tool_surface):
+    def _raw_sections(self, user_message, tool_surface, *, history):
         projection = self.runtime.run.projection
         contract = projection.contract
         goal = contract.goal if contract is not None else str(user_message)
-        history = self._history()
         latest = history.latest_user_guidance() if history is not None else ""
         feedback = projection.runtime_feedback
         return {

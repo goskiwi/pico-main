@@ -9,26 +9,6 @@ def intersect_write_scopes(contract_paths, policy_paths):
     return tuple(path for path in contract_paths if path in policy)
 
 
-def tracked_workspace_drift(states, effect_scope, tracked_files):
-    if effect_scope != "workspace":
-        return ()
-    drift = []
-    for path, actual_state in sorted(states.items()):
-        change = tracked_files.get(path)
-        if change is None:
-            continue
-        projected_state = str(change.current_after_state)
-        if projected_state != actual_state:
-            drift.append(
-                {
-                    "path": path,
-                    "projected_state": projected_state,
-                    "actual_state": actual_state,
-                }
-            )
-    return tuple(drift)
-
-
 def effect_diff(before, after):
     return [
         path
@@ -50,11 +30,11 @@ def path_transitions(before, after, paths):
 
 def classify_runner_result(failure, affected_paths, effect_scope):
     paths = list(affected_paths)
-    unknown = failure is not None and not paths and effect_scope != "none"
+    unknown = not paths and effect_scope != "none"
     status = (
         "success"
         if failure is None
-        else ("partial_success" if paths or unknown else "error")
+        else ("partial_success" if paths else "error")
     )
     side_effect = (
         "partial"

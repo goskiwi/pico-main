@@ -9,6 +9,7 @@ from .mutations import file_revision
 
 IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
 TOOL_INTERNAL_PATH_NAMES = frozenset({".git", ".pico"})
+PUBLIC_ENV_EXAMPLES = frozenset({".env.example", ".env.sample"})
 WORKSPACE_GIT_TIMEOUT_SECONDS = 5
 WORKSPACE_STATUS_MAX_CHARS = 1500
 
@@ -83,7 +84,7 @@ class WorkspaceObservation:
             lines.append("- Git: repository detection unavailable; state unknown.")
             return "\n".join(lines)
         state = "status unavailable; do not assume clean" if self.status == "unavailable" else self.status
-        lines.append(f"- Git snapshot (at context build): {self.head}; {state}.")
+        lines.append(f"- Git state (at context build): {self.head}; {state}.")
         if any(
             line[:2] in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
             for line in self.status_lines
@@ -157,7 +158,7 @@ class Workspace:
         if symbolic.returncode == 0 and symbolic_stdout:
             branch = symbolic_stdout
             return (
-                f"branch {branch}"
+                f"branch {branch} @ {commit_stdout[:12]}"
                 if commit.returncode == 0
                 else f"unborn {branch}"
             )
@@ -259,4 +260,9 @@ class Workspace:
         relative = resolved.relative_to(self.root)
         if any(part in TOOL_INTERNAL_PATH_NAMES for part in relative.parts):
             raise ValueError(f"tool path targets internal workspace state: {raw_path}")
+        name = relative.name.lower()
+        if (
+            name == ".env" or name.startswith(".env.")
+        ) and name not in PUBLIC_ENV_EXAMPLES:
+            raise ValueError(f"tool path targets a protected environment file: {raw_path}")
         return resolved

@@ -25,7 +25,7 @@ class ArtifactStoreTests(unittest.TestCase):
             content,
         )["artifact_id"]
 
-    def test_read_slice_reads_only_one_bounded_page_after_integrity_check(self):
+    def test_read_slice_reads_only_one_bounded_page(self):
         artifact_id = self._write("x" * (2 * 1024 * 1024))
         original_open = Path.open
         read_sizes = []
@@ -60,16 +60,14 @@ class ArtifactStoreTests(unittest.TestCase):
         self.assertEqual(len(page["content"]), 8192)
         self.assertEqual(page["total_bytes"], 2 * 1024 * 1024)
         self.assertNotIn(-1, read_sizes)
-        self.assertLessEqual(max(read_sizes), 1024 * 1024)
+        self.assertLessEqual(max(read_sizes), 8196)
 
-    def test_verified_source_cache_keeps_metadata_not_artifact_bytes(self):
-        artifact_id = self._write("x" * (2 * 1024 * 1024))
+    def test_artifact_uses_one_content_file(self):
+        artifact_id = self._write("content")
+        root = self.run_store.artifact_dir(self.run_id)
 
-        self.artifacts.read_slice(self.run_id, artifact_id, 0, 16)
-
-        cached = self.artifacts._verified_source
-        self.assertIsInstance(cached, tuple)
-        self.assertFalse(any(isinstance(item, bytes) for item in cached))
+        self.assertTrue((root / f"{artifact_id}.txt").is_file())
+        self.assertFalse((root / f"{artifact_id}.json").exists())
 
     def test_read_slice_preserves_utf8_boundaries(self):
         artifact_id = self._write("A你B好C")
@@ -90,14 +88,14 @@ class ArtifactStoreTests(unittest.TestCase):
 
         self.assertEqual(first["content"] + second["content"] + third["content"], "A你B好C")
 
-    def test_changed_artifact_invalidates_verified_cache(self):
+    def test_artifact_page_reads_current_immutable_file_contents(self):
         artifact_id = self._write("original")
-        self.artifacts.read_slice(self.run_id, artifact_id, 0, 8)
         content_path = self.run_store.artifact_dir(self.run_id) / f"{artifact_id}.txt"
         content_path.write_text("tampered", encoding="utf-8")
 
-        with self.assertRaisesRegex(ValueError, "artifact digest mismatch"):
-            self.artifacts.read_slice(self.run_id, artifact_id, 0, 8)
+        page = self.artifacts.read_slice(self.run_id, artifact_id, 0, 8)
+
+        self.assertEqual(page["content"], "tampered")
 
 
 if __name__ == "__main__":

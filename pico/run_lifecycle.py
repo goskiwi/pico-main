@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 class AgentLoopState:
     user_message: str
     run_started_at: float
-    prompt_snapshot: tuple[ModelPrompt, ResolvedToolSurface] | None = None
+    prompt_snapshot: ModelPrompt | None = None
+    tool_surface: ResolvedToolSurface | None = None
     provider_context_tokens: int | None = None
     overflow_recovery_attempted: bool = False
     last_request_input_tokens: int = 0
@@ -132,7 +133,7 @@ class RunLifecycle:
                     f"continue.{detail}"
                 )
             if resumed:
-                run_log.append_user_guidance(user_message)
+                run_log.append_user_guidance(runtime.redact_text(user_message))
 
             runtime.emit_event(
                 "run_resumed" if resumed else "run_started",
@@ -193,7 +194,7 @@ class RunLifecycle:
     ):
         config = self.runtime.config
         return TaskContract(
-            goal=goal,
+            goal=self.runtime.redact_text(goal),
             write_scope=WriteScope.from_policy(config.mode, config.allowed_write_paths),
         )
 
@@ -214,7 +215,6 @@ class RunLifecycle:
 
     def finish_success(self, final, *, run_started_at) -> RunOutcome:
         runtime = self.runtime
-        runtime.run.evidence.change_set.require_current_workspace(runtime.workspace.root)
         runtime.run.execution_context.check_active()
         runtime.run.run_log.append_final(
             final,

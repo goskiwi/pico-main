@@ -34,6 +34,11 @@ PICO_OPENAI_MODEL=deepseek-v4-flash
 PICO_OPENAI_REASONING_EFFORT=none
 ```
 
+当前生产接入只实现 OpenAI-compatible **Responses API**，不是 Chat
+Completions、Anthropic `/messages` 或 OpenAI Agents SDK。更换 Base URL 的
+前提是服务端真正兼容 Responses 的流式事件、函数调用和函数结果格式；Pico
+内部以 `ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构。
+
 CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度和请求超时通过环境变量配置。
 
 `pico/config.py` 定义 Runtime 配置，`pico/env.py` 只负责加载项目环境变量。
@@ -90,21 +95,21 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 4. 模型返回工具调用或 `submit_final`。
 5. `ToolRuntime` 把只读与执行前拒绝保存为单条 Exchange；潜在副作用先提交 Intent，执行后提交 Settlement。
 6. 中断恢复只检查未完成 Intent 的当前状态，不自动重放副作用操作。
-7. `CompletionController` 检查任务边界和已跟踪文件的工作区漂移，再接受模型声明的完成结果。
+7. `submit_final` 作为模型的结束声明；Runtime 确认没有未结算工具且任务未取消后记录终态。
 
 ## 工具与安全边界
 
 主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。模型每轮可以返回最多八个彼此独立的调用，Runtime 按模型顺序串行执行并一次返回全部结果；`submit_final` 必须独占一轮。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
 
-`RunEvidence` 只维护文件变化和不确定副作用。完整工具历史保存在 RunLog 中；模型和工具用量统计保留在 Metrics 中。
+完整工具事实保存在 RunLog 中；当前任务、Pending Tool、失败记忆和 Metrics 由 RunProjection 重建。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。
 - Auto 模式允许受限文件修改并开放通用命令；由于 Pico 没有 Shell 沙箱，`run_shell` 仍然要求用户审批。
-- `run_shell` 可以产生正常的测试、构建和 snapshot 输出；审批是这类主机副作用的授权边界。模型应优先用文件工具修改源码，以保留读取版本检查和原子替换。
-- 文件路径必须位于 Workspace 内，`.git` 和 `.pico` 不对模型开放。
-- `edit_file` 只接收路径和替换内容；Runtime 内部绑定本轮读取到的 Revision，写入前再次检查，并通过临时文件原子替换。
-- 执行意图和修改前版本标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
+- `run_shell` 可以产生正常的测试、构建和 snapshot 输出；审批是这类主机副作用的授权边界。模型应优先用文件工具修改源码，以获得精确替换、原子写入和可恢复记录。
+- 文件路径必须位于 Workspace 内，`.git`、`.pico` 和真实 `.env` 文件不对模型开放；`.env.example`、`.env.sample` 仍可读取。
+- `edit_file` 在执行时读取当前文件，只替换唯一匹配的 `old_text`，并通过同目录临时文件原子替换。它不把模型早先读取的整文件 Revision 作为局部修改的写入条件。
+- 执行意图和修改前状态标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
 - 模型负责选择并运行相关测试，Runtime 不把普通测试结果冒充为自然语言任务的独立验收；恢复出的不确定副作用作为事实反馈模型，由模型观察当前工作区后继续，不自动重放原工具。
 - 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续三次相同失败提示改变策略，第四次停止。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
 - Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受 Run 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；总内存上限为 1 MiB，stdout/stderr 各保留固定大小的 Head 与 Tail，并报告中间省略字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
@@ -120,10 +125,10 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 5. `pico/run_log.py` 与 `pico/run_projection.py`
 6. `pico/prompt_builder.py`
 
-Provider 使用 `AsyncOpenAI` 调用兼容 Responses API 的服务，对外仍提供同步调用。一个 Model Client 在 Session 内复用 `asyncio.Runner`、SDK Client 和 HTTP 连接池；每次请求只创建独立任务与响应流。取消或截止时间到达时仅取消当前任务，后续请求继续复用可用连接；CLI 退出时统一关闭 Client。消息回放状态保留在 Pico Adapter 中。同步入口不应直接在已有 asyncio 事件循环的线程里调用。命令执行、Artifact 和底层 Git 状态采集第一次阅读主链时可以跳过。
+Provider 使用 `AsyncOpenAI` 调用兼容 Responses API 的服务，对外仍提供同步调用。一个 Model Client 在 Session 内复用 `asyncio.Runner`、SDK Client 和 HTTP 连接池；每次请求只创建独立任务与响应流。取消或截止时间到达时仅取消当前任务，后续请求继续复用可用连接；CLI 退出时统一关闭 Client。消息回放状态保留在 Pico Adapter 中。同步入口不应直接在已有 asyncio 事件循环的线程里调用。当前没有第二个生产 Provider Adapter，因此项目不宣称已经完成多厂商协议适配。命令执行、Artifact 和底层 Git 状态采集第一次阅读主链时可以跳过。
 
-## 文件版本与结果展示
+## 文件修改与结果展示
 
-Pico 保留单次编辑 Diff、内部修改路径和版本标识，不生成跨 Run 恢复的累计净 Diff，不保存完整文件前像，也不提供历史撤销。工具输出及日志中的编辑片段仍会落盘，但不是整文件备份。未完成操作通过 Intent 与当前 Revision 结算；完成前只检查任务边界和已跟踪文件的工作区漂移。
+Pico 保留单次编辑 Diff、内部修改路径和前后状态标识，不生成跨 Run 恢复的累计净 Diff，不保存完整文件前像，也不提供历史撤销。工具输出及日志中的编辑片段仍会落盘，但不是整文件备份。未完成操作只在恢复时对相关路径重新观察；普通完成不扫描或锁定整个 Workspace。
 
 旧版含前像或 final_diff 的事件／Checkpoint 不提供迁移和兼容。已有历史文件不自动删除；请使用新 Session。旧运行目录仍可由用户自行保留或清理。

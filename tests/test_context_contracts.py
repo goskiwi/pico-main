@@ -140,6 +140,33 @@ class ContextSelectionTests(unittest.TestCase):
                 render_input=_assemble_input,
             )
 
+    def test_one_prompt_rebuild_reuses_one_history_snapshot_and_tool_surface(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subject.txt").write_text("alpha\n")
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool("read_file", {"path": "subject.txt"}),
+                    ModelAction.final("Read."),
+                ],
+            )
+
+            with mock.patch.object(
+                agent.prompt,
+                "_history",
+                wraps=agent.prompt._history,
+            ) as history, mock.patch.object(
+                agent.tools,
+                "resolve_surface",
+                wraps=agent.tools.resolve_surface,
+            ) as surface:
+                outcome = agent.ask("Read subject.txt")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(history.call_count, 1)
+            self.assertEqual(surface.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

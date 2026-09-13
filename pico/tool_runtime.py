@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -28,7 +27,6 @@ from .tool_execution import (
     effect_diff,
     intersect_write_scopes,
     path_transitions,
-    tracked_workspace_drift,
 )
 from .workspace import clip
 
@@ -74,7 +72,6 @@ class ToolRuntime:
 
     def __init__(self, runtime: Pico):
         self.runtime = runtime
-        self.observed_revisions: dict[str, str] = {}
         self.registry = self._build_registry()
         self._validate_allowlist(self.registry)
 
@@ -271,10 +268,12 @@ class ToolRuntime:
     def _record_tool_intent(cls, agent, call, *, plan, potential_effects):
         run_log = cls._recorded_run_log(agent)
         return run_log.append_tool_intent(
-            call,
+            cls._redacted_call(agent, call),
             effect_scope=plan.effect_scope,
-            potential_effects=potential_effects,
-            operation=plan.operation,
+            potential_effects=redact_facts(
+                potential_effects, agent.redact_text
+            ),
+            operation=redact_facts(plan.operation, agent.redact_text),
         )
 
     @classmethod
@@ -285,7 +284,15 @@ class ToolRuntime:
     @classmethod
     def _record_tool_exchange(cls, agent, call, outcome):
         run_log = cls._recorded_run_log(agent)
-        return run_log.append_tool_exchange(call, outcome)
+        return run_log.append_tool_exchange(cls._redacted_call(agent, call), outcome)
+
+    @staticmethod
+    def _redacted_call(agent, call):
+        return ToolCall(
+            call.name,
+            redact_facts(call.args, agent.redact_text),
+            call.call_id,
+        )
 
     @staticmethod
     def _plan_execution(tool, context, args):
@@ -378,63 +385,6 @@ class ToolRuntime:
             observed["path_transitions"] = list(transitions)
         return observed
 
-    def _observed_result_outcome(
-        self,
-        call,
-        result,
-        *,
-        effects_before,
-        effects_after,
-        potential_scope,
-    ):
-        planned_paths = set(effects_before)
-        unexpected = sorted(set(result.affected_paths) - planned_paths)
-        if unexpected:
-            return self._outcome(
-                call,
-                "partial_success",
-                "completed",
-                "unknown",
-                result.content,
-                failure=FailureInfo(
-                    "tool_effect_outside_plan",
-                    "tool reported unplanned paths: " + ", ".join(unexpected),
-                    "user_action_required",
-                ),
-                affected_paths=unexpected,
-                effect_scope=potential_scope,
-                structured={
-                    **self._observed_structured(result.structured, ()),
-                    "reported_unplanned_paths": unexpected,
-                },
-            )
-        paths = effect_diff(effects_before, effects_after)
-        transitions = path_transitions(
-            effects_before,
-            effects_after,
-            paths,
-        )
-        effect_scope = potential_scope if paths else "none"
-        status, side_effect, paths = classify_runner_result(
-            result.failure,
-            paths,
-            effect_scope,
-        )
-        return self._outcome(
-            call,
-            status,
-            "completed",
-            side_effect,
-            result.content,
-            failure=result.failure,
-            affected_paths=paths,
-            effect_scope=effect_scope,
-            structured=self._observed_structured(
-                result.structured,
-                transitions,
-            ),
-        )
-
     def _observed_exception_outcome(
         self,
         call,
@@ -512,21 +462,7 @@ class ToolRuntime:
         context.execution_plan = plan
         try:
             result = self._invoke_runner(tool, context, call.args)
-            if plan.paths:
-                effects_after = self._effect_snapshot(
-                    agent,
-                    plan.paths,
-                    settling=True,
-                )
-                outcome = self._observed_result_outcome(
-                    call,
-                    result,
-                    effects_before=effects_before,
-                    effects_after=effects_after,
-                    potential_scope=plan.effect_scope,
-                )
-            else:
-                outcome = self._result_outcome(call, result)
+            outcome = self._result_outcome(call, result)
         except Exception as exc:  # noqa: BLE001 - tool boundary
             if plan.paths:
                 effects_after = self._effect_snapshot(
@@ -611,51 +547,34 @@ class ToolRuntime:
     def _execute_edit(self, call, tool, context, plan):
         agent = self.runtime
         logical, path = plan.paths[0]
-        expected_revision = self.observed_revisions.get(logical)
-        if expected_revision is None:
-            return self._rejected(
-                call,
-                "read_required",
-                "read the file before editing it",
-                "retry_after_change",
+        try:
+            prepared = agent.dependencies.mutations.prepare_edit(
+                path,
+                call.args.get("old_text", ""),
+                call.args["new_text"],
+                execution_context=context.execution_context,
             )
-        with ExitStack() as stack:
-            try:
-                raw, revision = stack.enter_context(agent.dependencies.mutations.prepare_edit(
-                    path, expected_revision,
-                    execution_context=context.execution_context,
-                ))
-                before = {logical: revision}
-                drift = tracked_workspace_drift(before, plan.effect_scope, agent.run.evidence.change_set.files)
-                if drift:
-                    return self._rejected(
-                        call, "workspace_drift", f"workspace changed outside this Run; read_file before continuing: {logical}",
-                        "retry_after_change", structured={"drift": list(drift)},
-                    )
-                context.execution_context.check_active()
-            except ToolFailureError as exc:
-                return self._rejected(call, exc.failure.code, exc.failure.detail,
-                                      exc.failure.recovery, structured=exc.structured)
-            except (ExecutionCancelled, ExecutionDeadlineExceeded):
-                raise
-            except Exception as exc:  # noqa: BLE001 - mutation planning boundary
-                return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
+            before = {logical: prepared.receipt.before_revision}
+            context.execution_context.check_active()
+        except ToolFailureError as exc:
+            return self._rejected(call, exc.failure.code, exc.failure.detail,
+                                  exc.failure.recovery, structured=exc.structured)
+        except (ExecutionCancelled, ExecutionDeadlineExceeded):
+            raise
+        except Exception as exc:  # noqa: BLE001 - mutation planning boundary
+            return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
 
-            bound = {
-                **tool,
-                "run": partial(
-                    tool["run"],
-                    original=raw,
-                    expected_revision=expected_revision,
-                ),
-            }
-            return self._execute_prepared(
-                call,
-                bound,
-                context,
-                plan,
-                effects_before=before,
-            )
+        bound = {
+            **tool,
+            "run": partial(tool["run"], prepared=prepared),
+        }
+        return self._execute_prepared(
+            call,
+            bound,
+            context,
+            plan,
+            effects_before=before,
+        )
 
     def _execute(self, call, surface):
         agent = self.runtime
@@ -688,10 +607,6 @@ class ToolRuntime:
                 return self._rejected(call, failure.code, failure.detail, failure.recovery)
             if surface.mode != "auto" or name == "run_shell":
                 try:
-                    current = self.resolve_surface()
-                    if name not in current.definitions:
-                        raise ValueError("tool permission changed during approval")
-                    self._check_plan_scope(call, plan, current.allowed_write_paths)
                     for logical, target in plan.paths:
                         source = args["path"] if name in {"write_file", "edit_file"} else logical
                         if agent.workspace.resolve_tool_path(source) != target:
@@ -699,30 +614,12 @@ class ToolRuntime:
                 except ValueError as exc:
                     return self._rejected(call, "approval_context_changed", str(exc), "retry_after_change")
         try:
-            potential_scope, potential_paths = plan.effect_scope, plan.paths
+            potential_paths = plan.paths
             effects_before = {} if name == "edit_file" else self._effect_snapshot(agent, potential_paths)
         except Exception as exc:  # noqa: BLE001 - effect planning boundary
             return self._rejected(call, "effect_planning_failed", str(exc), "retry_after_change")
         if name == "edit_file":
             return self._execute_edit(call, tool, context, plan)
-        drift = tracked_workspace_drift(
-            effects_before,
-            potential_scope,
-            (
-                agent.run.evidence.change_set.files
-                if agent.run.run_log is not None
-                else {}
-            ),
-        )
-        if drift:
-            paths = ", ".join(item["path"] for item in drift)
-            return self._rejected(
-                call,
-                "workspace_drift",
-                f"workspace changed outside this Run; read_file before continuing: {paths}",
-                "retry_after_change",
-                structured={"drift": list(drift)},
-            )
         return self._execute_prepared(
             call,
             tool,
@@ -780,36 +677,6 @@ class ToolRuntime:
 
     def prepare_outcome(self, outcome):
         """Prepare executed and recovered facts through the same output boundary."""
-        path = outcome.structured.get("path")
-        if path and outcome.status == "success":
-            revision = (
-                outcome.structured.get("revision")
-                if outcome.tool_name == "read_file"
-                else outcome.structured.get("after_revision")
-            )
-            if revision and outcome.tool_name in {"read_file", "write_file", "edit_file"}:
-                self.observed_revisions[path] = revision
-        if outcome.tool_name == "read_file":
-            observed = outcome.structured
-            run_log = self.runtime.run.run_log
-            known = (
-                run_log.projection.evidence.change_set.files.get(observed.get("path"))
-                if run_log is not None
-                else None
-            )
-            if (
-                known is not None
-                and observed.get("revision")
-                and observed["revision"] != known.current_after_state
-                and (
-                    outcome.status == "success"
-                    or (outcome.failure and outcome.failure.code == "missing_path")
-                )
-            ):
-                outcome = replace(
-                    outcome,
-                    structured={**observed, "external_change_observed": True},
-                )
         failure = outcome.failure
         if failure is not None:
             failure = replace(failure, detail=self.runtime.redact_text(failure.detail))

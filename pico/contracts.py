@@ -349,10 +349,10 @@ class ToolOutcome:
         if len(encode().encode("utf-8")) > TOOL_OUTPUT_MAX_BYTES:
             essential = {
                 "path", "revision", "before_revision", "after_revision",
-                "expected_revision", "actual_revision", "start_line", "end_line",
-                "total_lines", "offset", "end_offset", "next_offset", "total_bytes",
+                "actual_revision", "start_line", "end_line",
+                "offset", "end_offset", "next_offset", "total_bytes",
                 "has_more", "truncated", "artifact_id", "exit_code", "stop_reason",
-                "output_limited", "status", "external_change_observed",
+                "output_limited", "status",
                 "stdout_discarded_bytes", "stderr_discarded_bytes",
             }
             payload["structured"] = {

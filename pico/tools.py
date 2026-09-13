@@ -4,7 +4,6 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
-import hashlib
 import json
 import os
 import selectors
@@ -149,7 +148,7 @@ def _validate_read_file(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args["path"])
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}",
-                               structured={"path": path.relative_to(workspace_root).as_posix(), "revision": "absent"})
+                               structured={"path": path.relative_to(workspace_root).as_posix()})
     if not path.is_file():
         raise ToolFailureError("invalid_path_type", "path is not a file")
     if int(args.get("end_line", 200)) < int(args.get("start_line", 1)):
@@ -202,8 +201,7 @@ def _validate_write_file(context, args, *, mutation_service, workspace_root):
 
 
 def _validate_edit_file(context, args, *, mutation_service):
-    # Edit admission is intentionally strict so the later mutation is
-    # deterministic and revision-bound.
+    # The mutation re-reads current bytes and requires one exact replacement.
     _logical, path = context.execution_plan.paths[0]
     if not path.exists():
         raise ToolFailureError("missing_path", f"path does not exist: {args['path']}")
@@ -262,19 +260,19 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
     path = path_resolver(args["path"])
     start_line = int(args.get("start_line", 1))
     requested_end_line = int(args.get("end_line", 200))
-    digest = hashlib.sha256()
     rendered = bytearray()
-    total_lines = 0
     number = 1
     line_start = True
     truncated = False
+    has_more = False
     actual_end_line = None
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.readline(64 * 1024), b""):
             if context.execution_context is not None:
                 context.execution_context.check_active()
-            digest.update(chunk)
-            total_lines = number
+            if number > requested_end_line:
+                has_more = True
+                break
             if start_line <= number <= requested_end_line:
                 prefix = f"{number:>4}: ".encode() if line_start else b""
                 content = prefix + chunk
@@ -283,6 +281,9 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
                 truncated |= len(content) > available
                 if available > 0:
                     actual_end_line = number
+                if truncated:
+                    has_more = True
+                    break
             line_start = chunk.endswith(b"\n")
             if line_start:
                 number += 1
@@ -292,7 +293,6 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
     )
     if truncated:
         body += "\n[read output truncated; narrow the line range or search for specific content]"
-    revision = "sha256:" + digest.hexdigest()
     relative = path.relative_to(workspace_root).as_posix()
     return ToolRunnerResult(
         body,
@@ -300,10 +300,8 @@ def tool_read_file(context, args, *, path_resolver, workspace_root):
             "path": relative,
             "start_line": start_line,
             "end_line": actual_end_line,
-            "total_lines": total_lines,
-            "has_more": truncated or total_lines > requested_end_line,
+            "has_more": has_more,
             "truncated": truncated,
-            "revision": revision,
         },
     )
 
@@ -472,14 +470,7 @@ def tool_write_file(context, args, *, mutation_service, workspace_root):
     content = str(args["content"])
     receipt = mutation_service.write(path, content)
     relative = path.relative_to(workspace_root).as_posix()
-    return ToolRunnerResult(
-        content=receipt.diff,
-        structured={
-            "path": relative,
-            "before_revision": receipt.before_revision,
-            "after_revision": receipt.after_revision,
-        },
-    )
+    return _mutation_result(relative, receipt)
 
 
 def tool_edit_file(
@@ -488,26 +479,39 @@ def tool_edit_file(
     *,
     mutation_service,
     workspace_root,
-    original,
-    expected_revision,
+    prepared,
 ):
     _logical, path = context.execution_plan.paths[0]
-    old_text = str(args.get("old_text", ""))
-    receipt = mutation_service.edit(
-        path,
-        old_text,
-        str(args["new_text"]),
-        expected_revision,
-        original=original,
-    )
+    if prepared.target != path:
+        raise RuntimeError("prepared edit target does not match execution plan")
+    receipt = mutation_service.commit_edit(prepared)
     relative = path.relative_to(workspace_root).as_posix()
+    return _mutation_result(relative, receipt)
+
+
+def _mutation_result(relative, receipt):
+    changed = receipt.changed
+    transitions = (
+        [
+            {
+                "path": relative,
+                "before_state": receipt.before_revision,
+                "after_state": receipt.after_revision,
+            }
+        ]
+        if changed
+        else []
+    )
     return ToolRunnerResult(
         content=receipt.diff or "(no changes)",
         structured={
             "path": relative,
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
+            "path_transitions": transitions,
         },
+        affected_paths=(relative,) if changed else (),
+        effect_scope="workspace" if changed else "none",
     )
 
 
@@ -551,6 +555,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
             "stdout_discarded_bytes": result.stdout_discarded_bytes,
             "stderr_discarded_bytes": result.stderr_discarded_bytes,
         },
+        effect_scope=("none" if result.infrastructure_error else "workspace"),
         failure=failure,
     )
 
@@ -566,7 +571,10 @@ def _run_shell_plan(context, args):
         "workspace",
         operation={
             "command": args["command"],
+            "shell": "/bin/sh",
+            "cwd": ".",
             "timeout_seconds": args["timeout_seconds"],
+            "environment_policy": "minimal",
         },
     )
 
@@ -584,7 +592,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "read_file": {
             "args_schema": ReadFileArgs,
             "risky": False,
-            "description": "Read a UTF-8 file by line range. Line breaks are presented as LF; the revision identifies the original file bytes.",
+            "description": "Read a UTF-8 file by line range. Line breaks are presented as LF.",
             "validate": partial(_validate_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
             "run": partial(tool_read_file, path_resolver=path_resolver, workspace_root=workspace_root),
         },
@@ -605,7 +613,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "run_shell": {
             "args_schema": RunShellArgs,
             "risky": True,
-            "description": "Run one user-approved, non-interactive host command from the workspace root. Use timeout_seconds from 1 to 600 (default 120). Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so their revisions remain tracked.",
+            "description": "Run one user-approved, non-interactive host command from the workspace root. Use timeout_seconds from 1 to 600 (default 120). Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so replacements stay exact and auditable.",
             "validate": partial(_validate_run_shell, command_runner=command_runner),
             "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
             "plan": _run_shell_plan,
@@ -623,7 +631,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "args_schema": EditFileArgs,
             "risky": True,
             "state_mutating": True,
-            "description": "Replace one exact, unique text block in a file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Call read_file first; Runtime binds the observed revision internally and checks it again before writing. Keep old_text small but unique and exclude read_file's line-number prefixes.",
+            "description": "Replace one exact, unique text block in the current file, treating LF and CRLF as the same line break. New lines use the local line ending; bytes outside the replaced block are preserved. Keep old_text small but unique and exclude read_file's line-number prefixes.",
             "validate": partial(_validate_edit_file, mutation_service=mutation_service),
             "run": partial(tool_edit_file, mutation_service=mutation_service, workspace_root=workspace_root),
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),

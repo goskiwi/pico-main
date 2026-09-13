@@ -87,7 +87,7 @@ class CommandResult:
 
 @dataclass(frozen=True)
 class RawCommandResult:
-    """Unmodified process output for Runtime observers that need exact bytes."""
+    """Bounded process output retained as bytes for Runtime formatting."""
 
     returncode: int | None
     stdout: bytes = b""

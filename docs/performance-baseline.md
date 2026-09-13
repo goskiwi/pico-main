@@ -44,3 +44,19 @@ At 100,000 events, Checkpoint + Tail reduced measured recovery latency by about
 History reduced the bounded Context construction from the 14.643 s baseline to
 about 0.87 s after either recovery path. These observations document this host;
 they are not acceptance thresholds.
+
+## Current refactor measurement
+
+Re-run on 2026-09-14 after the Runtime simplification, using the same command
+and workload:
+
+| Events | Log bytes | Append | Context | Full recovery | Checkpoint recovery | Full peak RSS | Checkpoint peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 225,838 | 0.067 s | 0.958 s | 0.0032 s | 0.0024 s | 136.0 MB | 132.5 MB |
+| 10,000 | 2,532,110 | 0.629 s | 0.880 s | 0.0344 s | 0.0027 s | 147.0 MB | 136.4 MB |
+| 100,000 | 26,054,080 | 6.833 s | 0.900 s | 0.3772 s | 0.0025 s | 254.9 MB | 136.9 MB |
+
+At 100,000 events the checkpoint path replayed the bounded tail in about
+1/148 of the full-replay time and used about 46% less peak memory. Append time
+remains linear and is not improved by Checkpoint; this benchmark therefore
+does not claim to solve synchronous Event-log write cost.

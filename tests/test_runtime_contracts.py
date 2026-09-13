@@ -11,8 +11,6 @@ from pico import (
     ToolOutcome,
     WriteScope,
 )
-from pico.completion_controller import CompletionController
-from pico.evidence import WorkspaceDriftError
 from pico.providers import ProviderContextOverflow
 from pico.run_log import RunEvent, RunLog, replay_events
 from tests.support import assert_file_command, build_agent
@@ -116,26 +114,6 @@ class RuntimeContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 RunEvent.from_dict(event)
 
-    def test_drift_after_assessment_still_prevents_terminal_success(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            target = root / "subject.txt"
-            target.write_text("alpha\n")
-            agent, _ = build_agent(root, [
-                ModelAction.tool("read_file", {"path": "subject.txt"}),
-                ModelAction.tool("edit_file", {"path": "subject.txt", "old_text": "alpha", "new_text": "beta"}),
-                ModelAction.final("Done"),
-            ])
-            evaluate = CompletionController.evaluate
-            def drift_after_evaluation(controller, final):
-                decision = evaluate(controller, final)
-                target.write_text("external change\n")
-                return decision
-            with mock.patch.object(CompletionController, "evaluate", drift_after_evaluation), self.assertRaises(WorkspaceDriftError):
-                agent.ask("Edit the file")
-            self.assertTrue(agent.run.resumable)
-            self.assertNotIn("assistant_final", [e.kind for e in agent.read_run_events(agent.run.run_log.run_id)])
-            self.assertEqual(target.read_text(), "external change\n")
     def test_context_overflow_rebuilds_then_completes(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(Path(directory), [])
@@ -190,7 +168,6 @@ class RuntimeContractTests(unittest.TestCase):
 
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
-            self.assertEqual(agent.run.evidence.changed_paths, ["subject.txt"])
             self.assertFalse(hasattr(outcome, "changed_paths"))
             self.assertNotIn("final_diff", outcome.to_dict())
             self.assertFalse(list(root.rglob("preimage_*")))
@@ -204,7 +181,23 @@ class RuntimeContractTests(unittest.TestCase):
                 for event in agent.run.run_log.events
                 if event.kind == "tool_intent" and event.call_id == "test"
             )
-            self.assertEqual(shell_intent.payload["operation"]["timeout_seconds"], 120)
+            self.assertEqual(
+                shell_intent.payload["operation"],
+                {
+                    "command": check,
+                    "cwd": ".",
+                    "environment_policy": "minimal",
+                    "shell": "/bin/sh",
+                    "timeout_seconds": 120,
+                },
+            )
+            shell_result = next(
+                event for event in agent.run.run_log.events
+                if event.kind == "tool_settlement" and event.call_id == "test"
+            ).payload["outcome"]
+            self.assertEqual(shell_result["status"], "success")
+            self.assertEqual(shell_result["side_effect_state"], "unknown")
+            self.assertEqual(shell_result["effect_scope"], "workspace")
             tool_events = [
                 (event.kind, event.call_id)
                 for event in agent.run.run_log.events
@@ -225,7 +218,7 @@ class RuntimeContractTests(unittest.TestCase):
             )
             self.assertEqual(replayed.summary(), agent.run.projection.summary())
 
-    def test_pre_execution_rejection_is_one_exchange(self):
+    def test_edit_uses_current_content_without_a_prior_read(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -242,19 +235,21 @@ class RuntimeContractTests(unittest.TestCase):
                 ],
             )
 
-            outcome = agent.ask("Attempt an edit")
+            outcome = agent.ask("Edit the file")
 
             self.assertEqual(outcome.status, "completed")
-            self.assertEqual(target.read_text(), "alpha\n")
+            self.assertEqual(target.read_text(), "beta\n")
             tool_events = [
                 event
                 for event in agent.run.run_log.events
                 if event.kind in {"tool_exchange", "tool_intent", "tool_settlement"}
             ]
-            self.assertEqual([event.kind for event in tool_events], ["tool_exchange"])
-            rejected = ToolOutcome.from_dict(tool_events[0].payload["outcome"])
-            self.assertEqual(rejected.execution_state, "not_started")
-            self.assertEqual(rejected.failure.code, "read_required")
+            self.assertEqual(
+                [event.kind for event in tool_events],
+                ["tool_intent", "tool_settlement"],
+            )
+            result = ToolOutcome.from_dict(tool_events[-1].payload["outcome"])
+            self.assertEqual(result.status, "success")
 
     def test_removed_tool_event_format_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported Run Log kind"):
@@ -554,8 +549,8 @@ class RuntimeContractTests(unittest.TestCase):
                 log.append_compaction("summary", [user.event_id, call_event.event_id])
 
 
-class FileVersionLifecycleTests(unittest.TestCase):
-    def test_external_change_is_reread_before_edit_and_version_is_tracked(self):
+class FileMutationLifecycleTests(unittest.TestCase):
+    def test_edit_preserves_unrelated_change_made_after_read(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -573,15 +568,6 @@ class FileVersionLifecycleTests(unittest.TestCase):
                         "edit_file",
                         {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
                     ),
-                    ModelAction.tool("read_file", {"path": "subject.txt"}),
-                    ModelAction.tool(
-                        "edit_file",
-                        {
-                            "path": "subject.txt",
-                            "old_text": "alpha\nexternal\n",
-                            "new_text": "beta\nexternal\n",
-                        },
-                    ),
                     ModelAction.final("Preserved the external edit."),
                 ],
                 before_action=change_after_initial_read,
@@ -590,8 +576,12 @@ class FileVersionLifecycleTests(unittest.TestCase):
             outcome = agent.ask("Change alpha to beta and preserve other work")
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(), "beta\nexternal\n")
-            change = agent.run.evidence.change_set.files["subject.txt"]
-            self.assertTrue(change.first_before_state.startswith("sha256:"))
+            settlement = next(
+                event for event in agent.run.run_log.events
+                if event.kind == "tool_settlement"
+            )
+            transition = settlement.payload["outcome"]["structured"]["path_transitions"][0]
+            self.assertTrue(transition["before_state"].startswith("sha256:"))
             self.assertFalse(list(root.rglob("preimage_*")))
             failures = [
                 event.payload["outcome"]["failure"]["code"]
@@ -599,7 +589,67 @@ class FileVersionLifecycleTests(unittest.TestCase):
                 if event.kind in {"tool_exchange", "tool_settlement"}
                 and event.payload["outcome"].get("failure")
             ]
-            self.assertIn("revision_conflict", failures)
+            self.assertEqual(failures, [])
+
+    def test_edit_rejects_when_external_change_removes_target_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "subject.txt"
+            target.write_text("alpha\n", encoding="utf-8")
+
+            def change_after_initial_read(index):
+                if index == 1:
+                    target.write_text("external\n", encoding="utf-8")
+
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool("read_file", {"path": "subject.txt"}),
+                    ModelAction.tool(
+                        "edit_file",
+                        {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
+                    ),
+                    ModelAction.final("The target changed before editing."),
+                ],
+                before_action=change_after_initial_read,
+            )
+
+            outcome = agent.ask("Change alpha to beta")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(target.read_text(), "external\n")
+            failure = next(
+                event.payload["outcome"]["failure"]["code"]
+                for event in agent.run.run_log.events
+                if event.kind in {"tool_exchange", "tool_settlement"}
+                and event.payload["outcome"].get("failure")
+            )
+            self.assertEqual(failure, "text_not_found")
+
+    def test_successful_edit_and_completion_do_not_rescan_file_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "subject.txt"
+            target.write_text("alpha\n", encoding="utf-8")
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "edit_file",
+                        {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
+                    ),
+                    ModelAction.final("Edited."),
+                ],
+            )
+
+            with mock.patch.object(
+                agent.workspace, "path_state", wraps=agent.workspace.path_state
+            ) as path_state:
+                outcome = agent.ask("Change alpha to beta")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(target.read_text(), "beta\n")
+            path_state.assert_not_called()
 
     def test_failed_edit_does_not_create_a_change(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -621,7 +671,6 @@ class FileVersionLifecycleTests(unittest.TestCase):
             outcome = agent.ask("Try the requested replacement")
 
             self.assertEqual(target.read_text(), "alpha\n")
-            self.assertEqual(agent.run.evidence.changed_paths, [])
             self.assertNotIn("final_diff", outcome.to_dict())
             failure = next(
                 event.payload["outcome"]["failure"]["code"]
@@ -631,7 +680,7 @@ class FileVersionLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(failure, "text_not_found")
 
-    def test_noop_and_revert_preserve_version_chain_without_backups(self):
+    def test_noop_and_revert_preserve_transaction_history_without_backups(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -659,10 +708,16 @@ class FileVersionLifecycleTests(unittest.TestCase):
             outcome = agent.ask("Exercise edits and restore the original")
 
             self.assertEqual(target.read_text(), "alpha\n")
-            self.assertEqual(agent.run.evidence.changed_paths, [])
             self.assertNotIn("final_diff", outcome.to_dict())
-            change = agent.run.evidence.change_set.files["subject.txt"]
-            self.assertTrue(change.first_before_state.startswith("sha256:"))
+            settlements = [
+                event.payload["outcome"]
+                for event in agent.run.run_log.events
+                if event.kind == "tool_settlement"
+            ]
+            self.assertEqual(
+                [item["side_effect_state"] for item in settlements],
+                ["none", "changed", "changed"],
+            )
             self.assertFalse(list(root.rglob("preimage_*")))
 
 

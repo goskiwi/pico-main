@@ -160,7 +160,8 @@ class RunStore:
         encoded = (
             json.dumps(entry.to_dict(), sort_keys=True, ensure_ascii=True) + "\n"
         ).encode("utf-8")
-        with path.open("ab") as handle:
+        descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "ab") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())

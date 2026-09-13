@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .contracts import ToolCall, ToolOutcome
-from .evidence import RunEvidence
 from .task_state import TaskContract
 
 
@@ -133,7 +132,6 @@ class RunProjection:
     run_id: str = ""
     session_id: str = ""
     contract: TaskContract | None = None
-    evidence: RunEvidence = field(default_factory=RunEvidence)
     metrics: RunMetrics = field(default_factory=RunMetrics)
     status: str = "not_started"
     stop_reason: str = ""
@@ -198,7 +196,6 @@ class RunProjection:
         if event.kind == "user_message":
             self.contract = TaskContract.from_dict(event.payload["contract"])
             self.status = "running"
-        self.evidence.apply_event(event)
         self.metrics.apply_event(event)
         self.pending_tool.apply_event(event)
         if event.kind == "failure_observed":
@@ -241,7 +238,6 @@ class RunProjection:
             raise ValueError("checkpoint requires one active Run")
         return {
             "contract": self.contract.to_dict(),
-            "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
             "runtime_feedback": (
                 {
@@ -271,7 +267,6 @@ class RunProjection:
     ):
         expected = {
             "contract",
-            "evidence",
             "metrics",
             "runtime_feedback",
             "failure_streak",
@@ -300,7 +295,6 @@ class RunProjection:
             run_id=str(run_id),
             session_id=str(session_id),
             contract=TaskContract.from_dict(value["contract"]),
-            evidence=RunEvidence.from_dict(value["evidence"]),
             metrics=RunMetrics.from_dict(value["metrics"]),
             status="running",
             runtime_feedback=(RuntimeFeedback(**feedback) if feedback else None),
@@ -327,7 +321,7 @@ class RunProjection:
         outcome = event.payload["outcome"]
         return bool(
             outcome.get("status") == "success"
-            or outcome.get("side_effect_state") != "none"
+            or outcome.get("side_effect_state") in {"changed", "partial"}
         )
 
     def summary(self):
@@ -346,7 +340,6 @@ class RunProjection:
                     "final_answer": self.final_answer,
                 },
             },
-            "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
             "runtime_feedback": (
                 {

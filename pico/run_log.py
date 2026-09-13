@@ -18,7 +18,6 @@ RUN_EVENT_KINDS = frozenset(
         "run_resumed",
         "model_requested",
         "turn_metrics",
-        "completion_blocked",
         "failure_observed",
         "tool_exchange",
         "tool_intent",
@@ -62,12 +61,6 @@ def _validate_model_instruction_payload(kind, payload):
         artifact_id and not TOOL_ARTIFACT_ID.fullmatch(artifact_id)
     ):
         raise ValueError("model_instruction evidence artifact is invalid")
-
-
-def _validate_completion_blocked_payload(kind, payload):
-    _exact_payload(kind, payload, {"status"})
-    if not isinstance(payload["status"], str) or not payload["status"].strip():
-        raise ValueError("completion_blocked requires a status")
 
 
 def _validate_failure_observed_payload(kind, payload):
@@ -184,7 +177,6 @@ _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
     "model_instruction": _validate_model_instruction_payload,
-    "completion_blocked": _validate_completion_blocked_payload,
     "failure_observed": _validate_failure_observed_payload,
     "tool_exchange": _validate_tool_exchange_payload,
     "tool_intent": _validate_tool_intent_payload,

@@ -6,8 +6,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from .completion_controller import CompletionController
-from .prompt_builder import render_runtime_feedback
 from .providers import ProviderContextOverflow
 from .run_lifecycle import RunLifecycle, reload_current_run
 from .run_projection import RunOutcome
@@ -35,7 +33,6 @@ class AgentLoop:
     def __init__(self, agent: Pico):
         self.agent = agent
         self.lifecycle = RunLifecycle(agent)
-        self.completion = CompletionController(agent)
 
     def run(
         self,
@@ -103,7 +100,9 @@ class AgentLoop:
 
     def _next_model_turn(self, loop_state):
         agent = self.agent
-        tool_surface = agent.tools.resolve_surface()
+        if loop_state.tool_surface is None:
+            loop_state.tool_surface = agent.tools.resolve_surface()
+        tool_surface = loop_state.tool_surface
         prompt = self._prepare_prompt(loop_state, tool_surface)
         action = self._request_action(
             loop_state,
@@ -121,13 +120,6 @@ class AgentLoop:
         agent = self.agent
         if agent.prompt.refresh_repository_instructions():
             self._reset_context(loop_state, "repository_instructions_changed")
-        if loop_state.prompt_snapshot is not None:
-            _prompt, prior_surface = loop_state.prompt_snapshot
-            if prior_surface.names != tool_surface.names or prior_surface.policy != tool_surface.policy:
-                self._reset_context(
-                    loop_state, "tool_surface_changed",
-                    tool_names=list(tool_surface.names),
-                )
         if loop_state.prompt_snapshot is None:
             prompt = agent.prompt.build_for_run(
                 loop_state.user_message,
@@ -135,9 +127,9 @@ class AgentLoop:
                 provider_context_tokens=loop_state.provider_context_tokens,
             )
             loop_state.provider_context_tokens = None
-            loop_state.prompt_snapshot = (prompt, tool_surface)
+            loop_state.prompt_snapshot = prompt
         else:
-            prompt, _surface = loop_state.prompt_snapshot
+            prompt = loop_state.prompt_snapshot
         return prompt
 
     def _reset_context(self, loop_state, reason=None, *, provider_context_tokens=None, **details):
@@ -284,46 +276,7 @@ class AgentLoop:
 
     def _handle_final_action(self, loop_state, turn):
         loop_state.invalid_output_count = 0
-        final = turn.action.content.strip()
-        assessment = self.completion.evaluate(final)
-        if assessment.allowed:
-            return LoopDirective("complete", assessment.instruction)
-        return self._block_completion(
-            loop_state,
-            turn,
-            assessment.status,
-            assessment.instruction,
-            assessment.evidence,
-        )
-
-    def _block_completion(
-        self,
-        loop_state,
-        turn,
-        status,
-        instruction,
-        evidence,
-    ):
-        warning, stop = self._observe_failure(
-            "completion",
-            status,
-            detail=evidence,
-        )
-        if warning:
-            instruction = instruction + "\n\n" + warning
-        self.agent.append_model_instruction(instruction, evidence=evidence)
-        self.agent.emit_event(
-            "completion_blocked",
-            {"status": status},
-        )
-        if stop:
-            return LoopDirective("stop", "repeated_failure")
-        self._continue_provider(
-            loop_state,
-            turn,
-            (render_runtime_feedback(self.agent.run.projection.runtime_feedback),),
-        )
-        return LoopDirective("continue")
+        return LoopDirective("complete", turn.action.content.strip())
 
     def _observe_failure(self, category, code, *, tool_name="", target="", detail=""):
         self.agent.emit_event(

@@ -20,10 +20,6 @@ class ActiveRunState:
         return self.run_log.projection
 
     @property
-    def evidence(self):
-        return self.projection.evidence
-
-    @property
     def metrics(self):
         return self.projection.metrics
 

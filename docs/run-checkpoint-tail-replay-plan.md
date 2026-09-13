@@ -90,7 +90,6 @@ Checkpoint 缺失、损坏或落后
   "event_log_offset": 8388608,
   "state": {
     "contract": {},
-    "evidence": {},
     "metrics": {},
     "runtime_feedback": null,
     "failure_streak": {
@@ -178,7 +177,6 @@ read_run_checkpoint(...)
 为 `RunProjection` 增加最小运行状态的 Checkpoint 序列化与恢复能力，覆盖：
 
 - `TaskContract`
-- `RunEvidence`
 - `RunMetrics`
 - `RuntimeFeedback`
 - 连续失败状态
@@ -303,7 +301,6 @@ Checkpoint + Tail Replay 的 RunProjection
 
 - Contract
 - 隐含恢复状态：Running / No Pending Tool
-- Evidence / Change Set / Uncertain Effects
 - Metrics
 - Runtime Feedback
 - Last Sequence

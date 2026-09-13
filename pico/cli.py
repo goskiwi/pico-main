@@ -46,8 +46,11 @@ DEFAULT_OPENAI_MODEL = "gpt-5.4"
 
 
 def _terminal_approval(name, args, plan):
-    request = {"arguments": args, "targets": [str(target) for _path, target in plan.paths],
-               "operation": plan.operation}
+    request = {
+        "arguments": args,
+        "targets": [str(target) for _path, target in plan.paths],
+        "operation": plan.operation,
+    }
     try:
         answer = input(
             f"approve {name} {json.dumps(request, ensure_ascii=True)}? [y/N] "
