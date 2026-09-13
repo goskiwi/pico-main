@@ -7,7 +7,6 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,11 +21,9 @@ from .contracts import (
     ToolRunnerResult,
 )
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
-from .mutations import RevisionConflict
 from .security import redact_facts
 from .tool_context import ToolContext
 from .tool_execution import (
-    attach_preimage_artifacts,
     classify_runner_result,
     effect_diff,
     intersect_write_scopes,
@@ -120,9 +117,6 @@ class ToolRuntime:
                         "path": logical,
                         "before_state": before,
                         "after_state": after,
-                        "before_artifact_id": str(
-                            effect.get("before_artifact_id", "")
-                        ),
                     }
                 )
         effect_scope = str(intent.payload.get("effect_scope", "none"))
@@ -388,37 +382,6 @@ class ToolRuntime:
             for logical, path in paths
         }
 
-    @staticmethod
-    def _needs_first_preimage(agent, logical, before_state):
-        return bool(
-            agent.run.run_log is not None
-            and before_state != "absent"
-            and logical not in agent.run.evidence.change_set.files
-        )
-
-    @staticmethod
-    def _preimage_artifacts(agent, call, paths, states, effect_scope):
-        if effect_scope != "workspace":
-            return {}
-        artifacts = {}
-        for logical, path in paths:
-            before_state = states.get(logical, "absent")
-            if not ToolRuntime._needs_first_preimage(
-                agent, logical, before_state
-            ):
-                continue
-            if not path.is_file():
-                raise ValueError(f"workspace preimage is not a file: {logical}")
-            with path.open("rb") as source:
-                descriptor = agent.dependencies.artifacts.write_workspace_preimage(
-                    _run_id(agent), call.call_id, logical, source,
-                )
-            captured = "sha256:" + descriptor["sha256"]
-            if captured != before_state:
-                raise RevisionConflict(logical, before_state, captured)
-            artifacts[logical] = descriptor["artifact_id"]
-        return artifacts
-
     def _validate_call(self, call, tool, context):
         try:
             args = self._validate_args(
@@ -451,7 +414,7 @@ class ToolRuntime:
             raise TypeError("tool runner must return ToolRunnerResult")
         return result
 
-    def _result_outcome(self, call, result, preimages=None):
+    def _result_outcome(self, call, result):
         status, side_effect, paths = classify_runner_result(
             result.failure,
             result.affected_paths,
@@ -466,7 +429,7 @@ class ToolRuntime:
             failure=result.failure,
             affected_paths=paths,
             effect_scope=result.effect_scope,
-            structured=attach_preimage_artifacts(result.structured, preimages or {}),
+            structured=result.structured,
         )
 
     @staticmethod
@@ -484,7 +447,6 @@ class ToolRuntime:
         *,
         effects_before,
         effects_after,
-        preimages,
         potential_scope,
     ):
         planned_paths = set(effects_before)
@@ -512,7 +474,6 @@ class ToolRuntime:
         transitions = path_transitions(
             effects_before,
             effects_after,
-            preimages,
             paths,
         )
         effect_scope = potential_scope if paths else "none"
@@ -543,7 +504,6 @@ class ToolRuntime:
         *,
         effects_before,
         effects_after,
-        preimages,
         potential_scope,
     ):
         typed = error if isinstance(error, ToolFailureError) else None
@@ -563,7 +523,6 @@ class ToolRuntime:
         transitions = path_transitions(
             effects_before,
             effects_after,
-            preimages,
             paths,
         )
         uncertain = bool(paths)
@@ -594,7 +553,6 @@ class ToolRuntime:
         plan,
         *,
         effects_before,
-        preimages,
     ):
         """Execute one admitted call and commit exactly one terminal fact."""
 
@@ -609,7 +567,6 @@ class ToolRuntime:
                     {
                         "path": path,
                         "before_state": state,
-                        "before_artifact_id": preimages.get(path, ""),
                     }
                     for path, state in sorted(effects_before.items())
                 ],
@@ -628,11 +585,10 @@ class ToolRuntime:
                     result,
                     effects_before=effects_before,
                     effects_after=effects_after,
-                    preimages=preimages,
                     potential_scope=plan.effect_scope,
                 )
             else:
-                outcome = self._result_outcome(call, result, preimages)
+                outcome = self._result_outcome(call, result)
         except Exception as exc:  # noqa: BLE001 - tool boundary
             if plan.paths:
                 effects_after = self._effect_snapshot(
@@ -645,7 +601,6 @@ class ToolRuntime:
                     exc,
                     effects_before=effects_before,
                     effects_after=effects_after,
-                    preimages=preimages,
                     potential_scope=plan.effect_scope,
                 )
             else:
@@ -739,12 +694,6 @@ class ToolRuntime:
                         call, "workspace_drift", f"workspace changed outside this Run; read_file before continuing: {logical}",
                         "retry_after_change", structured={"drift": list(drift)},
                     )
-                preimages = {}
-                if self._needs_first_preimage(agent, logical, revision):
-                    descriptor = agent.dependencies.artifacts.write_workspace_preimage(
-                        _run_id(agent), call.call_id, logical, BytesIO(raw),
-                    )
-                    preimages[logical] = descriptor["artifact_id"]
                 context.execution_context.check_active()
             except ToolFailureError as exc:
                 return self._rejected(call, exc.failure.code, exc.failure.detail,
@@ -768,10 +717,9 @@ class ToolRuntime:
                 context,
                 plan,
                 effects_before=before,
-                preimages=preimages,
             )
 
-    def _execute(self, call, surface):  # noqa: C901 - tool transaction boundary
+    def _execute(self, call, surface):
         agent = self.runtime
         name, args = call.name, call.args
         if name == "submit_final":
@@ -837,24 +785,12 @@ class ToolRuntime:
                 "retry_after_change",
                 structured={"drift": list(drift)},
             )
-        try:
-            preimages = self._preimage_artifacts(
-                agent, call, potential_paths, effects_before, potential_scope
-            )
-        except ToolFailureError as exc:
-            return self._rejected(call, exc.failure.code, exc.failure.detail,
-                                  exc.failure.recovery, structured=exc.structured)
-        except Exception as exc:  # noqa: BLE001 - fail before side effect
-            return self._rejected(
-                call, "effect_planning_failed", str(exc), "retry_after_change"
-            )
         return self._execute_prepared(
             call,
             tool,
             context,
             plan,
             effects_before=effects_before,
-            preimages=preimages,
         )
 
     def _rejected(

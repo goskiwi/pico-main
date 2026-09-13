@@ -7,7 +7,6 @@ import os
 import re
 from pathlib import Path
 
-from .artifacts import ArtifactStore
 from .run_checkpoint import read_run_checkpoint, write_run_checkpoint
 from .run_log import RunEvent, RunLog, replay_events
 
@@ -225,15 +224,6 @@ class RunStore:
                 log = self._load_full_and_rebuild_checkpoint(run_id)
         else:
             log = self._load_full_and_rebuild_checkpoint(run_id)
-        final_diff = log.projection.final_diff
-        if final_diff is not None and final_diff.artifact_id:
-            descriptor, _data = ArtifactStore(self, lambda text: text).read_internal(
-                run_id,
-                final_diff.artifact_id,
-                expected_kind="final_workspace_diff",
-            )
-            if int(descriptor["size_bytes"]) != final_diff.size_bytes:
-                raise ValueError("terminal final Diff descriptor size mismatch")
         return log
 
     def _load_full_and_rebuild_checkpoint(self, run_id):

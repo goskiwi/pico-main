@@ -95,8 +95,7 @@ Checkpoint 缺失、损坏或落后
     "stop_reason": "",
     "final_answer": "",
     "pending": null,
-    "runtime_feedback": null,
-    "final_diff": null
+    "runtime_feedback": null
   },
   "history": {
     "summary": "...",
@@ -182,7 +181,6 @@ read_run_checkpoint(...)
 - `RunMetrics`
 - `PendingToolCall`
 - `RuntimeFeedback`
-- `FinalDiff`
 - `last_sequence`
 
 持久化顺序：
@@ -307,7 +305,6 @@ Checkpoint + Tail Replay 的 RunProjection
 - Evidence / Change Set / Uncertain Effects
 - Metrics
 - Runtime Feedback
-- Final Diff
 - Last Sequence
 
 ### 7.2 History 等价

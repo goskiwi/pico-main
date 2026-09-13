@@ -219,9 +219,6 @@ def _outcome_summary(agent, outcome):
     ]
     if outcome.status != "completed" and outcome.stop_reason:
         lines.insert(1, f"Stop reason: {outcome.stop_reason}")
-    if outcome.final_diff and outcome.final_diff.external_paths:
-        lines.append("Diff includes observed external changes (not solely Agent-authored): "
-                     + ", ".join(outcome.final_diff.external_paths))
     return "\n".join(lines)
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .mutations import ABSENT_REVISION, file_revision, unified_text_diff
+from .mutations import ABSENT_REVISION, file_revision
 
 WORKSPACE_SCOPES = frozenset({"workspace"})
 
@@ -23,7 +23,6 @@ class WorkspaceDriftError(RuntimeError):
 class FileChange:
     path: str
     first_before_state: str
-    first_before_artifact_id: str
     current_after_state: str
     last_mutation_sequence: int
     external_change_observed: bool = False
@@ -44,7 +43,6 @@ class FileChange:
         return {
             "path": self.path,
             "first_before_state": self.first_before_state,
-            "first_before_artifact_id": self.first_before_artifact_id,
             "current_after_state": self.current_after_state,
             "last_mutation_sequence": self.last_mutation_sequence,
             "net_changed": self.net_changed,
@@ -56,7 +54,6 @@ class FileChange:
         expected = {
             "path",
             "first_before_state",
-            "first_before_artifact_id",
             "current_after_state",
             "last_mutation_sequence",
             "net_changed",
@@ -67,7 +64,6 @@ class FileChange:
         change = cls(
             path=str(value["path"]),
             first_before_state=str(value["first_before_state"]),
-            first_before_artifact_id=str(value["first_before_artifact_id"]),
             current_after_state=str(value["current_after_state"]),
             last_mutation_sequence=int(value["last_mutation_sequence"]),
             external_change_observed=bool(value["external_change_observed"]),
@@ -100,9 +96,6 @@ class RunChangeSet:
                 self.files[path] = FileChange(
                     path=path,
                     first_before_state=str(transition["before_state"]),
-                    first_before_artifact_id=str(
-                        transition.get("before_artifact_id", "")
-                    ),
                     current_after_state=str(transition["after_state"]),
                     last_mutation_sequence=int(effect["event_sequence"]),
                 )
@@ -186,45 +179,6 @@ class RunChangeSet:
         if drift:
             raise WorkspaceDriftError(drift)
         return self
-
-    def render_final_diff(self, root, artifact_store, run_id):
-        root = Path(root).resolve()
-        self.require_current_workspace(root)
-        rendered = []
-        for relative in self.net_changed_paths:
-            change = self.files[relative]
-            target = (root / relative).resolve()
-            try:
-                target.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Run change path escapes workspace: {relative}"
-                ) from exc
-            current_state = file_revision(target)
-            before_exists = change.first_before_state != ABSENT_REVISION
-            if before_exists:
-                if not change.first_before_artifact_id:
-                    raise RuntimeError(
-                        f"Run change lacks its first preimage artifact: {relative}"
-                    )
-                before = artifact_store.read_internal_text(
-                    run_id,
-                    change.first_before_artifact_id,
-                )
-            else:
-                before = ""
-            after_exists = current_state != ABSENT_REVISION
-            after = target.read_bytes().decode("utf-8") if after_exists else ""
-            rendered.append(
-                unified_text_diff(
-                    relative,
-                    before,
-                    after,
-                    before_exists=before_exists,
-                    after_exists=after_exists,
-                )
-            )
-        return "".join(rendered)
 
 
 def _effect_from_event(event, outcome):

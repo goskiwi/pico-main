@@ -2,18 +2,12 @@
 
 import hashlib
 import json
-import os
-import re
-import tempfile
 from pathlib import Path
 
 from .contracts import TOOL_ARTIFACT_ID
 from .persistence import write_once_bytes
 
 ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
-INTERNAL_ARTIFACT_ID = re.compile(
-    r"^(?:preimage|diff)_[a-f0-9]{16}_[a-f0-9]{10}$"
-)
 ARTIFACT_SCHEMA_VERSION = "artifact-v3"
 
 
@@ -39,84 +33,6 @@ class ArtifactStore:
             "size_bytes": len(safe_content.encode("utf-8")),
         }
         self._write_once(content_path, safe_content)
-        self._write_once(
-            descriptor_path,
-            json.dumps(descriptor, indent=2, sort_keys=True) + "\n",
-        )
-        return descriptor
-
-    def write_workspace_preimage(self, run_id, call_id, logical_path, source):
-        """Copy an original byte stream; edit supplies its already-read bytes."""
-
-        root = self.run_store.artifact_dir(run_id).resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        key_digest = hashlib.sha256(
-            f"{call_id}:{logical_path}".encode()
-        ).hexdigest()
-        digest = hashlib.sha256()
-        size = 0
-        with tempfile.NamedTemporaryFile(dir=root, suffix=".tmp") as staged:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                staged.write(chunk)
-                digest.update(chunk)
-                size += len(chunk)
-            staged.flush()
-            os.fsync(staged.fileno())
-            artifact_id = f"preimage_{key_digest[:16]}_{digest.hexdigest()[:10]}"
-            content_path = self._internal_artifact_path(root, artifact_id, ".txt")
-            try:
-                os.link(staged.name, content_path)
-            except FileExistsError:
-                staged.seek(0)
-                with content_path.open("rb") as existing:
-                    while chunk := staged.read(1024 * 1024):
-                        if existing.read(len(chunk)) != chunk:
-                            raise RuntimeError(f"immutable artifact collision: {content_path.name}") from None
-                    if existing.read(1):
-                        raise RuntimeError(f"immutable artifact collision: {content_path.name}") from None
-        descriptor = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
-            "artifact_id": artifact_id,
-            "kind": "workspace_preimage",
-            "sha256": digest.hexdigest(),
-            "size_bytes": size,
-            "path": str(logical_path),
-        }
-        self._write_once(
-            self._internal_artifact_path(root, artifact_id, ".json"),
-            json.dumps(descriptor, indent=2, sort_keys=True) + "\n",
-        )
-        return descriptor
-
-    def write_final_diff(self, run_id, content):
-        raw_content = str(content)
-        digest = hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
-        run_digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()
-        artifact_id = f"diff_{run_digest[:16]}_{digest[:10]}"
-        return self._write_internal(
-            run_id,
-            artifact_id,
-            raw_content,
-            kind="final_workspace_diff",
-            metadata={},
-        )
-
-    def _write_internal(self, run_id, artifact_id, content, *, kind, metadata):
-        data = str(content).encode("utf-8")
-        digest = hashlib.sha256(data).hexdigest()
-        root = self.run_store.artifact_dir(run_id).resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        content_path = self._internal_artifact_path(root, artifact_id, ".txt")
-        descriptor_path = self._internal_artifact_path(root, artifact_id, ".json")
-        descriptor = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
-            "artifact_id": artifact_id,
-            "kind": str(kind),
-            "sha256": digest,
-            "size_bytes": len(data),
-            **dict(metadata),
-        }
-        self._write_once(content_path, str(content))
         self._write_once(
             descriptor_path,
             json.dumps(descriptor, indent=2, sort_keys=True) + "\n",
@@ -172,41 +88,6 @@ class ArtifactStore:
         if path.parent != root:
             raise ValueError("artifact path escapes its run directory")
         return path
-
-    @staticmethod
-    def _internal_artifact_path(root, artifact_id, suffix):
-        root = Path(root).resolve()
-        artifact_id = str(artifact_id)
-        if not INTERNAL_ARTIFACT_ID.fullmatch(artifact_id):
-            raise ValueError("invalid internal artifact id")
-        path = (root / f"{artifact_id}{suffix}").resolve()
-        if path.parent != root:
-            raise ValueError("internal artifact path escapes its run directory")
-        return path
-
-    def read_internal(self, run_id, artifact_id, *, expected_kind=None):
-        root = self.run_store.artifact_dir(run_id).resolve()
-        descriptor_path = self._internal_artifact_path(root, artifact_id, ".json")
-        content_path = self._internal_artifact_path(root, artifact_id, ".txt")
-        if not descriptor_path.is_file() or not content_path.is_file():
-            raise ValueError("internal artifact is missing")
-        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-        if descriptor.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
-            raise ValueError("unsupported internal artifact schema")
-        if descriptor.get("artifact_id") != str(artifact_id):
-            raise ValueError("internal artifact id mismatch")
-        if expected_kind is not None and descriptor.get("kind") != expected_kind:
-            raise ValueError("internal artifact kind mismatch")
-        data = content_path.read_bytes()
-        if hashlib.sha256(data).hexdigest() != descriptor.get("sha256"):
-            raise ValueError("internal artifact digest mismatch")
-        if len(data) != int(descriptor.get("size_bytes", -1)):
-            raise ValueError("internal artifact size mismatch")
-        return descriptor, data
-
-    def read_internal_text(self, run_id, artifact_id):
-        _descriptor, data = self.read_internal(run_id, artifact_id)
-        return data.decode("utf-8")
 
     def read_slice(self, run_id, artifact_id, offset, max_bytes):
         descriptor, content_path, version = self._read_verified(run_id, artifact_id)

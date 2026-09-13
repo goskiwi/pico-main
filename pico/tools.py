@@ -578,7 +578,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
         failure = FailureInfo(
             "command_modified_repository",
             "diagnostic command changed repository-visible state without "
-            "a trustworthy Run-start preimage: " + ", ".join(changes[:20]),
+            "a tracked file mutation transaction: " + ", ".join(changes[:20]),
             "user_action_required",
         )
     elif result.infrastructure_error:

@@ -29,23 +29,6 @@ def tracked_workspace_drift(states, effect_scope, tracked_files):
     return tuple(drift)
 
 
-def attach_preimage_artifacts(structured, preimages):
-    structured = dict(structured or {})
-    transitions = []
-    for item in structured.get("path_transitions", ()):
-        transition = dict(item)
-        path = str(transition.get("path", ""))
-        transition["before_artifact_id"] = str(
-            preimages[path]
-            if path in preimages
-            else transition.get("before_artifact_id", "")
-        )
-        transitions.append(transition)
-    if transitions:
-        structured["path_transitions"] = transitions
-    return structured
-
-
 def effect_diff(before, after):
     return [
         path
@@ -54,13 +37,12 @@ def effect_diff(before, after):
     ]
 
 
-def path_transitions(before, after, preimages, paths):
+def path_transitions(before, after, paths):
     return [
         {
             "path": path,
             "before_state": before[path],
             "after_state": after[path],
-            "before_artifact_id": preimages.get(path, ""),
         }
         for path in paths
     ]

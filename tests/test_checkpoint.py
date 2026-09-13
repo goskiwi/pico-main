@@ -134,7 +134,6 @@ class CheckpointRecoveryTests(unittest.TestCase):
                     {
                         "path": "subject.txt",
                         "before_state": "absent",
-                        "before_artifact_id": "",
                     }
                 ],
                 operation={},
@@ -159,7 +158,6 @@ class CheckpointRecoveryTests(unittest.TestCase):
                     {
                         "path": "subject.txt",
                         "before_state": "absent",
-                        "before_artifact_id": "",
                     }
                 ],
                 operation={},
@@ -178,7 +176,6 @@ class CheckpointRecoveryTests(unittest.TestCase):
                                 "path": "subject.txt",
                                 "before_state": "absent",
                                 "after_state": "sha256:after",
-                                "before_artifact_id": "",
                             }
                         ]
                     },

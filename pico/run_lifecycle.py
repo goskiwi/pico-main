@@ -6,10 +6,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .delivery import (
-    build_final_diff,
-    build_stopped_final_diff,
-)
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 from .run_log import RunLog
 from .run_projection import RunOutcome
@@ -213,22 +209,19 @@ class RunLifecycle:
 
     def finish_success(self, final, *, run_started_at) -> RunOutcome:
         runtime = self.runtime
-        final_diff = build_final_diff(runtime)
+        runtime.run.evidence.change_set.require_current_workspace(runtime.workspace.root)
         runtime.run.execution_context.check_active()
         runtime.run.run_log.append_final(
             final,
-            final_diff,
             turn_duration_ms=int((time.monotonic() - run_started_at) * 1000),
         )
         return self._finish_session()
 
     def finish_stopped(self, stop_reason, *, run_started_at=None) -> RunOutcome:
         final, stop_reason = self._stopped_result(stop_reason)
-        final_diff = build_stopped_final_diff(self.runtime)
         self.runtime.run.run_log.append_stopped(
             final,
             stop_reason,
-            final_diff,
             turn_duration_ms=(
                 0
                 if run_started_at is None

@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .contracts import ToolCall, ToolOutcome
-from .delivery import FinalDiff
 from .evidence import RunEvidence
 from .task_state import TaskContract
 
@@ -157,7 +156,6 @@ class RunProjection:
     final_answer: str = ""
     pending_tool: PendingToolCall = field(default_factory=PendingToolCall)
     runtime_feedback: RuntimeFeedback | None = None
-    final_diff: FinalDiff | None = None
     failure_key: tuple[str, str, str, str] = ()
     failure_count: int = 0
     failure_warned: bool = False
@@ -165,7 +163,7 @@ class RunProjection:
     last_timestamp: str = ""
 
     def check_event(self, event):
-        kind, payload = event.kind, event.payload
+        kind = event.kind
         expected = self.last_sequence + 1
         if event.sequence != expected:
             raise ValueError("Run Log sequence is not contiguous")
@@ -183,19 +181,6 @@ class RunProjection:
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
         self.pending_tool.check_event(event)
-        if kind in {"assistant_final", "run_stopped"}:
-            raw = payload.get("final_diff")
-            final_diff = FinalDiff.from_dict(raw) if raw is not None else None
-            if kind == "assistant_final" and final_diff is None:
-                raise ValueError("completed Run requires a final Diff")
-            if final_diff is not None and bool(self.evidence.changed_paths) != bool(
-                final_diff.artifact_id
-            ):
-                raise ValueError("terminal final Diff does not match net changes")
-            if final_diff is not None:
-                external = set(self.evidence.external_paths)
-                if set(final_diff.external_paths) != external:
-                    raise ValueError("terminal final Diff omits or misstates observed external changes")
 
     @property
     def terminal(self):
@@ -261,8 +246,6 @@ class RunProjection:
             self.status = "completed" if event.kind == "assistant_final" else "stopped"
             self.stop_reason = event.payload["stop_reason"]
             self.final_answer = str(event.payload.get("content", ""))
-            raw = event.payload.get("final_diff")
-            self.final_diff = FinalDiff.from_dict(raw) if raw is not None else None
         self.last_sequence = event.sequence
         self.last_timestamp = event.timestamp
         return self
@@ -290,7 +273,6 @@ class RunProjection:
                 if self.runtime_feedback
                 else None
             ),
-            "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "failure_key": list(self.failure_key),
             "failure_count": self.failure_count,
             "failure_warned": self.failure_warned,
@@ -311,7 +293,6 @@ class RunProjection:
             "final_answer",
             "pending",
             "runtime_feedback",
-            "final_diff",
             "failure_key",
             "failure_count",
             "failure_warned",
@@ -343,11 +324,6 @@ class RunProjection:
             stop_reason=str(value["stop_reason"]),
             final_answer=str(value["final_answer"]),
             runtime_feedback=(RuntimeFeedback(**feedback) if feedback else None),
-            final_diff=(
-                FinalDiff.from_dict(value["final_diff"])
-                if value["final_diff"] is not None
-                else None
-            ),
             failure_key=failure_key,
             failure_count=int(value["failure_count"]),
             failure_warned=bool(value["failure_warned"]),
@@ -409,7 +385,6 @@ class RunProjection:
                 else None
             ),
             "pending_call_id": self.pending_call_id,
-            "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "failure_streak": {
                 "key": list(self.failure_key),
                 "count": self.failure_count,
@@ -432,7 +407,6 @@ class RunOutcome:
     status: str
     answer: str
     stop_reason: str
-    final_diff: FinalDiff | None
     changed_paths: tuple[str, ...]
     metrics: dict[str, Any]
 
@@ -441,13 +415,10 @@ class RunOutcome:
             raise TypeError("RunOutcome requires a RunProjection")
         if not projection.terminal:
             raise ValueError("RunOutcome requires a terminal Run projection")
-        if projection.status == "completed" and projection.final_diff is None:
-            raise ValueError("completed Run projection requires a final Diff")
         object.__setattr__(self, "run_id", projection.run_id)
         object.__setattr__(self, "status", projection.status)
         object.__setattr__(self, "answer", projection.final_answer)
         object.__setattr__(self, "stop_reason", projection.stop_reason)
-        object.__setattr__(self, "final_diff", projection.final_diff)
         object.__setattr__(
             self,
             "changed_paths",
@@ -463,7 +434,6 @@ class RunOutcome:
             "status": self.status,
             "answer": self.answer,
             "stop_reason": self.stop_reason,
-            "final_diff": self.final_diff.to_dict() if self.final_diff else None,
             "changed_paths": list(self.changed_paths),
             "metrics": deepcopy(self.metrics),
         }

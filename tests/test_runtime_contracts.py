@@ -11,12 +11,43 @@ from pico import (
     ToolOutcome,
     WriteScope,
 )
+from pico.completion_controller import CompletionController
+from pico.evidence import WorkspaceDriftError
 from pico.providers import ProviderContextOverflow
 from pico.run_log import RunEvent, RunLog, replay_events
 from tests.support import build_agent, verification_command
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_terminal_record_rejects_removed_final_diff_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _ = build_agent(Path(directory), [ModelAction.final("Done")])
+            outcome = agent.ask("Inspect")
+            event = agent.read_run_events(outcome.run_id)[-1].to_dict()
+            event["payload"]["final_diff"] = None
+            with self.assertRaises(ValueError):
+                RunEvent.from_dict(event)
+
+    def test_drift_after_assessment_still_prevents_terminal_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "subject.txt"
+            target.write_text("alpha\n")
+            agent, _ = build_agent(root, [
+                ModelAction.tool("read_file", {"path": "subject.txt"}),
+                ModelAction.tool("edit_file", {"path": "subject.txt", "old_text": "alpha", "new_text": "beta"}),
+                ModelAction.final("Done"),
+            ])
+            evaluate = CompletionController.evaluate
+            def drift_after_evaluation(controller, final):
+                decision = evaluate(controller, final)
+                target.write_text("external change\n")
+                return decision
+            with mock.patch.object(CompletionController, "evaluate", drift_after_evaluation), self.assertRaises(WorkspaceDriftError):
+                agent.ask("Edit the file")
+            self.assertTrue(agent.run.resumable)
+            self.assertNotIn("assistant_final", [e.kind for e in agent.read_run_events(agent.run.run_log.run_id)])
+            self.assertEqual(target.read_text(), "external change\n")
     def test_context_overflow_rebuilds_then_completes(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(Path(directory), [])
@@ -91,7 +122,9 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
             self.assertEqual(outcome.changed_paths, ("subject.txt",))
-            self.assertTrue(outcome.final_diff.artifact_id)
+            self.assertNotIn("final_diff", outcome.to_dict())
+            self.assertFalse(list(root.rglob("preimage_*")))
+            self.assertFalse(list(root.rglob("diff_*")))
             self.assertEqual(len(model.requests), 4)
             self.assertEqual(agent.run.evidence.latest_verification["status"], "passed")
             tool_events = [
@@ -255,6 +288,9 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(outcome.side_effect_state, "partial")
             self.assertEqual(outcome.affected_paths, ("subject.txt",))
             self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
+            self.assertFalse(list(root.rglob("preimage_*")))
+            transitions = outcome.structured["path_transitions"]
+            self.assertEqual(set(transitions[0]), {"path", "before_state", "after_state"})
 
     def test_compaction_cannot_split_call_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -273,7 +309,6 @@ class RuntimeContractTests(unittest.TestCase):
                     {
                         "path": "subject.txt",
                         "before_state": "absent",
-                        "before_artifact_id": "",
                     }
                 ],
                 operation={},
@@ -293,8 +328,8 @@ class RuntimeContractTests(unittest.TestCase):
                 log.append_compaction("summary", [user.event_id, call_event.event_id])
 
 
-class PreimageLifecycleTests(unittest.TestCase):
-    def test_external_change_is_reread_before_edit_and_becomes_the_preimage(self):
+class FileVersionLifecycleTests(unittest.TestCase):
+    def test_external_change_is_reread_before_edit_and_version_is_tracked(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -327,15 +362,11 @@ class PreimageLifecycleTests(unittest.TestCase):
             )
 
             outcome = agent.ask("Change alpha to beta and preserve other work")
-
+            self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(), "beta\nexternal\n")
             change = agent.run.evidence.change_set.files["subject.txt"]
-            self.assertEqual(
-                agent.dependencies.artifacts.read_internal_text(
-                    outcome.run_id, change.first_before_artifact_id
-                ),
-                "alpha\nexternal\n",
-            )
+            self.assertTrue(change.first_before_state.startswith("sha256:"))
+            self.assertFalse(list(root.rglob("preimage_*")))
             failures = [
                 event.payload["outcome"]["failure"]["code"]
                 for event in agent.run.run_log.events
@@ -344,7 +375,7 @@ class PreimageLifecycleTests(unittest.TestCase):
             ]
             self.assertIn("revision_conflict", failures)
 
-    def test_failed_edit_does_not_create_a_net_change_or_final_diff(self):
+    def test_failed_edit_does_not_create_a_change(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -365,7 +396,7 @@ class PreimageLifecycleTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(), "alpha\n")
             self.assertEqual(outcome.changed_paths, ())
-            self.assertEqual(outcome.final_diff.artifact_id, "")
+            self.assertNotIn("final_diff", outcome.to_dict())
             failure = next(
                 event.payload["outcome"]["failure"]["code"]
                 for event in agent.run.run_log.events
@@ -374,7 +405,7 @@ class PreimageLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(failure, "text_not_found")
 
-    def test_noop_and_revert_preserve_first_preimage_and_empty_final_diff(self):
+    def test_noop_and_revert_preserve_version_chain_without_backups(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
@@ -403,15 +434,10 @@ class PreimageLifecycleTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(), "alpha\n")
             self.assertEqual(outcome.changed_paths, ())
-            self.assertEqual(outcome.final_diff.artifact_id, "")
+            self.assertNotIn("final_diff", outcome.to_dict())
             change = agent.run.evidence.change_set.files["subject.txt"]
-            self.assertTrue(change.first_before_artifact_id.startswith("preimage_"))
-            self.assertEqual(
-                agent.dependencies.artifacts.read_internal_text(
-                    outcome.run_id, change.first_before_artifact_id
-                ),
-                "alpha\n",
-            )
+            self.assertTrue(change.first_before_state.startswith("sha256:"))
+            self.assertFalse(list(root.rglob("preimage_*")))
 
 
 if __name__ == "__main__":

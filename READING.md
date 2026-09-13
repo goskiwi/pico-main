@@ -31,14 +31,14 @@ verify 提供中途验收能力，由模型决定调用时机；TaskContract 独
 - RunLog：完整事件，唯一持久执行事实；Projection 通过回放获得。
 - RunProjection：任务状态、Evidence、Metrics、单个 pending 调用、关键反馈和终态结果。
 - RunEvidence：change_set、uncertain_effects、latest_verification、last_workspace_mutation_sequence。
-- FileChange：首次前像、当前版本、最后修改序号，以及是否观察到外部修改。
+- FileChange：首次版本标识、当前版本、最后修改序号，以及是否观察到外部修改。
 - ExecutionContext：截止时间 + 共享取消信号。
 
 成功编辑更新 change_set；有完整变化记录的 partial 仍更新文件状态，同时保留异常证据；无法解释的命令副作用保留为 unknown 并阻止完成。不能为了减少字段丢掉这些区别。
 
 ## 被追问时再读
 
-文件安全：tool_runtime.py 的 _execute_edit → mutations.py。记住读取版本、审批、前像、原子替换和写后观察。
+文件安全：tool_runtime.py 的 _execute_edit → mutations.py。记住读取版本、审批、版本复验、原子替换和写后观察。
 
 协议安全：run_projection.py 的 PendingToolCall。只有可能产生副作用的 Intent 才成为 pending；只读和执行前拒绝以单条 Exchange 闭合，Settlement 必须与 Intent 配对。
 
@@ -48,7 +48,7 @@ verify 提供中途验收能力，由模型决定调用时机；TaskContract 独
 
 ## 本次改动与验证
 
-完成：整理主循环；Evidence 删除重复历史投影；删除无用执行 ID 和父子取消结构；去掉无文件路径分支里的空快照计算；删除 Prompt、History 和 Compaction 生成后无人消费的诊断元数据。保留已有审批、FailureInfo.recovery、文件前像、版本检查、超时取消、工具事务配对、摘要覆盖校验和关键反馈保护。
+完成：整理主循环；Evidence 删除重复历史投影；删除无用执行 ID 和父子取消结构；去掉无文件路径分支里的空快照计算；删除 Prompt、History 和 Compaction 生成后无人消费的诊断元数据。保留已有审批、FailureInfo.recovery、版本检查、超时取消、工具事务配对、摘要覆盖校验和关键反馈保护。
 
 定向检查覆盖：编辑—中途验收—再编辑—最终验收，日志重放，未开始调用恢复，外部修改导致验证失效，部分修改与未知命令副作用区分，取消信号。
 这些是本地确定性检查，不是真实 LLM 修复基准成绩。
