@@ -8,6 +8,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,49 @@ COMMAND_POLL_SECONDS = 0.05
 COMMAND_TERMINATE_SECONDS = 1.0
 COMMAND_PIPE_GRACE_SECONDS = 1.0
 COMMAND_READ_CHUNK_BYTES = 64 * 1024
+
+
+class _HeadTailBuffer:
+    """Keep a fixed prefix and suffix while counting omitted middle bytes."""
+
+    def __init__(self, max_bytes):
+        self.head_limit = int(max_bytes) // 2
+        self.tail_limit = int(max_bytes) - self.head_limit
+        self.head = bytearray()
+        self.tail = deque()
+        self.tail_bytes = 0
+        self.omitted_bytes = 0
+
+    def append(self, chunk):
+        chunk = bytes(chunk)
+        head_remaining = self.head_limit - len(self.head)
+        if head_remaining > 0:
+            selected = chunk[:head_remaining]
+            self.head.extend(selected)
+            chunk = chunk[len(selected):]
+        if not chunk:
+            return
+        self.tail.append(chunk)
+        self.tail_bytes += len(chunk)
+        excess = max(0, self.tail_bytes - self.tail_limit)
+        self.omitted_bytes += excess
+        while excess:
+            first = self.tail[0]
+            if len(first) <= excess:
+                self.tail.popleft()
+                self.tail_bytes -= len(first)
+                excess -= len(first)
+            else:
+                self.tail[0] = first[excess:]
+                self.tail_bytes -= excess
+                excess = 0
+
+    @property
+    def head_bytes(self):
+        return len(self.head)
+
+    def retained(self):
+        return bytes(self.head) + b"".join(self.tail)
 
 
 def shell_argv(command):
@@ -52,6 +96,8 @@ class RawCommandResult:
     output_limited: bool = False
     stdout_discarded_bytes: int = 0
     stderr_discarded_bytes: int = 0
+    stdout_head_bytes: int = 0
+    stderr_head_bytes: int = 0
     infrastructure_error: bool = False
 
 
@@ -95,10 +141,16 @@ class CommandRunner:
             input_bytes=input_bytes,
         )
         rendered_stdout = self._render_output(
-            raw.stdout, "stdout", raw.stdout_discarded_bytes
+            raw.stdout,
+            "stdout",
+            raw.stdout_discarded_bytes,
+            raw.stdout_head_bytes,
         )
         rendered_stderr = self._render_output(
-            raw.stderr, "stderr", raw.stderr_discarded_bytes
+            raw.stderr,
+            "stderr",
+            raw.stderr_discarded_bytes,
+            raw.stderr_head_bytes,
         )
         return CommandResult(
             returncode=raw.returncode,
@@ -148,7 +200,11 @@ class CommandRunner:
                 env=self._environment(cwd, env or {}),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=(subprocess.PIPE if input_bytes is not None else None),
+                stdin=(
+                    subprocess.PIPE
+                    if input_bytes is not None
+                    else subprocess.DEVNULL
+                ),
                 start_new_session=True,
                 bufsize=0,
             )
@@ -161,18 +217,24 @@ class CommandRunner:
                 infrastructure_error=True,
             )
 
-        buffers = {"stdout": bytearray(), "stderr": bytearray()}
-        discarded = {"stdout": 0, "stderr": 0}
+        stream_limit = self.max_output_bytes // 2
+        buffers = {
+            "stdout": _HeadTailBuffer(stream_limit),
+            "stderr": _HeadTailBuffer(stream_limit),
+        }
         try:
             stop_reason = self._collect_output(
-                process, context, deadline, input_bytes, buffers, discarded
+                process, context, deadline, input_bytes, buffers
             )
         except BaseException:
             self._stop_process_group(process)
             raise
         finally:
             self._close_pipes(process)
-        limited = bool(discarded["stdout"] or discarded["stderr"])
+        limited = bool(
+            buffers["stdout"].omitted_bytes
+            or buffers["stderr"].omitted_bytes
+        )
         infrastructure_error = bool(require_complete_output and limited)
         return RawCommandResult(
             returncode=(
@@ -180,12 +242,14 @@ class CommandRunner:
                 if stop_reason and stop_reason != "pipe_held_open"
                 else int(process.returncode or 0)
             ),
-            stdout=bytes(buffers["stdout"]),
-            stderr=bytes(buffers["stderr"]),
+            stdout=buffers["stdout"].retained(),
+            stderr=buffers["stderr"].retained(),
             stop_reason=stop_reason,
             output_limited=limited,
-            stdout_discarded_bytes=discarded["stdout"],
-            stderr_discarded_bytes=discarded["stderr"],
+            stdout_discarded_bytes=buffers["stdout"].omitted_bytes,
+            stderr_discarded_bytes=buffers["stderr"].omitted_bytes,
+            stdout_head_bytes=buffers["stdout"].head_bytes,
+            stderr_head_bytes=buffers["stderr"].head_bytes,
             infrastructure_error=infrastructure_error,
         )
 
@@ -224,7 +288,7 @@ class CommandRunner:
         except OSError:
             pass
 
-    def _collect_output(self, process, context, deadline, input_bytes, buffers, discarded):
+    def _collect_output(self, process, context, deadline, input_bytes, buffers):
         stop_reason = ""
         pipe_deadline = None
         input_view = memoryview(input_bytes or b"")
@@ -262,11 +326,11 @@ class CommandRunner:
                 wait = max(0.0, min(COMMAND_POLL_SECONDS, next_deadline - time.monotonic()))
                 for key, _mask in selector.select(wait):
                     input_view = self._consume_ready_pipe(
-                        selector, key, input_view, buffers, discarded
+                        selector, key, input_view, buffers
                     )
         return stop_reason
 
-    def _consume_ready_pipe(self, selector, key, input_view, buffers, discarded):
+    def _consume_ready_pipe(self, selector, key, input_view, buffers):
         stream, name = key.fileobj, key.data
         try:
             if name == "stdin":
@@ -283,9 +347,7 @@ class CommandRunner:
                 if not chunk:
                     selector.unregister(stream)
                 else:
-                    available = max(0, self.max_output_bytes // 2 - len(buffers[name]))
-                    buffers[name].extend(chunk[:available])
-                    discarded[name] += max(0, len(chunk) - available)
+                    buffers[name].append(chunk)
         except BlockingIOError:
             pass  # Readiness may change before the nonblocking operation.
         return input_view
@@ -308,9 +370,12 @@ class CommandRunner:
                 pipe.close()
 
     @staticmethod
-    def _render_output(payload, name, discarded_bytes):
-        text = bytes(payload or b"").decode("utf-8", errors="replace")
+    def _render_output(payload, name, discarded_bytes, head_bytes):
+        payload = bytes(payload or b"")
         if discarded_bytes:
-            marker = f"[{name} truncated; discarded {discarded_bytes} bytes]"
-            text = text.rstrip("\n") + "\n" + marker
-        return text
+            marker = (
+                f"\n[{name} middle omitted; discarded "
+                f"{discarded_bytes} bytes]\n"
+            ).encode()
+            payload = payload[:head_bytes] + marker + payload[head_bytes:]
+        return payload.decode("utf-8", errors="replace")

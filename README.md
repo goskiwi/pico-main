@@ -1,6 +1,6 @@
 # Pico
 
-Pico 是一个面向可信本地仓库的 Coding Agent Runtime。模型负责决定下一步，Runtime 负责上下文、工具执行、持久化、恢复和最终验收。
+Pico 是一个面向可信本地仓库的 Coding Agent Runtime。模型负责决定下一步和主动运行测试，Runtime 负责上下文、工具执行、持久化、恢复和完成边界。
 
 ```text
 User request
@@ -34,7 +34,7 @@ PICO_OPENAI_MODEL=deepseek-v4-flash
 PICO_OPENAI_REASONING_EFFORT=none
 ```
 
-CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理，项目验收由 Runtime 自动发现；模型温度和请求超时通过环境变量配置。
+CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度和请求超时通过环境变量配置。
 
 `pico/config.py` 定义 Runtime 配置，`pico/env.py` 只负责加载项目环境变量。
 
@@ -42,7 +42,7 @@ CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部
 
 - `Pico`：组装模型、工作区、Session、工具和运行依赖。
 - `Session`：只保存会话 ID、工作区归属和当前 `active_run_id`。
-- `RunLog`：一个任务一次 Run，按顺序追加用户请求、模型调用、工具阶段、验证和终态。
+- `RunLog`：一个任务一次 Run，按顺序追加用户请求、模型调用、工具阶段、失败和终态。
 - `RunProjection`：用同一套规则消费实时事件和历史事件，得到当前 Run 状态。
 - `PromptBuilder`：在模型窗口预算内组装当前任务、历史、规则和工作区信息。
 - `ToolRuntime`：统一处理工具 Schema、模式权限、写入范围、审批、执行阶段和结果。
@@ -54,7 +54,7 @@ Session 不保存完整对话：
 ├── session.json                 # id / workspace_root / active_run_id
 └── runs/<run-id>/
     ├── events.jsonl             # 当前任务的完整执行历史
-    └── artifacts/               # 大工具输出和验证反馈
+    └── artifacts/               # 大工具输出和 Runtime 反馈
 ```
 
 一个 Session 可以连续运行多个任务；`active_run_id` 只在任务未完成时指向需要恢复的 Run。
@@ -107,7 +107,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 - 执行意图和修改前版本标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
 - 模型负责选择并运行相关测试，Runtime 不把普通测试结果冒充为自然语言任务的独立验收；恢复出的不确定副作用作为事实反馈模型，由模型观察当前工作区后继续，不自动重放原工具。
 - 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续三次相同失败提示改变策略，第四次停止。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
-- Shell 命令使用 POSIX 非阻塞管道和 `selectors` 等待输出，同时检查取消和截止时间；只保留固定大小的前缀并报告丢弃字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
+- Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受 Run 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；总内存上限为 1 MiB，stdout/stderr 各保留固定大小的 Head 与 Tail，并报告中间省略字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
 
 ## 阅读顺序
 
@@ -124,6 +124,6 @@ Provider 使用 `AsyncOpenAI` 调用兼容 Responses API 的服务，对外仍�
 
 ## 文件版本与结果展示
 
-Pico 保留单次编辑 Diff、修改路径和版本标识，不生成跨 Run 恢复的累计净 Diff，不保存完整文件前像，也不提供历史撤销。工具输出及日志中的编辑片段仍会落盘，但不是整文件备份。未完成操作通过 Intent 与当前 Revision 结算；验证和完成前的工作区检查保留。
+Pico 保留单次编辑 Diff、内部修改路径和版本标识，不生成跨 Run 恢复的累计净 Diff，不保存完整文件前像，也不提供历史撤销。工具输出及日志中的编辑片段仍会落盘，但不是整文件备份。未完成操作通过 Intent 与当前 Revision 结算；完成前只检查任务边界和已跟踪文件的工作区漂移。
 
 旧版含前像或 final_diff 的事件／Checkpoint 不提供迁移和兼容。已有历史文件不自动删除；请使用新 Session。旧运行目录仍可由用户自行保留或清理。

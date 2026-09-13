@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | 完整日志和模型上下文分开；旧历史摘要，近期调用和结果配对保留；当前请求与关键指令优先 |
 | 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 日志先记录调用和 started；没有可靠 result 时检查当前文件，不自动重放 |
-| Shell 超时或产生输出文件怎么办 | tools.py 的 tool_run_shell；command_runner.py | Shell 先审批；Runtime 限制输出和时间，测试与构建可以正常生成文件，超时会终止进程组并返回已有输出 |
+| Shell 超时、等待输入或输出过大怎么办 | tools.py 的 tool_run_shell；command_runner.py | Shell 先审批且默认 stdin 为 EOF；Timeout 有界，输出保留 Head/Tail，超时终止进程组并返回已有输出 |
 
 测试由模型通过 `run_shell` 主动运行，失败结果作为普通 ToolOutcome 返回下一轮。Runtime 不运行隐藏验收，也不声称能自动证明自然语言需求已经满足。
 

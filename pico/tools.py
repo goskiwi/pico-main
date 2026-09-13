@@ -33,7 +33,8 @@ READ_FILE_MAX_LINES = 2000
 SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
-RUN_SHELL_TIMEOUT_SECONDS = 120
+RUN_SHELL_DEFAULT_TIMEOUT_SECONDS = 120
+RUN_SHELL_MAX_TIMEOUT_SECONDS = 600
 
 
 class ToolArgs(BaseModel):
@@ -65,6 +66,11 @@ class SearchArgs(ToolArgs):
 
 class RunShellArgs(ToolArgs):
     command: str = Field(min_length=1)
+    timeout_seconds: int = Field(
+        default=RUN_SHELL_DEFAULT_TIMEOUT_SECONDS,
+        ge=1,
+        le=RUN_SHELL_MAX_TIMEOUT_SECONDS,
+    )
 
 
 class WriteFileArgs(ToolArgs):
@@ -213,7 +219,10 @@ def _validate_run_shell(context, args, *, command_runner):
         raise ValueError("run_shell requires a non-blank command")
     if command_runner is None:
         raise RuntimeError("run_shell requires a CommandRunner")
-    return {"command": command}
+    return {
+        "command": command,
+        "timeout_seconds": int(args["timeout_seconds"]),
+    }
 
 
 def tool_list_files(context, args, *, path_resolver, workspace_root):
@@ -507,7 +516,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
     result = command_runner.run(
         shell_argv(command),
         cwd=workspace_root,
-        timeout=RUN_SHELL_TIMEOUT_SECONDS,
+        timeout=int(args["timeout_seconds"]),
         env={},
         execution_context=context.execution_context,
     )
@@ -555,7 +564,10 @@ def _workspace_file_plan(context, args, *, path_resolver, workspace_root):
 def _run_shell_plan(context, args):
     return ToolExecutionPlan(
         "workspace",
-        operation={"command": args["command"]},
+        operation={
+            "command": args["command"],
+            "timeout_seconds": args["timeout_seconds"],
+        },
     )
 
 
@@ -593,7 +605,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "run_shell": {
             "args_schema": RunShellArgs,
             "risky": True,
-            "description": "Run one user-approved host command from the workspace root. Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so their revisions remain tracked.",
+            "description": "Run one user-approved, non-interactive host command from the workspace root. Use timeout_seconds from 1 to 600 (default 120). Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so their revisions remain tracked.",
             "validate": partial(_validate_run_shell, command_runner=command_runner),
             "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
             "plan": _run_shell_plan,

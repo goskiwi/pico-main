@@ -16,6 +16,21 @@ from pico.tools import tool_run_shell
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_commands_without_explicit_input_read_eof_instead_of_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = CommandRunner(directory).run(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys; print(len(sys.stdin.buffer.read()))",
+                ),
+                cwd=directory,
+                timeout=2,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout.strip(), "0")
+
     def test_successful_sigterm_does_not_fall_through_to_sigkill(self):
         process = mock.Mock(pid=123)
         process.wait.return_value = 0
@@ -99,9 +114,30 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertTrue(result.output_limited)
             self.assertGreater(result.stdout_discarded_bytes, 0)
             self.assertGreater(result.stderr_discarded_bytes, 0)
-            self.assertIn("stdout truncated; discarded", result.stdout)
-            self.assertIn("stderr truncated; discarded", result.stderr)
+            self.assertIn("stdout middle omitted; discarded", result.stdout)
+            self.assertIn("stderr middle omitted; discarded", result.stderr)
             self.assertLess(len(result.stdout.encode()) + len(result.stderr.encode()), 1400)
+
+    def test_large_output_keeps_a_fixed_head_and_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = (
+                "import sys; "
+                "sys.stdout.write('H'*256 + 'M'*1000 + 'T'*256)"
+            )
+            result = CommandRunner(directory, max_output_bytes=1024).run(
+                (sys.executable, "-c", source),
+                cwd=directory,
+                timeout=2,
+            )
+
+            self.assertTrue(result.output_limited)
+            self.assertEqual(result.stdout_discarded_bytes, 1000)
+            self.assertTrue(result.stdout.startswith("H" * 256))
+            self.assertTrue(result.stdout.endswith("T" * 256))
+            self.assertIn(
+                "[stdout middle omitted; discarded 1000 bytes]",
+                result.stdout,
+            )
 
     def test_exact_internal_output_reports_overflow_instead_of_using_a_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,7 +218,10 @@ class RunShellExecutionTests(unittest.TestCase):
 
             result = tool_run_shell(
                 context,
-                {"command": "printf 'after\\n' > tracked.txt; sleep 30"},
+                {
+                    "command": "printf 'after\\n' > tracked.txt; sleep 30",
+                    "timeout_seconds": 1,
+                },
                 command_runner=CommandRunner(root),
                 workspace_root=root,
             )

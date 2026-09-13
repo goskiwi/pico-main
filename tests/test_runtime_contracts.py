@@ -199,6 +199,12 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(agent.run.metrics.tool_counts["run_shell"], 1)
             self.assertEqual(approval.call_count, 1)
             self.assertEqual(approval.call_args.args[0], "run_shell")
+            shell_intent = next(
+                event
+                for event in agent.run.run_log.events
+                if event.kind == "tool_intent" and event.call_id == "test"
+            )
+            self.assertEqual(shell_intent.payload["operation"]["timeout_seconds"], 120)
             tool_events = [
                 (event.kind, event.call_id)
                 for event in agent.run.run_log.events
@@ -342,6 +348,36 @@ class RuntimeContractTests(unittest.TestCase):
             )
             rejected = ToolOutcome.from_dict(shell_event.payload["outcome"])
             self.assertEqual(rejected.failure.code, "approval_denied")
+
+    def test_shell_timeout_must_fit_the_declared_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approval = mock.Mock(return_value=True)
+            agent, _model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "run_shell",
+                        {"command": "printf should-not-run", "timeout_seconds": 601},
+                        call_id="shell",
+                    ),
+                    ModelAction.final("The invalid timeout was rejected."),
+                ],
+                approval_handler=approval,
+            )
+
+            outcome = agent.ask("Run a command with an invalid timeout")
+
+            self.assertEqual(outcome.status, "completed")
+            approval.assert_not_called()
+            shell_event = next(
+                event
+                for event in agent.run.run_log.events
+                if event.call_id == "shell"
+            )
+            rejected = ToolOutcome.from_dict(shell_event.payload["outcome"])
+            self.assertEqual(rejected.execution_state, "not_started")
+            self.assertEqual(rejected.failure.code, "invalid_arguments")
 
     def test_removed_acceptance_protocol_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported Run Log kind"):
