@@ -77,6 +77,7 @@ def _build_model_client(args):
         raise ValueError("PICO_OPENAI_TEMPERATURE must be between 0 and 2")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("PICO_OPENAI_TIMEOUT must be positive")
+    model_window = provider_env("PICO_MODEL_CONTEXT_WINDOW")
     return OpenAICompatibleModelClient(
         model=model,
         base_url=configured_base_url or DEFAULT_OPENAI_BASE_URL,
@@ -84,6 +85,7 @@ def _build_model_client(args):
         temperature=temperature,
         timeout=timeout,
         reasoning_effort=provider_env("PICO_OPENAI_REASONING_EFFORT"),
+        context_window_tokens=int(model_window) if model_window else None,
     )
 
 
@@ -161,11 +163,9 @@ def build_agent(args):
     workspace = Workspace.build(args.cwd)
     load_project_env(workspace.root, boundary=workspace.root)
     store = SessionStore(workspace.root / ".pico" / "sessions")
-    model_window = provider_env("PICO_MODEL_CONTEXT_WINDOW")
     config = PicoConfig(
         mode=args.mode,
-        context_budget_tokens=int(provider_env("PICO_CONTEXT_BUDGET", "272000")),
-        model_context_window_tokens=int(model_window) if model_window else None,
+        context_limit_tokens=int(provider_env("PICO_CONTEXT_LIMIT", "272000")),
     )
     session_id = args.resume
     if session_id == "latest":

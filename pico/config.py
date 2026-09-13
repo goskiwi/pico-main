@@ -28,53 +28,33 @@ def _allowed_write_paths(value):
 @dataclass(frozen=True, slots=True)
 class PicoConfig:
     mode: str = "code"
-    max_agent_turns: int = 32
-    max_new_tokens: int = 32000
     allowed_tools: tuple[str, ...] | None = None
-    turn_timeout_seconds: int = 600
-    context_budget_tokens: int = 272000
-    model_context_window_tokens: int | None = None
-    compaction_reserve_tokens: int = 32000
-    compaction_keep_recent_tokens: int = 20000
-    summary_max_output_tokens: int = 16000
     allowed_write_paths: tuple[str, ...] | None = None
+    max_agent_turns: int = 32
+    run_timeout_seconds: int = 600
+    context_limit_tokens: int = 272000
+    max_output_tokens: int = 32000
+    recent_history_tokens: int = 20000
 
     def __post_init__(self):
         if self.mode not in {"ask", "code", "auto"}:
             raise ValueError("mode must be ask, code, or auto")
         values = {
             "max_agent_turns": int(self.max_agent_turns),
-            "max_new_tokens": int(self.max_new_tokens),
-            "turn_timeout_seconds": int(self.turn_timeout_seconds),
-            "context_budget_tokens": int(self.context_budget_tokens),
-            "compaction_reserve_tokens": int(self.compaction_reserve_tokens),
-            "compaction_keep_recent_tokens": int(self.compaction_keep_recent_tokens),
-            "summary_max_output_tokens": int(self.summary_max_output_tokens),
+            "run_timeout_seconds": int(self.run_timeout_seconds),
+            "context_limit_tokens": int(self.context_limit_tokens),
+            "max_output_tokens": int(self.max_output_tokens),
+            "recent_history_tokens": int(self.recent_history_tokens),
         }
-        if any(values[name] < 1 for name in (
-            "max_agent_turns", "max_new_tokens", "turn_timeout_seconds",
-            "summary_max_output_tokens",
-        )):
+        if any(value < 1 for value in values.values()):
             raise ValueError("runtime limits must be positive")
-        if values["context_budget_tokens"] <= values["max_new_tokens"]:
-            raise ValueError("context budget must exceed max_new_tokens")
-        model_window = self.model_context_window_tokens
-        if model_window is not None:
-            model_window = int(model_window)
-            if model_window < 1:
-                raise ValueError("model context window must be positive")
-            if values["context_budget_tokens"] > model_window:
-                raise ValueError("context budget must not exceed the configured model context window")
-        if values["compaction_reserve_tokens"] < values["max_new_tokens"]:
-            raise ValueError("compaction reserve must be at least max_new_tokens")
-        if values["compaction_reserve_tokens"] >= values["context_budget_tokens"]:
-            raise ValueError("compaction reserve must be smaller than the context budget")
-        available = values["context_budget_tokens"] - values["compaction_reserve_tokens"]
-        if not 1 <= values["compaction_keep_recent_tokens"] <= available:
-            raise ValueError("compaction keep_recent must fit below the compaction threshold")
+        if values["context_limit_tokens"] <= values["max_output_tokens"]:
+            raise ValueError("context limit must exceed max_output_tokens")
+        available = values["context_limit_tokens"] - values["max_output_tokens"]
+        if values["recent_history_tokens"] > available:
+            raise ValueError("recent history must fit below the compaction threshold")
         normalized = {
             "mode": str(self.mode),
-            "model_context_window_tokens": model_window,
             **values,
             "allowed_tools": _allowed_tools(self.allowed_tools),
             "allowed_write_paths": _allowed_write_paths(self.allowed_write_paths),

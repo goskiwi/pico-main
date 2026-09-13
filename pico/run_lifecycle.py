@@ -201,7 +201,7 @@ class RunLifecycle:
     def _root_execution(self):
         runtime = self.runtime
         return ExecutionContext.root(
-            max_seconds=runtime.config.turn_timeout_seconds,
+            max_seconds=runtime.config.run_timeout_seconds,
         )
 
     def execution_stop(self):

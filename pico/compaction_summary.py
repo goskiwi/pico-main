@@ -17,6 +17,7 @@ SUMMARY_FIELDS = {
     "next_steps",
     "critical_context",
 }
+SUMMARY_MAX_OUTPUT_TOKENS = 16_000
 PROGRESS_FIELDS = {"done", "in_progress", "blocked"}
 TEXT_LIST = {"type": "array", "items": {"type": "string"}}
 SUMMARY_TOOL = {

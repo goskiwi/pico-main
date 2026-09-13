@@ -287,14 +287,27 @@ class OpenAICompatibleModelClient:
 
     conversation_mode = "responses-manual-replay-v1"
 
-    def __init__(self, model, base_url, api_key, temperature, timeout,
-                 reasoning_effort=""):
+    def __init__(
+        self,
+        model,
+        base_url,
+        api_key,
+        temperature,
+        timeout,
+        reasoning_effort="",
+        context_window_tokens=None,
+    ):
         self.model = str(model)
         self.base_url = str(base_url).rstrip("/")
         self.api_key = str(api_key)
         self.temperature = temperature
         self.timeout = float(timeout)
         self.reasoning_effort = str(reasoning_effort or "").strip()
+        self.context_window_tokens = (
+            None if context_window_tokens is None else int(context_window_tokens)
+        )
+        if self.context_window_tokens is not None and self.context_window_tokens < 1:
+            raise ValueError("model context window must be positive")
         self.last_completion_metadata = {}
         self._runner = asyncio.Runner()
         self._sdk_client = None
@@ -317,8 +330,13 @@ class OpenAICompatibleModelClient:
 
     def new_isolated_client(self):
         return OpenAICompatibleModelClient(
-            self.model, self.base_url, self.api_key, self.temperature,
-            self.timeout, self.reasoning_effort,
+            self.model,
+            self.base_url,
+            self.api_key,
+            self.temperature,
+            self.timeout,
+            self.reasoning_effort,
+            self.context_window_tokens,
         )
 
     @staticmethod
@@ -355,7 +373,7 @@ class OpenAICompatibleModelClient:
             replay_context_tokens=self._replay_context_tokens,
         )
 
-    def _payload(self, input_text, max_new_tokens, instructions, action_tools):
+    def _payload(self, input_text, max_output_tokens, instructions, action_tools):
         if not self._action_input:
             self._action_input.append({
                 "role": "user",
@@ -365,7 +383,7 @@ class OpenAICompatibleModelClient:
             "model": self.model,
             "instructions": str(instructions),
             "input": list(self._action_input),
-            "max_output_tokens": int(max_new_tokens),
+            "max_output_tokens": int(max_output_tokens),
             "stream": True,
             "store": False,
             "include": ["reasoning.encrypted_content"],
@@ -441,13 +459,13 @@ class OpenAICompatibleModelClient:
             self._runner.close()
             self._closed = True
 
-    def complete_action(self, input_text, max_new_tokens, *, instructions,
+    def complete_action(self, input_text, max_output_tokens, *, instructions,
                         action_tools, execution_context: ExecutionContext):
         if self._pending_call_ids:
             raise RuntimeError("pending function calls have no recorded outputs")
         try:
             response = self._request(
-                self._payload(input_text, max_new_tokens, instructions, action_tools),
+                self._payload(input_text, max_output_tokens, instructions, action_tools),
                 execution_context,
             )
         except ProviderContextOverflow:

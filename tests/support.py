@@ -10,6 +10,7 @@ class ScriptedModel:
     """Deterministic model double that still traverses the real Pico runtime."""
 
     model = "scripted-model"
+    context_window_tokens = None
 
     def __init__(self, actions, *, before_action=None):
         self.actions = list(actions)
@@ -37,7 +38,7 @@ class ScriptedModel:
     def complete_action(
         self,
         input_text,
-        max_new_tokens,
+        max_output_tokens,
         *,
         instructions,
         action_tools,
@@ -57,7 +58,7 @@ class ScriptedModel:
                 "input_text": input_text,
                 "instructions": instructions,
                 "action_tools": tuple(action_tools),
-                "max_new_tokens": max_new_tokens,
+                "max_output_tokens": max_output_tokens,
             }
         )
         self.last_completion_metadata = {
@@ -120,10 +121,9 @@ def build_agent(
         session=store.create(workspace.root),
         config=PicoConfig(
             mode="auto",
-            context_budget_tokens=32_000,
-            compaction_reserve_tokens=4_000,
-            compaction_keep_recent_tokens=2_000,
-            max_new_tokens=1_000,
+            context_limit_tokens=32_000,
+            recent_history_tokens=2_000,
+            max_output_tokens=1_000,
         ),
         approval_handler=approval_handler,
     )

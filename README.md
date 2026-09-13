@@ -70,11 +70,11 @@ Session 不保存完整对话：
 
 ## 上下文与压缩
 
-`context_budget_tokens` 是 Pico 的运行预算，不是模型的实际窗口。默认预算为 272,000 Token，预留 32,000，因而在约 240,000 Token 时触发压缩；近期历史保留预算为 20,000，摘要输出上限为 16,000。上限不会预先占用或产生对应数量的计费 Token。
+`context_limit_tokens` 是 Pico 主动采用的 Context 上限；模型 Adapter 可以另行声明模型实际窗口，Runtime 取两者较小值。默认上限为 272,000 Token，`max_output_tokens` 为 32,000，因而在约 240,000 Token 时触发压缩；`recent_history_tokens` 为 20,000。摘要输出上限是 Compaction 内部常量，最多 16,000 Token 且不会超过当前模型输出上限。这些上限不会预先占用或产生对应数量的计费 Token。
 
-CLI 可通过 `PICO_CONTEXT_BUDGET` 设置运行预算，通过 `PICO_MODEL_CONTEXT_WINDOW` 声明当前模型支持的窗口；设置后启动时校验预算不能超过窗口。模型窗口由用户依据 Provider 文档配置，不自动推断。未配置模型窗口时，只校验 Pico 内部预算关系，不能保证适配任意模型。更换模型时需同步更新窗口配置。
+CLI 可通过 `PICO_CONTEXT_LIMIT` 设置 Pico 上限，通过 `PICO_MODEL_CONTEXT_WINDOW` 向模型 Adapter 声明当前模型支持的窗口。模型窗口由用户依据 Provider 文档配置，不自动推断；未配置时，Runtime 只使用 Pico 上限，不能保证适配任意模型。更换模型时需同步更新窗口配置。
 
-例如当前 DeepSeek-V4-Flash 可配置 `PICO_MODEL_CONTEXT_WINDOW=1000000`、`PICO_CONTEXT_BUDGET=272000`。旧配置字段 `provider_context_limit_tokens` 已移除，不提供别名。
+例如当前 DeepSeek-V4-Flash 可配置 `PICO_MODEL_CONTEXT_WINDOW=1000000`、`PICO_CONTEXT_LIMIT=272000`。旧的 Context、Reserve 和 Summary 配置字段均已移除，不提供别名。
 
 Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔记：
 

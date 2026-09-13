@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import context_manager as context
-from .compaction_summary import CompactionSummarizer, SemanticCompactionError
+from .compaction_summary import (
+    SUMMARY_MAX_OUTPUT_TOKENS,
+    CompactionSummarizer,
+    SemanticCompactionError,
+)
 from .execution import (
     ExecutionCancelled,
     ExecutionContext,
@@ -183,8 +187,12 @@ class PromptBuilder:
         raw = self._raw_sections(user_message, tool_surface, history=history)
         instructions_tokens = self.count_tokens(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(tool_surface)
-        available = (self.runtime.config.context_budget_tokens
-                     - self.runtime.config.max_new_tokens - instructions_tokens - tool_schema_tokens)
+        available = (
+            self.runtime.context_limit_tokens
+            - self.runtime.config.max_output_tokens
+            - instructions_tokens
+            - tool_schema_tokens
+        )
         fixed = context.fixed_context(
             raw,
             section_caps=self.section_caps,
@@ -265,10 +273,10 @@ class PromptBuilder:
             + request_overhead_tokens
         )
         context_tokens = max(local_context_tokens, int(provider_context_tokens or 0))
-        reserve_tokens = max(
-            int(config.max_new_tokens), config.compaction_reserve_tokens
+        threshold_tokens = max(
+            1,
+            self.runtime.context_limit_tokens - config.max_output_tokens,
         )
-        threshold_tokens = max(1, config.context_budget_tokens - reserve_tokens)
         if context_tokens < threshold_tokens:
             return None
         projection_history_budget = inputs["history_budget"]
@@ -284,9 +292,11 @@ class PromptBuilder:
                         else ""
                     ),
                     execution_context=self.runtime.run.execution_context,
-                    context_limit_tokens=config.context_budget_tokens,
+                    context_limit_tokens=self.runtime.context_limit_tokens,
                     max_output_tokens=min(
-                        config.summary_max_output_tokens, max_summary_tokens
+                        SUMMARY_MAX_OUTPUT_TOKENS,
+                        config.max_output_tokens,
+                        max_summary_tokens,
                     ),
                     count_tokens=count_tokens,
                 )
@@ -316,7 +326,7 @@ class PromptBuilder:
                     "model client does not support isolated semantic compaction"
                 )
             compacted = history.plan_compaction(
-                retain_tokens=config.compaction_keep_recent_tokens,
+                retain_tokens=config.recent_history_tokens,
                 max_history_tokens=projection_history_budget,
                 history_token_counter=history_token_counter,
                 summary_builder=build_summary,

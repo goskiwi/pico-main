@@ -160,7 +160,7 @@ class AgentLoop:
         agent.emit_event("model_requested")
         action = agent.model_client.complete_action(
             prompt.input_text,
-            agent.config.max_new_tokens,
+            agent.config.max_output_tokens,
             instructions=prompt.instructions,
             action_tools=tool_surface.action_tools,
             execution_context=agent.run.execution_context,
@@ -181,8 +181,8 @@ class AgentLoop:
     def _provider_high_watermark(self):
         config = self.agent.config
         return (
-            config.context_budget_tokens
-            - config.compaction_reserve_tokens
+            self.agent.context_limit_tokens
+            - config.max_output_tokens
         )
 
     def _continue_provider(self, loop_state, turn, provider_results):
@@ -212,7 +212,7 @@ class AgentLoop:
         loop_state.overflow_recovery_attempted = True
         self._reset_context(
             loop_state, "context_overflow_retry",
-            provider_context_tokens=self.agent.config.context_budget_tokens,
+            provider_context_tokens=self.agent.context_limit_tokens,
         )
         return True
 

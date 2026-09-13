@@ -14,6 +14,13 @@ WORKSPACE_GIT_TIMEOUT_SECONDS = 5
 WORKSPACE_STATUS_MAX_CHARS = 1500
 
 
+def _is_protected_environment_name(value):
+    name = str(value).casefold()
+    return (name == ".env" or name.startswith(".env.")) and (
+        name not in PUBLIC_ENV_EXAMPLES
+    )
+
+
 def normalize_relative_file(value: str) -> str:
     text = str(value or "").strip().replace("\\", "/")
     path = PurePosixPath(text)
@@ -258,11 +265,10 @@ class Workspace:
     def resolve_tool_path(self, raw_path):
         resolved = self.resolve_path(raw_path)
         relative = resolved.relative_to(self.root)
-        if any(part in TOOL_INTERNAL_PATH_NAMES for part in relative.parts):
+        if any(part.casefold() in TOOL_INTERNAL_PATH_NAMES for part in relative.parts):
             raise ValueError(f"tool path targets internal workspace state: {raw_path}")
-        name = relative.name.lower()
-        if (
-            name == ".env" or name.startswith(".env.")
-        ) and name not in PUBLIC_ENV_EXAMPLES:
-            raise ValueError(f"tool path targets a protected environment file: {raw_path}")
+        if any(_is_protected_environment_name(part) for part in relative.parts):
+            raise ValueError(
+                f"tool path targets a protected environment file: {raw_path}"
+            )
         return resolved

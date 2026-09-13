@@ -32,10 +32,9 @@ def build_policy_agent(root, actions, *, mode, allowed_write_paths=None):
         config=PicoConfig(
             mode=mode,
             allowed_write_paths=allowed_write_paths,
-            context_budget_tokens=32_000,
-            compaction_reserve_tokens=4_000,
-            compaction_keep_recent_tokens=2_000,
-            max_new_tokens=1_000,
+            context_limit_tokens=32_000,
+            recent_history_tokens=2_000,
+            max_output_tokens=1_000,
         ),
         approval_handler=lambda _name, _args, _plan: True,
     )
@@ -48,7 +47,13 @@ class SecurityBoundaryTests(unittest.TestCase):
             root = Path(directory)
             workspace = Workspace.build(root, repo_root_override=root)
 
-            for path in ("../outside.txt", ".git/config", ".pico/events.jsonl"):
+            for path in (
+                "../outside.txt",
+                ".git/config",
+                ".GIT/config",
+                ".pico/events.jsonl",
+                ".PiCo/events.jsonl",
+            ):
                 with self.assertRaises(ValueError):
                     workspace.resolve_tool_path(path)
 
@@ -58,10 +63,12 @@ class SecurityBoundaryTests(unittest.TestCase):
             external = Path(outside) / "secret.txt"
             external.write_text("secret\n", encoding="utf-8")
             (root / "redirect.txt").symlink_to(external)
+            (root / "redirect-directory").symlink_to(Path(outside))
             workspace = Workspace.build(root, repo_root_override=root)
 
-            with self.assertRaisesRegex(ValueError, "escapes workspace"):
-                workspace.resolve_tool_path("redirect.txt")
+            for path in ("redirect.txt", "redirect-directory/secret.txt"):
+                with self.assertRaisesRegex(ValueError, "escapes workspace"):
+                    workspace.resolve_tool_path(path)
 
     def test_ask_mode_and_allowed_paths_are_enforced_locally(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -156,13 +163,24 @@ class SecurityBoundaryTests(unittest.TestCase):
             (root / ".env.local").write_text("SECRET=value\n")
             (root / ".env.production").write_text("SECRET=value\n")
             (root / ".env.test.local").write_text("SECRET=value\n")
+            (root / ".ENV").write_text("SECRET=value\n")
+            protected_directory = root / ".Env.Secrets"
+            protected_directory.mkdir()
+            (protected_directory / "secret.txt").write_text("SECRET=value\n")
             example = root / ".env.example"
             example.write_text("SECRET=example\n")
             sample = root / ".env.sample"
             sample.write_text("SECRET=sample\n")
             workspace = Workspace.build(root, repo_root_override=root)
 
-            for name in (".env", ".env.local", ".env.production", ".env.test.local"):
+            for name in (
+                ".env",
+                ".env.local",
+                ".env.production",
+                ".env.test.local",
+                ".ENV",
+                ".Env.Secrets/secret.txt",
+            ):
                 with self.assertRaisesRegex(ValueError, "protected environment"):
                     workspace.resolve_tool_path(name)
             self.assertEqual(workspace.resolve_tool_path(".env.example"), example.resolve())

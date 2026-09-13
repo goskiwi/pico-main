@@ -40,6 +40,20 @@ class Pico:
             raise ValueError("session belongs to another workspace")
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
+        model_context_window = getattr(model_client, "context_window_tokens", None)
+        if model_context_window is not None:
+            model_context_window = int(model_context_window)
+            if model_context_window < 1:
+                raise ValueError("model context window must be positive")
+        self.context_limit_tokens = min(
+            self.config.context_limit_tokens,
+            model_context_window or self.config.context_limit_tokens,
+        )
+        available_context = self.context_limit_tokens - self.config.max_output_tokens
+        if available_context < 1:
+            raise ValueError("model context window must exceed max_output_tokens")
+        if self.config.recent_history_tokens > available_context:
+            raise ValueError("recent history must fit the effective context limit")
         self.workspace = workspace
         self.run = ActiveRunState()
         self.session = session
