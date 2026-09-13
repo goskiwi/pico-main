@@ -1,0 +1,77 @@
+{
+  "duration_seconds": 0.22,
+  "passed": 13,
+  "results": [
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "pointed_active_run"
+    },
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "orphan_active_run"
+    },
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "torn_log_tail"
+    },
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "damaged_checkpoint"
+    },
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "compacted_history_tail"
+    },
+    {
+      "category": "task",
+      "passed": true,
+      "scenario": "runtime_feedback"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "before_intent"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "intent_file_unchanged"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "published_before_settlement"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "deleted_before_settlement"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "created_before_settlement"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "shell_effect_unknown"
+    },
+    {
+      "category": "tool",
+      "passed": true,
+      "scenario": "settlement_already_durable"
+    }
+  ],
+  "schema": "pico-recovery-eval-current",
+  "source": {
+    "commit": "81da05c",
+    "dirty": false
+  },
+  "total": 13
+}
