@@ -83,7 +83,7 @@ class ScriptedModel:
         self._pending_call_id = ""
 
 
-def verification_command(path, expected):
+def assert_file_command(path, expected):
     source = (
         "from pathlib import Path; "
         f"assert Path({str(path)!r}).read_text(encoding='utf-8') == {expected!r}"
@@ -91,13 +91,16 @@ def verification_command(path, expected):
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
 
 
+def approve_all(_name, _args, _plan):
+    return True
+
+
 def build_agent(
     root,
     actions,
     *,
-    verification="",
-    verification_required=None,
     before_action=None,
+    approval_handler=approve_all,
 ):
     root = Path(root)
     workspace = Workspace.build(root, repo_root_override=root)
@@ -109,12 +112,11 @@ def build_agent(
         session=store.create(workspace.root),
         config=PicoConfig(
             mode="auto",
-            verification_command=verification,
-            verification_required=verification_required,
             context_budget_tokens=32_000,
             compaction_reserve_tokens=4_000,
             compaction_keep_recent_tokens=2_000,
             max_new_tokens=1_000,
         ),
+        approval_handler=approval_handler,
     )
     return agent, model

@@ -17,7 +17,6 @@ from .execution import (
 )
 from .history import HISTORY_OMITTED
 from .prompt_instructions import build_prompt_instructions
-from .verification import ResolvedVerificationPolicy
 from .workspace import WORKSPACE_GIT_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
@@ -110,11 +109,10 @@ def render_runtime_feedback(feedback):
     return "\n\n".join(parts)
 
 
-def render_runtime_policy(contract, mode, paths, verification_required):
+def render_runtime_policy(contract, mode, paths):
     if contract is None:
         policy = {
             "mode": "unavailable",
-            "verification_required": False,
             "write_scope": {"mode": "unavailable"},
         }
     else:
@@ -126,7 +124,6 @@ def render_runtime_policy(contract, mode, paths, verification_required):
             write_scope = {"mode": "paths", "paths": list(paths)}
         policy = {
             "mode": mode,
-            "verification_required": bool(verification_required),
             "write_scope": write_scope,
         }
     return "runtime_policy:\n" + json.dumps(
@@ -357,30 +354,17 @@ class PromptBuilder:
         )
 
     def _raw_sections(self, user_message, tool_surface):
-        self.refresh_repository_instructions()
         projection = self.runtime.run.projection
         contract = projection.contract
         goal = contract.goal if contract is not None else str(user_message)
         history = self._history()
         latest = history.latest_user_guidance() if history is not None else ""
         feedback = projection.runtime_feedback
-        verification_policy = (
-            ResolvedVerificationPolicy.resolve(
-                contract,
-                self.runtime.config.verification_command,
-            )
-            if contract is not None
-            else None
-        )
         return {
             "runtime_policy": render_runtime_policy(
                 contract,
                 tool_surface.mode,
                 tool_surface.allowed_write_paths,
-                bool(
-                    verification_policy
-                    and verification_policy.required
-                ),
             ),
             "repository_instructions": render_repository_instructions(
                 self.repository_instructions

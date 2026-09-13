@@ -1,4 +1,4 @@
-"""Concrete host command runner for trusted, Runtime-owned verification."""
+"""Bounded host command execution for model-requested shell tools."""
 
 from __future__ import annotations
 
@@ -200,34 +200,21 @@ class CommandRunner:
         return cwd
 
     def _environment(self, cwd, provided):
-        environment = {
-            "HOME": tempfile.gettempdir(),
-            "PATH": os.environ.get("PATH", os.defpath),
-            "PWD": str(cwd),
-            "TMPDIR": tempfile.gettempdir(),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONNOUSERSITE": "1",
-            "PYTEST_ADDOPTS": "-p no:cacheprovider",
-            "RUFF_CACHE_DIR": str(Path(tempfile.gettempdir()) / "pico-ruff-cache"),
-            "PYTHONPATH": str(
-                self.workspace_root / "src"
-                if (self.workspace_root / "src").is_dir()
-                else self.workspace_root
-            ),
-        }
+        environment = {}
         for name, value in dict(provided).items():
             name = str(name)
             value = str(value)
             if not name or "=" in name or "\x00" in name or "\x00" in value:
                 raise ValueError("command environment contains an invalid entry")
             environment[name] = value
-        for name in ("HOME", "PATH", "PWD", "TMPDIR"):
-            environment[name] = {
+        environment.update(
+            {
                 "HOME": tempfile.gettempdir(),
                 "PATH": os.environ.get("PATH", os.defpath),
                 "PWD": str(cwd),
                 "TMPDIR": tempfile.gettempdir(),
-            }[name]
+            }
+        )
         return environment
 
     @staticmethod
@@ -309,6 +296,7 @@ class CommandRunner:
             cls._signal_process_group(process, sig)
             try:
                 process.wait(timeout=COMMAND_TERMINATE_SECONDS)
+                return
             except subprocess.TimeoutExpired as exc:
                 if sig == signal.SIGKILL:
                     raise RuntimeError("process group did not stop after SIGKILL") from exc

@@ -23,7 +23,6 @@ RUN_EVENT_KINDS = frozenset(
         "tool_exchange",
         "tool_intent",
         "tool_settlement",
-        "verification_result",
         "provider_session_reset",
         "run_stopped",
     }
@@ -181,58 +180,6 @@ def _validate_stopped_payload(kind, payload):
         raise ValueError("run_stopped duration cannot be negative")
 
 
-def _validate_verification_payload(kind, payload):
-    _exact_payload(
-        kind,
-        payload,
-        {
-            "status",
-            "started_workspace_mutation_sequence",
-            "finished_workspace_mutation_sequence",
-            "started_changed_path_states",
-            "finished_changed_path_states",
-            "workspace_changes",
-        },
-        {
-            "command",
-            "exit_code",
-            "output",
-        },
-    )
-    if payload["status"] not in {"passed", "failed", "infrastructure_error"}:
-        raise ValueError("verification_result has invalid status")
-    changes = payload["workspace_changes"]
-    if changes is not None and (
-        not isinstance(changes, list)
-        or any(not isinstance(path, str) or not path for path in changes)
-    ):
-        raise TypeError("verification workspace_changes must be paths or null")
-    if (changes is None or changes) and payload["status"] == "passed":
-        raise ValueError("verification with uncertain workspace effects cannot pass")
-    if not isinstance(payload["finished_workspace_mutation_sequence"], int):
-        raise TypeError(
-            "verification_result finished mutation sequence must be an integer"
-        )
-    if not isinstance(payload["started_workspace_mutation_sequence"], int):
-        raise TypeError(
-            "verification_result started mutation sequence must be an integer"
-        )
-    for state_field in (
-        "started_changed_path_states",
-        "finished_changed_path_states",
-    ):
-        states = payload[state_field]
-        if not isinstance(states, dict) or any(
-            not isinstance(path, str)
-            or not path
-            or not isinstance(state, str)
-            for path, state in states.items()
-        ):
-            raise TypeError(
-                f"verification_result {state_field} must map paths to states"
-            )
-
-
 _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
@@ -242,7 +189,6 @@ _PAYLOAD_VALIDATORS = {
     "tool_exchange": _validate_tool_exchange_payload,
     "tool_intent": _validate_tool_intent_payload,
     "tool_settlement": _validate_tool_settlement_payload,
-    "verification_result": _validate_verification_payload,
     "assistant_final": _validate_final_payload,
     "run_stopped": _validate_stopped_payload,
 }

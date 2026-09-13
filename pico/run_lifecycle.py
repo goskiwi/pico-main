@@ -120,7 +120,17 @@ class RunLifecycle:
             raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
         try:
-            runtime.tools.reconcile_interrupted()
+            recovered = runtime.tools.reconcile_interrupted()
+            if recovered is not None:
+                outcome, _entry = recovered
+                paths = ", ".join(outcome.affected_paths)
+                detail = f" Affected paths observed: {paths}." if paths else ""
+                runtime.append_model_instruction(
+                    "A previous tool was interrupted and was settled without "
+                    "replaying it. Inspect the current workspace and relevant "
+                    "process state before deciding whether to repair, retry, or "
+                    f"continue.{detail}"
+                )
             if resumed:
                 run_log.append_user_guidance(user_message)
 
@@ -185,11 +195,6 @@ class RunLifecycle:
         return TaskContract(
             goal=goal,
             write_scope=WriteScope.from_policy(config.mode, config.allowed_write_paths),
-            verification_required=(
-                config.mode != "ask" and bool(config.verification_command)
-                if config.verification_required is None
-                else config.verification_required
-            ),
         )
 
     def _root_execution(self):

@@ -26,16 +26,6 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
-from .execution import (
-    ExecutionCancelled,
-    ExecutionContext,
-    ExecutionDeadlineExceeded,
-)
-from .verification import (
-    RepositorySnapshotError,
-    capture_repository_state,
-    repository_state_changes,
-)
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
@@ -44,7 +34,6 @@ SEARCH_MAX_MATCHES = 200
 SEARCH_MAX_OUTPUT_BYTES = 512 * 1024
 SEARCH_TIMEOUT_SECONDS = 10.0
 RUN_SHELL_TIMEOUT_SECONDS = 120
-RUN_SHELL_SETTLEMENT_TIMEOUT_SECONDS = 30
 
 
 class ToolArgs(BaseModel):
@@ -515,22 +504,6 @@ def tool_edit_file(
 
 def tool_run_shell(context, args, *, command_runner, workspace_root):
     command = str(args["command"])
-    try:
-        before = capture_repository_state(
-            workspace_root,
-            command_runner=command_runner,
-            execution_context=context.execution_context,
-        )
-    except RepositorySnapshotError as exc:
-        return ToolRunnerResult(
-            "",
-            structured={"command": command, "repository_changes": []},
-            failure=FailureInfo(
-                "repository_snapshot_unavailable",
-                str(exc),
-                "retry_after_change",
-            ),
-        )
     result = command_runner.run(
         shell_argv(command),
         cwd=workspace_root,
@@ -538,24 +511,6 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
         env={},
         execution_context=context.execution_context,
     )
-    snapshot_failure = None
-    try:
-        settlement_context = ExecutionContext.standalone(
-            max_seconds=RUN_SHELL_SETTLEMENT_TIMEOUT_SECONDS
-        )
-        after = capture_repository_state(
-            workspace_root,
-            command_runner=command_runner,
-            execution_context=settlement_context,
-        )
-        changes = repository_state_changes(before, after)
-    except (
-        ExecutionCancelled,
-        ExecutionDeadlineExceeded,
-        RepositorySnapshotError,
-    ) as exc:
-        changes = ()
-        snapshot_failure = exc
     output = "\n".join(
         part
         for part in (
@@ -565,23 +520,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
         if part
     )
     failure = None
-    effect_scope = "none"
-    if snapshot_failure is not None:
-        effect_scope = "workspace"
-        failure = FailureInfo(
-            "repository_snapshot_unavailable",
-            str(snapshot_failure),
-            "user_action_required",
-        )
-    elif changes:
-        effect_scope = "workspace"
-        failure = FailureInfo(
-            "command_modified_repository",
-            "diagnostic command changed repository-visible state without "
-            "a tracked file mutation transaction: " + ", ".join(changes[:20]),
-            "user_action_required",
-        )
-    elif result.infrastructure_error:
+    if result.infrastructure_error:
         failure = FailureInfo(
             "command_infrastructure_error",
             result.stderr or "command could not start",
@@ -602,9 +541,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
             "output_limited": result.output_limited,
             "stdout_discarded_bytes": result.stdout_discarded_bytes,
             "stderr_discarded_bytes": result.stderr_discarded_bytes,
-            "repository_changes": list(changes[:20]),
         },
-        effect_scope=effect_scope,
         failure=failure,
     )
 
@@ -656,7 +593,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "run_shell": {
             "args_schema": RunShellArgs,
             "risky": True,
-            "description": "Run one user-approved diagnostic command from the trusted workspace root. Use it for tests, linters, type checks, git status/diff, and reproductions. It is host execution, not a sandbox, and must not modify repository files. Mutating shell commands are not supported by this Runtime.",
+            "description": "Run one user-approved host command from the workspace root. Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so their revisions remain tracked.",
             "validate": partial(_validate_run_shell, command_runner=command_runner),
             "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
             "plan": _run_shell_plan,

@@ -30,7 +30,6 @@ from .tool_execution import (
     path_transitions,
     tracked_workspace_drift,
 )
-from .verification import ResolvedVerificationPolicy
 from .workspace import clip
 
 if TYPE_CHECKING:
@@ -149,74 +148,13 @@ class ToolRuntime:
 
     def _build_registry(self):
         runtime = self.runtime
-        tools = toolkit.build_tool_registry(
+        return toolkit.build_tool_registry(
             workspace_root=runtime.workspace.root,
             path_resolver=runtime.workspace.resolve_tool_path,
             artifact_store=runtime.dependencies.artifacts,
             redact_text=runtime.redact_text,
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
-        )
-        if runtime.config.verification_command.strip():
-            tools["verify"] = {
-                "args_schema": toolkit.ToolArgs,
-                "risky": False,
-                "description": (
-                    "Run the Runtime's fixed acceptance command now. Use after a "
-                    "meaningful set of edits to get authoritative failures before "
-                    "submit_final. This tool takes no arguments and does not finish "
-                    "the task."
-                ),
-                "plan": lambda context, args: ToolExecutionPlan(
-                    "workspace",
-                    operation={
-                        "command": runtime.config.verification_command,
-                    },
-                ),
-                "run": self._run_verification,
-            }
-        return tools
-
-    def _run_verification(self, context, args):
-        contract = self.runtime.run.projection.contract
-        if contract is None:
-            raise RuntimeError("Runtime verification requires an active task")
-        policy = ResolvedVerificationPolicy.resolve(
-            contract,
-            self.runtime.config.verification_command,
-        )
-        sequence = self.runtime.run.evidence.last_workspace_mutation_sequence
-        record = self.runtime.run_verification(sequence, policy)
-        status = str(record.get("status", "infrastructure_error"))
-        output = str(record.get("output", "")).strip()
-        passed = status == "passed"
-        failure = (
-            None
-            if passed
-            else FailureInfo(
-                "verification_failed"
-                if status == "failed"
-                else "verification_infrastructure_error",
-                "Runtime verification failed; inspect the output and repair the code."
-                if status == "failed"
-                else "Runtime verification could not establish a trustworthy result.",
-                "retry_after_change"
-                if status == "failed"
-                else "user_action_required",
-            )
-        )
-        changes = record["workspace_changes"]
-        return ToolRunnerResult(
-            content=(
-                ("Runtime verification passed." if passed else "Runtime verification failed.")
-                + (("\n" + output) if output else "")
-            ),
-            structured={"verification": record},
-            affected_paths=tuple(changes or ()),
-            effect_scope=(
-                "workspace" if changes is None or bool(changes) else "none"
-            ),
-            failure=failure,
         )
 
     def _validate_allowlist(self, tools):
@@ -263,7 +201,7 @@ class ToolRuntime:
     def _tool_allowed_by_mode(name, mode):
         if mode == "ask":
             return name in ASK_TOOL_NAMES
-        return not (mode == "auto" and name == "run_shell")
+        return True
 
     def resolve_surface(self):
         """Resolve one authoritative Tool set for advertisement and execution."""
@@ -651,7 +589,7 @@ class ToolRuntime:
         self._require_write_scope((path for path, _target in plan.paths), allowed_paths)
 
     def _approval_failure(self, name, args, surface, plan):
-        if surface.mode == "auto":
+        if surface.mode == "auto" and name != "run_shell":
             return None
         handler = self.runtime.dependencies.approval_handler
         if handler is None:
@@ -748,7 +686,7 @@ class ToolRuntime:
             failure = self._approval_failure(name, args, surface, plan)
             if failure is not None:
                 return self._rejected(call, failure.code, failure.detail, failure.recovery)
-            if surface.mode != "auto":
+            if surface.mode != "auto" or name == "run_shell":
                 try:
                     current = self.resolve_surface()
                     if name not in current.definitions:

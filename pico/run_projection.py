@@ -27,7 +27,6 @@ class RunMetrics:
     kind_counts: dict[str, int] = field(default_factory=dict)
     tool_counts: dict[str, int] = field(default_factory=dict)
     outcome_counts: dict[str, int] = field(default_factory=dict)
-    verification_counts: dict[str, int] = field(default_factory=dict)
 
     def apply_event(self, event):
         kind = event.kind
@@ -43,17 +42,6 @@ class RunMetrics:
                 self.executed_tool_count += 1
                 self.tool_counts[tool] = self.tool_counts.get(tool, 0) + 1
             self.outcome_counts[status] = self.outcome_counts.get(status, 0) + 1
-            if tool == "verify":
-                verification = dict(outcome.get("structured", {})).get("verification", {})
-                verification_status = str(verification.get("status", "unknown"))
-                self.verification_counts[verification_status] = (
-                    self.verification_counts.get(verification_status, 0) + 1
-                )
-        elif kind == "verification_result":
-            status = str(payload.get("status", "unknown"))
-            self.verification_counts[status] = (
-                self.verification_counts.get(status, 0) + 1
-            )
         elif kind in {"assistant_final", "run_stopped"}:
             self.turn_duration_ms = int(payload.get("turn_duration_ms", 0))
 
@@ -65,7 +53,6 @@ class RunMetrics:
             "kind_counts": dict(sorted(self.kind_counts.items())),
             "tool_counts": dict(sorted(self.tool_counts.items())),
             "outcome_counts": dict(sorted(self.outcome_counts.items())),
-            "verification_counts": dict(sorted(self.verification_counts.items())),
         }
 
     @classmethod
@@ -77,7 +64,6 @@ class RunMetrics:
             "kind_counts",
             "tool_counts",
             "outcome_counts",
-            "verification_counts",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid checkpoint RunMetrics")
@@ -95,7 +81,6 @@ class RunMetrics:
             kind_counts=counts("kind_counts"),
             tool_counts=counts("tool_counts"),
             outcome_counts=counts("outcome_counts"),
-            verification_counts=counts("verification_counts"),
         )
         numeric = (
             result.turn_duration_ms,
@@ -104,7 +89,6 @@ class RunMetrics:
             *result.kind_counts.values(),
             *result.tool_counts.values(),
             *result.outcome_counts.values(),
-            *result.verification_counts.values(),
         )
         if any(item < 0 for item in numeric):
             raise ValueError("checkpoint metric counts cannot be negative")
@@ -250,19 +234,15 @@ class RunProjection:
         self.last_timestamp = event.timestamp
         return self
 
-    def to_checkpoint(self):
+    def checkpoint_state(self):
         if self.pending_tool.call is not None:
             raise ValueError("cannot checkpoint a pending tool intent")
+        if self.status != "running" or self.contract is None:
+            raise ValueError("checkpoint requires one active Run")
         return {
-            "run_id": self.run_id,
-            "session_id": self.session_id,
-            "contract": self.contract.to_dict() if self.contract else None,
+            "contract": self.contract.to_dict(),
             "evidence": self.evidence.to_dict(),
             "metrics": self.metrics.to_dict(),
-            "status": self.status,
-            "stop_reason": self.stop_reason,
-            "final_answer": self.final_answer,
-            "pending": None,
             "runtime_feedback": (
                 {
                     "instruction": self.runtime_feedback.instruction,
@@ -273,37 +253,31 @@ class RunProjection:
                 if self.runtime_feedback
                 else None
             ),
-            "failure_key": list(self.failure_key),
-            "failure_count": self.failure_count,
-            "failure_warned": self.failure_warned,
-            "last_sequence": self.last_sequence,
-            "last_timestamp": self.last_timestamp,
+            "failure_streak": {
+                "key": list(self.failure_key),
+                "count": self.failure_count,
+            },
         }
 
     @classmethod
-    def from_checkpoint(cls, value):
+    def from_checkpoint_state(
+        cls,
+        value,
+        *,
+        run_id,
+        session_id,
+        last_sequence,
+        last_timestamp,
+    ):
         expected = {
-            "run_id",
-            "session_id",
             "contract",
             "evidence",
             "metrics",
-            "status",
-            "stop_reason",
-            "final_answer",
-            "pending",
             "runtime_feedback",
-            "failure_key",
-            "failure_count",
-            "failure_warned",
-            "last_sequence",
-            "last_timestamp",
+            "failure_streak",
         }
         if not isinstance(value, dict) or set(value) != expected:
-            raise ValueError("invalid checkpoint Projection")
-        if value["pending"] is not None:
-            raise ValueError("checkpoint cannot contain a pending tool")
-        contract = value["contract"]
+            raise ValueError("invalid checkpoint state")
         feedback = value["runtime_feedback"]
         if feedback is not None and (
             not isinstance(feedback, dict)
@@ -311,29 +285,31 @@ class RunProjection:
             != {"instruction", "evidence", "evidence_artifact_id", "event_id"}
         ):
             raise ValueError("invalid checkpoint Runtime feedback")
-        failure_key = tuple(str(item) for item in value["failure_key"])
+        failure = value["failure_streak"]
+        if not isinstance(failure, dict) or set(failure) != {"key", "count"}:
+            raise ValueError("invalid checkpoint failure streak")
+        if not isinstance(failure["key"], list):
+            raise TypeError("checkpoint failure key must be a list")
+        failure_key = tuple(str(item) for item in failure["key"])
         if len(failure_key) not in {0, 4}:
             raise ValueError("invalid checkpoint failure key")
+        failure_count = int(failure["count"])
+        if failure_count < 0:
+            raise ValueError("checkpoint failure count cannot be negative")
         projection = cls(
-            run_id=str(value["run_id"]),
-            session_id=str(value["session_id"]),
-            contract=(TaskContract.from_dict(contract) if contract else None),
+            run_id=str(run_id),
+            session_id=str(session_id),
+            contract=TaskContract.from_dict(value["contract"]),
             evidence=RunEvidence.from_dict(value["evidence"]),
             metrics=RunMetrics.from_dict(value["metrics"]),
-            status=str(value["status"]),
-            stop_reason=str(value["stop_reason"]),
-            final_answer=str(value["final_answer"]),
+            status="running",
             runtime_feedback=(RuntimeFeedback(**feedback) if feedback else None),
             failure_key=failure_key,
-            failure_count=int(value["failure_count"]),
-            failure_warned=bool(value["failure_warned"]),
-            last_sequence=int(value["last_sequence"]),
-            last_timestamp=str(value["last_timestamp"]),
+            failure_count=failure_count,
+            failure_warned=failure_count >= 3,
+            last_sequence=int(last_sequence),
+            last_timestamp=str(last_timestamp),
         )
-        if projection.status not in {"not_started", "running", "completed", "stopped"}:
-            raise ValueError("invalid checkpoint Projection status")
-        if projection.failure_warned != (projection.failure_count >= 3):
-            raise ValueError("checkpoint failure warning state is inconsistent")
         if bool(projection.failure_key) != bool(projection.failure_count):
             raise ValueError("checkpoint failure count is inconsistent")
         if projection.last_sequence < 1 or not projection.last_timestamp:
@@ -344,8 +320,6 @@ class RunProjection:
     def _event_makes_progress(event):
         if event.kind == "user_guidance":
             return True
-        if event.kind == "verification_result":
-            return event.payload.get("status") == "passed"
         if event.kind == "provider_session_reset":
             return event.payload.get("reason") == "repository_instructions_changed"
         if event.kind not in {"tool_exchange", "tool_settlement"}:
@@ -407,7 +381,6 @@ class RunOutcome:
     status: str
     answer: str
     stop_reason: str
-    changed_paths: tuple[str, ...]
     metrics: dict[str, Any]
 
     def __init__(self, projection: RunProjection):
@@ -419,11 +392,6 @@ class RunOutcome:
         object.__setattr__(self, "status", projection.status)
         object.__setattr__(self, "answer", projection.final_answer)
         object.__setattr__(self, "stop_reason", projection.stop_reason)
-        object.__setattr__(
-            self,
-            "changed_paths",
-            tuple(projection.evidence.changed_paths),
-        )
         object.__setattr__(self, "metrics", projection.metrics.to_dict())
 
     def to_dict(self):
@@ -434,6 +402,5 @@ class RunOutcome:
             "status": self.status,
             "answer": self.answer,
             "stop_reason": self.stop_reason,
-            "changed_paths": list(self.changed_paths),
             "metrics": deepcopy(self.metrics),
         }

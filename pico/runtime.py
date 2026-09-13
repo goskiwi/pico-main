@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import security as securitylib
@@ -18,7 +17,6 @@ from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
-from .verification import detect_verification_command, run_verification
 from .workspace import clip
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
@@ -42,11 +40,6 @@ class Pico:
             raise ValueError("session belongs to another workspace")
         self.model_client = model_client
         self.config = config if config is not None else PicoConfig()
-        if not self.config.verification_command.strip():
-            self.config = replace(
-                self.config,
-                verification_command=detect_verification_command(workspace.root),
-            )
         self.workspace = workspace
         self.run = ActiveRunState()
         self.session = session
@@ -105,13 +98,6 @@ class Pico:
             instruction,
             evidence=evidence,
             evidence_artifact_id=str(descriptor.get("artifact_id", "")),
-        )
-
-    def run_verification(self, started_workspace_mutation_sequence, policy):
-        return run_verification(
-            self,
-            started_workspace_mutation_sequence,
-            policy,
         )
 
     def read_run_events(self, run_id):

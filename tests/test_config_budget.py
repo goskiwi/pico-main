@@ -21,3 +21,7 @@ class ContextBudgetTests(unittest.TestCase):
             PicoConfig(model_context_window_tokens=0)
         with self.assertRaises(TypeError):
             PicoConfig(provider_context_limit_tokens=128_000)
+        with self.assertRaises(TypeError):
+            PicoConfig(verification_command="pytest -q")
+        with self.assertRaises(TypeError):
+            PicoConfig(verification_required=True)

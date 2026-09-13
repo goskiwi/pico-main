@@ -59,8 +59,8 @@ Session 不保存完整对话：
 
 一个 Session 可以连续运行多个任务；`active_run_id` 只在任务未完成时指向需要恢复的 Run。
 
-长 Run 在没有 Pending Intent 的稳定边界保存可重建 Checkpoint。恢复优先读取
-Projection、有效 History 和 Checkpoint 后的 Event 尾部；Checkpoint 缺失或损坏时从
+长 Run 在没有 Pending Intent 的稳定边界保存可重建 Checkpoint。Checkpoint 只保存一次 Run 身份与日志游标，以及恢复所需的最小状态和有效 History。恢复优先读取
+这些状态和 Checkpoint 后的 Event 尾部；Checkpoint 缺失或损坏时从
 当前格式的完整 RunLog 重建。旧 Run 格式不迁移、不兼容。
 
 ## 上下文与压缩
@@ -80,7 +80,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 → 摘要 + 近期完整交互 + 最新用户请求 + 当前真实状态
 ```
 
-摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有工具与验证结果可以证明工作完成。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace、根 `AGENTS.md` 和验证状态每次由 Runtime 获取；不发现或加载嵌套规则。摘要是有损历史上下文，不能作为权限或执行事实。
+摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有实际工具结果可以证明执行事实。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace 和根 `AGENTS.md` 每次由 Runtime 获取；不发现或加载嵌套规则。摘要是有损历史上下文，不能作为权限或执行事实。
 
 ## 一次任务
 
@@ -90,25 +90,24 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 4. 模型返回工具调用或 `submit_final`。
 5. `ToolRuntime` 把只读与执行前拒绝保存为单条 Exchange；潜在副作用先提交 Intent，执行后提交 Settlement。
 6. 中断恢复只检查未完成 Intent 的当前状态，不自动重放副作用操作。
-7. `CompletionController` 检查副作用和验证结果，再允许 Runtime 完成任务。
+7. `CompletionController` 检查任务边界和已跟踪文件的工作区漂移，再接受模型声明的完成结果。
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file`、`verify` 和 `submit_final`。每轮只接受一个调用；有固定验收命令时才开放无参数 `verify`。
+主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。每轮只接受一个调用。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
 
-`verify` 由模型主动触发中途检查；任务契约独立记录是否要求验收，`submit_final` 在要求验收时强制重新验证，即使工作区没有净修改。中途入口不能保证模型一定及时调用。
-
-`RunEvidence` 只维护文件变化、不确定副作用、最新验证和最后修改序号。完整读取、修改和验证历史保存在 RunLog 中；模型和工具用量统计继续保留在 Metrics 中。
+`RunEvidence` 只维护文件变化和不确定副作用。完整工具历史保存在 RunLog 中；模型和工具用量统计保留在 Metrics 中。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。
-- Auto 模式允许受限文件修改，但不开放通用命令。
+- Auto 模式允许受限文件修改并开放通用命令；由于 Pico 没有 Shell 沙箱，`run_shell` 仍然要求用户审批。
+- `run_shell` 可以产生正常的测试、构建和 snapshot 输出；审批是这类主机副作用的授权边界。模型应优先用文件工具修改源码，以保留读取版本检查和原子替换。
 - 文件路径必须位于 Workspace 内，`.git` 和 `.pico` 不对模型开放。
 - `edit_file` 只接收路径和替换内容；Runtime 内部绑定本轮读取到的 Revision，写入前再次检查，并通过临时文件原子替换。
 - 执行意图和修改前版本标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
-- 模型的最终回答不是完成证明；Runtime 独立执行配置的验证并复查当前工作区状态。
+- 模型负责选择并运行相关测试，Runtime 不把普通测试结果冒充为自然语言任务的独立验收；恢复出的不确定副作用作为事实反馈模型，由模型观察当前工作区后继续，不自动重放原工具。
 - 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续三次相同失败提示改变策略，第四次停止。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
-- Shell 与验收命令使用 POSIX 非阻塞管道和 `selectors` 等待输出，同时检查取消和截止时间；只保留固定大小的前缀并报告丢弃字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
+- Shell 命令使用 POSIX 非阻塞管道和 `selectors` 等待输出，同时检查取消和截止时间；只保留固定大小的前缀并报告丢弃字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
 
 ## 阅读顺序
 

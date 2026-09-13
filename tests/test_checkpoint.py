@@ -6,7 +6,7 @@ from unittest import mock
 
 from pico import SessionStore, TaskContract, ToolCall, ToolOutcome, WriteScope
 from pico.history import RunHistory
-from pico.run_checkpoint import write_run_checkpoint
+from pico.run_checkpoint import read_run_checkpoint, write_run_checkpoint
 from pico.run_log import RunLog, replay_events
 from pico.run_store import RunStore
 
@@ -20,7 +20,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
             checkpoint_byte_interval=10**9,
         )
         log = RunLog("run_checkpoint", "session_checkpoint", store)
-        log.append_user(TaskContract("Inspect", WriteScope("none"), False))
+        log.append_user(TaskContract("Inspect", WriteScope("none")))
         return store, log
 
     def test_normal_restore_reads_checkpoint_and_tail_without_full_log(self):
@@ -53,6 +53,48 @@ class CheckpointRecoveryTests(unittest.TestCase):
                 restored_store.read_events(log.run_id)[-1].payload["content"],
                 "after restore",
             )
+
+    def test_checkpoint_contains_one_identity_cursor_and_minimal_running_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, log = self._new_log(directory, interval=1)
+            value = json.loads(store.checkpoint_path(log.run_id).read_text())
+
+            self.assertEqual(set(value), {
+                "run_id", "session_id", "last_sequence", "last_timestamp",
+                "event_log_offset", "state", "history",
+            })
+            self.assertEqual(set(value["state"]), {
+                "contract", "evidence", "metrics", "runtime_feedback",
+                "failure_streak",
+            })
+            for removed in (
+                "run_id", "session_id", "last_sequence", "last_timestamp",
+                "status", "stop_reason", "final_answer", "pending",
+                "failure_warned",
+            ):
+                self.assertNotIn(removed, value["state"])
+
+    def test_removed_checkpoint_format_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, log = self._new_log(directory, interval=1)
+            path = store.checkpoint_path(log.run_id)
+            value = json.loads(path.read_text())
+            value["projection"] = value.pop("state")
+            path.write_text(json.dumps(value))
+
+            with self.assertRaisesRegex(ValueError, "checkpoint fields"):
+                read_run_checkpoint(path, expected_run_id=log.run_id)
+
+    def test_removed_acceptance_fields_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, log = self._new_log(directory, interval=1)
+            path = store.checkpoint_path(log.run_id)
+            value = json.loads(path.read_text())
+            value["state"]["evidence"]["latest_verification"] = None
+            path.write_text(json.dumps(value))
+
+            with self.assertRaisesRegex(ValueError, "RunEvidence"):
+                read_run_checkpoint(path, expected_run_id=log.run_id)
 
     def test_damaged_checkpoint_rebuilds_from_current_log(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,7 +129,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                 side_effect=OSError("checkpoint unavailable"),
             ):
                 event = log.append_user(
-                    TaskContract("Inspect", WriteScope("none"), False)
+                    TaskContract("Inspect", WriteScope("none"))
                 )
 
             self.assertEqual(event.sequence, 1)
@@ -188,7 +230,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                 "failure_observed",
                 {
                     "category": "completion",
-                    "code": "verification_failed",
+                    "code": "workspace_drift",
                     "tool_name": "",
                     "identity": "tests",
                 },
@@ -216,7 +258,7 @@ class IncrementalHistoryTests(unittest.TestCase):
             store = SessionStore(Path(directory) / "sessions")
             session = store.create(Path(directory))
             log = RunLog("run_history", session.id, store.runs(session.id))
-            user = log.append_user(TaskContract("Inspect", WriteScope("none"), False))
+            user = log.append_user(TaskContract("Inspect", WriteScope("none")))
             guidance = log.append_user_guidance("latest")
             call = ToolCall("read_file", {"path": "subject.txt"}, "read")
             exchange = log.append_tool_exchange(

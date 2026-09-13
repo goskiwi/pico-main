@@ -135,10 +135,6 @@ def build_welcome(agent, model):
                 "SESSION",
                 agent.session.id,
             ),
-            row(
-                "VERIFY     "
-                + (agent.config.verification_command or "unavailable")
-            ),
             row(""),
         ]
     )
@@ -188,33 +184,17 @@ def _run_state_text(agent):
     if agent.run.run_log is None:
         return "Run: not started"
     task = agent.run.projection
-    changed = ", ".join(task.evidence.changed_paths) or "none"
     return "\n".join(
         (
             f"Goal: {task.contract.goal}",
             f"Status: {task.status}",
-            f"Changed: {changed}",
         )
     )
 
 
-def _outcome_summary(agent, outcome):
-    changed = ", ".join(outcome.changed_paths) or "none"
-    if not outcome.changed_paths:
-        verification = "not required"
-    elif not agent.config.verification_command:
-        verification = "unavailable"
-    else:
-        record = agent.run.evidence.latest_verification
-        verification = (
-            str(record.get("status", "not run"))
-            if record
-            else "not run"
-        )
+def _outcome_summary(outcome):
     lines = [
         f"Status: {outcome.status}",
-        f"Changed: {changed}",
-        f"Verification: {verification}",
         f"Run: {outcome.run_id}",
     ]
     if outcome.status != "completed" and outcome.stop_reason:
@@ -222,8 +202,8 @@ def _outcome_summary(agent, outcome):
     return "\n".join(lines)
 
 
-def _print_outcome(agent, outcome):
-    print(_outcome_summary(agent, outcome))
+def _print_outcome(outcome):
+    print(_outcome_summary(outcome))
     print()
     print(outcome.answer)
 
@@ -255,7 +235,7 @@ def build_arg_parser():
         default=defaults.mode,
         help=(
             "Ask is observation-only; Code asks before risky actions; Auto "
-            "automates bounded file changes but never exposes run_shell."
+            "automates bounded file changes; host shell commands still ask for approval."
         ),
     )
     return parser
@@ -285,7 +265,7 @@ def main(argv=None):
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-            _print_outcome(agent, outcome)
+            _print_outcome(outcome)
             return 0 if outcome.status == "completed" else 1
         return 0
 
@@ -319,6 +299,6 @@ def main(argv=None):
         print()
         try:
             outcome = agent.ask(user_input)
-            _print_outcome(agent, outcome)
+            _print_outcome(outcome)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

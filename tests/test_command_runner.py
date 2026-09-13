@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pico.command_runner import CommandRunner, shell_argv
 from pico.execution import ExecutionContext
@@ -15,6 +16,15 @@ from pico.tools import tool_run_shell
 
 
 class CommandRunnerTests(unittest.TestCase):
+    def test_successful_sigterm_does_not_fall_through_to_sigkill(self):
+        process = mock.Mock(pid=123)
+        process.wait.return_value = 0
+
+        with mock.patch.object(CommandRunner, "_signal_process_group") as send:
+            CommandRunner._stop_process_group(process)
+
+        send.assert_called_once_with(process, signal.SIGTERM)
+
     def test_detached_descendant_does_not_block_pipe_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_path = Path(directory) / "descendant.pid"
@@ -142,8 +152,8 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertIn("started", result.stdout)
 
 
-class RunShellSettlementTests(unittest.TestCase):
-    def test_global_deadline_still_allows_bounded_repository_settlement(self):
+class RunShellExecutionTests(unittest.TestCase):
+    def test_timeout_returns_partial_output_without_rejecting_created_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             subprocess.run(("git", "init", "-q"), cwd=root, check=True)
@@ -177,8 +187,8 @@ class RunShellSettlementTests(unittest.TestCase):
                 workspace_root=root,
             )
 
-            self.assertEqual(result.failure.code, "command_modified_repository")
-            self.assertIn("tracked.txt", result.structured["repository_changes"])
+            self.assertEqual(result.failure.code, "command_failed")
+            self.assertEqual(tracked.read_text(encoding="utf-8"), "after\n")
             self.assertEqual(result.structured["stop_reason"], "deadline_exceeded")
 
 

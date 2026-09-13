@@ -15,7 +15,7 @@ from pico.completion_controller import CompletionController
 from pico.evidence import WorkspaceDriftError
 from pico.providers import ProviderContextOverflow
 from pico.run_log import RunEvent, RunLog, replay_events
-from tests.support import build_agent, verification_command
+from tests.support import assert_file_command, build_agent
 
 
 class RuntimeContractTests(unittest.TestCase):
@@ -74,34 +74,13 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(request.call_count, 1)
             self.assertTrue(agent.run.resumable)
 
-    def test_cancellation_after_verification_preserves_evidence_before_stopping(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "subject.txt").write_text("alpha\n")
-            agent, _ = build_agent(root, [ModelAction.final("Ready")],
-                                   verification=verification_command("subject.txt", "alpha\n"),
-                                   verification_required=True)
-            verify = agent.run_verification
-            def verify_then_cancel(sequence, policy):
-                result = verify(sequence, policy)
-                agent.cancel_current_run()
-                return result
-            with mock.patch.object(agent, "run_verification", side_effect=verify_then_cancel):
-                outcome = agent.ask("Check the file")
-            self.assertEqual(outcome.stop_reason, "user_cancelled")
-            self.assertEqual(agent.run.evidence.latest_verification["status"], "passed")
-            events = agent.read_run_events(outcome.run_id)
-            self.assertLess(next(e.sequence for e in events if e.kind == "verification_result"),
-                            next(e.sequence for e in events if e.kind == "run_stopped"))
-            self.assertEqual(agent.session.active_run_id, "")
-            self.assertIsNone(agent.run.execution_context)
-
-    def test_read_edit_verify_and_complete_through_pico_ask(self):
+    def test_read_edit_test_and_complete_through_pico_ask(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
             target.write_text("alpha\n", encoding="utf-8")
-            verify = verification_command("subject.txt", "beta\n")
+            check = assert_file_command("subject.txt", "beta\n")
+            approval = mock.Mock(return_value=True)
             agent, model = build_agent(
                 root,
                 [
@@ -111,22 +90,27 @@ class RuntimeContractTests(unittest.TestCase):
                         {"path": "subject.txt", "old_text": "alpha\n", "new_text": "beta\n"},
                         call_id="edit",
                     ),
-                    ModelAction.tool("verify", {}, call_id="verify"),
+                    ModelAction.tool(
+                        "run_shell", {"command": check}, call_id="test"
+                    ),
                     ModelAction.final("Updated subject.txt."),
                 ],
-                verification=verify,
+                approval_handler=approval,
             )
 
-            outcome = agent.ask("Replace alpha with beta and verify it")
+            outcome = agent.ask("Replace alpha with beta and test it")
 
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
-            self.assertEqual(outcome.changed_paths, ("subject.txt",))
+            self.assertEqual(agent.run.evidence.changed_paths, ["subject.txt"])
+            self.assertFalse(hasattr(outcome, "changed_paths"))
             self.assertNotIn("final_diff", outcome.to_dict())
             self.assertFalse(list(root.rglob("preimage_*")))
             self.assertFalse(list(root.rglob("diff_*")))
             self.assertEqual(len(model.requests), 4)
-            self.assertEqual(agent.run.evidence.latest_verification["status"], "passed")
+            self.assertEqual(agent.run.metrics.tool_counts["run_shell"], 1)
+            self.assertEqual(approval.call_count, 1)
+            self.assertEqual(approval.call_args.args[0], "run_shell")
             tool_events = [
                 (event.kind, event.call_id)
                 for event in agent.run.run_log.events
@@ -138,8 +122,8 @@ class RuntimeContractTests(unittest.TestCase):
                     ("tool_exchange", "read"),
                     ("tool_intent", "edit"),
                     ("tool_settlement", "edit"),
-                    ("tool_intent", "verify"),
-                    ("tool_settlement", "verify"),
+                    ("tool_intent", "test"),
+                    ("tool_settlement", "test"),
                 ],
             )
             replayed = replay_events(
@@ -190,12 +174,12 @@ class RuntimeContractTests(unittest.TestCase):
                 payload={"outcome": {}},
             )
 
-    def test_failed_verification_is_repaired_before_completion(self):
+    def test_failed_model_run_test_is_repaired_before_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "subject.txt"
             target.write_text("alpha\n", encoding="utf-8")
-            verify = verification_command("subject.txt", "beta\n")
+            check = assert_file_command("subject.txt", "beta\n")
             agent, _model = build_agent(
                 root,
                 [
@@ -204,25 +188,91 @@ class RuntimeContractTests(unittest.TestCase):
                         "edit_file",
                         {"path": "subject.txt", "old_text": "alpha\n", "new_text": "broken\n"},
                     ),
-                    ModelAction.tool("verify", {}),
+                    ModelAction.tool("run_shell", {"command": check}),
                     ModelAction.tool(
                         "edit_file",
                         {"path": "subject.txt", "old_text": "broken\n", "new_text": "beta\n"},
                     ),
+                    ModelAction.tool("run_shell", {"command": check}),
                     ModelAction.final("Repaired and verified."),
                 ],
-                verification=verify,
             )
 
             outcome = agent.ask("Make subject.txt contain beta")
 
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(target.read_text(encoding="utf-8"), "beta\n")
-            self.assertGreaterEqual(
-                agent.run.metrics.verification_counts.get("failed", 0), 1
+            self.assertEqual(agent.run.metrics.tool_counts["run_shell"], 2)
+            self.assertEqual(agent.run.metrics.outcome_counts["error"], 1)
+
+    def test_submit_final_does_not_run_a_command_implicitly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approval = mock.Mock(return_value=True)
+            agent, _model = build_agent(
+                root,
+                [ModelAction.final("Done without running a check.")],
+                approval_handler=approval,
             )
-            self.assertGreaterEqual(
-                agent.run.metrics.verification_counts.get("passed", 0), 1
+
+            outcome = agent.ask("Inspect the workspace")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(agent.run.metrics.executed_tool_count, 0)
+            approval.assert_not_called()
+
+    def test_auto_mode_exposes_shell_but_never_bypasses_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approval = mock.Mock(return_value=False)
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "run_shell",
+                        {"command": "printf denied > denied.txt"},
+                        call_id="shell",
+                    ),
+                    ModelAction.final("The command was not approved."),
+                ],
+                approval_handler=approval,
+            )
+
+            outcome = agent.ask("Run a command")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertFalse((root / "denied.txt").exists())
+            self.assertIn(
+                "run_shell",
+                {tool["name"] for tool in model.requests[0]["action_tools"]},
+            )
+            approval.assert_called_once()
+            shell_event = next(
+                event
+                for event in agent.run.run_log.events
+                if event.call_id == "shell"
+            )
+            rejected = ToolOutcome.from_dict(shell_event.payload["outcome"])
+            self.assertEqual(rejected.failure.code, "approval_denied")
+
+    def test_removed_acceptance_protocol_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Run Log kind"):
+            RunEvent(
+                event_id="run_old:event:000001",
+                sequence=1,
+                run_id="run_old",
+                session_id="session_old",
+                kind="verification_result",
+                timestamp="2026-09-12T00:00:00+00:00",
+                payload={},
+            )
+        with self.assertRaisesRegex(ValueError, "task contract"):
+            TaskContract.from_dict(
+                {
+                    "goal": "Inspect",
+                    "write_scope": {"mode": "none", "paths": []},
+                    "verification_required": False,
+                }
             )
 
     def test_failed_intent_persistence_prevents_the_write(self):
@@ -292,6 +342,58 @@ class RuntimeContractTests(unittest.TestCase):
             transitions = outcome.structured["path_transitions"]
             self.assertEqual(set(transitions[0]), {"path", "before_state", "after_state"})
 
+    def test_interrupted_shell_is_observed_then_the_agent_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tool(
+                        "run_shell",
+                        {"command": "printf x >> generated.txt"},
+                        call_id="interrupted-shell",
+                    ),
+                    ModelAction.tool(
+                        "run_shell",
+                        {"command": "test -f generated.txt"},
+                        call_id="inspect-shell-result",
+                    ),
+                    ModelAction.final("Inspected the interrupted command and continued."),
+                ],
+            )
+            real_append = RunLog.append_tool_settlement
+
+            def lose_first_settlement(log, outcome, **kwargs):
+                if outcome.tool_call_id == "interrupted-shell":
+                    raise OSError("simulated settlement loss")
+                return real_append(log, outcome, **kwargs)
+
+            with mock.patch.object(
+                RunLog,
+                "append_tool_settlement",
+                new=lose_first_settlement,
+            ), self.assertRaisesRegex(OSError, "settlement loss"):
+                agent.ask("Create an output and inspect it")
+
+            outcome = agent.ask("Continue from the interrupted command")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual((root / "generated.txt").read_text(), "x")
+            self.assertIn(
+                "settled without replaying it",
+                model.requests[1]["input_text"],
+            )
+            recovered = next(
+                event
+                for event in agent.run.run_log.events
+                if event.call_id == "interrupted-shell"
+                and event.kind == "tool_settlement"
+            )
+            self.assertTrue(recovered.payload["recovered_from_interruption"])
+            self.assertEqual(
+                recovered.payload["outcome"]["side_effect_state"], "unknown"
+            )
+
     def test_compaction_cannot_split_call_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory) / "sessions")
@@ -299,7 +401,7 @@ class RuntimeContractTests(unittest.TestCase):
             run_store = store.runs(session.id)
             log = RunLog("run_compaction", session.id, run_store)
             user = log.append_user(
-                TaskContract("Inspect", WriteScope("none"), False)
+                TaskContract("Inspect", WriteScope("none"))
             )
             call = ToolCall("write_file", {"path": "subject.txt", "content": "alpha"}, "write")
             call_event = log.append_tool_intent(
@@ -395,7 +497,7 @@ class FileVersionLifecycleTests(unittest.TestCase):
             outcome = agent.ask("Try the requested replacement")
 
             self.assertEqual(target.read_text(), "alpha\n")
-            self.assertEqual(outcome.changed_paths, ())
+            self.assertEqual(agent.run.evidence.changed_paths, [])
             self.assertNotIn("final_diff", outcome.to_dict())
             failure = next(
                 event.payload["outcome"]["failure"]["code"]
@@ -433,7 +535,7 @@ class FileVersionLifecycleTests(unittest.TestCase):
             outcome = agent.ask("Exercise edits and restore the original")
 
             self.assertEqual(target.read_text(), "alpha\n")
-            self.assertEqual(outcome.changed_paths, ())
+            self.assertEqual(agent.run.evidence.changed_paths, [])
             self.assertNotIn("final_diff", outcome.to_dict())
             change = agent.run.evidence.change_set.files["subject.txt"]
             self.assertTrue(change.first_before_state.startswith("sha256:"))

@@ -57,7 +57,7 @@ def build_fixture(root, size):
         checkpoint_byte_interval=10**12,
     )
     log = RunLog(f"run_{size}", "session_benchmark", store)
-    log.append_user(TaskContract("benchmark", WriteScope("none"), False))
+    log.append_user(TaskContract("benchmark", WriteScope("none")))
     checkpoint_at = max(1, size - min(TAIL_EVENTS, max(0, size - 1)))
     started = time.perf_counter()
     checkpoint_written = False

@@ -79,37 +79,38 @@ Checkpoint 缺失、损坏或落后
 
 ## 4. Checkpoint 数据结构
 
-建议结构：
+当前结构：
 
 ```json
 {
   "run_id": "run_001",
   "session_id": "session_001",
   "last_sequence": 10000,
+  "last_timestamp": "2026-09-13T08:00:00+00:00",
   "event_log_offset": 8388608,
-  "projection": {
+  "state": {
     "contract": {},
     "evidence": {},
     "metrics": {},
-    "status": "running",
-    "stop_reason": "",
-    "final_answer": "",
-    "pending": null,
-    "runtime_feedback": null
+    "runtime_feedback": null,
+    "failure_streak": {
+      "key": [],
+      "count": 0
+    }
   },
   "history": {
-    "summary": "...",
-    "retained_transactions": []
+    "events": [],
+    "latest_user_guidance": null
   }
 }
 ```
 
 两类状态必须区分：
 
-- `projection`：精确、可执行的 Runtime 状态，必须与完整 Replay 结果一致。
+- `state`：恢复运行所需的最小 Projection 状态。Run 身份、日志游标和恒定条件不在其中重复保存。
 - `history`：提供给模型的有效历史，可以包含有损摘要，但必须保留任务连续性和完整工具事务。
 
-不新增内容哈希或第二套事实权威。Checkpoint 使用原子写入，并通过 schema、Run ID、Session ID、sequence、offset 和尾部事件连续性判断是否可用；任一校验失败时都从同一 Event Log 重建 Checkpoint，不维护旧格式兼容分支。
+不新增内容哈希或第二套事实权威。Checkpoint 使用原子写入，并通过精确字段、Run ID、Session ID、sequence、offset 和尾部事件连续性判断是否可用；任一校验失败时都从同一 Event Log 重建 Checkpoint，不维护旧格式兼容分支。
 
 ## 5. 实施阶段
 
@@ -174,14 +175,15 @@ write_run_checkpoint(...)
 read_run_checkpoint(...)
 ```
 
-为 `RunProjection` 增加完整的 Checkpoint 序列化与恢复能力，覆盖：
+为 `RunProjection` 增加最小运行状态的 Checkpoint 序列化与恢复能力，覆盖：
 
 - `TaskContract`
 - `RunEvidence`
 - `RunMetrics`
-- `PendingToolCall`
 - `RuntimeFeedback`
-- `last_sequence`
+- 连续失败状态
+
+Run ID、Session ID、Last Sequence 和 Last Timestamp 只保存在 Checkpoint 顶层。Checkpoint 仅在 `running` 且没有 Pending Tool 时生成，因此不保存 `status`、`stop_reason`、`final_answer` 或 `pending=null`。
 
 持久化顺序：
 
@@ -300,8 +302,7 @@ Checkpoint + Tail Replay 的 RunProjection
 比较：
 
 - Contract
-- Status / Stop Reason / Final Answer
-- Pending Tool
+- 隐含恢复状态：Running / No Pending Tool
 - Evidence / Change Set / Uncertain Effects
 - Metrics
 - Runtime Feedback

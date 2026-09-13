@@ -55,7 +55,7 @@ def redact_text(text, env=None):
 def redact_facts(value, redactor, key=""):
     # These values are machine identities consumed by replay and mutation logic.
     if key in {
-        "path", "affected_paths", "changed_paths", "repository_changes", "revision",
+        "path", "affected_paths", "revision",
         "expected_revision", "actual_revision", "before_revision", "after_revision",
         "before_state", "after_state", "artifact_id",
         "sha256", "status",

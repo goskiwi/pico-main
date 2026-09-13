@@ -55,7 +55,7 @@ class AgentLoop:
             raise
 
     def _step(self, loop_state):
-        """One model decision: execute a tool, correct output, or verify completion."""
+        """One model decision: execute a tool, correct output, or complete."""
         stop = self.lifecycle.execution_stop()
         if stop:
             return LoopDirective("stop", stop)
@@ -297,7 +297,6 @@ class AgentLoop:
         warning, stop = self._observe_failure(
             "completion",
             status,
-            target=self.completion.resolve_verification_policy().command,
             detail=evidence,
         )
         if warning:

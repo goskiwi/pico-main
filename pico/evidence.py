@@ -1,4 +1,4 @@
-"""Current file changes, uncertain effects and latest verification, rebuilt from RunLog."""
+"""Current file changes and uncertain effects rebuilt from RunLog."""
 
 from __future__ import annotations
 
@@ -198,55 +198,18 @@ def _effect_from_event(event, outcome):
     }
 
 
-def verification_is_current(
-    record,
-    mutation_sequence,
-    changed_path_states,
-    command,
-):
-    expected_sequence = int(mutation_sequence)
-    expected_states = dict(changed_path_states)
-    return bool(
-        int(record.get("started_workspace_mutation_sequence", -1))
-        == int(record.get("finished_workspace_mutation_sequence", -2))
-        == expected_sequence
-        and dict(record.get("started_changed_path_states", {}))
-        == dict(record.get("finished_changed_path_states", {}))
-        == expected_states
-        and str(record.get("command", "")) == str(command)
-    )
-
-
 @dataclass
 class RunEvidence:
     """Only current decision state; full history remains in RunLog."""
 
     change_set: RunChangeSet = field(default_factory=RunChangeSet)
     uncertain_effects: list[dict] = field(default_factory=list)
-    latest_verification: dict | None = None
-    last_workspace_mutation_sequence: int = 0
 
     def apply_event(self, event):
-        if event.kind == "verification_result":
-            self.latest_verification = dict(event.payload)
-            changes = event.payload["workspace_changes"]
-            if changes is None or changes:
-                self._record_effect(event, {
-                    "tool_call_id": event.event_id,
-                    "tool_name": "verification",
-                    "status": "error",
-                    "execution_state": "completed",
-                    "side_effect_state": "unknown",
-                    "affected_paths": changes or (),
-                    "effect_scope": "workspace",
-                })
-            return self
         if event.kind not in {"tool_exchange", "tool_settlement"}:
             return self
         outcome = event.payload["outcome"]
         structured = outcome.get("structured", {})
-        if outcome["tool_name"] == "verify" and "verification" in structured:
-            self.latest_verification = dict(structured["verification"])
         if outcome["tool_name"] == "read_file":
             path, revision = structured.get("path"), structured.get("revision")
             missing = (outcome.get("failure") or {}).get("code") == "missing_path"
@@ -257,15 +220,12 @@ class RunEvidence:
                 known.current_after_state = revision
                 known.last_mutation_sequence = event.sequence
                 known.external_change_observed = True
-                self.last_workspace_mutation_sequence = event.sequence
         if outcome["side_effect_state"] != "none":
             self._record_effect(event, outcome)
         return self
 
     def _record_effect(self, event, outcome):
         effect = _effect_from_event(event, outcome)
-        if effect["effect_scope"] in WORKSPACE_SCOPES:
-            self.last_workspace_mutation_sequence = event.sequence
         if effect["side_effect_state"] in {"changed", "partial"}:
             paths = {item["path"] for item in effect["path_transitions"]}
             if set(effect["affected_paths"]) - paths:
@@ -294,25 +254,6 @@ class RunEvidence:
     def has_net_workspace_change(self):
         return bool(self.change_set.net_changed_paths)
 
-    def latest_verification_for_state(self, mutation_sequence, changed_path_states, command):
-        record = self.latest_verification
-        if record is not None and verification_is_current(
-            record, mutation_sequence, changed_path_states, command,
-        ):
-            return record
-        return None
-
-    def partial_workspace_effects(self):
-        return [effect for effect in self.uncertain_effects
-                if effect["effect_scope"] in WORKSPACE_SCOPES
-                and effect["side_effect_state"] == "partial"]
-
-    def unverifiable_effects(self):
-        return [effect for effect in self.uncertain_effects
-                if effect["side_effect_state"] == "unknown"
-                or effect["effect_scope"] not in WORKSPACE_SCOPES
-                or not effect["affected_paths"]]
-
     def to_dict(self):
         return {
             "change_set": self.change_set.to_dict(),
@@ -321,8 +262,6 @@ class RunEvidence:
                  "path_transitions": [dict(item) for item in effect["path_transitions"]]}
                 for effect in self.uncertain_effects
             ],
-            "latest_verification": dict(self.latest_verification) if self.latest_verification else None,
-            "last_workspace_mutation_sequence": self.last_workspace_mutation_sequence,
         }
 
     @classmethod
@@ -330,8 +269,6 @@ class RunEvidence:
         expected = {
             "change_set",
             "uncertain_effects",
-            "latest_verification",
-            "last_workspace_mutation_sequence",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid checkpoint RunEvidence")
@@ -366,16 +303,7 @@ class RunEvidence:
                     ),
                 }
             )
-        verification = value["latest_verification"]
-        if verification is not None and not isinstance(verification, dict):
-            raise TypeError("checkpoint verification must be an object or null")
         return cls(
             change_set=RunChangeSet.from_dict(value["change_set"]),
             uncertain_effects=normalized,
-            latest_verification=(
-                dict(verification) if verification is not None else None
-            ),
-            last_workspace_mutation_sequence=int(
-                value["last_workspace_mutation_sequence"]
-            ),
         )

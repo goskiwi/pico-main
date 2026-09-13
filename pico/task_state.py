@@ -50,7 +50,6 @@ class WriteScope:
 class TaskContract:
     goal: str
     write_scope: WriteScope
-    verification_required: bool
 
     def __post_init__(self):
         self.validate()
@@ -62,27 +61,19 @@ class TaskContract:
             raise ValueError("task contract requires a goal")
         if not isinstance(self.write_scope, WriteScope):
             raise TypeError("task contract requires WriteScope")
-        if not isinstance(self.verification_required, bool):
-            raise TypeError("verification_required must be a boolean")
         return self
 
     @classmethod
     def from_dict(cls, value):
-        if not isinstance(value, dict) or set(value) != {
-            "goal",
-            "write_scope",
-            "verification_required",
-        }:
+        if not isinstance(value, dict) or set(value) != {"goal", "write_scope"}:
             raise ValueError("invalid task contract fields")
         return cls(
             value["goal"],
             WriteScope.from_dict(value["write_scope"]),
-            value["verification_required"],
         )
 
     def to_dict(self):
         return {
             "goal": self.goal,
             "write_scope": self.write_scope.to_dict(),
-            "verification_required": self.verification_required,
         }

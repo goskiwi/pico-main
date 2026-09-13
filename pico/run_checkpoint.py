@@ -15,8 +15,9 @@ def write_run_checkpoint(path, run_log, event_log_offset):
         "run_id": projection.run_id,
         "session_id": projection.session_id,
         "last_sequence": projection.last_sequence,
+        "last_timestamp": projection.last_timestamp,
         "event_log_offset": int(event_log_offset),
-        "projection": projection.to_checkpoint(),
+        "state": projection.checkpoint_state(),
         "history": {
             "events": [
                 event.to_dict() for event in run_log.effective_history_events
@@ -41,23 +42,22 @@ def read_run_checkpoint(path, *, expected_run_id):
         "run_id",
         "session_id",
         "last_sequence",
+        "last_timestamp",
         "event_log_offset",
-        "projection",
+        "state",
         "history",
     }
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("invalid Run checkpoint fields")
     if str(value["run_id"]) != str(expected_run_id):
         raise ValueError("Run checkpoint belongs to another Run")
-    projection = RunProjection.from_checkpoint(value["projection"])
-    if (
-        projection.run_id != str(value["run_id"])
-        or projection.session_id != str(value["session_id"])
-        or projection.last_sequence != int(value["last_sequence"])
-    ):
-        raise ValueError("Run checkpoint Projection identity is inconsistent")
-    if projection.pending_tool.call is not None:
-        raise ValueError("Run checkpoint contains a pending tool")
+    projection = RunProjection.from_checkpoint_state(
+        value["state"],
+        run_id=value["run_id"],
+        session_id=value["session_id"],
+        last_sequence=value["last_sequence"],
+        last_timestamp=value["last_timestamp"],
+    )
     offset = int(value["event_log_offset"])
     if offset < 0:
         raise ValueError("Run checkpoint has an invalid Event offset")

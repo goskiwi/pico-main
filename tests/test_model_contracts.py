@@ -1,5 +1,3 @@
-import shlex
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,57 +53,6 @@ class ModelResultTests(unittest.TestCase):
 
         self.assertEqual(service.action.kind, "service_failed")
         self.assertEqual(protocol.action.kind, "protocol_error")
-
-
-
-class CompletionRequirementTests(unittest.TestCase):
-    @staticmethod
-    def _passing_command():
-        return f"{shlex.quote(sys.executable)} -c {shlex.quote('pass')}"
-
-    def test_required_verification_runs_without_workspace_changes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            agent, _model = build_agent(
-                Path(directory),
-                [ModelAction.final("Verified without changes.")],
-                verification=self._passing_command(),
-                verification_required=True,
-            )
-
-            outcome = agent.ask("Run the required acceptance check")
-
-            self.assertEqual(outcome.status, "completed")
-            self.assertEqual(
-                agent.run.evidence.latest_verification["status"], "passed"
-            )
-
-    def test_workspace_change_does_not_imply_verification_when_not_required(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
-            agent, _model = build_agent(
-                root,
-                [
-                    ModelAction.tool("read_file", {"path": "subject.txt"}),
-                    ModelAction.tool(
-                        "edit_file",
-                        {
-                            "path": "subject.txt",
-                            "old_text": "alpha\n",
-                            "new_text": "beta\n",
-                        },
-                    ),
-                    ModelAction.final("Changed without an acceptance requirement."),
-                ],
-                verification=self._passing_command(),
-                verification_required=False,
-            )
-
-            outcome = agent.ask("Change the file")
-
-            self.assertEqual(outcome.status, "completed")
-            self.assertIsNone(agent.run.evidence.latest_verification)
-
 
 class RepeatedFailureTests(unittest.TestCase):
     def test_different_edit_arguments_are_not_the_same_failure(self):

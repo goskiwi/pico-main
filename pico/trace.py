@@ -71,8 +71,6 @@ class TracePrinter:
             return f"[Compaction] committed · covered={len(event.covered_event_ids)}"
         if kind == "provider_session_reset":
             return f"[Provider] session reset · {payload.get('reason')}"
-        if kind == "verification_result":
-            return f"[Verification] {payload['status']} · exit={payload.get('exit_code')}"
         if kind == "completion_blocked":
             return f"[Completion] blocked · {payload.get('status')}"
         if kind in {"run_started", "run_resumed"}:

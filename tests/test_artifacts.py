@@ -25,7 +25,7 @@ class ArtifactStoreTests(unittest.TestCase):
             content,
         )["artifact_id"]
 
-    def test_read_slice_reads_only_one_bounded_page_after_verification(self):
+    def test_read_slice_reads_only_one_bounded_page_after_integrity_check(self):
         artifact_id = self._write("x" * (2 * 1024 * 1024))
         original_open = Path.open
         read_sizes = []

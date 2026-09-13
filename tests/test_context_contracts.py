@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pico import (
     ModelAction,
@@ -11,7 +12,7 @@ from pico import (
     WriteScope,
     context_manager,
 )
-from pico.prompt_builder import _assemble_input
+from pico.prompt_builder import _assemble_input, load_repository_instructions
 from pico.run_log import RunLog
 from tests.support import build_agent
 
@@ -41,7 +42,11 @@ class RepositoryInstructionTests(unittest.TestCase):
                 before_action=update_rule_during_first_request,
             )
 
-            outcome = agent.ask("Inspect the nested subject")
+            with mock.patch(
+                "pico.prompt_builder.load_repository_instructions",
+                wraps=load_repository_instructions,
+            ) as load:
+                outcome = agent.ask("Inspect the nested subject")
 
             self.assertEqual(outcome.status, "completed")
             self.assertIn("ROOT_RULE_V1", model.requests[0]["input_text"])
@@ -57,6 +62,7 @@ class RepositoryInstructionTests(unittest.TestCase):
             )
             self.assertEqual(first.payload["outcome"]["status"], "success")
             self.assertEqual(len(model.requests), 2)
+            self.assertEqual(load.call_count, 2)
             self.assertNotIn("deeper rules take precedence", model.requests[1]["instructions"])
             resets = [e for e in agent.read_run_events(outcome.run_id)
                       if e.kind == "provider_session_reset"]
@@ -83,7 +89,7 @@ class ContextSelectionTests(unittest.TestCase):
             store = SessionStore(Path(directory) / "sessions")
             session = store.create(Path(directory))
             log = RunLog("run_context", session.id, store.runs(session.id))
-            log.append_user(TaskContract("Inspect", WriteScope("none"), False))
+            log.append_user(TaskContract("Inspect", WriteScope("none")))
             for call_id, path, content in (
                 ("old", "old.txt", "old-result"),
                 ("new", "new.txt", "new-result"),
