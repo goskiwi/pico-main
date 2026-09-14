@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 
 from .contracts import ToolOutcome
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
 
 SUMMARY_FIELDS = {
-    "goal",
     "constraints",
     "progress",
     "key_decisions",
@@ -30,7 +29,6 @@ SUMMARY_TOOL = {
         "additionalProperties": False,
         "required": sorted(SUMMARY_FIELDS),
         "properties": {
-            "goal": TEXT_LIST,
             "constraints": TEXT_LIST,
             "progress": {
                 "type": "object",
@@ -62,8 +60,7 @@ def _text_list(value, field_name):
 
 
 @dataclass(frozen=True)
-class CompactionSummary:
-    goal: tuple[str, ...]
+class CompactedContext:
     constraints: tuple[str, ...]
     progress_done: tuple[str, ...]
     progress_in_progress: tuple[str, ...]
@@ -71,16 +68,48 @@ class CompactionSummary:
     key_decisions: tuple[str, ...]
     next_steps: tuple[str, ...]
     critical_context: tuple[str, ...]
+    read_files: tuple[str, ...] = ()
+    modified_files: tuple[str, ...] = ()
+    covered_through_sequence: int = 0
+
+    def __post_init__(self):
+        for name in (
+            "constraints",
+            "progress_done",
+            "progress_in_progress",
+            "progress_blocked",
+            "key_decisions",
+            "next_steps",
+            "critical_context",
+            "read_files",
+            "modified_files",
+        ):
+            value = tuple(getattr(self, name))
+            if any(not isinstance(item, str) or not item.strip() for item in value):
+                raise ValueError(f"CompactedContext {name} must contain non-empty text")
+            object.__setattr__(self, name, value)
+        if tuple(sorted(set(self.read_files))) != self.read_files:
+            raise ValueError("read_files must be sorted and unique")
+        if tuple(sorted(set(self.modified_files))) != self.modified_files:
+            raise ValueError("modified_files must be sorted and unique")
+        if set(self.read_files) & set(self.modified_files):
+            raise ValueError("read_files and modified_files must be disjoint")
+        if int(self.covered_through_sequence) < 0:
+            raise ValueError("coverage cursor cannot be negative")
+        object.__setattr__(
+            self,
+            "covered_through_sequence",
+            int(self.covered_through_sequence),
+        )
 
     @classmethod
-    def from_dict(cls, value):
+    def from_model_dict(cls, value):
         if not isinstance(value, dict) or set(value) != SUMMARY_FIELDS:
             raise ValueError("compaction summary has invalid fields")
         progress = value["progress"]
         if not isinstance(progress, dict) or set(progress) != PROGRESS_FIELDS:
             raise ValueError("compaction summary progress has invalid fields")
         return cls(
-            goal=_text_list(value["goal"], "goal"),
             constraints=_text_list(value["constraints"], "constraints"),
             progress_done=_text_list(progress["done"], "progress.done"),
             progress_in_progress=_text_list(
@@ -90,6 +119,68 @@ class CompactionSummary:
             key_decisions=_text_list(value["key_decisions"], "key_decisions"),
             next_steps=_text_list(value["next_steps"], "next_steps"),
             critical_context=_text_list(value["critical_context"], "critical_context"),
+        )
+
+    def with_runtime_facts(
+        self,
+        *,
+        read_files,
+        modified_files,
+        covered_through_sequence,
+    ):
+        modified = set(modified_files)
+        read = set(read_files) - modified
+        return replace(
+            self,
+            read_files=tuple(sorted(read)),
+            modified_files=tuple(sorted(modified)),
+            covered_through_sequence=int(covered_through_sequence),
+        )
+
+    def to_dict(self):
+        return {
+            "constraints": list(self.constraints),
+            "progress": {
+                "done": list(self.progress_done),
+                "in_progress": list(self.progress_in_progress),
+                "blocked": list(self.progress_blocked),
+            },
+            "key_decisions": list(self.key_decisions),
+            "next_steps": list(self.next_steps),
+            "critical_context": list(self.critical_context),
+            "read_files": list(self.read_files),
+            "modified_files": list(self.modified_files),
+            "covered_through_sequence": self.covered_through_sequence,
+        }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {
+            *SUMMARY_FIELDS,
+            "read_files",
+            "modified_files",
+            "covered_through_sequence",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid CompactedContext")
+        semantic = cls.from_model_dict(
+            {key: value[key] for key in SUMMARY_FIELDS}
+        )
+        read_files = _text_list(value["read_files"], "read_files")
+        modified_files = _text_list(value["modified_files"], "modified_files")
+        if tuple(sorted(set(read_files))) != read_files:
+            raise ValueError("read_files must be sorted and unique")
+        if tuple(sorted(set(modified_files))) != modified_files:
+            raise ValueError("modified_files must be sorted and unique")
+        if set(read_files) & set(modified_files):
+            raise ValueError("read_files and modified_files must be disjoint")
+        covered = int(value["covered_through_sequence"])
+        if covered < 1:
+            raise ValueError("CompactedContext requires a positive coverage cursor")
+        return semantic.with_runtime_facts(
+            read_files=read_files,
+            modified_files=modified_files,
+            covered_through_sequence=covered,
         )
 
     @staticmethod
@@ -107,12 +198,13 @@ class CompactionSummary:
         )
         return "\n\n".join(
             (
-                self._section("Goal", self.goal),
                 self._section("Constraints & Preferences", self.constraints),
                 f"## Progress\n{progress}",
                 self._section("Key Decisions", self.key_decisions),
                 self._section("Next Steps", self.next_steps),
                 self._section("Critical Context", self.critical_context),
+                self._section("Read Files", self.read_files),
+                self._section("Modified Files", self.modified_files),
             )
         )
 
@@ -124,6 +216,9 @@ class CompactionSummarizer:
     @staticmethod
     def _semantic_record(entry):
         payload = dict(entry.payload)
+        if entry.kind == "compaction":
+            context = CompactedContext.from_dict(payload["context"])
+            return {"kind": "compaction", **context.to_dict()}
         if entry.kind == "tool_call":
             return {
                 "kind": "tool_call",
@@ -156,12 +251,6 @@ class CompactionSummarizer:
             if outcome.artifact_id:
                 record["artifact_id"] = outcome.artifact_id
             return record
-        if entry.kind == "model_instruction":
-            return {
-                "kind": entry.kind,
-                "instruction": str(payload.get("instruction", "")),
-                "evidence": str(payload.get("evidence", "")),
-            }
         return {
             "kind": entry.kind,
             "content": str(payload.get("content", "")),
@@ -221,10 +310,11 @@ class CompactionSummarizer:
         return best
 
     def summarize(self, events, *, task_goal, execution_context,
-                  context_limit_tokens, max_output_tokens, count_tokens):
+                  effective_context_limit_tokens, max_output_tokens, count_tokens):
         instructions = """Create a structured context checkpoint for a coding agent.
 Return every required field through submit_compaction_summary. The history may contain an older
-compaction checkpoint followed by newer events. Preserve still-relevant goals, constraints,
+compaction checkpoint followed by newer events. The exact task goal is supplied separately and
+must not be repeated. Preserve still-relevant constraints,
 preferences, decisions, progress and critical context from the older checkpoint, then update them
 with the newer events. Later user guidance supersedes conflicting older requests or summary claims.
 Distinguish proposed work from observed results; only tool evidence proves that
@@ -242,7 +332,7 @@ evidence was omitted, not that work succeeded or facts are absent."""
         history_text = self._bounded_input(
             tuple(events), count_tokens=count_tokens,
             input_budget=(
-                context_limit_tokens
+                effective_context_limit_tokens
                 - max_output_tokens
                 - request_overhead
                 - count_tokens(task_context)
@@ -252,13 +342,14 @@ evidence was omitted, not that work succeeded or facts are absent."""
         client = None
         try:
             client = self.client_factory()
-            action = client.complete_action(
+            turn = client.complete_turn(
                 input_text,
                 max_output_tokens,
                 instructions=instructions,
                 action_tools=[SUMMARY_TOOL],
                 execution_context=execution_context,
             )
+            action = turn.action
             if (
                 action.kind != "tool"
                 or len(action.tool_calls) != 1
@@ -267,8 +358,7 @@ evidence was omitted, not that work succeeded or facts are absent."""
                 raise ValueError(
                     "summary model did not return submit_compaction_summary"
                 )
-            summary = CompactionSummary.from_dict(action.tool_calls[0].args)
-            return summary.render()
+            return CompactedContext.from_model_dict(action.tool_calls[0].args)
         except SemanticCompactionError:
             raise
         except (ExecutionCancelled, ExecutionDeadlineExceeded):

@@ -86,13 +86,13 @@ class SecurityBoundaryTests(unittest.TestCase):
                 mode="ask",
             )
 
-            ask_agent.ask("Try to create a file")
+            ask_outcome = ask_agent.ask("Try to create a file")
 
             self.assertFalse((root / "ask-denied.txt").exists())
             ask_result = next(
                 ToolOutcome.from_dict(event.payload["outcome"])
-                for event in ask_agent.run.run_log.events
-                if event.kind == "tool_exchange"
+                for event in ask_agent.read_run_events(ask_outcome.run_id)
+                if event.kind == "tool_result"
             )
             self.assertEqual(ask_result.failure.code, "tool_not_allowed")
 
@@ -117,14 +117,14 @@ class SecurityBoundaryTests(unittest.TestCase):
                 allowed_write_paths=("allowed.txt",),
             )
 
-            scoped_agent.ask("Create only allowed.txt")
+            scoped_outcome = scoped_agent.ask("Create only allowed.txt")
 
             self.assertFalse((root / "outside.txt").exists())
             self.assertEqual((root / "allowed.txt").read_text(), "allowed\n")
             outcomes = [
                 ToolOutcome.from_dict(event.payload["outcome"])
-                for event in scoped_agent.run.run_log.events
-                if event.kind in {"tool_exchange", "tool_settlement"}
+                for event in scoped_agent.read_run_events(scoped_outcome.run_id)
+                if event.kind == "tool_result"
             ]
             self.assertEqual(outcomes[0].failure.code, "write_scope_denied")
             self.assertEqual(outcomes[1].status, "success")
@@ -155,6 +155,32 @@ class SecurityBoundaryTests(unittest.TestCase):
 
             self.assertNotIn("test-secret-value", persisted)
             self.assertIn("<redacted>", persisted)
+
+    def test_repository_instructions_and_final_answer_are_redacted(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"PICO_OPENAI_API_KEY": "test-secret-value"},
+            clear=False,
+        ):
+            root = Path(directory)
+            (root / "AGENTS.md").write_text(
+                "Never print test-secret-value.\n",
+                encoding="utf-8",
+            )
+            agent, model = build_agent(
+                root,
+                [ModelAction.final("Returned test-secret-value")],
+            )
+
+            outcome = agent.ask("Inspect")
+            persisted = json.dumps(
+                [event.to_dict() for event in agent.read_run_events(outcome.run_id)]
+            )
+
+            self.assertNotIn("test-secret-value", model.requests[0]["input_text"])
+            self.assertNotIn("test-secret-value", persisted)
+            self.assertNotIn("test-secret-value", outcome.answer)
+            self.assertIn("<redacted>", outcome.answer)
 
     def test_environment_files_are_protected_but_examples_are_readable(self):
         with tempfile.TemporaryDirectory() as directory:

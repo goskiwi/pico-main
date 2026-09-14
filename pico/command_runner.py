@@ -354,14 +354,23 @@ class CommandRunner:
 
     @classmethod
     def _stop_process_group(cls, process):
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            cls._signal_process_group(process, sig)
-            try:
-                process.wait(timeout=COMMAND_TERMINATE_SECONDS)
-                return
-            except subprocess.TimeoutExpired as exc:
-                if sig == signal.SIGKILL:
-                    raise RuntimeError("process group did not stop after SIGKILL") from exc
+        cls._signal_process_group(process, signal.SIGTERM)
+        leader_stopped = False
+        try:
+            process.wait(timeout=COMMAND_TERMINATE_SECONDS)
+            leader_stopped = True
+        except subprocess.TimeoutExpired:
+            pass
+
+        # The group can still contain descendants after its leader exits on
+        # SIGTERM. Always close the escalation boundary for the whole group.
+        cls._signal_process_group(process, signal.SIGKILL)
+        if leader_stopped:
+            return
+        try:
+            process.wait(timeout=COMMAND_TERMINATE_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("process group did not stop after SIGKILL") from exc
 
     @staticmethod
     def _close_pipes(process):

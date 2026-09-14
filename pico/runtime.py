@@ -9,6 +9,7 @@ from . import security as securitylib
 from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
 from .config import PicoConfig
+from .contracts import AssistantTurn
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .run_lifecycle import RunLifecycle, load_resumable_run
@@ -17,7 +18,6 @@ from .runtime_dependencies import RuntimeDependencies
 from .runtime_state import ActiveRunState
 from .session_store import Session, SessionStore
 from .tool_runtime import ToolRuntime
-from .workspace import clip
 
 __all__ = ["Pico", "PicoConfig", "RunOutcome", "SessionStore"]
 
@@ -45,11 +45,10 @@ class Pico:
             model_context_window = int(model_context_window)
             if model_context_window < 1:
                 raise ValueError("model context window must be positive")
-        self.context_limit_tokens = min(
-            self.config.context_limit_tokens,
-            model_context_window or self.config.context_limit_tokens,
+        available_context = (
+            self.effective_context_limit_tokens
+            - self.config.max_output_tokens
         )
-        available_context = self.context_limit_tokens - self.config.max_output_tokens
         if available_context < 1:
             raise ValueError("model context window must exceed max_output_tokens")
         if self.config.recent_history_tokens > available_context:
@@ -75,8 +74,32 @@ class Pico:
         self.prompt = PromptBuilder(self)
         load_resumable_run(self)
 
+    @property
+    def effective_context_limit_tokens(self):
+        """Return the smaller Runtime policy limit and Provider capability."""
+
+        model_limit = getattr(self.model_client, "context_window_tokens", None)
+        policy_limit = self.config.context_limit_tokens
+        if model_limit is None and policy_limit is None:
+            raise ValueError(
+                "context window is unknown; configure the model capability or "
+                "PicoConfig.context_limit_tokens"
+            )
+        if model_limit is None:
+            return int(policy_limit)
+        if policy_limit is None:
+            return int(model_limit)
+        return min(int(policy_limit), int(model_limit))
+
     def redact_text(self, text):
         return securitylib.redact_text(text)
+
+    def redact_turn(self, turn):
+        if not isinstance(turn, AssistantTurn):
+            raise TypeError("turn redaction requires an AssistantTurn")
+        return AssistantTurn.from_dict(
+            securitylib.redact_facts(turn.to_dict(), self.redact_text)
+        )
 
     def emit_event(self, event_type, payload=None):
         task_state = self.run.projection
@@ -89,33 +112,17 @@ class Pico:
         entry = run_log.append(event_type, payload)
         return entry
 
-    def append_model_instruction(self, instruction, *, evidence=""):
-        run_log = self.run.run_log
-        if run_log is None:
-            raise RuntimeError("Runtime instruction requires an active RunLog")
-        instruction = self.redact_text(str(instruction))
-        evidence = self.redact_text(str(evidence))
-        descriptor = {}
-        if evidence:
-            descriptor = self.dependencies.artifacts.write_tool_output(
-                self.run.projection.run_id,
-                f"runtime_instruction_{run_log.projection.last_sequence + 1}",
-                evidence,
-            )
-            evidence = (
-                clip(evidence, 2000)
-                + "\n[Full untrusted evidence: artifact_id="
-                + descriptor["artifact_id"]
-                + ". Use read_artifact to inspect it.]"
-            )
-        return run_log.append_model_instruction(
-            instruction,
-            evidence=evidence,
-            evidence_artifact_id=str(descriptor.get("artifact_id", "")),
-        )
-
     def read_run_events(self, run_id):
         return self.dependencies.run_store.read_events(run_id)
+
+    def run_status(self):
+        run_log = self.run.run_log
+        if run_log is None:
+            return {"run": None, "context": None}
+        return {
+            "run": run_log.projection.summary(),
+            "context": run_log.context_state.to_dict(),
+        }
 
     def ask(self, user_message) -> RunOutcome:
         from .agent_loop import AgentLoop

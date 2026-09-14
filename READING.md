@@ -6,11 +6,11 @@
 
 1. [runtime.py](pico/runtime.py)：只看 Pico 构造函数和 ask。Session 选择 Run，Pico 组装对象。
 2. [agent_loop.py](pico/agent_loop.py)：先看 run，再看 _step。run 负责初始化、循环和收尾；_step 请求模型并分派一种动作。
-3. 同文件的 _next_model_turn：获取工具、准备上下文、请求模型。
+3. 同文件的 `_step`：使用本次 Attempt 固定的工具面，准备上下文并请求模型动作。
 4. 同文件的 _handle_tool_turn：按模型顺序逐个调用 ToolRuntime，再把这一轮的全部结果交回模型。
 5. 同文件的 _handle_final_action：把模型的 `submit_final` 转成交给 RunLifecycle 的终态声明。
 
-请求准备只走 `PromptBuilder.build_for_run()`：准备预算 → 必要时生成并提交摘要 → 渲染。AgentLoop 的 `_reset_context()` 统一处理 Provider 会话与 Prompt 缓存重建。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
+请求准备只走 `PromptBuilder.build_for_run()`：准备预算 → 必要时生成并提交摘要 → 渲染。AgentLoop 只在仓库指令变化、Context 高水位或溢出恢复时调用 `_reset_context()`；普通失败提醒随 Tool Result 返回。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
 
 例子：read_file → edit_file → run_shell 运行测试 → 根据失败继续 edit_file → 再次运行测试 → submit_final。
 第一次把 ToolRuntime 当成“执行一个工具并给出真实结果”，把 PromptBuilder 当成“构造有预算的输入”。
@@ -19,8 +19,8 @@
 
 | 问题 | 阅读入口 | 能讲清的行为 |
 | --- | --- | --- |
-| 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | 完整日志和模型上下文分开；旧历史摘要，近期调用和结果配对保留；当前请求与关键指令优先 |
-| 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 日志先记录调用和 started；没有可靠 result 时检查当前文件，不自动重放 |
+| 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | TaskContract 保留唯一目标；CompactedContext 保存约束、进度、决定、下一步、关键上下文和确定性文件集合；近期 Assistant Turn 与 Tool Result 精确保留 |
+| 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 完整 Assistant Turn 先落盘；副作用工具再记录 started；没有可靠 result 时检查当前文件，不自动重放 |
 | Shell 超时、等待输入或输出过大怎么办 | tools.py 的 tool_run_shell；command_runner.py | Shell 先审批且默认 stdin 为 EOF；Timeout 有界，输出保留 Head/Tail，超时终止进程组并返回已有输出 |
 
 测试由模型通过 `run_shell` 主动运行，失败结果作为普通 ToolOutcome 返回下一轮。Runtime 不运行隐藏验收，也不声称能自动证明自然语言需求已经满足。
@@ -28,17 +28,20 @@
 ## 第三遍：状态只回答当前问题
 
 - ActiveRunState：RunLog + 当前执行上下文。没有 RunLog 就没有真实任务投影。
-- RunLog：完整事件，唯一持久执行事实；Projection 通过回放获得。
-- RunProjection：任务状态、Metrics、单个 pending 调用、关键反馈和终态结果。
+- RunLog：完整事件，唯一持久执行事实；Projection 与 ContextState 均可由它重建。
+- RunProjection：任务状态、执行阶段、当前 Assistant Tool Turn、单个 started 工具、Metrics、连续失败状态和终态结果。
+- ContextState：给模型继续任务所需的一个滚动摘要和摘要后的近期完整事件；不重复保存目标或执行阶段。
 - ExecutionContext：截止时间 + 共享取消信号。
 
-成功编辑把路径、Diff 和前后状态保存在 ToolOutcome。无法解释的中断命令保留为 unknown，不自动重放；恢复后的第一轮把事实和当前 Workspace 提供给模型，由模型检查后继续。
+Run 是可跨进程恢复的持久任务；Attempt 是一次首次执行或 Resume；Model Turn 是 Attempt 内的一次模型请求。请求数量与截止时间属于 Attempt，不伪装成整个 Run 的累计时间。
+
+成功编辑把路径、Diff 和前后状态保存在 ToolOutcome。Shell 等无法归因具体路径的命令标记为 untracked；中断后不自动重放，恢复后的第一轮把事实和当前 Workspace 提供给模型，由模型检查后继续。
 
 ## 被追问时再读
 
 文件安全：tool_runtime.py 的 _execute_edit → mutations.py。记住审批、当前内容中的唯一锚点、原子替换和写入回执。
 
-协议安全：run_projection.py 的 PendingToolCall。只有可能产生副作用的 Intent 才成为 pending；只读和执行前拒绝以单条 Exchange 闭合，Settlement 必须与 Intent 配对。
+协议安全：run_projection.py 的 ActiveToolTurn 与 PendingTool。Assistant Turn 保存完整调用批次；所有调用以 Tool Result 闭合，潜在副作用必须先有 Tool Started。
 
 输出过大：artifacts.py。主循环只拿预览和工件引用，全文按需读取。
 

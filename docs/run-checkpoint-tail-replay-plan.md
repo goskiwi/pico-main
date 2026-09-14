@@ -29,7 +29,7 @@ History 恢复成本 = O(全部事件数)
 
 - Artifact 外置只减少单个 Event 的体积，不减少事件数量。
 - Context Compaction 只减少模型输入，不减少恢复时需要读取的原始日志。
-- `max_agent_turns` 只限制单次 `ask()`；同一个 Run 经过多次 Resume 后仍可能持续增长。
+- `max_model_requests_per_attempt` 只限制单次执行 Attempt；同一个 Run 经过多次 Resume 后仍可能持续增长。
 
 ## 2. 具体失败场景
 
@@ -53,8 +53,8 @@ History 恢复成本 = O(全部事件数)
                                    ▼
                     ┌─────────────────────────────┐
                     │ checkpoint.json             │
-                    │ Projection + 有效 History    │
-                    │ last_sequence + byte_offset │
+                    │ Task + CompactedContext      │
+                    │ Recent Events + Cursor       │
                     └──────────────┬──────────────┘
                                    │
                 Resume             ▼
@@ -73,8 +73,9 @@ Checkpoint 可用
 → 读取并重放尾部事件
 
 Checkpoint 缺失、损坏或落后
-→ 使用同一 Event Replay 逻辑重建 Checkpoint
-→ 原子替换后继续统一恢复流程
+→ 使用同一 Event Replay 逻辑恢复当前状态
+→ 若已处于 ready_for_model，原子重建 Checkpoint
+→ 若仍在模型／工具阶段，先由 Tail 状态完成中断结算
 ```
 
 ## 4. Checkpoint 数据结构
@@ -86,28 +87,27 @@ Checkpoint 缺失、损坏或落后
   "run_id": "run_001",
   "session_id": "session_001",
   "last_sequence": 10000,
-  "last_timestamp": "2026-09-13T08:00:00+00:00",
   "event_log_offset": 8388608,
-  "state": {
+  "run_state": {
     "contract": {},
+    "status": "running",
     "metrics": {},
-    "runtime_feedback": null,
-    "failure_streak": {
-      "key": [],
-      "count": 0
-    }
+    "failure": null
   },
-  "history": {
-    "events": [],
-    "latest_user_guidance": null
+  "context_state": {
+    "compacted": null,
+    "recent_events": []
   }
 }
 ```
 
-两类状态必须区分：
+三类状态必须区分：
 
-- `state`：恢复运行所需的最小 Projection 状态。Run 身份、日志游标和恒定条件不在其中重复保存。
-- `history`：提供给模型的有效历史，可以包含有损摘要，但必须保留任务连续性和完整工具事务。
+- `run_state`：任务 Contract、运行状态、Metrics 与当前 Failure。
+- `context_state`：一个 CompactedContext 加摘要后的近期精确 Event。
+- `last_sequence` 与 `event_log_offset`：Checkpoint 覆盖的 Event sequence 与日志字节位置。
+
+Checkpoint 只在 `ready_for_model` 写入；模型请求、Assistant Turn 或工具执行中的阶段必须位于 Event Log Tail，不能被 Checkpoint 游标吞掉。
 
 不新增内容哈希或第二套事实权威。Checkpoint 使用原子写入，并通过精确字段、Run ID、Session ID、sequence、offset 和尾部事件连续性判断是否可用；任一校验失败时都从同一 Event Log 重建 Checkpoint，不维护旧格式兼容分支。
 
@@ -174,14 +174,14 @@ write_run_checkpoint(...)
 read_run_checkpoint(...)
 ```
 
-为 `RunProjection` 增加最小运行状态的 Checkpoint 序列化与恢复能力，覆盖：
+为 `RunProjection` 增加稳定任务状态的 Checkpoint 序列化与恢复能力，覆盖：
 
 - `TaskContract`
 - `RunMetrics`
-- `RuntimeFeedback`
 - 连续失败状态
+- `status=running`
 
-Run ID、Session ID、Last Sequence 和 Last Timestamp 只保存在 Checkpoint 顶层。Checkpoint 仅在 `running` 且没有 Pending Tool 时生成，因此不保存 `status`、`stop_reason`、`final_answer` 或 `pending=null`。
+Run ID、Session ID 与日志位置都保存在顶层。Checkpoint 只允许在 `running + ready_for_model` 且没有 Active Tool Turn 或 Pending Tool 时生成。
 
 持久化顺序：
 
@@ -193,71 +193,73 @@ Run ID、Session ID、Last Sequence 和 Last Timestamp 只保存在 Checkpoint �
 
 如果第三步中断，旧 Checkpoint 仍然有效，下次恢复只需多重放一段尾部 Event。
 
-### 阶段四：RunLog 支持基线与尾部
+### 阶段四：RunLog 支持 Projection 基线与尾部重放
 
-当前新事件 sequence 使用 `_events` 长度计算。只加载尾部后，需要改为：
+新事件 sequence 使用 Projection 游标：
 
 ```python
 sequence = self.projection.last_sequence + 1
 ```
 
-恢复后的 RunLog 持有：
+恢复时临时读取：
 
 ```text
-Checkpoint Projection 基线
-+ Checkpoint History 基线
+Checkpoint RunProjection
++ Checkpoint ContextState
 + 尾部 Events
 ```
+
+尾部 Event 顺序推进 Projection 与 Context 后即可释放，不在 RunLog 内保留第二份
+Event Tail。完整审计统一通过 RunStore 读取 `events.jsonl`。
 
 需要检查和调整：
 
 - `RunLog.append()`
 - `RunLog._from_events()`
 - `RunLog.history()`
-- `RunLog.pending_tool_intent()`
-- 所有默认假设 `RunLog.events` 是完整历史的调用方
+- 所有需要完整审计事实的调用方
 
 完整审计和导出仍由 RunStore 提供全量读取接口，不要求活动 RunLog 常驻全部旧事件。
 
-### 阶段五：History Checkpoint
+### 阶段五：ContextState Checkpoint
 
-仅保存 Projection 不能解决 PromptBuilder 构建 History 时的全量读取问题。History Checkpoint 应保存：
+仅保存 Projection 不能解决 PromptBuilder 构建 History 时的全量读取问题。ContextState 应保存：
 
 - 最近一次有效摘要。
 - 摘要后保留的完整工具事务。
-- 最新用户指导。
-- 当前待处理 Runtime 反馈。
+
+用户补充指令只存在于 RunLog。尚未被 Compaction 覆盖的原文全部投影到可信用户区域，较早内容随其他历史一起进入摘要。已提交 Summary 必须保留；必要压缩失败或必保内容超预算时，Context 构建明确失败，不降级为缺少约束的 Prompt。
 
 恢复后的有效 History：
 
 ```text
-History Checkpoint
+ContextState
 + Checkpoint 之后的 Event 尾部
 ```
 
-Checkpoint 边界不能拆开：
+Checkpoint 与 Compaction 边界不能拆开：
 
 ```text
-tool_intent
-→ tool_settlement
+assistant_turn
+→ tool_result（每个 Tool Call 各一个）
 ```
 
-因此优先只在没有 Pending Tool 的稳定边界保存 Checkpoint。
+副作用调用中间还包含 `tool_started`。只有当前 Assistant Turn 的全部 Tool Call 都已有 Tool Result 时，才允许保存 Checkpoint。
 
 ### 阶段六：触发策略
 
 触发条件：
 
 ```text
-当前没有 Pending Tool，并且刚完成 Compaction，或距离上次 Checkpoint
+当前处于 ready_for_model，并且刚完成 Compaction，或距离上次 Checkpoint
 新增 10,000 个事件或 2 MiB 日志。
 ```
 
 自然触发点：
 
 - 成功提交 Compaction 后立即保存。
-- 工具事务完成且达到阈值时保存。
-- 用户主动暂停或退出前尝试保存。
+- 完整 Assistant Tool Turn 结算且达到阈值时保存。
+- Run 初始化与中断结算完成后按阈值保存。
 
 已经 `completed` 或 `stopped` 的 Run 不需要为了 Resume 强制生成新 Checkpoint；除非还要优化历史浏览和审计查询。
 
@@ -278,9 +280,9 @@ tool_intent
 
 ```text
 使用统一 Event Replay 逻辑读取 Event Log
-→ 重建 Projection 与 History Checkpoint
-→ 原子替换损坏或落后的 Checkpoint
-→ 回到 Checkpoint + Tail 的统一恢复流程
+→ 重建 Task、CompactedContext、Recent Events 与执行阶段
+→ 仅在 ready_for_model 时原子替换 Checkpoint
+→ 中间阶段先按 Replay 结果结算，再在下一个稳定边界保存
 ```
 
 Checkpoint 只加速正常恢复，不成为恢复成功的前置条件或 Gate。新实现一次性切换到新的 Run 存储契约，不读取旧版 Run 数据，也不提供旧格式迁移逻辑。
@@ -302,7 +304,6 @@ Checkpoint + Tail Replay 的 RunProjection
 - Contract
 - 隐含恢复状态：Running / No Pending Tool
 - Metrics
-- Runtime Feedback
 - Last Sequence
 
 ### 7.2 History 等价
@@ -310,8 +311,8 @@ Checkpoint + Tail Replay 的 RunProjection
 对同一状态构建模型输入，确保两条恢复路径都保留：
 
 - 原始任务目标。
-- 最新用户指令。
-- Runtime 反馈。
+- 近期用户指令原文以及较早指令的摘要。
+- 由连续失败状态临时生成的模型纠错提示。
 - 最近完整工具事务。
 - 已提交的摘要。
 - 当前 Workspace 事实。
@@ -329,11 +330,12 @@ Checkpoint + Tail Replay 的 RunProjection
 5. Checkpoint Run ID 或 Session ID 错误。
 6. Checkpoint byte offset 越界。
 7. 尾部第一条 sequence 不连续。
-8. `tool_exchange` 提交前中断。
-9. `tool_intent` 后中断。
-10. `tool_settlement` 后中断。
-11. Compaction 后立即中断。
-12. 新 Run 初始 Checkpoint 创建过程中断。
+8. `model_requested` 后中断。
+9. `assistant_turn` 后中断。
+10. `tool_started` 后中断。
+11. 多工具批次部分 `tool_result` 后中断。
+12. Compaction 后立即中断。
+13. 新 Run 初始 Checkpoint 创建过程中断。
 
 ### 7.4 性能验证
 
@@ -377,8 +379,8 @@ pico/config.py
 本次改造一次完成以下能力，不保留旧版读取路径、不做双写，也不拆成两版共存：
 
 ```text
-Projection Checkpoint
-+ History Checkpoint
+RunProjection
++ ContextState
 + event_log_offset 尾部读取
 + Checkpoint 重建
 + Projection / History 等价测试
@@ -390,4 +392,4 @@ Event Log 分段、历史 UI 分页和已完成 Run 归档不属于本次修改�
 
 ## 10. 面试表述
 
-> 当前实现将完整 Run Event Log 作为事实源，大工具输出通过 Artifact 外置，模型上下文通过 Compaction 控制；但完整 Replay 的恢复成本仍是 O(N)。改造后统一使用 Projection/History Checkpoint，并记录 `last_sequence` 和 Event Log `byte_offset`，恢复时只重放尾部。Checkpoint 是 Event Log 的派生加速状态；缺失、损坏或落后时由同一 Event Replay 逻辑重建，不维护旧格式兼容路径或双写方案。
+> 当前实现将完整 Run Event Log 作为事实源，大工具输出通过 Artifact 外置，模型上下文通过 Compaction 控制；但完整 Replay 的恢复成本仍是 O(N)。改造后 Checkpoint 直接保存 RunProjection、ContextState、`last_sequence` 和 Event Log `byte_offset`，恢复时只重放尾部。Checkpoint 是 Event Log 的派生加速状态；缺失、损坏或落后时由同一 Event Replay 逻辑重建，不维护旧格式兼容路径或双写方案。

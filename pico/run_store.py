@@ -169,15 +169,21 @@ class RunStore:
         self._sequences[entry.run_id] = entry.sequence
         return offset
 
-    def maybe_checkpoint(self, run_log, entry, event_log_offset):
+    def checkpoint_if_due(self, run_log, *, force=False):
         projection = run_log.projection
-        if projection.terminal or run_log.pending_tool_call() is not None:
+        if (
+            projection.terminal
+            or projection.phase != "ready_for_model"
+            or projection.pending_tool is not None
+            or projection.active_tool_turn is not None
+        ):
             return False
+        event_log_offset = self.events_path(run_log.run_id).stat().st_size
         previous_sequence, previous_offset = self._checkpoint_cursors.get(
             run_log.run_id, (0, 0)
         )
         due = bool(
-            entry.kind == "compaction"
+            force
             or projection.last_sequence - previous_sequence
             >= self.checkpoint_event_interval
             or event_log_offset - previous_offset >= self.checkpoint_byte_interval
@@ -194,7 +200,6 @@ class RunStore:
             projection.last_sequence,
             event_log_offset,
         )
-        run_log._events.clear()
         return True
 
     def load_run(self, run_id):
@@ -204,15 +209,14 @@ class RunStore:
         checkpoint = self.checkpoint_path(run_id)
         if checkpoint.is_file():
             try:
-                projection, history, guidance, offset = read_run_checkpoint(
+                projection, context_state, offset = read_run_checkpoint(
                     checkpoint, expected_run_id=run_id
                 )
                 checkpoint_sequence = projection.last_sequence
                 tail = self._read_tail(run_id, offset=offset)
                 log = RunLog._from_checkpoint(
                     projection=projection,
-                    history_events=history,
-                    latest_user_guidance_event=guidance,
+                    context_state=context_state,
                     tail_events=tail,
                     store=self,
                 )
@@ -231,7 +235,12 @@ class RunStore:
         events = self._read_events(run_id)
         log = RunLog._from_events(events, self, expected_run_id=run_id)
         self._remember_cursor(run_id, events)
-        if not log.projection.terminal and log.pending_tool_call() is None:
+        if (
+            not log.projection.terminal
+            and log.projection.phase == "ready_for_model"
+            and log.projection.pending_tool is None
+            and log.projection.active_tool_turn is None
+        ):
             offset = self.events_path(run_id).stat().st_size
             try:
                 write_run_checkpoint(self.checkpoint_path(run_id), log, offset)
@@ -242,37 +251,7 @@ class RunStore:
                     log.projection.last_sequence,
                     offset,
                 )
-                log._events.clear()
         return log
 
     def replay(self, run_id):
         return self.load_run(run_id).projection
-
-    def find_active_run(self, session_id):
-        if not self.root.exists():
-            return None
-        candidates = []
-        for directory in self.root.iterdir():
-            if directory.is_symlink() or not directory.is_dir():
-                continue
-            try:
-                log = self.load_run(directory.name)
-            except (OSError, ValueError):
-                continue
-            if log.session_id != str(session_id):
-                continue
-            if not log.projection.terminal:
-                candidates.append(
-                    (
-                        log.projection.last_timestamp,
-                        directory.name,
-                        log,
-                    )
-                )
-        if candidates:
-            _timestamp, _run_id, log = max(
-                candidates,
-                key=lambda item: (item[0], item[1]),
-            )
-            return log
-        return None

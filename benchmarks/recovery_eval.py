@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from pico import (
+    AssistantTurn,
+    ModelAction,
     Pico,
     PicoConfig,
     SessionStore,
@@ -19,6 +21,7 @@ from pico import (
     Workspace,
     WriteScope,
 )
+from pico.compaction_summary import CompactedContext
 from pico.mutations import file_revision
 from pico.run_log import RunLog
 from pico.run_store import RunStore
@@ -26,6 +29,7 @@ from pico.run_store import RunStore
 
 class NoopModel:
     model = "recovery-eval"
+    context_window_tokens = 272_000
 
     @staticmethod
     def reset_action_session():
@@ -61,6 +65,7 @@ def _new_run(root: Path, *, checkpoint_interval=10_000):
     )
     log = RunLog("run_eval", session.id, store)
     log.append_user(TaskContract("Evaluate recovery", WriteScope("workspace")))
+    store.checkpoint_if_due(log, force=True)
     session.set_active_run(log.run_id)
     return sessions, session, store, log
 
@@ -85,6 +90,7 @@ def _task_case(name, setup):
             "run_id": restored.run.projection.run_id,
             "summary": restored.run.projection.summary(),
             "history": restored.run.run_log.history().render_projection(),
+            "user_messages": list(restored.run.run_log.history().user_texts()),
         }
         if actual != expected:
             raise AssertionError(f"{name}: restored state differs from durable oracle")
@@ -94,12 +100,6 @@ def _task_cases():
     def pointed(_root, _session, _store, log):
         log.append_user_guidance("pointed tail")
         return _oracle(log)
-
-    def orphan(_root, session, _store, log):
-        log.append_user_guidance("orphan tail")
-        expected = _oracle(log)
-        session.set_active_run("")
-        return expected
 
     def torn(_root, _session, store, log):
         log.append_user_guidance("durable before torn tail")
@@ -116,23 +116,32 @@ def _task_cases():
 
     def compacted(_root, _session, _store, log):
         first = log.append_user_guidance("old context")
-        active = log.history().active_events()
-        covered = [event.event_id for event in active if event.sequence <= first.sequence]
-        log.append_compaction("old context summarized", covered)
+        log.append_compaction(
+            CompactedContext(
+                constraints=("old context summarized",),
+                progress_done=(),
+                progress_in_progress=(),
+                progress_blocked=(),
+                key_decisions=(),
+                next_steps=(),
+                critical_context=(),
+                covered_through_sequence=first.sequence,
+            )
+        )
         log.append_user_guidance("tail after compaction")
         return _oracle(log)
 
-    def feedback(_root, _session, _store, log):
-        log.append_model_instruction("Inspect current state before continuing", evidence="interrupted")
+    def failure_state(_root, _session, _store, log):
+        log.append("model_requested")
+        log.append_model_failure("protocol_error", "malformed", "malformed", {})
         return _oracle(log)
 
     return {
         "pointed_active_run": pointed,
-        "orphan_active_run": orphan,
         "torn_log_tail": torn,
         "damaged_checkpoint": damaged_checkpoint,
         "compacted_history_tail": compacted,
-        "runtime_feedback": feedback,
+        "failure_state": failure_state,
     }
 
 
@@ -141,13 +150,18 @@ def _oracle(log):
         "run_id": log.run_id,
         "summary": log.projection.summary(),
         "history": log.history().render_projection(),
+        "user_messages": list(log.history().user_texts()),
     }
 
 
-def _intent(log, call, *, path=None, before=None):
+def _started(log, call, *, path=None, before=None):
     effects = [] if path is None else [{"path": path, "before_state": before}]
-    return log.append_tool_intent(
-        call,
+    log.append("model_requested")
+    log.append_assistant_turn(
+        AssistantTurn(ModelAction.tool(call.name, call.args, call_id=call.call_id))
+    )
+    return log.append_tool_started(
+        call.call_id,
         effect_scope="workspace",
         potential_effects=effects,
         operation={},
@@ -177,20 +191,20 @@ def _tool_case(name, setup, expected):
 
 
 def _tool_cases():
-    def before_intent(root, _log):
+    def before_started(root, _log):
         (root / "subject.txt").write_text("alpha\n")
 
     def unchanged(root, log):
         target = root / "subject.txt"
         target.write_text("alpha\n")
-        _intent(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
+        _started(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
                 path="subject.txt", before=file_revision(target))
 
     def published(root, log):
         target = root / "subject.txt"
         target.write_text("alpha\n")
         before = file_revision(target)
-        _intent(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
+        _started(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
                 path="subject.txt", before=before)
         target.write_text("beta\n")
 
@@ -198,27 +212,27 @@ def _tool_cases():
         target = root / "subject.txt"
         target.write_text("alpha\n")
         before = file_revision(target)
-        _intent(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
+        _started(log, ToolCall("edit_file", {"path": "subject.txt"}, "edit"),
                 path="subject.txt", before=before)
         target.unlink()
 
     def created(root, log):
-        _intent(log, ToolCall("write_file", {"path": "new.txt"}, "write"),
+        _started(log, ToolCall("write_file", {"path": "new.txt"}, "write"),
                 path="new.txt", before="absent")
         (root / "new.txt").write_text("created\n")
 
-    def shell_unknown(_root, log):
-        _intent(log, ToolCall("run_shell", {"command": "test"}, "shell"))
+    def shell_untracked(_root, log):
+        _started(log, ToolCall("run_shell", {"command": "test"}, "shell"))
 
     def settled(root, log):
         target = root / "subject.txt"
         target.write_text("alpha\n")
         before = file_revision(target)
         call = ToolCall("edit_file", {"path": "subject.txt"}, "edit")
-        _intent(log, call, path="subject.txt", before=before)
+        _started(log, call, path="subject.txt", before=before)
         target.write_text("beta\n")
         after = file_revision(target)
-        log.append_tool_settlement(
+        log.append_tool_result(
             ToolOutcome(
                 call.call_id,
                 call.name,
@@ -226,13 +240,12 @@ def _tool_cases():
                 "completed",
                 "changed",
                 "edited",
-                structured={"path_transitions": [{
+                structured={
                     "path": "subject.txt",
-                    "before_state": before,
-                    "after_state": after,
-                }]},
+                    "before_revision": before,
+                    "after_revision": after,
+                },
                 affected_paths=("subject.txt",),
-                effect_scope="workspace",
             )
         )
 
@@ -250,18 +263,18 @@ def _tool_cases():
         "affected_paths": ["subject.txt"],
     }
     return {
-        "before_intent": (before_intent, none),
-        "intent_file_unchanged": (unchanged, unchanged_outcome),
-        "published_before_settlement": (published, partial),
-        "deleted_before_settlement": (deleted, partial),
-        "created_before_settlement": (created, {**partial, "affected_paths": ["new.txt"]}),
-        "shell_effect_unknown": (shell_unknown, {
+        "before_started": (before_started, none),
+        "started_file_unchanged": (unchanged, unchanged_outcome),
+        "published_before_result": (published, partial),
+        "deleted_before_result": (deleted, partial),
+        "created_before_result": (created, {**partial, "affected_paths": ["new.txt"]}),
+        "shell_effect_untracked": (shell_untracked, {
             "status": "partial_success",
             "execution_state": "failed",
-            "side_effect_state": "unknown",
+            "side_effect_state": "untracked",
             "affected_paths": [],
         }),
-        "settlement_already_durable": (settled, none),
+        "result_already_durable": (settled, none),
     }
 
 

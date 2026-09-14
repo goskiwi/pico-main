@@ -10,7 +10,7 @@ class TracePrinter:
         self.run_id = None
         self.turn = 0
         self.request_started = None
-        self.call = None
+        self.calls = {}
 
     def write(self, message):
         if self.stream is None:
@@ -23,9 +23,11 @@ class TracePrinter:
 
     @staticmethod
     def _label(call):
-        path = call.args.get("path")
+        name = call["name"] if isinstance(call, dict) else call.name
+        args = call["args"] if isinstance(call, dict) else call.args
+        path = args.get("path")
         suffix = " " + json.dumps(path, ensure_ascii=True) if isinstance(path, str) else ""
-        return call.name + suffix
+        return name + suffix
 
     def __call__(self, event):
         if self.stream is None:
@@ -34,7 +36,7 @@ class TracePrinter:
             self.run_id = event.run_id
             self.turn = 0
             self.request_started = None
-            self.call = None
+            self.calls = {}
             self.write(f"[Trace Run] {event.run_id}")
         message = self._message(event)
         if message:
@@ -47,33 +49,52 @@ class TracePrinter:
             self.turn += 1
             self.request_started = time.monotonic()
             return f"[Model {self.turn}] requesting…"
-        if kind == "turn_metrics":
+        if kind in {"assistant_turn", "model_failure"}:
             elapsed = time.monotonic() - self.request_started if self.request_started else 0
-            cached = payload.get("cached_tokens")
+            if kind == "assistant_turn":
+                turn = payload["turn"]
+                usage = turn.get("usage", {})
+                action = turn.get("action", {})
+                self.calls = {
+                    call["call_id"]: call
+                    for call in action.get("tool_calls", [])
+                }
+            else:
+                usage = payload.get("usage", {})
+                action = {"kind": payload.get("kind")}
+            cached = usage.get("cached_tokens")
             cached_text = "unknown" if cached is None else str(cached)
-            return (f"[Model {self.turn}] returned · input={payload.get('input_tokens')} "
+            status = action.get("kind", "unknown")
+            return (f"[Model {self.turn}] {status} · input={usage.get('input_tokens')} "
                     f"cached={cached_text} "
-                    f"output={payload.get('output_tokens')} · {elapsed:.2f}s")
-        if kind == "tool_intent":
-            self.call = event.tool_call
-            return f"[Tool {self.call.call_id}] {self._label(self.call)} · started"
-        if kind in {"tool_exchange", "tool_settlement"}:
+                    f"output={usage.get('output_tokens')} · {elapsed:.2f}s")
+        if kind == "tool_started":
+            call = self.calls.get(event.call_id)
+            label = self._label(call) if call else event.call_id
+            return f"[Tool {event.call_id}] {label} · started"
+        if kind == "tool_result":
             outcome = payload['outcome']
-            event_call = event.tool_call
-            call = event_call or (
-                self.call if self.call and self.call.call_id == event.call_id else None
+            call = self.calls.pop(event.call_id, None)
+            label = (
+                self._label(call)
+                if call
+                else outcome['tool_name']
             )
-            label = self._label(call) if call else outcome['tool_name']
-            self.call = None
             return (f"[Tool {event.call_id}] {label} · {outcome['status']} "
                     f"· effect={outcome['side_effect_state']}")
         if kind == "compaction":
-            return f"[Compaction] committed · covered={len(event.covered_event_ids)}"
+            return (
+                "[Compaction] committed · through="
+                f"{event.covered_through_sequence}"
+            )
         if kind == "provider_session_reset":
             return f"[Provider] session reset · {payload.get('reason')}"
         if kind in {"run_started", "run_resumed"}:
             return f"[Run] {kind.removeprefix('run_')}"
-        if kind in {"assistant_final", "run_stopped"}:
-            status = "completed" if kind == "assistant_final" else payload.get('stop_reason')
-            return f"[Run] {status} · {payload.get('turn_duration_ms', 0) / 1000:.2f}s"
+        if kind == "run_stopped":
+            status = payload.get('stop_reason')
+            return (
+                f"[Run] {status} · "
+                f"{payload.get('attempt_duration_ms', 0) / 1000:.2f}s"
+            )
         return None

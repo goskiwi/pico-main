@@ -52,11 +52,11 @@ and workload:
 
 | Events | Log bytes | Append | Context | Full recovery | Checkpoint recovery | Full peak RSS | Checkpoint peak RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 225,838 | 0.067 s | 0.958 s | 0.0032 s | 0.0024 s | 136.0 MB | 132.5 MB |
-| 10,000 | 2,532,110 | 0.629 s | 0.880 s | 0.0344 s | 0.0027 s | 147.0 MB | 136.4 MB |
-| 100,000 | 26,054,080 | 6.833 s | 0.900 s | 0.3772 s | 0.0025 s | 254.9 MB | 136.9 MB |
+| 1,000 | 225,838 | 0.064 s | 0.109 s | 0.0036 s | 0.0024 s | 134.8 MB | 135.8 MB |
+| 10,000 | 2,532,110 | 0.615 s | 0.112 s | 0.0333 s | 0.0027 s | 137.0 MB | 125.2 MB |
+| 100,000 | 23,400,302 | 6.294 s | 0.118 s | 0.3803 s | 0.0027 s | 180.4 MB | 134.2 MB |
 
 At 100,000 events the checkpoint path replayed the bounded tail in about
-1/148 of the full-replay time and used about 46% less peak memory. Append time
+1/143 of the full-replay time and used about 26% less peak memory. Append time
 remains linear and is not improved by Checkpoint; this benchmark therefore
 does not claim to solve synchronous Event-log write cost.

@@ -6,22 +6,23 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .contracts import EFFECT_SCOPES, TOOL_ARTIFACT_ID, ToolCall, ToolOutcome
-from .history import CONTEXT_KINDS, RunHistory
+from .compaction_summary import CompactedContext
+from .contracts import EFFECT_SCOPES, AssistantTurn, ToolOutcome
+from .history import CONTEXT_KINDS, ContextState, RunHistory
 from .run_projection import RunProjection
-from .task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskContract
+from .task_state import TaskContract
 
 RUN_EVENT_KINDS = frozenset(
     {
         *CONTEXT_KINDS,
+        "user_message",
         "run_started",
         "run_resumed",
         "model_requested",
-        "turn_metrics",
-        "failure_observed",
-        "tool_exchange",
-        "tool_intent",
-        "tool_settlement",
+        "assistant_turn",
+        "model_failure",
+        "tool_started",
+        "tool_result",
         "provider_session_reset",
         "run_stopped",
     }
@@ -43,36 +44,34 @@ def _validate_text_payload(kind, payload):
         raise TypeError(f"{kind} content must be text")
 
 
-def _validate_model_instruction_payload(kind, payload):
-    _exact_payload(
-        kind,
-        payload,
-        {"instruction", "evidence", "evidence_artifact_id"},
-    )
-    if (
-        not isinstance(payload["instruction"], str)
-        or not payload["instruction"].strip()
-    ):
-        raise ValueError("model_instruction requires trusted instruction text")
-    if not isinstance(payload["evidence"], str):
-        raise TypeError("model_instruction evidence must be text")
-    artifact_id = payload["evidence_artifact_id"]
-    if not isinstance(artifact_id, str) or (
-        artifact_id and not TOOL_ARTIFACT_ID.fullmatch(artifact_id)
-    ):
-        raise ValueError("model_instruction evidence artifact is invalid")
+def _validate_compaction_payload(kind, payload):
+    _exact_payload(kind, payload, {"context"})
+    CompactedContext.from_dict(payload["context"])
 
 
-def _validate_failure_observed_payload(kind, payload):
-    _exact_payload(kind, payload, {"category", "code", "tool_name", "identity"})
-    if not isinstance(payload["category"], str) or not payload["category"]:
-        raise ValueError("failure_observed requires a category")
-    if not isinstance(payload["code"], str) or not payload["code"]:
-        raise ValueError("failure_observed requires a code")
-    if not isinstance(payload["tool_name"], str) or not isinstance(
-        payload["identity"], str
+def _validate_assistant_turn_payload(kind, payload):
+    _exact_payload(kind, payload, {"turn", "attempt_duration_ms"})
+    AssistantTurn.from_dict(payload["turn"])
+    if int(payload["attempt_duration_ms"]) < 0:
+        raise ValueError("assistant turn duration cannot be negative")
+
+
+def _validate_model_failure_payload(kind, payload):
+    _exact_payload(kind, payload, {"kind", "identity", "detail", "usage"})
+    if payload["kind"] not in {
+        "truncated",
+        "service_failed",
+        "protocol_error",
+        "interrupted",
+        "context_overflow",
+    }:
+        raise ValueError("model_failure has an invalid kind")
+    if not isinstance(payload["identity"], str) or not isinstance(
+        payload["detail"], str
     ):
-        raise TypeError("failure_observed identity fields must be text")
+        raise TypeError("model_failure identity and detail must be text")
+    if not isinstance(payload["usage"], dict):
+        raise TypeError("model_failure usage must be an object")
 
 
 def _validate_user_payload(kind, payload):
@@ -80,108 +79,62 @@ def _validate_user_payload(kind, payload):
     TaskContract.from_dict(payload["contract"])
 
 
-def _tool_call(payload):
-    return ToolCall(
-        str(payload["name"]),
-        payload["args"],
-        str(payload["call_id"]),
-    )
-
-
-def _validate_call(kind, payload):
-    _exact_payload(kind, payload, {"name", "args", "call_id"})
-    if not isinstance(payload["call_id"], str) or not payload["call_id"].strip():
-        raise ValueError(f"{kind} requires a call id")
-    if not isinstance(payload["name"], str) or not payload["name"].strip():
-        raise ValueError(f"{kind} requires a tool name")
-    _tool_call(payload)
-
-
-def _validate_tool_exchange_payload(kind, payload):
-    _exact_payload(kind, payload, {"call", "outcome"})
-    call = _tool_call(payload["call"])
-    outcome = ToolOutcome.from_dict(payload["outcome"])
-    if (outcome.tool_call_id, outcome.tool_name) != (call.call_id, call.name):
-        raise ValueError("tool_exchange call and outcome do not match")
-    if outcome.side_effect_state != "none" or outcome.effect_scope != "none":
-        raise ValueError("tool_exchange cannot contain workspace side effects")
-
-
-def _validate_tool_intent_payload(kind, payload):
+def _validate_tool_started_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
         {
-            "call",
+            "call_id",
             "effect_scope",
             "potential_effects",
             "operation",
         },
     )
-    _validate_call("tool_intent call", payload["call"])
+    if not isinstance(payload["call_id"], str) or not payload["call_id"]:
+        raise ValueError("tool_started requires a call id")
     if payload["effect_scope"] not in EFFECT_SCOPES - {"none"}:
-        raise ValueError("tool_intent requires a non-empty effect scope")
+        raise ValueError("tool_started requires a non-empty effect scope")
     if not isinstance(payload["potential_effects"], list) or not isinstance(
         payload["operation"], dict
     ):
-        raise TypeError("tool_intent has invalid field types")
+        raise TypeError("tool_started has invalid field types")
     for effect in payload["potential_effects"]:
         if not isinstance(effect, dict) or set(effect) != {
             "path",
             "before_state",
         }:
-            raise ValueError("tool_intent has invalid potential effect")
+            raise ValueError("tool_started has invalid potential effect")
 
 
-def _validate_tool_settlement_payload(kind, payload):
-    _exact_payload(
-        kind,
-        payload,
-        {"outcome"},
-        {"recovered_from_interruption"},
-    )
+def _validate_tool_result_payload(kind, payload):
+    _exact_payload(kind, payload, {"outcome"}, {"recovered_from_interruption"})
     ToolOutcome.from_dict(payload["outcome"])
     if "recovered_from_interruption" in payload and not isinstance(
         payload["recovered_from_interruption"], bool
     ):
-        raise TypeError("tool_settlement recovery marker must be boolean")
-
-
-def _validate_final_payload(kind, payload):
-    _exact_payload(
-        kind,
-        payload,
-        {"content", "stop_reason", "turn_duration_ms"},
-    )
-    if not str(payload["content"]).strip():
-        raise ValueError("assistant_final requires content")
-    if payload["stop_reason"] != STOP_REASON_FINAL_ANSWER_RETURNED:
-        raise ValueError("assistant_final has invalid stop reason")
-    if int(payload["turn_duration_ms"]) < 0:
-        raise ValueError("assistant_final duration cannot be negative")
+        raise TypeError("tool_result recovery marker must be boolean")
 
 
 def _validate_stopped_payload(kind, payload):
     _exact_payload(
         kind,
         payload,
-        {"content", "stop_reason", "turn_duration_ms"},
+        {"content", "stop_reason", "attempt_duration_ms"},
     )
     if not str(payload["stop_reason"]):
         raise ValueError("run_stopped requires stop_reason")
-    if int(payload["turn_duration_ms"]) < 0:
+    if int(payload["attempt_duration_ms"]) < 0:
         raise ValueError("run_stopped duration cannot be negative")
 
 
 _PAYLOAD_VALIDATORS = {
     "user_message": _validate_user_payload,
     "user_guidance": _validate_text_payload,
-    "model_instruction": _validate_model_instruction_payload,
-    "failure_observed": _validate_failure_observed_payload,
-    "tool_exchange": _validate_tool_exchange_payload,
-    "tool_intent": _validate_tool_intent_payload,
-    "tool_settlement": _validate_tool_settlement_payload,
-    "assistant_final": _validate_final_payload,
+    "assistant_turn": _validate_assistant_turn_payload,
+    "compaction": _validate_compaction_payload,
+    "model_failure": _validate_model_failure_payload,
+    "tool_started": _validate_tool_started_payload,
+    "tool_result": _validate_tool_result_payload,
     "run_stopped": _validate_stopped_payload,
 }
 
@@ -249,57 +202,33 @@ class RunEvent:
     def content(self):
         if self.kind == "user_message":
             return str(dict(self.payload.get("contract", {})).get("goal", ""))
-        if self.kind == "model_instruction":
-            return str(self.payload.get("instruction", ""))
-        if self.kind in {"user_guidance", "assistant_final"}:
+        if self.kind == "user_guidance":
             return str(self.payload.get("content", ""))
-        if self.kind in {"tool_exchange", "tool_settlement"}:
+        if self.kind == "assistant_turn":
+            turn = AssistantTurn.from_dict(self.payload["turn"])
+            return turn.visible_text or turn.action.content
+        if self.kind == "tool_result":
             outcome = dict(self.payload.get("outcome", {}) or {})
             return str(outcome.get("content", ""))
         if self.kind == "compaction":
-            return str(self.payload.get("content", ""))
+            return CompactedContext.from_dict(self.payload["context"]).render()
         return ""
 
     @property
     def name(self):
-        if self.kind in {"tool_exchange", "tool_settlement"}:
+        if self.kind == "tool_result":
             return str(dict(self.payload.get("outcome", {}) or {}).get("tool_name", ""))
         return ""
 
     @property
-    def tool_call(self):
-        if self.kind not in {"tool_exchange", "tool_intent"}:
-            return None
-        return _tool_call(self.payload["call"])
-
-    @property
-    def args(self):
-        call = self.tool_call
-        return dict(call.args) if call is not None else {}
-
-    @property
     def call_id(self):
-        if self.kind in {"tool_exchange", "tool_settlement"}:
+        if self.kind in {"tool_started", "tool_result"}:
+            if self.kind == "tool_started":
+                return str(self.payload["call_id"])
             return str(
                 dict(self.payload.get("outcome", {}) or {}).get("tool_call_id", "")
             )
-        call = self.tool_call
-        return call.call_id if call is not None else ""
-
-    @property
-    def outcome_status(self):
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(outcome.get("status", ""))
-
-    @property
-    def side_effect_state(self):
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        return str(outcome.get("side_effect_state", ""))
-
-    @property
-    def affected_paths(self):
-        outcome = dict(self.payload.get("outcome", {}) or {})
-        return tuple(str(item) for item in outcome.get("affected_paths", []))
+        return ""
 
     @property
     def artifact_id(self):
@@ -307,8 +236,12 @@ class RunEvent:
         return str(outcome.get("artifact_id", ""))
 
     @property
-    def covered_event_ids(self):
-        return tuple(str(item) for item in self.payload.get("covered_event_ids", []))
+    def covered_through_sequence(self):
+        if self.kind != "compaction":
+            return 0
+        return CompactedContext.from_dict(
+            self.payload["context"]
+        ).covered_through_sequence
 
 
 def replay_events(events, *, expected_run_id=None):
@@ -327,11 +260,11 @@ class RunLog:
         self.run_id = str(run_id)
         self.session_id = str(session_id)
         self.store = store
-        self._events = []
-        self._history_events = []
-        self._latest_user_guidance_event = None
-        self.projection = RunProjection()
-
+        self.context_state = ContextState()
+        self.projection = RunProjection(
+            run_id=self.run_id,
+            session_id=self.session_id,
+        )
 
     @classmethod
     def _from_events(cls, events, store, *, expected_run_id):
@@ -342,11 +275,8 @@ class RunLog:
         projection = replay_events(events, expected_run_id=expected_run_id)
         first = events[0]
         log = cls(first.run_id, first.session_id, store)
-        log._events = list(events)
         log.projection = projection
-        history = RunHistory(events, projected_instruction_id="")
-        log._history_events = list(history.active_events())
-        log._latest_user_guidance_event = history.latest_user_guidance_event()
+        log.context_state = ContextState.from_events(events)
         return log
 
     @classmethod
@@ -354,55 +284,23 @@ class RunLog:
         cls,
         *,
         projection,
-        history_events,
-        latest_user_guidance_event,
+        context_state,
         tail_events,
         store,
     ):
         log = cls(projection.run_id, projection.session_id, store)
         log.projection = projection
-        log._history_events = list(history_events)
-        log._latest_user_guidance_event = latest_user_guidance_event
+        log.context_state = context_state
         for event in tail_events:
             log.projection.apply_event(event)
-            log._events.append(event)
-            log._apply_history_event(event)
+            log._apply_context_event(event)
         return log
 
-    @property
-    def events(self):
-        return tuple(self._events)
-
-    @property
-    def effective_history_events(self):
-        return tuple(self._history_events)
-
-    @property
-    def latest_user_guidance_event(self):
-        return self._latest_user_guidance_event
-
     def history(self):
-        feedback = self.projection.runtime_feedback
-        return RunHistory(
-            self._history_events,
-            projected_instruction_id=feedback.event_id if feedback else "",
-            events_are_active=True,
-            latest_user_guidance_event=self._latest_user_guidance_event,
-        )
+        return RunHistory(context_state=self.context_state)
 
-    def _apply_history_event(self, entry):
-        if entry.kind == "user_guidance":
-            self._latest_user_guidance_event = entry
-        if entry.kind not in CONTEXT_KINDS:
-            return
-        if entry.kind != "compaction":
-            self._history_events.append(entry)
-            return
-        covered = entry.covered_event_ids
-        prefix = tuple(item.event_id for item in self._history_events[: len(covered)])
-        if not covered or covered != prefix:
-            raise ValueError("compaction coverage must match effective History prefix")
-        self._history_events = [entry, *self._history_events[len(covered) :]]
+    def _apply_context_event(self, entry):
+        self.context_state.apply_event(entry)
 
     def append(self, kind, payload=None):
         sequence = self.projection.last_sequence + 1
@@ -417,22 +315,12 @@ class RunLog:
         )
         candidate = deepcopy(self.projection)
         candidate.apply_event(entry)
-        event_log_offset = self.store._append_event(entry)
-        self._events.append(entry)
-        self._apply_history_event(entry)
+        self.store._append_event(entry)
+        self._apply_context_event(entry)
         self.projection.__dict__.update(candidate.__dict__)
         if self.store.trace is not None:
             self.store.trace(entry)
-        self.store.maybe_checkpoint(self, entry, event_log_offset)
         return entry
-
-    def pending_tool_intent(self):
-        for entry in reversed(self._events):
-            if entry.kind == "tool_settlement":
-                break
-            if entry.kind == "tool_intent":
-                return entry
-        return None
 
     def append_user(self, contract):
         if not isinstance(contract, TaskContract):
@@ -443,49 +331,50 @@ class RunLog:
         content = str(content).strip()
         if not content:
             raise ValueError("user guidance must not be blank")
-        self._require_no_pending()
+        self._require_ready()
         return self.append("user_guidance", {"content": content})
 
-    @staticmethod
-    def _call_payload(call):
-        if not isinstance(call, ToolCall):
-            raise TypeError("tool call must be a ToolCall")
-        return {
-            "name": call.name,
-            "args": dict(call.args),
-            "call_id": call.call_id,
-        }
-
-    def append_tool_exchange(self, call, outcome):
-        if not isinstance(outcome, ToolOutcome):
-            raise TypeError("tool exchange requires a ToolOutcome")
+    def append_assistant_turn(self, turn, *, attempt_duration_ms=0):
+        if not isinstance(turn, AssistantTurn):
+            raise TypeError("assistant_turn requires an AssistantTurn")
         return self.append(
-            "tool_exchange",
+            "assistant_turn",
             {
-                "call": self._call_payload(call),
-                "outcome": outcome.to_dict(),
+                "turn": turn.to_dict(),
+                "attempt_duration_ms": int(attempt_duration_ms),
             },
         )
 
-    def append_tool_intent(
+    def append_model_failure(self, kind, identity, detail, usage):
+        return self.append(
+            "model_failure",
+            {
+                "kind": str(kind),
+                "identity": str(identity),
+                "detail": str(detail),
+                "usage": dict(usage),
+            },
+        )
+
+    def append_tool_started(
         self,
-        call,
+        call_id,
         *,
         effect_scope,
         potential_effects,
         operation,
     ):
         return self.append(
-            "tool_intent",
+            "tool_started",
             {
-                "call": self._call_payload(call),
+                "call_id": str(call_id),
                 "effect_scope": str(effect_scope),
                 "potential_effects": list(potential_effects),
                 "operation": dict(operation),
             },
         )
 
-    def append_tool_settlement(
+    def append_tool_result(
         self,
         outcome,
         *,
@@ -497,72 +386,36 @@ class RunLog:
         if recovered_from_interruption:
             payload["recovered_from_interruption"] = True
         return self.append(
-            "tool_settlement",
+            "tool_result",
             payload,
         )
 
-    def append_model_instruction(
-        self,
-        instruction,
-        *,
-        evidence="",
-        evidence_artifact_id="",
-    ):
-        self._require_no_pending()
-        return self.append(
-            "model_instruction",
-            {
-                "instruction": str(instruction),
-                "evidence": str(evidence),
-                "evidence_artifact_id": str(evidence_artifact_id),
-            },
-        )
-
-    def append_final(self, content, *, turn_duration_ms=0):
-        self._require_no_pending()
-        return self.append(
-            "assistant_final",
-            {
-                "content": str(content),
-                "stop_reason": STOP_REASON_FINAL_ANSWER_RETURNED,
-                "turn_duration_ms": int(turn_duration_ms),
-            },
-        )
-
-    def append_stopped(self, content, stop_reason, *, turn_duration_ms=0):
-        self._require_no_pending()
+    def append_stopped(self, content, stop_reason, *, attempt_duration_ms=0):
+        self._require_ready()
         payload = {
             "content": str(content),
             "stop_reason": str(stop_reason),
-            "turn_duration_ms": int(turn_duration_ms),
+            "attempt_duration_ms": int(attempt_duration_ms),
         }
         return self.append("run_stopped", payload)
 
-    def pending_call_id(self):
-        return self.projection.pending_call_id
+    def _require_ready(self):
+        if self.projection.phase != "ready_for_model":
+            raise RuntimeError("Run must reach a ready-for-model boundary first")
 
-    def pending_tool_call(self):
-        return self.projection.pending_tool.call
-
-    def _require_no_pending(self):
-        if self.pending_tool_call() is not None:
-            raise RuntimeError("pending tool call must receive a result first")
-
-
-    def append_compaction(self, content, covered_event_ids):
-        covered = tuple(covered_event_ids)
-        if not covered or len(set(covered)) != len(covered):
-            raise ValueError("compaction must cover a non-empty unique prefix")
-        active = self.history().active_events()
-        if covered != tuple(entry.event_id for entry in active[: len(covered)]):
+    def append_compaction(self, context):
+        if not isinstance(context, CompactedContext):
+            raise TypeError("compaction requires a CompactedContext")
+        self._require_ready()
+        active = self.history().recent_events()
+        covered = tuple(
+            entry
+            for entry in active
+            if entry.sequence <= context.covered_through_sequence
+        )
+        if not covered or covered != active[: len(covered)]:
             raise ValueError("compaction coverage must be the exact active prefix")
         remaining = active[len(covered) :]
-        if remaining and remaining[0].kind == "tool_settlement":
-            raise ValueError("compaction cannot split a tool call/result pair")
-        return self.append(
-            "compaction",
-            {
-                "content": content,
-                "covered_event_ids": list(covered),
-            },
-        )
+        if remaining and remaining[0].kind == "tool_result":
+            raise ValueError("compaction cannot split an Assistant turn")
+        return self.append("compaction", {"context": context.to_dict()})

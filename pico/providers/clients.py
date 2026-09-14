@@ -14,7 +14,7 @@ from openai import (
     DefaultAsyncHttpxClient,
 )
 
-from ..contracts import ModelAction, ToolCall
+from ..contracts import AssistantTurn, ModelAction, ToolCall
 from ..execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -163,7 +163,9 @@ def _replay_item(item):
             return None, "assistant message output is not completed"
         content = item.get("content")
         if not isinstance(content, list) or any(
-            not isinstance(part, dict) or part.get("type") != "output_text"
+            not isinstance(part, dict)
+            or part.get("type") != "output_text"
+            or not isinstance(part.get("text"), str)
             for part in content
         ):
             return None, "assistant message output contains unsupported content"
@@ -184,6 +186,7 @@ class ParsedTurn:
     action: ModelAction
     replay_items: tuple[dict, ...] = ()
     pending_call_ids: tuple[str, ...] = ()
+    visible_text: str = ""
     usage: dict = field(default_factory=dict)
 
     @property
@@ -259,6 +262,7 @@ def _parse_turn(data, action_tools):
     declared = {str(tool["name"]) for tool in action_tools}
     replay = []
     calls = []
+    visible = []
     for item in output:
         if item.get("type") == "function_call":
             call, error = _tool_call(item)
@@ -275,11 +279,23 @@ def _parse_turn(data, action_tools):
         if error:
             return ParsedTurn.failed("protocol_error", error, usage)
         replay.append(normalized)
+        if item.get("type") == "message":
+            visible.extend(
+                part["text"]
+                for part in item["content"]
+                if part["text"].strip()
+            )
     try:
         action, pending_call_ids = _action_from_calls(calls)
     except ValueError as exc:
         return ParsedTurn.failed("protocol_error", str(exc), usage)
-    return ParsedTurn(action, tuple(replay), pending_call_ids, usage)
+    return ParsedTurn(
+        action=action,
+        replay_items=tuple(replay),
+        pending_call_ids=pending_call_ids,
+        visible_text="\n".join(visible).strip(),
+        usage=usage,
+    )
 
 
 class OpenAICompatibleModelClient:
@@ -459,8 +475,8 @@ class OpenAICompatibleModelClient:
             self._runner.close()
             self._closed = True
 
-    def complete_action(self, input_text, max_output_tokens, *, instructions,
-                        action_tools, execution_context: ExecutionContext):
+    def complete_turn(self, input_text, max_output_tokens, *, instructions,
+                      action_tools, execution_context: ExecutionContext):
         if self._pending_call_ids:
             raise RuntimeError("pending function calls have no recorded outputs")
         try:
@@ -481,4 +497,4 @@ class OpenAICompatibleModelClient:
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
             self._pending_call_ids = turn.pending_call_ids
-        return turn.action
+        return AssistantTurn(turn.action, turn.visible_text, turn.usage)

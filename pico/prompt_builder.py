@@ -19,7 +19,7 @@ from .execution import (
     ExecutionContext,
     ExecutionDeadlineExceeded,
 )
-from .history import HISTORY_OMITTED
+from .failure_policy import guidance_for_failure
 from .prompt_instructions import build_prompt_instructions
 from .workspace import WORKSPACE_GIT_TIMEOUT_SECONDS
 
@@ -28,10 +28,10 @@ if TYPE_CHECKING:
     from .tool_runtime import ResolvedToolSurface
 
 AGENTS_MD_MAX_BYTES = 32 * 1024
-CONTEXT_WIRE_ORDER = ("runtime_evidence", "workspace", "history")
+CONTEXT_WIRE_ORDER = ("workspace", "history")
 
 
-def load_repository_instructions(repo_root):
+def load_project_instructions(repo_root):
     """Load only the workspace-root AGENTS.md instruction file."""
     repo_root = Path(repo_root).resolve()
     path = repo_root / "AGENTS.md"
@@ -45,63 +45,56 @@ def load_repository_instructions(repo_root):
     return {"AGENTS.md": content}
 
 
-def _untrusted_envelope(selected):
-    lines = ['<untrusted_context trust="untrusted_data">']
-    for section in CONTEXT_WIRE_ORDER:
-        value = str(selected.get(section, "")).strip()
-        if value:
-            lines.extend(
-                (
-                    f'<section name="{section}">',
-                    escape(value, quote=False),
-                    "</section>",
-                )
-            )
-    lines.append("</untrusted_context>")
-    return "\n".join(lines)
+def _context_sections(selected):
+    tags = {
+        "workspace": "environment_context",
+        "history": "conversation_history",
+    }
+    sections = []
+    for name in CONTEXT_WIRE_ORDER:
+        value = str(selected.get(name, "")).strip()
+        if not value:
+            continue
+        tag = tags[name]
+        sections.append(
+            f"<{tag}>\n{escape(value, quote=False)}\n</{tag}>"
+        )
+    return "\n\n".join(sections)
 
 
 def _assemble_input(raw, selected):
-    parts = [raw["runtime_policy"]]
-    if raw["repository_instructions"]:
-        parts.append(raw["repository_instructions"])
-    parts.append(raw["task_request"])
-    if raw["runtime_instruction"]:
-        parts.append(raw["runtime_instruction"])
+    parts = [raw["permissions"]]
+    if raw["project_instructions"]:
+        parts.append(raw["project_instructions"])
+    if selected.get("user_messages"):
+        parts.append(selected["user_messages"])
+    if raw["retry_instruction"]:
+        parts.append(raw["retry_instruction"])
     if selected:
-        parts.append(_untrusted_envelope(selected))
-    if raw["latest_user_request"]:
-        parts.append(raw["latest_user_request"])
+        context_sections = _context_sections(selected)
+        if context_sections:
+            parts.append(context_sections)
     return "\n\n".join(parts)
 
 
-def runtime_feedback_sections(feedback):
-    if feedback is None:
-        return {"runtime_instruction": "", "runtime_evidence": ""}
-    return {
-        "runtime_instruction": "runtime_instruction:\n"
-        + json.dumps(
-            {"instruction": feedback.instruction},
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        "runtime_evidence": (
-            "runtime_evidence:\n"
-            + json.dumps(
-                {
-                    "content": feedback.evidence,
-                    "artifact_id": feedback.evidence_artifact_id,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            if feedback.evidence or feedback.evidence_artifact_id
-            else ""
-        ),
-    }
+def render_retry_instruction(guidance):
+    guidance = str(guidance).strip()
+    if not guidance:
+        return ""
+    return "retry_instruction:\n" + json.dumps(
+        guidance,
+        ensure_ascii=False,
+    )
 
 
-def render_runtime_policy(contract, mode, paths):
+def render_user_messages(goal, later_messages=()):
+    return "user_messages:\n" + json.dumps(
+        [str(goal), *(str(message) for message in later_messages)],
+        ensure_ascii=False,
+    )
+
+
+def render_permissions(contract, mode, paths):
     if contract is None:
         policy = {
             "mode": "unavailable",
@@ -118,23 +111,23 @@ def render_runtime_policy(contract, mode, paths):
             "mode": mode,
             "write_scope": write_scope,
         }
-    return "runtime_policy:\n" + json.dumps(
+    return "permissions:\n" + json.dumps(
         policy, ensure_ascii=False, sort_keys=True
     )
 
 
-def render_repository_instructions(instructions):
+def render_project_instructions(instructions):
     if not instructions:
         return ""
     content = instructions["AGENTS.md"]
     return "\n".join(
         (
-            "<repository_instructions>",
+            "<project_instructions>",
             '<instructions path="AGENTS.md">',
             "Applies to the entire workspace.",
             escape(content, quote=False),
             "</instructions>",
-            "</repository_instructions>",
+            "</project_instructions>",
         )
     )
 
@@ -155,7 +148,7 @@ class PromptBuilder:
     def __init__(self, runtime: Pico):
         self.runtime = runtime
         self.instructions = build_prompt_instructions()
-        self.repository_instructions = load_repository_instructions(runtime.workspace.root)
+        self.project_instructions = self._load_project_instructions()
         self.tokenizer = context.Tokenizer(getattr(runtime.model_client, "model", ""))
         self.section_caps = dict(context.DEFAULT_SECTION_CAPS)
         factory = getattr(runtime.model_client, "new_isolated_client", None)
@@ -166,29 +159,41 @@ class PromptBuilder:
     def count_tokens(self, text):
         return self.tokenizer.count(text)
 
-    def build_for_run(self, user_message, *, tool_surface, provider_context_tokens=None):
+    def _load_project_instructions(self):
+        return {
+            path: self.runtime.redact_text(content)
+            for path, content in load_project_instructions(
+                self.runtime.workspace.root
+            ).items()
+        }
+
+    def build_for_run(self, *, tool_surface, provider_context_tokens=None):
         """Prepare, optionally compact durably, then render one model input."""
-        inputs = self.prepare(user_message, tool_surface=tool_surface)
+        inputs = self.prepare(tool_surface=tool_surface)
         plan = self.plan_compaction(inputs, provider_context_tokens=provider_context_tokens)
         if plan is not None:
-            self.runtime.run.run_log.append_compaction(*plan)
+            self.runtime.run.run_log.append_compaction(plan)
+            self.runtime.dependencies.run_store.checkpoint_if_due(
+                self.runtime.run.run_log,
+                force=True,
+            )
         return self.build(inputs, refresh_history=plan is not None)
 
-    def refresh_repository_instructions(self):
-        current = load_repository_instructions(self.runtime.workspace.root)
-        changed = current != self.repository_instructions
-        self.repository_instructions = current
+    def refresh_project_instructions(self):
+        current = self._load_project_instructions()
+        changed = current != self.project_instructions
+        self.project_instructions = current
         return changed
 
-    def prepare(self, user_message, *, tool_surface: ResolvedToolSurface):
+    def prepare(self, *, tool_surface: ResolvedToolSurface):
         """Sample context and calculate budgets once for one prompt rebuild."""
         history = self._history()
         history_text = render_history(history)
-        raw = self._raw_sections(user_message, tool_surface, history=history)
+        raw = self._raw_sections(tool_surface, history=history)
         instructions_tokens = self.count_tokens(self.instructions)
         tool_schema_tokens = self._tool_schema_tokens(tool_surface)
         available = (
-            self.runtime.context_limit_tokens
+            self.runtime.effective_context_limit_tokens
             - self.runtime.config.max_output_tokens
             - instructions_tokens
             - tool_schema_tokens
@@ -198,6 +203,7 @@ class PromptBuilder:
             section_caps=self.section_caps,
             count_tokens=self.count_tokens,
             render_input=_assemble_input,
+            history=history,
         )
         return {
             "raw": raw,
@@ -205,19 +211,6 @@ class PromptBuilder:
             "tool_schema_tokens": tool_schema_tokens,
             "available": available,
             "fixed_context": fixed,
-            "history_budget": context.history_budget(
-                raw,
-                available,
-                fixed_context=fixed,
-                count_tokens=self.count_tokens,
-                render_input=_assemble_input,
-            ),
-            "history_token_counter": context.history_token_counter(
-                raw,
-                fixed,
-                count_tokens=self.count_tokens,
-                render_input=_assemble_input,
-            ),
             "history": history,
             "history_text": history_text,
         }
@@ -231,12 +224,23 @@ class PromptBuilder:
         history_text = (
             render_history(history) if refresh_history else inputs["history_text"]
         )
-        raw = {**raw, "history": history_text}
-        minimum_input = _assemble_input(raw, context._required_context(raw))
+        raw = {
+            **raw,
+            "history": history_text,
+            "user_messages": (
+                render_user_messages(
+                    self.runtime.run.projection.contract.goal,
+                    history.user_texts(),
+                )
+                if refresh_history and history is not None
+                else raw["user_messages"]
+            ),
+        }
+        minimum_input = _assemble_input(raw, context.required_context(raw))
         if count_tokens(minimum_input) > available:
             raise context.ContextBudgetExceeded(
-                "runtime policy, repository instructions, task request, pending "
-                "Runtime instruction and evidence exceed the model budget"
+                "permissions, project instructions, user messages and retry "
+                "instruction exceed the model budget"
             )
         rendered_context = context.select_context(
             raw,
@@ -256,7 +260,7 @@ class PromptBuilder:
     def plan_compaction(self, inputs, *, provider_context_tokens=None):
         """Plan semantic compaction; Context owns every bounded fallback."""
         run_log = self.runtime.run.run_log
-        if run_log is None or run_log.pending_tool_call() is not None:
+        if run_log is None or run_log.projection.pending_tool is not None:
             return None
         history = inputs["history"]
         config = self.runtime.config
@@ -275,16 +279,13 @@ class PromptBuilder:
         context_tokens = max(local_context_tokens, int(provider_context_tokens or 0))
         threshold_tokens = max(
             1,
-            self.runtime.context_limit_tokens - config.max_output_tokens,
+            self.runtime.effective_context_limit_tokens - config.max_output_tokens,
         )
         if context_tokens < threshold_tokens:
             return None
-        projection_history_budget = inputs["history_budget"]
-        history_token_counter = inputs["history_token_counter"]
-
         def build_summary(events, *, max_summary_tokens):
             try:
-                summary = self.semantic_summarizer.summarize(
+                return self.semantic_summarizer.summarize(
                     events,
                     task_goal=(
                         self.runtime.run.projection.contract.goal
@@ -292,7 +293,9 @@ class PromptBuilder:
                         else ""
                     ),
                     execution_context=self.runtime.run.execution_context,
-                    context_limit_tokens=self.runtime.context_limit_tokens,
+                    effective_context_limit_tokens=(
+                        self.runtime.effective_context_limit_tokens
+                    ),
                     max_output_tokens=min(
                         SUMMARY_MAX_OUTPUT_TOKENS,
                         config.max_output_tokens,
@@ -300,17 +303,6 @@ class PromptBuilder:
                     ),
                     count_tokens=count_tokens,
                 )
-                projected = (
-                    "Current run events:\n[compaction] "
-                    + summary
-                    + "\n"
-                    + HISTORY_OMITTED
-                )
-                if history_token_counter(projected) > projection_history_budget:
-                    raise SemanticCompactionError(
-                        "semantic summary does not fit the available History budget"
-                    )
-                return summary
             except SemanticCompactionError:
                 raise
             except (ExecutionCancelled, ExecutionDeadlineExceeded):
@@ -320,23 +312,56 @@ class PromptBuilder:
                     f"semantic compaction failed: {type(exc).__name__}: {exc}"
                 ) from exc
 
-        try:
-            if self.semantic_summarizer is None:
-                raise SemanticCompactionError(
-                    "model client does not support isolated semantic compaction"
-                )
-            compacted = history.plan_compaction(
-                retain_tokens=config.recent_history_tokens,
-                max_history_tokens=projection_history_budget,
-                history_token_counter=history_token_counter,
-                summary_builder=build_summary,
+        if self.semantic_summarizer is None:
+            raise SemanticCompactionError(
+                "model client does not support isolated semantic compaction"
             )
-            if compacted is None:
-                raise SemanticCompactionError("summary did not reduce history")
-        except SemanticCompactionError:
-            return None
-        summary, covered = compacted
-        return summary, covered
+        def raw_after(events, history_text=""):
+            return {
+                **raw,
+                "history": history_text,
+                "user_messages": render_user_messages(
+                    self.runtime.run.projection.contract.goal,
+                    history.user_texts(events),
+                ),
+            }
+
+        def context_budget(events):
+            candidate_raw = raw_after(events)
+            required = context.required_context(candidate_raw)
+            return (
+                context.history_budget(
+                    candidate_raw,
+                    inputs["available"],
+                    fixed_context=required,
+                    count_tokens=count_tokens,
+                    render_input=_assemble_input,
+                ),
+                context.history_token_counter(
+                    candidate_raw,
+                    required,
+                    count_tokens=count_tokens,
+                    render_input=_assemble_input,
+                ),
+            )
+
+        def context_size(events, history_text):
+            candidate_raw = raw_after(events, history_text)
+            selected = context.required_context(candidate_raw)
+            if history_text:
+                selected["history"] = history_text
+            return count_tokens(_assemble_input(candidate_raw, selected))
+
+        compacted = history.plan_compaction(
+            retain_tokens=config.recent_history_tokens,
+            token_counter=count_tokens,
+            context_budget=context_budget,
+            context_size=context_size,
+            summary_builder=build_summary,
+        )
+        if compacted is None:
+            raise SemanticCompactionError("summary did not reduce history")
+        return compacted
 
     def _history(self):
         run_log = self.runtime.run.run_log
@@ -357,35 +382,37 @@ class PromptBuilder:
             int(estimator(tool_surface.action_tools, self.count_tokens)),
         )
 
-    def _raw_sections(self, user_message, tool_surface, *, history):
+    def _raw_sections(self, tool_surface, *, history):
         projection = self.runtime.run.projection
         contract = projection.contract
-        goal = contract.goal if contract is not None else str(user_message)
-        latest = history.latest_user_guidance() if history is not None else ""
-        feedback = projection.runtime_feedback
+        if contract is None:
+            raise RuntimeError("Prompt construction requires an active TaskContract")
+        goal = contract.goal
         return {
-            "runtime_policy": render_runtime_policy(
+            "permissions": render_permissions(
                 contract,
                 tool_surface.mode,
                 tool_surface.allowed_write_paths,
             ),
-            "repository_instructions": render_repository_instructions(
-                self.repository_instructions
+            "project_instructions": render_project_instructions(
+                self.project_instructions
             ),
-            "workspace": self.runtime.workspace.text(
-                command_runner=self.runtime.dependencies.command_runner,
-                execution_context=(
-                    self.runtime.run.execution_context
-                    or ExecutionContext.standalone(
-                        max_seconds=WORKSPACE_GIT_TIMEOUT_SECONDS
-                    )
-                ),
+            "workspace": self.runtime.redact_text(
+                self.runtime.workspace.text(
+                    command_runner=self.runtime.dependencies.command_runner,
+                    execution_context=(
+                        self.runtime.run.execution_context
+                        or ExecutionContext.standalone(
+                            max_seconds=WORKSPACE_GIT_TIMEOUT_SECONDS
+                        )
+                    ),
+                )
             ),
-            "task_request": "task_request:\n" + json.dumps(goal, ensure_ascii=False),
-            **runtime_feedback_sections(feedback),
-            "latest_user_request": (
-                "latest_user_request:\n" + json.dumps(latest, ensure_ascii=False)
-                if latest
-                else ""
+            "user_messages": render_user_messages(
+                goal,
+                history.user_texts() if history is not None else (),
+            ),
+            "retry_instruction": render_retry_instruction(
+                guidance_for_failure(projection.failure)
             ),
         }

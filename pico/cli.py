@@ -163,9 +163,12 @@ def build_agent(args):
     workspace = Workspace.build(args.cwd)
     load_project_env(workspace.root, boundary=workspace.root)
     store = SessionStore(workspace.root / ".pico" / "sessions")
+    configured_context_limit = provider_env("PICO_CONTEXT_LIMIT")
     config = PicoConfig(
         mode=args.mode,
-        context_limit_tokens=int(provider_env("PICO_CONTEXT_LIMIT", "272000")),
+        context_limit_tokens=(
+            int(configured_context_limit) if configured_context_limit else None
+        ),
     )
     session_id = args.resume
     if session_id == "latest":
@@ -184,15 +187,22 @@ def build_agent(args):
 
 
 def _run_state_text(agent):
-    if agent.run.run_log is None:
+    state = agent.run_status()
+    if state["run"] is None:
         return "Run: not started"
-    task = agent.run.projection
-    return "\n".join(
-        (
-            f"Goal: {task.contract.goal}",
-            f"Status: {task.status}",
+    run = state["run"]
+    task = run["task"]
+    lines = [
+        f"Goal: {task['contract']['goal']}",
+        f"Status: {task['lifecycle']['status']}",
+        f"Phase: {run['phase']}",
+    ]
+    compacted = state["context"]["compacted"]
+    if compacted is not None and compacted["progress"]["in_progress"]:
+        lines.append(
+            "In progress: " + "; ".join(compacted["progress"]["in_progress"])
         )
-    )
+    return "\n".join(lines)
 
 
 def _outcome_summary(outcome):

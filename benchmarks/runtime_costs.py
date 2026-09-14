@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from pico import context_manager
+from pico.compaction_summary import CompactedContext
 from pico.prompt_builder import _assemble_input, render_history
 from pico.run_checkpoint import write_run_checkpoint
 from pico.run_log import RunLog
@@ -18,6 +19,7 @@ from pico.task_state import TaskContract, WriteScope
 
 COMPACTION_INTERVAL = 1_000
 TAIL_EVENTS = 100
+CONTEXT_BUDGET = 240_000
 
 
 def elapsed(call):
@@ -30,18 +32,16 @@ def build_context(restored):
     tokenizer = context_manager.Tokenizer("scripted-model")
     history = restored.history()
     raw = {
-        "runtime_policy": "runtime_policy: benchmark",
-        "repository_instructions": "",
-        "task_request": "task_request: benchmark",
-        "runtime_instruction": "",
-        "runtime_evidence": "",
-        "latest_user_request": "",
+        "permissions": "permissions: benchmark",
+        "project_instructions": "",
+        "user_messages": 'user_messages: ["benchmark"]',
+        "retry_instruction": "",
         "workspace": "Workspace: benchmark",
         "history": render_history(history),
     }
     selected = context_manager.select_context(
         raw,
-        8_000,
+        CONTEXT_BUDGET,
         section_caps=context_manager.DEFAULT_SECTION_CAPS,
         count_tokens=tokenizer.count,
         history=history,
@@ -72,8 +72,20 @@ def build_fixture(root, size):
             and sequence > 1
             and sequence % COMPACTION_INTERVAL == COMPACTION_INTERVAL - 1
         ):
-            covered = [event.event_id for event in log.effective_history_events]
-            log.append_compaction(f"summary through event {sequence}", covered)
+            log.append_compaction(
+                CompactedContext(
+                    constraints=(f"summary through event {sequence}",),
+                    progress_done=(),
+                    progress_in_progress=(),
+                    progress_blocked=(),
+                    key_decisions=(),
+                    next_steps=(),
+                    critical_context=(),
+                    covered_through_sequence=(
+                        log.context_state.recent_events[-1].sequence
+                    ),
+                )
+            )
         else:
             log.append_user_guidance(f"guidance {sequence}")
     if not checkpoint_written:
@@ -98,11 +110,17 @@ def load_measurement(root, run_id, mode):
     else:
         recovery_seconds, restored = elapsed(lambda: store.load_run(run_id))
     context_seconds, rendered = elapsed(lambda: build_context(restored))
+    guidance = [
+        event.content
+        for event in restored.history().recent_events()
+        if event.kind == "user_guidance"
+    ]
     return {
         "recovery_seconds": recovery_seconds,
         "context_seconds": context_seconds,
         "last_sequence": restored.projection.last_sequence,
-        "latest_guidance": restored.history().latest_user_guidance(),
+        "user_guidance_count": len(guidance),
+        "last_user_guidance": guidance[-1] if guidance else "",
         "context_chars": len(rendered),
         "peak_rss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
     }
@@ -135,7 +153,8 @@ def measure(size):
         checkpoint = child_measurement(root, fixture["run_id"], "checkpoint")
         if (
             full["last_sequence"] != checkpoint["last_sequence"]
-            or full["latest_guidance"] != checkpoint["latest_guidance"]
+            or full["user_guidance_count"] != checkpoint["user_guidance_count"]
+            or full["last_user_guidance"] != checkpoint["last_user_guidance"]
             or full["context_chars"] != checkpoint["context_chars"]
         ):
             raise RuntimeError("full and Checkpoint recovery diverged")

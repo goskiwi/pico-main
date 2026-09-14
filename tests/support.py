@@ -3,7 +3,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from pico import Pico, PicoConfig, SessionStore, Workspace
+from pico import AssistantTurn, Pico, PicoConfig, SessionStore, Workspace
 
 
 class ScriptedModel:
@@ -35,7 +35,7 @@ class ScriptedModel:
             action_tools, token_counter
         )
 
-    def complete_action(
+    def complete_turn(
         self,
         input_text,
         max_output_tokens,
@@ -52,7 +52,13 @@ class ScriptedModel:
             self.before_action(index)
         if not self.actions:
             raise AssertionError("ScriptedModel has no action left")
-        action = self.actions.pop(0)
+        scripted = self.actions.pop(0)
+        turn = (
+            scripted
+            if isinstance(scripted, AssistantTurn)
+            else AssistantTurn(scripted)
+        )
+        action = turn.action
         self.requests.append(
             {
                 "input_text": input_text,
@@ -70,7 +76,7 @@ class ScriptedModel:
             self._pending_call_ids = tuple(
                 call.call_id for call in action.tool_calls
             )
-        return action
+        return turn
 
     def projected_context_tokens(
         self, results, *, instructions, action_tools, token_counter

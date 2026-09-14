@@ -491,24 +491,12 @@ def tool_edit_file(
 
 def _mutation_result(relative, receipt):
     changed = receipt.changed
-    transitions = (
-        [
-            {
-                "path": relative,
-                "before_state": receipt.before_revision,
-                "after_state": receipt.after_revision,
-            }
-        ]
-        if changed
-        else []
-    )
     return ToolRunnerResult(
         content=receipt.diff or "(no changes)",
         structured={
             "path": relative,
             "before_revision": receipt.before_revision,
             "after_revision": receipt.after_revision,
-            "path_transitions": transitions,
         },
         affected_paths=(relative,) if changed else (),
         effect_scope="workspace" if changed else "none",

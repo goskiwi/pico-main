@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
@@ -13,22 +12,7 @@ from .runtime_state import ActiveRunState
 from .task_state import TaskContract, WriteScope
 
 if TYPE_CHECKING:
-    from .prompt_builder import ModelPrompt
     from .runtime import Pico
-    from .tool_runtime import ResolvedToolSurface
-
-
-@dataclass
-class AgentLoopState:
-    user_message: str
-    run_started_at: float
-    prompt_snapshot: ModelPrompt | None = None
-    tool_surface: ResolvedToolSurface | None = None
-    provider_context_tokens: int | None = None
-    overflow_recovery_attempted: bool = False
-    last_request_input_tokens: int = 0
-    invalid_output_count: int = 0
-    starting_model_request_count: int = 0
 
 
 def _state_from_snapshot(runtime: Pico, run_log):
@@ -42,36 +26,27 @@ def _state_from_snapshot(runtime: Pico, run_log):
 
 
 def load_resumable_run(runtime: Pico):
-    """Install the one validated unfinished Run named by this Session.
+    """Install the one validated unfinished Run named by this Session."""
 
-    A non-empty Session pointer is authoritative and therefore fails closed if
-    its Run Log is absent, corrupt, or belongs to another Session.  Without a
-    pointer, the Run Store may discover the latest orphaned unfinished Run.
-    """
-
-    session_id = str(runtime.session.id)
     if runtime.session.workspace_root != runtime.workspace.root:
         raise ValueError("session workspace does not match runtime workspace")
 
     pointed_run_id = str(runtime.session.active_run_id)
-    if pointed_run_id:
-        run_log = runtime.dependencies.run_store.load_run(pointed_run_id)
-    else:
-        run_log = runtime.dependencies.run_store.find_active_run(session_id)
-    if run_log is None:
+    if not pointed_run_id:
         return runtime.run
+    if not runtime.dependencies.run_store.has_events(pointed_run_id):
+        runtime.session.set_active_run("")
+        return runtime.run
+    run_log = runtime.dependencies.run_store.load_run(pointed_run_id)
 
     projection = run_log.projection
     state = _state_from_snapshot(runtime, run_log)
     if projection.terminal:
-        if pointed_run_id:
-            runtime.session.set_active_run("")
+        runtime.session.set_active_run("")
         runtime.run = ActiveRunState()
         return runtime.run
 
     runtime.run = state
-    if not pointed_run_id:
-        runtime.session.set_active_run(run_log.run_id)
     return runtime.run
 
 
@@ -112,7 +87,7 @@ class RunLifecycle:
         user_message,
     ):
         runtime = self.runtime
-        run_started_at = time.monotonic()
+        attempt_started_at = time.monotonic()
         resumed = self._resume_or_create_run(
             user_message,
         )
@@ -121,36 +96,22 @@ class RunLifecycle:
             raise RuntimeError("Run initialization requires a Run Log")
         runtime.run.execution_context = self._root_execution()
         try:
-            recovered = runtime.tools.reconcile_interrupted()
-            if recovered is not None:
-                outcome, _entry = recovered
-                paths = ", ".join(outcome.affected_paths)
-                detail = f" Affected paths observed: {paths}." if paths else ""
-                runtime.append_model_instruction(
-                    "A previous tool was interrupted and was settled without "
-                    "replaying it. Inspect the current workspace and relevant "
-                    "process state before deciding whether to repair, retry, or "
-                    f"continue.{detail}"
-                )
-            if resumed:
-                run_log.append_user_guidance(runtime.redact_text(user_message))
-
+            runtime.tools.reconcile_interrupted()
             runtime.emit_event(
                 "run_resumed" if resumed else "run_started",
                 {
                     "workspace_root": str(runtime.workspace.root),
                 },
             )
+            if resumed:
+                run_log.append_user_guidance(runtime.redact_text(user_message))
             runtime.model_client.reset_action_session()
+            runtime.dependencies.run_store.checkpoint_if_due(run_log)
         except BaseException:
             runtime.run.execution_context = None
             reload_current_run(runtime)
             raise
-        return AgentLoopState(
-            user_message=user_message,
-            run_started_at=run_started_at,
-            starting_model_request_count=runtime.run.metrics.model_request_count,
-        )
+        return attempt_started_at
 
     def _resume_or_create_run(
         self,
@@ -178,14 +139,14 @@ class RunLifecycle:
             runtime.session.id,
             runtime.dependencies.run_store,
         )
+        runtime.session.set_active_run(run_id)
+        runtime.run = ActiveRunState(run_log=run_log)
         try:
             run_log.append_user(contract)
         except BaseException:
             runtime.run = ActiveRunState()
             load_resumable_run(runtime)
             raise
-        runtime.run = ActiveRunState(run_log=run_log)
-        runtime.session.set_active_run(run_id)
         return False
 
     def _task_contract(
@@ -201,46 +162,49 @@ class RunLifecycle:
     def _root_execution(self):
         runtime = self.runtime
         return ExecutionContext.root(
-            max_seconds=runtime.config.run_timeout_seconds,
+            max_seconds=runtime.config.attempt_timeout_seconds,
         )
 
     def execution_stop(self):
         try:
             self.runtime.run.execution_context.check_active()
         except ExecutionDeadlineExceeded:
-            return "turn_timeout"
+            return "attempt_timeout"
         except ExecutionCancelled as exc:
             return str(exc) or "user_cancelled"
         return ""
 
-    def finish_success(self, final, *, run_started_at) -> RunOutcome:
+    def finish_success(self, turn, *, attempt_started_at) -> RunOutcome:
         runtime = self.runtime
         runtime.run.execution_context.check_active()
-        runtime.run.run_log.append_final(
-            final,
-            turn_duration_ms=int((time.monotonic() - run_started_at) * 1000),
+        safe_turn = runtime.redact_turn(turn)
+        runtime.run.run_log.append_assistant_turn(
+            safe_turn,
+            attempt_duration_ms=int(
+                (time.monotonic() - attempt_started_at) * 1000
+            ),
         )
-        return self._finish_session()
+        return self._finish_run()
 
-    def finish_stopped(self, stop_reason, *, run_started_at=None) -> RunOutcome:
+    def finish_stopped(self, stop_reason, *, attempt_started_at=None) -> RunOutcome:
         final, stop_reason = self._stopped_result(stop_reason)
         self.runtime.run.run_log.append_stopped(
             final,
             stop_reason,
-            turn_duration_ms=(
+            attempt_duration_ms=(
                 0
-                if run_started_at is None
-                else int((time.monotonic() - run_started_at) * 1000)
+                if attempt_started_at is None
+                else int((time.monotonic() - attempt_started_at) * 1000)
             ),
         )
         runtime = self.runtime
-        outcome = self._finish_session()
+        outcome = self._finish_run()
         if stop_reason == "user_reset":
             runtime.run = ActiveRunState()
             runtime.model_client.reset_action_session()
         return outcome
 
-    def _finish_session(self):
+    def _finish_run(self):
         runtime = self.runtime
         outcome = RunOutcome(runtime.run.projection)
         try:
@@ -254,6 +218,13 @@ class RunLifecycle:
 
         try:
             self.runtime.tools.reconcile_interrupted()
+            if self.runtime.run.projection.phase == "requesting_model":
+                self.runtime.run.run_log.append_model_failure(
+                    "interrupted",
+                    "user_reset",
+                    "user_reset",
+                    {},
+                )
             return self.finish_stopped("user_reset")
         except BaseException:
             reload_current_run(self.runtime)
@@ -267,15 +238,18 @@ class RunLifecycle:
                 "valid tool call or final answer."
             )
             stop_reason = "model_failure_limit"
+        elif stop == "provider_failure":
+            final = "Stopped after the Provider request failed after bounded retries."
+            stop_reason = "provider_failure"
         elif stop == "repeated_failure":
             final = "Stopped after the same failure repeated without relevant progress."
             stop_reason = "repeated_failure"
-        elif stop == "agent_turn_limit":
-            final = "Stopped after reaching the Agent turn limit."
-            stop_reason = "agent_turn_limit"
-        elif stop == "turn_timeout":
-            final = "Stopped after reaching the active Turn timeout."
-            stop_reason = "turn_timeout"
+        elif stop == "model_request_limit":
+            final = "Stopped after reaching the model request limit for this attempt."
+            stop_reason = "model_request_limit"
+        elif stop == "attempt_timeout":
+            final = "Stopped after reaching the active execution attempt timeout."
+            stop_reason = "attempt_timeout"
         elif stop:
             final = f"Stopped because execution was interrupted: {stop}."
             stop_reason = stop

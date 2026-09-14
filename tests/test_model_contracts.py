@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from pico import ModelAction, ToolCall
+from pico.compaction_summary import SUMMARY_TOOL
 from pico.providers.clients import _parse_turn, _result_items
 from pico.run_log import replay_events
 from tests.support import build_agent
@@ -97,6 +98,40 @@ class ModelResultTests(unittest.TestCase):
             ],
         )
 
+    def test_visible_assistant_text_is_separate_from_hidden_reasoning(self):
+        turn = _parse_turn(
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "opaque-reasoning",
+                    },
+                    {
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "I will inspect the current file.",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "read",
+                        "arguments": '{"path":"a.py"}',
+                    },
+                ],
+            },
+            self._tools(),
+        )
+
+        self.assertEqual(turn.visible_text, "I will inspect the current file.")
+        self.assertNotIn("opaque-reasoning", turn.visible_text)
+
     def test_submit_final_must_be_alone(self):
         turn = _parse_turn(
             {
@@ -157,6 +192,12 @@ class ModelResultTests(unittest.TestCase):
         self.assertEqual(turn.action.kind, "protocol_error")
         self.assertIn("at most 8", turn.action.content)
 
+    def test_compaction_schema_does_not_duplicate_the_task_goal(self):
+        parameters = SUMMARY_TOOL["parameters"]
+
+        self.assertNotIn("goal", parameters["properties"])
+        self.assertNotIn("goal", parameters["required"])
+
 class RepeatedFailureTests(unittest.TestCase):
     def test_different_edit_arguments_are_not_the_same_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,7 +213,7 @@ class RepeatedFailureTests(unittest.TestCase):
             ])
             outcome = agent.ask("Try distinct edits")
             self.assertEqual(outcome.status, "completed")
-            self.assertEqual(agent.run.projection.failure_count, 1)
+            self.assertEqual(agent.run.projection.failure.count, 1)
             self.assertEqual((root / "subject.txt").read_text(), "alpha\n")
 
     def test_argument_key_order_and_call_id_do_not_reset_identical_failures(self):
@@ -182,19 +223,74 @@ class RepeatedFailureTests(unittest.TestCase):
                            {"path": "missing.txt", "start_line": 1},
                            {"start_line": 1, "path": "missing.txt"},
                        ] * 2)]
-            agent, _ = build_agent(Path(directory), actions)
+            agent, model = build_agent(Path(directory), actions)
             outcome = agent.ask("Read a missing file")
             self.assertEqual(outcome.stop_reason, "repeated_failure")
-            self.assertEqual(agent.run.projection.failure_count, 4)
+            self.assertEqual(agent.run.projection.failure.count, 4)
+            self.assertEqual(len(model.result_batches), 3)
+            self.assertIn("retry_instruction", model.result_batches[2][0])
+            resets = [
+                event
+                for event in agent.read_run_events(outcome.run_id)
+                if event.kind == "provider_session_reset"
+            ]
+            self.assertEqual(resets, [])
+
+    def test_later_success_in_the_same_batch_cancels_the_failure_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "present.txt").write_text("ok\n", encoding="utf-8")
+            missing = {"path": "missing.txt", "start_line": 1}
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tool("read_file", missing, call_id="failure-1"),
+                    ModelAction.tool("read_file", missing, call_id="failure-2"),
+                    ModelAction.tools(
+                        (
+                            ToolCall("read_file", missing, "failure-3"),
+                            ToolCall("read_file", {"path": "present.txt"}, "success"),
+                        )
+                    ),
+                    ModelAction.final("Recovered in the same batch."),
+                ],
+            )
+
+            outcome = agent.ask("Exercise a mixed third-failure batch")
+
+            self.assertEqual(outcome.status, "completed")
+            self.assertIsNone(agent.run.projection.failure)
+            self.assertEqual(len(model.result_batches[-1]), 2)
+            self.assertTrue(
+                all("retry_instruction" not in item for item in model.result_batches[-1])
+            )
 
     def test_different_model_errors_do_not_accumulate(self):
         with tempfile.TemporaryDirectory() as directory:
-            agent, _ = build_agent(Path(directory), [
+            agent, model = build_agent(Path(directory), [
                 *[ModelAction.protocol_error(f"different error {i}") for i in range(4)],
                 ModelAction.final("Recovered."),
             ])
             outcome = agent.ask("Exercise distinct errors")
             self.assertEqual(outcome.status, "completed")
+            self.assertEqual(len(model.result_batches), 4)
+            for batch in model.result_batches:
+                self.assertEqual(
+                    batch,
+                    (
+                        (
+                            "The previous model response did not match the required "
+                            "protocol. Return valid tool calls or one complete final answer."
+                        ),
+                    ),
+                )
+                self.assertNotIn("different error", batch[0])
+            audit = [
+                event.payload["identity"]
+                for event in agent.read_run_events(outcome.run_id)
+                if event.kind == "model_failure"
+            ]
+            self.assertTrue(any("different error 0" in item for item in audit))
 
     def test_third_identical_failure_warns_and_fourth_stops(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,23 +303,39 @@ class RepeatedFailureTests(unittest.TestCase):
 
             self.assertEqual(outcome.status, "stopped")
             self.assertEqual(outcome.stop_reason, "repeated_failure")
-            self.assertEqual(agent.run.projection.failure_count, 4)
-            self.assertTrue(agent.run.projection.failure_warned)
+            self.assertEqual(agent.run.projection.failure.count, 4)
             self.assertEqual(len(model.requests), 4)
             replayed = replay_events(
                 agent.read_run_events(outcome.run_id), expected_run_id=outcome.run_id
             )
-            self.assertEqual(replayed.failure_count, 4)
-            self.assertTrue(replayed.failure_warned)
-            instructions = [
-                event.payload["instruction"]
-                for event in agent.run.run_log.events
-                if event.kind == "model_instruction"
-            ]
-            self.assertEqual(
-                sum("same failure has occurred three times" in item for item in instructions),
-                1,
+            self.assertEqual(replayed.failure.count, 4)
+            self.assertEqual(len(model.result_batches), 3)
+            self.assertNotIn(
+                "same failure has occurred three times",
+                model.result_batches[0][0],
             )
+            self.assertIn(
+                "same failure has occurred three times",
+                model.result_batches[2][0],
+            )
+
+    def test_provider_failure_stops_without_asking_the_model_to_fix_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, model = build_agent(
+                Path(directory),
+                [
+                    ModelAction.service_failed("upstream unavailable"),
+                    ModelAction.final("must not run"),
+                ],
+            )
+
+            outcome = agent.ask("Exercise Provider failure")
+
+            self.assertEqual(outcome.status, "stopped")
+            self.assertEqual(outcome.stop_reason, "provider_failure")
+            self.assertEqual(len(model.requests), 1)
+            self.assertEqual(model.result_batches, [])
+            self.assertEqual(len(model.actions), 1)
 
     def test_successful_tool_resets_the_failure_streak(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -250,7 +362,7 @@ class RepeatedFailureTests(unittest.TestCase):
             outcome = agent.ask("Exercise progress-sensitive retries")
 
             self.assertEqual(outcome.status, "completed")
-            self.assertEqual(agent.run.projection.failure_count, 1)
+            self.assertEqual(agent.run.projection.failure.count, 1)
 
 
 if __name__ == "__main__":

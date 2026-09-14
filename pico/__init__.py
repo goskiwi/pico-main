@@ -1,4 +1,5 @@
-from .contracts import ModelAction, ToolCall, ToolOutcome
+from .compaction_summary import CompactedContext
+from .contracts import AssistantTurn, ModelAction, ToolCall, ToolOutcome
 from .providers.clients import OpenAICompatibleModelClient
 from .run_projection import RunOutcome
 from .runtime import Pico, PicoConfig, SessionStore
@@ -8,6 +9,8 @@ from .tool_runtime import ToolRuntime
 from .workspace import Workspace
 
 __all__ = [
+    "AssistantTurn",
+    "CompactedContext",
     "ModelAction",
     "OpenAICompatibleModelClient",
     "Pico",

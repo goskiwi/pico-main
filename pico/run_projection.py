@@ -2,25 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from .contracts import ToolCall, ToolOutcome
+from .compaction_summary import CompactedContext
+from .contracts import EFFECT_SCOPES, AssistantTurn, ToolCall, ToolOutcome
 from .task_state import TaskContract
-
-
-@dataclass(frozen=True)
-class RuntimeFeedback:
-    instruction: str
-    evidence: str = ""
-    evidence_artifact_id: str = ""
-    event_id: str = ""
 
 
 @dataclass
 class RunMetrics:
-    turn_duration_ms: int = 0
+    attempt_duration_ms: int = 0
     model_request_count: int = 0
     executed_tool_count: int = 0
     kind_counts: dict[str, int] = field(default_factory=dict)
@@ -33,7 +27,7 @@ class RunMetrics:
         self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
         if kind == "model_requested":
             self.model_request_count += 1
-        elif kind in {"tool_exchange", "tool_settlement"}:
+        elif kind == "tool_result":
             outcome = dict(payload.get("outcome", {}) or {})
             tool = str(outcome.get("tool_name", ""))
             status = str(outcome.get("status", "unknown"))
@@ -41,12 +35,18 @@ class RunMetrics:
                 self.executed_tool_count += 1
                 self.tool_counts[tool] = self.tool_counts.get(tool, 0) + 1
             self.outcome_counts[status] = self.outcome_counts.get(status, 0) + 1
-        elif kind in {"assistant_final", "run_stopped"}:
-            self.turn_duration_ms = int(payload.get("turn_duration_ms", 0))
+        elif kind == "assistant_turn":
+            turn = AssistantTurn.from_dict(payload["turn"])
+            if turn.action.kind == "final":
+                self.attempt_duration_ms = int(
+                    payload.get("attempt_duration_ms", 0)
+                )
+        elif kind == "run_stopped":
+            self.attempt_duration_ms = int(payload.get("attempt_duration_ms", 0))
 
     def to_dict(self):
         return {
-            "turn_duration_ms": self.turn_duration_ms,
+            "attempt_duration_ms": self.attempt_duration_ms,
             "model_request_count": self.model_request_count,
             "executed_tool_count": self.executed_tool_count,
             "kind_counts": dict(sorted(self.kind_counts.items())),
@@ -57,7 +57,7 @@ class RunMetrics:
     @classmethod
     def from_dict(cls, value):
         expected = {
-            "turn_duration_ms",
+            "attempt_duration_ms",
             "model_request_count",
             "executed_tool_count",
             "kind_counts",
@@ -74,7 +74,7 @@ class RunMetrics:
             return {str(key): int(count) for key, count in raw.items()}
 
         result = cls(
-            turn_duration_ms=int(value["turn_duration_ms"]),
+            attempt_duration_ms=int(value["attempt_duration_ms"]),
             model_request_count=int(value["model_request_count"]),
             executed_tool_count=int(value["executed_tool_count"]),
             kind_counts=counts("kind_counts"),
@@ -82,7 +82,7 @@ class RunMetrics:
             outcome_counts=counts("outcome_counts"),
         )
         numeric = (
-            result.turn_duration_ms,
+            result.attempt_duration_ms,
             result.model_request_count,
             result.executed_tool_count,
             *result.kind_counts.values(),
@@ -94,37 +94,88 @@ class RunMetrics:
         return result
 
 
-@dataclass
-class PendingToolCall:
-    """Track the one durable effect intent that may need recovery."""
+@dataclass(frozen=True)
+class PendingTool:
+    """Current durable tool operation awaiting its settlement."""
 
-    call: ToolCall | None = None
+    call: ToolCall
+    effect_scope: str
+    potential_effects: tuple[dict, ...]
 
-    def check_event(self, event):
-        kind, payload = event.kind, event.payload
-        if kind == "tool_intent":
-            if self.call is not None:
-                raise ValueError("Run Log already has a pending tool intent")
-        elif kind == "tool_settlement":
-            outcome = ToolOutcome.from_dict(payload["outcome"])
-            if self.call is None:
-                raise ValueError("tool_settlement requires a pending tool intent")
-            if outcome.tool_call_id != self.call.call_id:
-                raise ValueError("tool_settlement must match the pending call id")
-            if outcome.tool_name != self.call.name:
-                raise ValueError(
-                    "tool_settlement tool name does not match the pending call"
-                )
-            if outcome.execution_state == "not_started":
-                raise ValueError("persisted tool intent cannot settle as not_started")
-        elif self.call is not None:
-            raise ValueError("pending tool intent must receive a settlement first")
+    def __post_init__(self):
+        if self.effect_scope not in EFFECT_SCOPES - {"none"}:
+            raise ValueError("pending tool requires a non-empty effect scope")
+        effects = tuple(dict(effect) for effect in self.potential_effects)
+        for effect in effects:
+            if set(effect) != {"path", "before_state"}:
+                raise ValueError("pending tool has an invalid potential effect")
+        object.__setattr__(self, "potential_effects", effects)
 
-    def apply_event(self, event):
-        if event.kind == "tool_intent":
-            self.call = event.tool_call
-        elif event.kind == "tool_settlement":
-            self.call = None
+
+@dataclass(frozen=True)
+class ActiveToolTurn:
+    turn: AssistantTurn
+    completed_call_ids: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if self.turn.action.kind != "tool":
+            raise ValueError("active tool turn requires tool calls")
+        call_ids = tuple(call.call_id for call in self.turn.action.tool_calls)
+        completed = tuple(str(call_id) for call_id in self.completed_call_ids)
+        if completed != call_ids[: len(completed)]:
+            raise ValueError("completed tool calls must be an ordered prefix")
+        object.__setattr__(self, "completed_call_ids", completed)
+
+    @property
+    def next_call(self):
+        index = len(self.completed_call_ids)
+        calls = self.turn.action.tool_calls
+        return calls[index] if index < len(calls) else None
+
+
+@dataclass(frozen=True)
+class ConsecutiveFailure:
+    """One repeated model or tool failure currently blocking progress."""
+
+    category: str
+    code: str
+    tool_name: str
+    identity: str
+    count: int = 1
+
+    def __post_init__(self):
+        if not self.category or not self.code:
+            raise ValueError("consecutive failure requires category and code")
+        if self.count < 1:
+            raise ValueError("consecutive failure count must be positive")
+
+    @property
+    def signature(self):
+        return self.category, self.code, self.tool_name, self.identity
+
+    def to_dict(self):
+        return {
+            "category": self.category,
+            "code": self.code,
+            "tool_name": self.tool_name,
+            "identity": self.identity,
+            "count": self.count,
+        }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {"category", "code", "tool_name", "identity", "count"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid consecutive failure")
+        if not all(isinstance(value[name], str) for name in expected - {"count"}):
+            raise TypeError("consecutive failure identity fields must be text")
+        return cls(
+            category=value["category"],
+            code=value["code"],
+            tool_name=value["tool_name"],
+            identity=value["identity"],
+            count=int(value["count"]),
+        )
 
 
 @dataclass
@@ -136,13 +187,11 @@ class RunProjection:
     status: str = "not_started"
     stop_reason: str = ""
     final_answer: str = ""
-    pending_tool: PendingToolCall = field(default_factory=PendingToolCall)
-    runtime_feedback: RuntimeFeedback | None = None
-    failure_key: tuple[str, str, str, str] = ()
-    failure_count: int = 0
-    failure_warned: bool = False
+    pending_tool: PendingTool | None = None
+    active_tool_turn: ActiveToolTurn | None = None
+    phase: str = "not_started"
+    failure: ConsecutiveFailure | None = None
     last_sequence: int = 0
-    last_timestamp: str = ""
 
     def check_event(self, event):
         kind = event.kind
@@ -162,33 +211,65 @@ class RunProjection:
             raise ValueError("Run Log must begin with user_message")
         if kind == "user_message" and self.contract is not None:
             raise ValueError("Run Log may contain only one user_message")
-        self.pending_tool.check_event(event)
+        self._check_execution_event(event)
+
+    def _check_execution_event(self, event):
+        if event.kind == "compaction":
+            context = CompactedContext.from_dict(event.payload["context"])
+            if context.covered_through_sequence >= event.sequence:
+                raise ValueError("compaction coverage must precede its Event")
+        if event.kind == "model_requested":
+            if self.phase != "ready_for_model":
+                raise ValueError("model request requires a ready Run")
+            return
+        if event.kind in {"assistant_turn", "model_failure"}:
+            if self.phase != "requesting_model":
+                raise ValueError(f"{event.kind} requires an active model request")
+            return
+        if event.kind == "tool_started":
+            self._check_tool_started(event)
+            return
+        if event.kind == "tool_result":
+            self._check_tool_result(event)
+            return
+        if self.pending_tool is not None or self.active_tool_turn is not None:
+            raise ValueError("active Assistant turn must receive all Tool Results first")
+
+    def _check_tool_started(self, event):
+        if self.phase != "executing_tools" or self.active_tool_turn is None:
+            raise ValueError("tool_started requires an active Assistant turn")
+        if self.pending_tool is not None:
+            raise ValueError("Run Log already has a started tool")
+        if event.payload["call_id"] != self.active_tool_turn.next_call.call_id:
+            raise ValueError("tool_started must match the next Tool Call")
+
+    def _check_tool_result(self, event):
+        outcome = ToolOutcome.from_dict(event.payload["outcome"])
+        if self.phase != "executing_tools" or self.active_tool_turn is None:
+            raise ValueError("tool_result requires an active Assistant turn")
+        call = self.active_tool_turn.next_call
+        if (outcome.tool_call_id, outcome.tool_name) != (call.call_id, call.name):
+            raise ValueError("tool_result must match the next Tool Call")
+        if self.pending_tool is not None:
+            if outcome.tool_call_id != self.pending_tool.call.call_id:
+                raise ValueError("tool_result must settle the started tool")
+            if outcome.execution_state == "not_started":
+                raise ValueError("started tool cannot settle as not_started")
 
     @property
     def terminal(self):
         return self.status in {"completed", "stopped"}
-
-    @property
-    def pending_call_id(self):
-        return self.pending_tool.call.call_id if self.pending_tool.call else ""
-
-    @property
-    def model_request_count(self):
-        return self.metrics.model_request_count
-
-    @property
-    def executed_tool_count(self):
-        return self.metrics.executed_tool_count
-
-    @property
-    def turn_duration_ms(self):
-        return self.metrics.turn_duration_ms
 
     def apply_event(self, event):
         self.check_event(event)
         return self._advance_event(event)
 
     def _advance_event(self, event):
+        result_call = (
+            self.active_tool_turn.next_call
+            if event.kind == "tool_result" and self.active_tool_turn is not None
+            else None
+        )
         self.run_id, self.session_id = (
             event.run_id,
             event.session_id,
@@ -196,63 +277,122 @@ class RunProjection:
         if event.kind == "user_message":
             self.contract = TaskContract.from_dict(event.payload["contract"])
             self.status = "running"
+            self.phase = "ready_for_model"
         self.metrics.apply_event(event)
-        self.pending_tool.apply_event(event)
-        if event.kind == "failure_observed":
-            key = tuple(
-                str(event.payload[name])
-                for name in ("category", "code", "tool_name", "identity")
-            )
-            if key == self.failure_key:
-                self.failure_count += 1
-            else:
-                self.failure_key = key
-                self.failure_count = 1
-            self.failure_warned = self.failure_count >= 3
-        elif self._event_makes_progress(event):
-            self.failure_key = ()
-            self.failure_count = 0
-            self.failure_warned = False
-        if event.kind in {"tool_exchange", "tool_intent"}:
-            self.runtime_feedback = None
-        elif event.kind == "model_instruction":
-            self.runtime_feedback = RuntimeFeedback(
-                instruction=str(event.payload["instruction"]),
-                evidence=str(event.payload["evidence"]),
-                evidence_artifact_id=str(event.payload["evidence_artifact_id"]),
-                event_id=event.event_id,
-            )
-        elif event.kind in {"assistant_final", "run_stopped"}:
-            self.runtime_feedback = None
-            self.status = "completed" if event.kind == "assistant_final" else "stopped"
-            self.stop_reason = event.payload["stop_reason"]
-            self.final_answer = str(event.payload.get("content", ""))
+        self._advance_execution(event)
+        self._advance_failure(event, result_call)
+        self._advance_terminal(event)
         self.last_sequence = event.sequence
-        self.last_timestamp = event.timestamp
         return self
 
+    def _advance_execution(self, event):
+        if event.kind in {"run_started", "run_resumed"}:
+            self.phase = "ready_for_model"
+        elif event.kind == "model_requested":
+            self.phase = "requesting_model"
+        elif event.kind == "assistant_turn":
+            turn = AssistantTurn.from_dict(event.payload["turn"])
+            if turn.action.kind == "tool":
+                self.active_tool_turn = ActiveToolTurn(turn)
+                self.phase = "executing_tools"
+            else:
+                self.status = "completed"
+                self.stop_reason = "final_answer_returned"
+                self.final_answer = turn.action.content
+                self.phase = "completed"
+        elif event.kind == "model_failure":
+            self.phase = "ready_for_model"
+        elif event.kind == "tool_started":
+            call = self.active_tool_turn.next_call
+            self.pending_tool = PendingTool(
+                call=call,
+                effect_scope=str(event.payload["effect_scope"]),
+                potential_effects=tuple(event.payload["potential_effects"]),
+            )
+        elif event.kind == "tool_result":
+            call_id = str(event.payload["outcome"]["tool_call_id"])
+            self.pending_tool = None
+            completed = (*self.active_tool_turn.completed_call_ids, call_id)
+            if len(completed) == len(self.active_tool_turn.turn.action.tool_calls):
+                self.active_tool_turn = None
+                self.phase = "ready_for_model"
+            else:
+                self.active_tool_turn = ActiveToolTurn(
+                    self.active_tool_turn.turn,
+                    completed,
+                )
+
+    def _advance_failure(self, event, result_call):
+        if event.kind == "model_failure":
+            observed = ConsecutiveFailure(
+                category="model",
+                code=str(event.payload["kind"]),
+                tool_name="",
+                identity=str(event.payload["identity"]),
+            )
+            self._apply_failure(observed)
+        elif event.kind == "tool_result":
+            outcome = ToolOutcome.from_dict(event.payload["outcome"])
+            if outcome.status != "success":
+                call = result_call
+                if call is None:
+                    raise ValueError("tool result has no active Tool Call")
+                observed = ConsecutiveFailure(
+                    category="tool",
+                    code=(outcome.failure.code if outcome.failure else outcome.status),
+                    tool_name=outcome.tool_name,
+                    identity=json.dumps(
+                        {
+                            "input": call.args,
+                            "detail": (
+                                outcome.failure.detail
+                                if outcome.failure
+                                else outcome.content
+                            ),
+                        },
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+                self._apply_failure(observed)
+            elif self._event_makes_progress(event):
+                self.failure = None
+        elif event.kind == "assistant_turn":
+            if self.failure is not None and self.failure.category == "model":
+                self.failure = None
+        elif self._event_clears_failure(event):
+            self.failure = None
+
+    def _advance_terminal(self, event):
+        if event.kind == "run_stopped":
+            self.status = "stopped"
+            self.stop_reason = event.payload["stop_reason"]
+            self.final_answer = str(event.payload.get("content", ""))
+            self.phase = "stopped"
+
+    def _apply_failure(self, observed):
+        if self.failure is not None and observed.signature == self.failure.signature:
+            observed = ConsecutiveFailure(
+                *observed.signature,
+                count=self.failure.count + 1,
+            )
+        self.failure = observed
+
     def checkpoint_state(self):
-        if self.pending_tool.call is not None:
-            raise ValueError("cannot checkpoint a pending tool intent")
+        if (
+            self.pending_tool is not None
+            or self.active_tool_turn is not None
+            or self.phase != "ready_for_model"
+        ):
+            raise ValueError("checkpoint requires a ready-for-model boundary")
         if self.status != "running" or self.contract is None:
             raise ValueError("checkpoint requires one active Run")
         return {
             "contract": self.contract.to_dict(),
+            "status": self.status,
             "metrics": self.metrics.to_dict(),
-            "runtime_feedback": (
-                {
-                    "instruction": self.runtime_feedback.instruction,
-                    "evidence": self.runtime_feedback.evidence,
-                    "evidence_artifact_id": self.runtime_feedback.evidence_artifact_id,
-                    "event_id": self.runtime_feedback.event_id,
-                }
-                if self.runtime_feedback
-                else None
-            ),
-            "failure_streak": {
-                "key": list(self.failure_key),
-                "count": self.failure_count,
-            },
+            "failure": self.failure.to_dict() if self.failure is not None else None,
         }
 
     @classmethod
@@ -263,50 +403,31 @@ class RunProjection:
         run_id,
         session_id,
         last_sequence,
-        last_timestamp,
     ):
         expected = {
             "contract",
+            "status",
             "metrics",
-            "runtime_feedback",
-            "failure_streak",
+            "failure",
         }
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid checkpoint state")
-        feedback = value["runtime_feedback"]
-        if feedback is not None and (
-            not isinstance(feedback, dict)
-            or set(feedback)
-            != {"instruction", "evidence", "evidence_artifact_id", "event_id"}
-        ):
-            raise ValueError("invalid checkpoint Runtime feedback")
-        failure = value["failure_streak"]
-        if not isinstance(failure, dict) or set(failure) != {"key", "count"}:
-            raise ValueError("invalid checkpoint failure streak")
-        if not isinstance(failure["key"], list):
-            raise TypeError("checkpoint failure key must be a list")
-        failure_key = tuple(str(item) for item in failure["key"])
-        if len(failure_key) not in {0, 4}:
-            raise ValueError("invalid checkpoint failure key")
-        failure_count = int(failure["count"])
-        if failure_count < 0:
-            raise ValueError("checkpoint failure count cannot be negative")
+        if value["status"] != "running":
+            raise ValueError("checkpoint task status must be running")
+        failure = value["failure"]
+        if failure is not None:
+            failure = ConsecutiveFailure.from_dict(failure)
         projection = cls(
             run_id=str(run_id),
             session_id=str(session_id),
             contract=TaskContract.from_dict(value["contract"]),
             metrics=RunMetrics.from_dict(value["metrics"]),
             status="running",
-            runtime_feedback=(RuntimeFeedback(**feedback) if feedback else None),
-            failure_key=failure_key,
-            failure_count=failure_count,
-            failure_warned=failure_count >= 3,
+            failure=failure,
             last_sequence=int(last_sequence),
-            last_timestamp=str(last_timestamp),
+            phase="ready_for_model",
         )
-        if bool(projection.failure_key) != bool(projection.failure_count):
-            raise ValueError("checkpoint failure count is inconsistent")
-        if projection.last_sequence < 1 or not projection.last_timestamp:
+        if projection.last_sequence < 1:
             raise ValueError("checkpoint Projection cursor is invalid")
         return projection
 
@@ -315,14 +436,19 @@ class RunProjection:
         if event.kind == "user_guidance":
             return True
         if event.kind == "provider_session_reset":
-            return event.payload.get("reason") == "repository_instructions_changed"
-        if event.kind not in {"tool_exchange", "tool_settlement"}:
+            return event.payload.get("reason") == "project_instructions_changed"
+        if event.kind != "tool_result":
             return False
         outcome = event.payload["outcome"]
         return bool(
             outcome.get("status") == "success"
             or outcome.get("side_effect_state") in {"changed", "partial"}
         )
+
+    def _event_clears_failure(self, event):
+        if self.failure is not None and self.failure.category == "model":
+            return event.kind == "assistant_turn"
+        return self._event_makes_progress(event)
 
     def summary(self):
         if self.contract is None:
@@ -341,22 +467,34 @@ class RunProjection:
                 },
             },
             "metrics": self.metrics.to_dict(),
-            "runtime_feedback": (
-                {
-                    "instruction": self.runtime_feedback.instruction,
-                    "evidence": self.runtime_feedback.evidence,
-                    "evidence_artifact_id": self.runtime_feedback.evidence_artifact_id,
-                    "event_id": self.runtime_feedback.event_id,
-                }
-                if self.runtime_feedback is not None
-                else None
+            "pending_call_id": (
+                self.pending_tool.call.call_id if self.pending_tool else ""
             ),
-            "pending_call_id": self.pending_call_id,
-            "failure_streak": {
-                "key": list(self.failure_key),
-                "count": self.failure_count,
-                "warned": self.failure_warned,
-            },
+            "phase": self.phase,
+            "active_tool_calls": (
+                [
+                    {
+                        "name": call.name,
+                        "args": dict(call.args),
+                        "call_id": call.call_id,
+                        "state": (
+                            "completed"
+                            if call.call_id
+                            in self.active_tool_turn.completed_call_ids
+                            else (
+                                "started"
+                                if self.pending_tool is not None
+                                and call.call_id == self.pending_tool.call.call_id
+                                else "not_started"
+                            )
+                        ),
+                    }
+                    for call in self.active_tool_turn.turn.action.tool_calls
+                ]
+                if self.active_tool_turn is not None
+                else []
+            ),
+            "failure": self.failure.to_dict() if self.failure is not None else None,
             "last_sequence": self.last_sequence,
         }
 

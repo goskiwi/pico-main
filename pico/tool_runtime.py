@@ -26,7 +26,6 @@ from .tool_execution import (
     classify_runner_result,
     effect_diff,
     intersect_write_scopes,
-    path_transitions,
 )
 from .workspace import clip
 
@@ -82,18 +81,17 @@ class ToolRuntime:
         run_log = runtime.run.run_log
         if run_log is None:
             return None
-        call = run_log.pending_tool_call()
-        if call is None:
+        pending = run_log.projection.pending_tool
+        if pending is None:
+            self.close_unstarted_calls("operation_interrupted")
             return None
-        intent = run_log.pending_tool_intent()
-        if intent is None:
-            raise RuntimeError("pending tool call is missing its durable intent")
+        call = pending.call
         observation_context = ExecutionContext.standalone(
             max_seconds=EFFECT_SETTLEMENT_TIMEOUT_SECONDS
         )
-        potential = list(intent.payload.get("potential_effects", []))
-        changed = []
-        transitions = []
+        potential = list(pending.potential_effects)
+        effects_before = {}
+        effects_after = {}
         for effect in potential:
             logical = str(effect.get("path", ""))
             if not logical:
@@ -106,42 +104,82 @@ class ToolRuntime:
                 path,
                 execution_context=observation_context,
             )
-            if before != after:
-                changed.append(logical)
-                transitions.append(
-                    {
-                        "path": logical,
-                        "before_state": before,
-                        "after_state": after,
-                    }
-                )
-        effect_scope = str(intent.payload.get("effect_scope", "none"))
-        unknown = effect_scope == "workspace" and not potential
-        uncertain = bool(changed or unknown)
+            effects_before[logical] = before
+            effects_after[logical] = after
+        changed = effect_diff(effects_before, effects_after)
+        effect_scope = pending.effect_scope
+        untracked = effect_scope == "workspace" and not potential
+        uncertain = bool(changed or untracked)
+        if untracked:
+            interruption_detail = (
+                "Tool execution was interrupted before a durable settlement. "
+                "Workspace changes were not tracked; inspect the current "
+                "workspace before deciding whether to retry."
+            )
+        elif changed:
+            interruption_detail = (
+                "Tool execution was interrupted before a durable settlement. "
+                f"Observed changed paths: {', '.join(changed)}. Read their current "
+                "contents before deciding whether to repair or continue."
+            )
+        else:
+            interruption_detail = (
+                "Tool execution was interrupted before a durable settlement. "
+                "No tracked path changes were observed."
+            )
         outcome = ToolOutcome(
             tool_call_id=call.call_id,
             tool_name=call.name,
             status="partial_success" if uncertain else "error",
             execution_state="failed",
             side_effect_state=(
-                "partial" if changed else ("unknown" if unknown else "none")
+                "partial" if changed else ("untracked" if untracked else "none")
             ),
             content="",
             failure=FailureInfo(
                 "operation_interrupted",
-                "Tool execution was interrupted before a durable settlement.",
+                interruption_detail,
                 "no_retry" if uncertain else "retry_after_change",
             ),
             affected_paths=tuple(changed),
-            effect_scope=effect_scope if uncertain else "none",
-            structured={"path_transitions": transitions},
+            structured=self._revision_details(
+                effects_before,
+                effects_after,
+                changed,
+            ),
         )
         outcome = self.prepare_outcome(outcome)
-        entry = run_log.append_tool_settlement(
+        entry = run_log.append_tool_result(
             outcome,
             recovered_from_interruption=True,
         )
+        self.close_unstarted_calls("operation_interrupted")
         return outcome, entry
+
+    def close_unstarted_calls(self, reason="operation_interrupted"):
+        """Close the unexecuted suffix of one interrupted Assistant turn."""
+
+        run_log = self.runtime.run.run_log
+        if run_log is None or run_log.projection.pending_tool is not None:
+            return ()
+        outcomes = []
+        while run_log.projection.active_tool_turn is not None:
+            call = run_log.projection.active_tool_turn.next_call
+            outcome = self._outcome(
+                call,
+                "rejected",
+                "not_started",
+                "none",
+                "",
+                failure=FailureInfo(
+                    str(reason),
+                    "Tool Call was not started because its Assistant turn was interrupted.",
+                    "retry_after_change",
+                ),
+            )
+            run_log.append_tool_result(outcome)
+            outcomes.append(outcome)
+        return tuple(outcomes)
 
     def _build_registry(self):
         runtime = self.runtime
@@ -257,18 +295,18 @@ class ToolRuntime:
             raise RuntimeError("tool execution requires an active Run")
         if call_id is None:
             return run_log
-        pending = run_log.pending_tool_call()
+        pending = run_log.projection.pending_tool
         if pending is None:
-            raise RuntimeError("active Run has no pending tool intent")
-        if str(call_id) != pending.call_id:
+            raise RuntimeError("active Run has no started tool")
+        if str(call_id) != pending.call.call_id:
             raise RuntimeError("tool execution does not match the pending Run call")
         return run_log
 
     @classmethod
-    def _record_tool_intent(cls, agent, call, *, plan, potential_effects):
+    def _record_tool_started(cls, agent, call, *, plan, potential_effects):
         run_log = cls._recorded_run_log(agent)
-        return run_log.append_tool_intent(
-            cls._redacted_call(agent, call),
+        return run_log.append_tool_started(
+            call.call_id,
             effect_scope=plan.effect_scope,
             potential_effects=redact_facts(
                 potential_effects, agent.redact_text
@@ -277,22 +315,9 @@ class ToolRuntime:
         )
 
     @classmethod
-    def _record_tool_settlement(cls, agent, outcome):
+    def _record_tool_result(cls, agent, outcome):
         run_log = cls._recorded_run_log(agent, outcome.tool_call_id)
-        return run_log.append_tool_settlement(outcome)
-
-    @classmethod
-    def _record_tool_exchange(cls, agent, call, outcome):
-        run_log = cls._recorded_run_log(agent)
-        return run_log.append_tool_exchange(cls._redacted_call(agent, call), outcome)
-
-    @staticmethod
-    def _redacted_call(agent, call):
-        return ToolCall(
-            call.name,
-            redact_facts(call.args, agent.redact_text),
-            call.call_id,
-        )
+        return run_log.append_tool_result(outcome)
 
     @staticmethod
     def _plan_execution(tool, context, args):
@@ -373,17 +398,19 @@ class ToolRuntime:
             result.content,
             failure=result.failure,
             affected_paths=paths,
-            effect_scope=result.effect_scope,
             structured=result.structured,
         )
 
     @staticmethod
-    def _observed_structured(structured, transitions):
-        observed = dict(structured or {})
-        observed.pop("path_transitions", None)
-        if transitions:
-            observed["path_transitions"] = list(transitions)
-        return observed
+    def _revision_details(before, after, paths):
+        if len(paths) != 1:
+            return {}
+        path = paths[0]
+        return {
+            "path": path,
+            "before_revision": before[path],
+            "after_revision": after[path],
+        }
 
     def _observed_exception_outcome(
         self,
@@ -392,7 +419,6 @@ class ToolRuntime:
         *,
         effects_before,
         effects_after,
-        potential_scope,
     ):
         typed = error if isinstance(error, ToolFailureError) else None
         if typed is not None:
@@ -405,14 +431,9 @@ class ToolRuntime:
                 "none",
                 "",
                 failure=typed.failure,
-                structured=self._observed_structured(typed.structured, ()),
+                structured=typed.structured,
             )
         paths = effect_diff(effects_before, effects_after)
-        transitions = path_transitions(
-            effects_before,
-            effects_after,
-            paths,
-        )
         uncertain = bool(paths)
         return self._outcome(
             call,
@@ -426,10 +447,10 @@ class ToolRuntime:
                 "no_retry" if uncertain else "retry_after_change",
             ),
             affected_paths=paths,
-            effect_scope=potential_scope if paths else "none",
-            structured=self._observed_structured(
-                {},
-                transitions,
+            structured=self._revision_details(
+                effects_before,
+                effects_after,
+                paths,
             ),
         )
 
@@ -447,7 +468,7 @@ class ToolRuntime:
         agent = self.runtime
         workspace_effect = plan.effect_scope == "workspace"
         if workspace_effect:
-            self._record_tool_intent(
+            self._record_tool_started(
                 agent,
                 call,
                 plan=plan,
@@ -475,34 +496,37 @@ class ToolRuntime:
                     exc,
                     effects_before=effects_before,
                     effects_after=effects_after,
-                    potential_scope=plan.effect_scope,
                 )
             else:
                 typed_error = exc if isinstance(exc, ToolFailureError) else None
-                unknown = bool(not typed_error and workspace_effect)
+                untracked = bool(not typed_error and workspace_effect)
                 outcome = self._outcome(
                     call,
-                    "partial_success" if unknown else "error",
+                    "partial_success" if untracked else "error",
                     "failed",
-                    "unknown" if unknown else "none",
+                    "untracked" if untracked else "none",
                     "",
                     failure=(typed_error.failure if typed_error else None)
                     or FailureInfo(
-                        "tool_effect_unknown" if unknown else "tool_failed",
-                        str(exc),
-                        "no_retry" if unknown else "retry_after_change",
+                        "tool_effect_untracked" if untracked else "tool_failed",
+                        (
+                            f"{exc}. Workspace changes were not tracked; inspect "
+                            "the current workspace before deciding whether to retry."
+                            if untracked
+                            else str(exc)
+                        ),
+                        "no_retry" if untracked else "retry_after_change",
                     ),
-                    effect_scope=plan.effect_scope,
                     structured=(
                         typed_error.structured
                         if typed_error
-                        else {"path_transitions": []}
+                        else {}
                     ),
                 )
         if workspace_effect:
-            self._record_tool_settlement(agent, outcome)
+            self._record_tool_result(agent, outcome)
         else:
-            self._record_tool_exchange(agent, call, outcome)
+            agent.run.run_log.append_tool_result(outcome)
         return outcome
 
     def execute_call(self, call, surface):
@@ -517,8 +541,16 @@ class ToolRuntime:
             raise RuntimeError("tool execution requires an active Run")
         if runtime.run.projection.terminal:
             raise RuntimeError("terminal Run cannot execute a tool call")
-        if runtime.run.run_log.pending_tool_call() is not None:
-            raise RuntimeError("a tool intent is already pending")
+        if runtime.run.projection.pending_tool is not None:
+            raise RuntimeError("a tool is already started")
+        active_turn = runtime.run.projection.active_tool_turn
+        if active_turn is None or active_turn.next_call is None:
+            raise RuntimeError("tool execution requires an active Assistant turn")
+        if (call.call_id, call.name) != (
+            active_turn.next_call.call_id,
+            active_turn.next_call.name,
+        ):
+            raise RuntimeError("tool execution does not match the next Tool Call")
         return self._execute(call, surface)
 
     def _check_plan_scope(self, call, plan, allowed_paths):
@@ -646,7 +678,7 @@ class ToolRuntime:
             failure=FailureInfo(code, detail, recovery),
             structured=structured,
         )
-        self._record_tool_exchange(self.runtime, call, outcome)
+        self.runtime.run.run_log.append_tool_result(outcome)
         return outcome
 
     def _outcome(
@@ -659,7 +691,6 @@ class ToolRuntime:
         *,
         failure=None,
         affected_paths=(),
-        effect_scope="none",
         structured=None,
     ):
         return self.prepare_outcome(ToolOutcome(
@@ -672,7 +703,6 @@ class ToolRuntime:
             structured=dict(structured or {}),
             failure=failure,
             affected_paths=tuple(affected_paths),
-            effect_scope=effect_scope if side_effect_state != "none" else "none",
         ))
 
     def prepare_outcome(self, outcome):

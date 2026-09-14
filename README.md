@@ -31,13 +31,14 @@ uv run pico --cwd /path/to/repo --resume latest "继续任务"
 PICO_OPENAI_API_KEY=your-key
 PICO_OPENAI_API_BASE=https://api.deepseek.com
 PICO_OPENAI_MODEL=deepseek-v4-flash
+PICO_MODEL_CONTEXT_WINDOW=1000000
 PICO_OPENAI_REASONING_EFFORT=none
 ```
 
 当前生产接入只实现 OpenAI-compatible **Responses API**，不是 Chat
 Completions、Anthropic `/messages` 或 OpenAI Agents SDK。更换 Base URL 的
 前提是服务端真正兼容 Responses 的流式事件、函数调用和函数结果格式；Pico
-内部以 `ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构。
+内部以 `AssistantTurn`、`ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构。
 
 CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度和请求超时通过环境变量配置。
 
@@ -59,22 +60,22 @@ Session 不保存完整对话：
 ├── session.json                 # id / workspace_root / active_run_id
 └── runs/<run-id>/
     ├── events.jsonl             # 当前任务的完整执行历史
-    └── artifacts/               # 大工具输出和 Runtime 反馈
+    └── artifacts/               # 大工具输出
 ```
 
-一个 Session 可以连续运行多个任务；`active_run_id` 只在任务未完成时指向需要恢复的 Run。
+一个 Session 可以容纳多个 Run；`active_run_id` 是唯一恢复指针，并在首个 Run Event 之前持久化。指针存在但 Event 尚未写入时视为空启动并清除，不扫描或猜测 orphan Run。已完成 Run 之间不继承对话历史，后续任务只从当前 Workspace 重新观察代码事实；只有恢复同一个未完成 Run 时才继续原任务上下文。
 
-长 Run 在没有 Pending Intent 的稳定边界保存可重建 Checkpoint。Checkpoint 只保存一次 Run 身份与日志游标，以及恢复所需的最小状态和有效 History。恢复优先读取
+长 Run 在 `ready_for_model` 稳定边界保存可重建 Checkpoint。Checkpoint 直接保存 RunProjection、ContextState 和日志游标；ContextState 只包含滚动摘要与摘要后的近期完整事件。恢复优先读取
 这些状态和 Checkpoint 后的 Event 尾部；Checkpoint 缺失或损坏时从
 当前格式的完整 RunLog 重建。旧 Run 格式不迁移、不兼容。
 
 ## 上下文与压缩
 
-`context_limit_tokens` 是 Pico 主动采用的 Context 上限；模型 Adapter 可以另行声明模型实际窗口，Runtime 取两者较小值。默认上限为 272,000 Token，`max_output_tokens` 为 32,000，因而在约 240,000 Token 时触发压缩；`recent_history_tokens` 为 20,000。摘要输出上限是 Compaction 内部常量，最多 16,000 Token 且不会超过当前模型输出上限。这些上限不会预先占用或产生对应数量的计费 Token。
+`PicoConfig.context_limit_tokens` 是可选的 Runtime 策略上限，默认不限制模型声明的窗口；模型 Adapter 负责声明实际窗口。`Pico.effective_context_limit_tokens` 是已有上限的只读派生值：两者都有时取较小值，只提供一方时使用该值，两者都缺失时初始化失败。`max_output_tokens` 默认为 32,000，`recent_history_tokens` 为 20,000。摘要输出上限是 Compaction 内部常量，最多 16,000 Token 且不会超过当前模型输出上限。这些上限不会预先占用或产生对应数量的计费 Token。
 
 CLI 可通过 `PICO_CONTEXT_LIMIT` 设置 Pico 上限，通过 `PICO_MODEL_CONTEXT_WINDOW` 向模型 Adapter 声明当前模型支持的窗口。模型窗口由用户依据 Provider 文档配置，不自动推断；未配置时，Runtime 只使用 Pico 上限，不能保证适配任意模型。更换模型时需同步更新窗口配置。
 
-例如当前 DeepSeek-V4-Flash 可配置 `PICO_MODEL_CONTEXT_WINDOW=1000000`、`PICO_CONTEXT_LIMIT=272000`。旧的 Context、Reserve 和 Summary 配置字段均已移除，不提供别名。
+例如当前 DeepSeek-V4-Flash 可配置 `PICO_MODEL_CONTEXT_WINDOW=1000000`；只有希望 Pico 主动采用更小窗口时才设置 `PICO_CONTEXT_LIMIT`。旧的 Context、Reserve 和 Summary 配置字段均已移除，不提供别名。
 
 Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔记：
 
@@ -82,37 +83,39 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 完整 RunLog
 → 上一次摘要 + 新增的较早历史
 → 新的结构化摘要
-→ 摘要 + 近期完整交互 + 最新用户请求 + 当前真实状态
+→ 摘要 + 近期用户指导与完整工具事务 + 当前真实状态
 ```
 
-摘要固定保存 Goal、Constraints & Preferences、Progress、Key Decisions、Next Steps 和 Critical Context。较新的用户纠正覆盖冲突的旧摘要；只有实际工具结果可以证明执行事实。工具调用与结果按完整事务保留，旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。当前 Workspace 和根 `AGENTS.md` 每次由 Runtime 获取；不发现或加载嵌套规则。摘要是有损历史上下文，不能作为权限或执行事实。
+`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。Runtime 从被压缩的成功工具结果中确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。已提交的 CompactedContext 和确定性文件集合是压缩后必保上下文；必要压缩失败时不发送残缺 Prompt。
 
 ## 一次任务
 
 1. CLI 创建或加载 Session，通过唯一的 `Pico(..., session=session)` 入口组装 Runtime。
 2. `Pico.ask()` 创建新 Run，恢复时继续 Session 指向的未完成 Run。
 3. `PromptBuilder` 从 RunLog 投影出模型需要的上下文。
-4. 模型返回工具调用或 `submit_final`。
-5. `ToolRuntime` 把只读与执行前拒绝保存为单条 Exchange；潜在副作用先提交 Intent，执行后提交 Settlement。
-6. 中断恢复只检查未完成 Intent 的当前状态，不自动重放副作用操作。
-7. `submit_final` 作为模型的结束声明；Runtime 确认没有未结算工具且任务未取消后记录终态。
+4. Runtime 先记录完整 `assistant_turn`，其中包含公开文字与有序 Tool Call。
+5. 所有工具统一返回 `tool_result`；潜在副作用在执行前额外提交 `tool_started`。
+6. 中断恢复根据 Assistant Turn、已完成结果和 Started 状态区分 completed、started 与 not_started，不盲目重放。
+7. `submit_final` 形成 final Assistant Turn；Runtime 确认任务未取消后记录终态。
+
+Run 表示可跨进程恢复的持久任务；每次首次执行或 Resume 是一个 Attempt。模型请求数量和执行期限按 Attempt 限制，崩溃前已经持久化的工具事实仍属于同一个 Run。
 
 ## 工具与安全边界
 
 主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。模型每轮可以返回最多八个彼此独立的调用，Runtime 按模型顺序串行执行并一次返回全部结果；`submit_final` 必须独占一轮。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
 
-完整工具事实保存在 RunLog 中；当前任务、Pending Tool、失败记忆和 Metrics 由 RunProjection 重建。
+完整执行事实保存在 RunLog 中；当前任务、Assistant Turn、Pending Tool、连续失败状态和 Metrics 由 RunProjection 重建。模型纠错提示由失败状态临时生成。Checkpoint 只在 `ready_for_model` 稳定边界生成，直接保存 RunProjection、ContextState 和日志游标；崩溃中的阶段由 Tail Replay 恢复。状态查询只读取这两个现成视图，不维护第三份状态。
 
 - Ask 模式只读。
 - Code 模式中的命令和文件修改需要审批。
 - Auto 模式允许受限文件修改并开放通用命令；由于 Pico 没有 Shell 沙箱，`run_shell` 仍然要求用户审批。
-- `run_shell` 可以产生正常的测试、构建和 snapshot 输出；审批是这类主机副作用的授权边界。模型应优先用文件工具修改源码，以获得精确替换、原子写入和可恢复记录。
+- `run_shell` 可以产生正常的测试、构建和 snapshot 输出；审批是这类主机副作用的授权边界。Runtime 不归因 Shell 修改的具体路径，因此其结果标记为 `untracked`，而不是声称没有副作用。模型应优先用文件工具修改源码，以获得精确替换、原子写入和可恢复记录。
 - 文件路径必须位于 Workspace 内，`.git`、`.pico` 和真实 `.env` 文件不对模型开放；`.env.example`、`.env.sample` 仍可读取。
 - `edit_file` 在执行时读取当前文件，只替换唯一匹配的 `old_text`，并通过同目录临时文件原子替换。它不把模型早先读取的整文件 Revision 作为局部修改的写入条件。
 - 执行意图和修改前状态标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
 - 模型负责选择并运行相关测试，Runtime 不把普通测试结果冒充为自然语言任务的独立验收；恢复出的不确定副作用作为事实反馈模型，由模型观察当前工作区后继续，不自动重放原工具。
-- 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续三次相同失败提示改变策略，第四次停止。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
-- Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受 Run 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；总内存上限为 1 MiB，stdout/stderr 各保留固定大小的 Head 与 Tail，并报告中间省略字节。超时会清理进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
+- 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续第三次相同工具失败把固定 `retry_instruction` 附在对应 Tool Result 中，不重建 Context，第四次停止。当前多工具批次若随后取得成功，失败 streak 与尚未发送的提醒一起取消。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
+- Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受当前 Attempt 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；总内存上限为 1 MiB，stdout/stderr 各保留固定大小的 Head 与 Tail，并报告中间省略字节。超时会先终止再强制清理整个进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
 
 ## 阅读顺序
 

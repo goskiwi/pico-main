@@ -65,8 +65,10 @@ def exercise(stage, *, deadline=False):
     observed = {}
     def request():
         try:
-            observed["action"] = client.complete_action("first", 100, instructions="test", action_tools=tools,
-                                                       execution_context=context).kind
+            observed["action"] = client.complete_turn(
+                "first", 100, instructions="test", action_tools=tools,
+                execution_context=context,
+            ).action.kind
         except Exception as exc:  # noqa: BLE001 - return worker failures to the test thread
             observed["exception"] = type(exc).__name__
         finally:
@@ -89,8 +91,10 @@ def exercise(stage, *, deadline=False):
         if worker.is_alive():
             raise RuntimeError("request did not settle after server release")
         client.reset_action_session()  # Same Pico client; new task after cancellation.
-        action = client.complete_action("second", 100, instructions="test", action_tools=tools,
-                                        execution_context=ExecutionContext.root(max_seconds=3))
+        action = client.complete_turn(
+            "second", 100, instructions="test", action_tools=tools,
+            execution_context=ExecutionContext.root(max_seconds=3),
+        ).action
         return {"stage": stage, "cancel_returned_within_1s": prompt_cancel,
                 "cancel_exception": observed.get("exception"),
                 "cancel_elapsed_seconds": round(observed["finished_at"] - cancelled_at, 3),
@@ -191,14 +195,14 @@ class HttpCancellationTests(unittest.TestCase):
             ) as create:
                 transport = None
                 for _index in range(2):
-                    action = client.complete_action(
+                    action = client.complete_turn(
                         "request",
                         100,
                         instructions="test",
                         action_tools=tools,
                         execution_context=ExecutionContext.root(max_seconds=3),
                     )
-                    self.assertEqual(action.kind, "final")
+                    self.assertEqual(action.action.kind, "final")
                     current = client._sdk_client._client
                     transport = current if transport is None else transport
                     self.assertIs(current, transport)

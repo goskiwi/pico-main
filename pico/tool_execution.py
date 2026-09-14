@@ -17,20 +17,9 @@ def effect_diff(before, after):
     ]
 
 
-def path_transitions(before, after, paths):
-    return [
-        {
-            "path": path,
-            "before_state": before[path],
-            "after_state": after[path],
-        }
-        for path in paths
-    ]
-
-
 def classify_runner_result(failure, affected_paths, effect_scope):
     paths = list(affected_paths)
-    unknown = not paths and effect_scope != "none"
+    untracked = not paths and effect_scope != "none"
     status = (
         "success"
         if failure is None
@@ -39,6 +28,6 @@ def classify_runner_result(failure, affected_paths, effect_scope):
     side_effect = (
         "partial"
         if failure is not None and paths
-        else ("unknown" if unknown else ("changed" if paths else "none"))
+        else ("untracked" if untracked else ("changed" if paths else "none"))
     )
     return status, side_effect, paths

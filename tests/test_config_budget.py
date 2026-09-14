@@ -21,7 +21,8 @@ class ContextBudgetTests(unittest.TestCase):
 
             agent = self._agent(root, model, PicoConfig())
 
-            self.assertEqual(agent.context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+            self.assertFalse(hasattr(agent, "context_limit_tokens"))
             self.assertEqual(agent.config.max_output_tokens, 32_000)
             self.assertEqual(agent.config.recent_history_tokens, 20_000)
 
@@ -37,7 +38,28 @@ class ContextBudgetTests(unittest.TestCase):
                 PicoConfig(context_limit_tokens=128_000),
             )
 
-            self.assertEqual(agent.context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+
+    def test_missing_model_and_policy_context_limits_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = ScriptedModel([])
+
+            with self.assertRaisesRegex(ValueError, "context window is unknown"):
+                self._agent(root, model, PicoConfig())
+
+    def test_policy_context_limit_is_used_when_model_limit_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = ScriptedModel([])
+
+            agent = self._agent(
+                root,
+                model,
+                PicoConfig(context_limit_tokens=128_000),
+            )
+
+            self.assertEqual(agent.effective_context_limit_tokens, 128_000)
 
     def test_effective_model_window_must_fit_output_and_recent_history(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,6 +88,8 @@ class ContextBudgetTests(unittest.TestCase):
         for removed in (
             {"max_new_tokens": 1_000},
             {"turn_timeout_seconds": 60},
+            {"run_timeout_seconds": 60},
+            {"max_agent_turns": 8},
             {"context_budget_tokens": 128_000},
             {"model_context_window_tokens": 128_000},
             {"compaction_reserve_tokens": 32_000},

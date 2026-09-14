@@ -31,14 +31,20 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.strip(), "0")
 
-    def test_successful_sigterm_does_not_fall_through_to_sigkill(self):
+    def test_successful_sigterm_still_closes_the_descendant_process_group(self):
         process = mock.Mock(pid=123)
         process.wait.return_value = 0
 
         with mock.patch.object(CommandRunner, "_signal_process_group") as send:
             CommandRunner._stop_process_group(process)
 
-        send.assert_called_once_with(process, signal.SIGTERM)
+        self.assertEqual(
+            send.call_args_list,
+            [
+                mock.call(process, signal.SIGTERM),
+                mock.call(process, signal.SIGKILL),
+            ],
+        )
 
     def test_detached_descendant_does_not_block_pipe_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,6 +192,29 @@ class CommandRunnerTests(unittest.TestCase):
             self.assertIsNone(result.returncode)
             self.assertEqual(result.stop_reason, "deadline_exceeded")
             self.assertIn("started", result.stdout)
+
+    def test_timeout_kills_descendant_that_ignores_sigterm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            child = (
+                "import pathlib,signal,time; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(1); pathlib.Path('survived.txt').write_text('alive')"
+            )
+            leader = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                "time.sleep(30)"
+            )
+
+            result = CommandRunner(directory).run(
+                (sys.executable, "-c", leader),
+                cwd=directory,
+                timeout=0.2,
+            )
+            time.sleep(1.2)
+
+            self.assertEqual(result.stop_reason, "deadline_exceeded")
+            self.assertFalse((Path(directory) / "survived.txt").exists())
 
 
 class RunShellExecutionTests(unittest.TestCase):

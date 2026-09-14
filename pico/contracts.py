@@ -13,7 +13,7 @@ ACTION_KINDS = frozenset(
 )
 TOOL_STATUSES = frozenset({"success", "error", "rejected", "partial_success"})
 EXECUTION_STATES = frozenset({"not_started", "completed", "failed"})
-SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "unknown"})
+SIDE_EFFECT_STATES = frozenset({"none", "changed", "partial", "untracked"})
 EFFECT_SCOPES = frozenset({"none", "workspace"})
 TOOL_ARTIFACT_ID_PATTERN = r"^tool_[a-f0-9]{16}_[a-f0-9]{10}$"
 TOOL_ARTIFACT_ID = re.compile(TOOL_ARTIFACT_ID_PATTERN)
@@ -28,21 +28,17 @@ RECOVERY_CONDITIONS = frozenset(
 )
 
 
-def _validate_effect_facts(side_effect_state, affected_paths, effect_scope):
+def _validate_effect_facts(side_effect_state, affected_paths):
     if side_effect_state == "none":
         if affected_paths:
             raise ValueError("effect-free outcome cannot contain affected paths")
-        if effect_scope != "none":
-            raise ValueError("effect-free outcome requires none effect scope")
         return
     if side_effect_state in {"changed", "partial"}:
         if not affected_paths:
             raise ValueError("known side effects require affected paths")
-        if effect_scope == "none":
-            raise ValueError("known side effects require an effect scope")
         return
-    if effect_scope == "none":
-        raise ValueError("unknown side effects require an effect scope")
+    if affected_paths:
+        raise ValueError("untracked side effects cannot name affected paths")
 
 
 @dataclass(frozen=True)
@@ -152,6 +148,77 @@ class ModelAction:
     def protocol_error(cls, content: str):
         return cls("protocol_error", content=str(content))
 
+    def to_dict(self):
+        return {
+            "kind": self.kind,
+            "tool_calls": [
+                {
+                    "name": call.name,
+                    "args": dict(call.args),
+                    "call_id": call.call_id,
+                }
+                for call in self.tool_calls
+            ],
+            "content": self.content,
+        }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {"kind", "tool_calls", "content"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid ModelAction")
+        if not isinstance(value["tool_calls"], list):
+            raise TypeError("ModelAction tool_calls must be a list")
+        return cls(
+            kind=str(value["kind"]),
+            tool_calls=tuple(
+                ToolCall(
+                    name=str(call["name"]),
+                    args=dict(call["args"]),
+                    call_id=str(call["call_id"]),
+                )
+                for call in value["tool_calls"]
+            ),
+            content=str(value["content"]),
+        )
+
+
+@dataclass(frozen=True)
+class AssistantTurn:
+    """Provider-neutral accepted or failed Assistant response."""
+
+    action: ModelAction
+    visible_text: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not isinstance(self.action, ModelAction):
+            raise TypeError("assistant turn requires a ModelAction")
+        if not isinstance(self.visible_text, str):
+            raise TypeError("assistant visible text must be text")
+        if not isinstance(self.usage, dict):
+            raise TypeError("assistant turn usage must be an object")
+
+    def to_dict(self):
+        return {
+            "action": self.action.to_dict(),
+            "visible_text": self.visible_text,
+            "usage": dict(self.usage),
+        }
+
+    @classmethod
+    def from_dict(cls, value):
+        expected = {"action", "visible_text", "usage"}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("invalid AssistantTurn")
+        if not isinstance(value["usage"], dict):
+            raise TypeError("AssistantTurn usage must be an object")
+        return cls(
+            action=ModelAction.from_dict(value["action"]),
+            visible_text=str(value["visible_text"]),
+            usage=dict(value["usage"]),
+        )
+
 
 @dataclass(frozen=True)
 class FailureInfo:
@@ -213,7 +280,6 @@ class ToolOutcome:
     structured: dict[str, Any] = field(default_factory=dict)
     failure: FailureInfo | None = None
     affected_paths: tuple[str, ...] = ()
-    effect_scope: str = "none"
     artifact_id: str = ""
 
     def __post_init__(self):
@@ -227,14 +293,14 @@ class ToolOutcome:
             raise ValueError(f"invalid execution state: {self.execution_state}")
         if self.side_effect_state not in SIDE_EFFECT_STATES:
             raise ValueError(f"invalid side-effect state: {self.side_effect_state}")
-        if self.effect_scope not in EFFECT_SCOPES:
-            raise ValueError(f"invalid effect scope: {self.effect_scope}")
         if not isinstance(self.artifact_id, str):
             raise TypeError("tool artifact id must be text")
         if self.artifact_id and not TOOL_ARTIFACT_ID.fullmatch(self.artifact_id):
             raise ValueError("invalid tool artifact id")
         if not isinstance(self.structured, dict):
             raise TypeError("tool outcome structured result must be an object")
+        if "path_transitions" in self.structured:
+            raise ValueError("path_transitions is not part of ToolOutcome")
         if self.status == "success" and self.execution_state != "completed":
             raise ValueError("successful outcome must complete execution")
         if self.status == "rejected" and self.execution_state != "not_started":
@@ -243,9 +309,7 @@ class ToolOutcome:
             raise ValueError(f"{self.status} outcome requires failure information")
         if self.status == "success" and self.failure is not None:
             raise ValueError("successful outcome cannot contain failure information")
-        _validate_effect_facts(
-            self.side_effect_state, self.affected_paths, self.effect_scope
-        )
+        _validate_effect_facts(self.side_effect_state, self.affected_paths)
 
     def to_dict(self):
         return {
@@ -258,7 +322,6 @@ class ToolOutcome:
             "structured": dict(self.structured),
             "failure": self.failure.to_dict() if self.failure else None,
             "affected_paths": list(self.affected_paths),
-            "effect_scope": self.effect_scope,
             "artifact_id": self.artifact_id,
         }
 
@@ -274,7 +337,6 @@ class ToolOutcome:
             "structured",
             "failure",
             "affected_paths",
-            "effect_scope",
             "artifact_id",
         }
         if not isinstance(value, dict) or set(value) != expected:
@@ -296,11 +358,10 @@ class ToolOutcome:
             structured=dict(value["structured"]),
             failure=FailureInfo.from_dict(failure) if failure is not None else None,
             affected_paths=tuple(str(item) for item in value["affected_paths"]),
-            effect_scope=str(value["effect_scope"]),
             artifact_id=value["artifact_id"],
         )
 
-    def model_payload(self):
+    def model_payload(self, *, retry_instruction=""):
         payload = {
             "status": self.status,
             "execution_state": self.execution_state,
@@ -308,10 +369,7 @@ class ToolOutcome:
         }
         if self.content:
             payload["content"] = self.content
-        # Keep recovery transactions in the durable outcome, not in every
-        # model response. All other tool-specific diagnostics remain visible.
-        structured = {key: value for key, value in self.structured.items()
-                      if key != "path_transitions"}
+        structured = dict(self.structured)
         if self.tool_name in {"write_file", "edit_file"} and self.status == "success":
             revision = structured.pop("after_revision", None)
             structured.pop("before_revision", None)
@@ -326,14 +384,14 @@ class ToolOutcome:
             and self.affected_paths == (structured.get("path"),)
         ):
             payload["affected_paths"] = list(self.affected_paths)
-        if self.effect_scope != "none":
-            payload["effect_scope"] = self.effect_scope
         if self.artifact_id:
             payload["artifact_id"] = self.artifact_id
+        if retry_instruction:
+            payload["retry_instruction"] = str(retry_instruction)
         return payload
 
-    def render_for_model(self):
-        payload = self.model_payload()
+    def render_for_model(self, *, retry_instruction=""):
+        payload = self.model_payload(retry_instruction=retry_instruction)
 
         def encode():
             return json.dumps(payload, ensure_ascii=False, sort_keys=True,

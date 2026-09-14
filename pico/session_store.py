@@ -1,4 +1,4 @@
-"""Strict, atomic Session persistence; run evidence lives elsewhere."""
+"""Strict, atomic Session manifest; Run facts live in each RunStore."""
 
 import json
 import re
@@ -119,7 +119,7 @@ class SessionStore:
         )
 
     def latest_active(self):
-        """Return the Session with the newest pointed or orphaned unfinished Run."""
+        """Return the Session whose pointed unfinished Run changed most recently."""
 
         directories = [path for path in self.root.iterdir()
                        if path.is_dir() and not path.is_symlink()
@@ -127,34 +127,29 @@ class SessionStore:
         candidates = []
         for path in directories:
             session = self.load(path.name)
+            if not session.active_run_id:
+                continue
             run_store = self.runs(session.id)
-            run_log = None
-            if session.active_run_id:
-                run_log = run_store.load_run(session.active_run_id)
-                if run_log.projection.session_id != session.id:
-                    raise ValueError("active Run does not belong to this Session")
-                if run_log.projection.terminal:
-                    session.set_active_run("")
-                    run_log = run_store.find_active_run(session.id)
-            else:
-                run_log = run_store.find_active_run(session.id)
-            if run_log is None:
+            if not run_store.has_events(session.active_run_id):
+                session.set_active_run("")
+                continue
+            run_log = run_store.load_run(session.active_run_id)
+            if run_log.projection.session_id != session.id:
+                raise ValueError("active Run does not belong to this Session")
+            if run_log.projection.terminal:
+                session.set_active_run("")
                 continue
             candidates.append(
                 (
-                    run_log.projection.last_timestamp,
+                    run_store.events_path(run_log.run_id).stat().st_mtime_ns,
                     run_log.run_id,
                     session.id,
-                    session,
-                    run_log,
                 )
             )
         if not candidates:
             return None
-        _timestamp, _run_id, _session_id, session, run_log = max(
+        _mtime, _run_id, session_id = max(
             candidates,
             key=lambda item: item[:3],
         )
-        if session.active_run_id != run_log.run_id:
-            session.set_active_run(run_log.run_id)
-        return session.id
+        return session_id

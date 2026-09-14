@@ -57,10 +57,8 @@ def redact_facts(value, redactor, key=""):
     if key in {
         "path", "affected_paths", "revision",
         "actual_revision", "before_revision", "after_revision",
-        "before_state", "after_state", "artifact_id",
-        "sha256", "status",
-        "started_changed_path_states", "finished_changed_path_states",
-        "workspace_root", "workspace_changes", "run_id", "session_id",
+        "before_state", "artifact_id", "status",
+        "workspace_root", "run_id", "session_id",
     }:
         return value
     if isinstance(value, str):
