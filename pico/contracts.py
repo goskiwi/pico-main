@@ -222,7 +222,7 @@ class AssistantTurn:
 
 @dataclass(frozen=True)
 class ModelMessage:
-    """One chronological User, Assistant, or Tool message sent to a model."""
+    """One chronological Developer, User, Assistant, or Tool model message."""
 
     role: str
     text: str = ""
@@ -230,7 +230,7 @@ class ModelMessage:
     tool_call_id: str = ""
 
     def __post_init__(self):
-        if self.role not in {"user", "assistant", "tool"}:
+        if self.role not in {"developer", "user", "assistant", "tool"}:
             raise ValueError("model message has an invalid role")
         if not isinstance(self.text, str):
             raise TypeError("model message text must be text")
@@ -238,8 +238,10 @@ class ModelMessage:
         if any(not isinstance(call, ToolCall) for call in calls):
             raise TypeError("assistant tool calls must be ToolCall values")
         object.__setattr__(self, "tool_calls", calls)
-        if self.role == "user" and (not self.text or calls or self.tool_call_id):
-            raise ValueError("user message requires only text")
+        if self.role in {"developer", "user"} and (
+            not self.text or calls or self.tool_call_id
+        ):
+            raise ValueError(f"{self.role} message requires only text")
         if self.role == "assistant" and self.tool_call_id:
             raise ValueError("assistant message cannot be a Tool Result")
         if self.role == "assistant" and not self.text and not calls:
@@ -250,6 +252,10 @@ class ModelMessage:
     @classmethod
     def user(cls, text):
         return cls("user", str(text))
+
+    @classmethod
+    def developer(cls, text):
+        return cls("developer", str(text))
 
     @classmethod
     def assistant(cls, *, text="", tool_calls=()):

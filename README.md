@@ -90,6 +90,8 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 `TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
 
+System Prompt 只保存稳定规则和有效 Run 权限。当前失败纠正不进入 System Prompt：正常工具失败由对应 Tool Result 承载；恢复或 Context Reset 时需要重建的纠正作为最后一条 Developer Message 提供，因此不会提高成长期规则或破坏消息时间关系。
+
 ## 一次任务
 
 1. CLI 创建或加载 Session，通过唯一的 `Pico(..., session=session)` 入口组装 Runtime。

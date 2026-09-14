@@ -78,6 +78,29 @@ class ModelMessageTests(unittest.TestCase):
             )
             self.assertFalse(hasattr(prompt, "input_text"))
 
+    def test_failure_correction_is_the_last_developer_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _model = build_agent(Path(directory), [])
+            RunLifecycle(agent).initialize("Inspect")
+            agent.run.run_log.append("model_requested")
+            agent.run.run_log.append_model_failure(
+                "protocol_error",
+                "malformed response",
+                "malformed response",
+                {},
+            )
+
+            prompt = agent.prompt.build_for_run(
+                tool_surface=agent.tools.resolve_surface()
+            )
+
+            self.assertNotIn("previous model response", prompt.system_prompt.lower())
+            self.assertEqual(prompt.messages[-1].role, "developer")
+            self.assertIn(
+                "previous model response",
+                prompt.messages[-1].text.lower(),
+            )
+
     def test_user_assistant_and_tool_messages_preserve_chronology(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

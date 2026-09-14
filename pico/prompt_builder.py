@@ -134,9 +134,6 @@ class PromptBuilder:
             "creation and is enforced locally):\n"
             + json.dumps(permissions, ensure_ascii=False, sort_keys=True),
         ]
-        correction = guidance_for_failure(self.runtime.run.projection.failure)
-        if correction:
-            parts.append("Previous failure:\n" + correction)
         return "\n\n".join(parts)
 
     def _workspace_text(self):
@@ -182,6 +179,9 @@ class PromptBuilder:
                 for unit in history.model_message_units()
                 for message in unit
             )
+        correction = guidance_for_failure(projection.failure)
+        if correction:
+            messages.append(ModelMessage.developer(correction))
         return tuple(messages)
 
     def _prompt_tokens(self, system_prompt, messages):

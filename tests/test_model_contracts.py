@@ -103,18 +103,20 @@ class ModelResultTests(unittest.TestCase):
 
         items = _message_items(
             (
+                ModelMessage.developer("Use the current workspace."),
                 ModelMessage.user("Inspect a.py"),
                 ModelMessage.assistant(text="Reading it.", tool_calls=(call,)),
                 ModelMessage.tool("read", '{"status":"success"}'),
             )
         )
 
-        self.assertEqual(items[0]["role"], "user")
-        self.assertEqual(items[1]["type"], "message")
-        self.assertEqual(items[2]["type"], "function_call")
-        self.assertEqual(items[2]["call_id"], "read")
-        self.assertEqual(items[3]["type"], "function_call_output")
+        self.assertEqual(items[0]["role"], "developer")
+        self.assertEqual(items[1]["role"], "user")
+        self.assertEqual(items[2]["type"], "message")
+        self.assertEqual(items[3]["type"], "function_call")
         self.assertEqual(items[3]["call_id"], "read")
+        self.assertEqual(items[4]["type"], "function_call_output")
+        self.assertEqual(items[4]["call_id"], "read")
 
     def test_assistant_text_is_separate_from_hidden_reasoning(self):
         turn = _parse_turn(

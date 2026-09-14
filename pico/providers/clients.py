@@ -82,9 +82,9 @@ def _message_items(messages):
     for message in messages:
         if not isinstance(message, ModelMessage):
             raise TypeError("model prompt messages must be ModelMessage values")
-        if message.role == "user":
+        if message.role in {"developer", "user"}:
             items.append({
-                "role": "user",
+                "role": message.role,
                 "content": [{"type": "input_text", "text": message.text}],
             })
             continue
