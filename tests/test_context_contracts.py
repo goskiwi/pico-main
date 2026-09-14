@@ -198,6 +198,10 @@ class ModelMessageTests(unittest.TestCase):
                 "_history",
                 wraps=agent.prompt._history,
             ) as history, mock.patch.object(
+                agent.prompt,
+                "_messages",
+                wraps=agent.prompt._messages,
+            ) as messages, mock.patch.object(
                 agent.tools,
                 "resolve_surface",
                 wraps=agent.tools.resolve_surface,
@@ -206,6 +210,7 @@ class ModelMessageTests(unittest.TestCase):
 
             self.assertEqual(outcome.status, "completed")
             self.assertEqual(history.call_count, 1)
+            self.assertEqual(messages.call_count, 1)
             self.assertEqual(surface.call_count, 1)
 
 

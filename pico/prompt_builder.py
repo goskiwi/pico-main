@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from .tool_runtime import ResolvedToolSurface
 
 AGENTS_MD_MAX_BYTES = 32 * 1024
-WORKSPACE_MAX_TOKENS = 600
 
 
 def load_project_instructions(repo_root):
@@ -148,11 +147,7 @@ class PromptBuilder:
                 ),
             )
         )
-        return context.clip_complete_lines(
-            text,
-            WORKSPACE_MAX_TOKENS,
-            token_counter=self.count_tokens,
-        )
+        return text
 
     def _messages(self, history, workspace, *, include_workspace=True):
         projection = self.runtime.run.projection
@@ -227,8 +222,12 @@ class PromptBuilder:
         )
 
     def build(self, prepared, *, refresh_history=False):
-        history = self._history() if refresh_history else prepared["history"]
-        messages = self._messages(history, prepared["workspace"])
+        if refresh_history:
+            history = self._history()
+            messages = self._messages(history, prepared["workspace"])
+        else:
+            history = prepared["history"]
+            messages = prepared["messages"]
         if self._prompt_tokens(prepared["system_prompt"], messages) > prepared[
             "input_limit"
         ]:

@@ -11,7 +11,7 @@ IGNORED_PATH_NAMES = {".git", ".pico", "__pycache__", ".pytest_cache", ".ruff_ca
 TOOL_INTERNAL_PATH_NAMES = frozenset({".git", ".pico"})
 PUBLIC_ENV_EXAMPLES = frozenset({".env.example", ".env.sample"})
 WORKSPACE_GIT_TIMEOUT_SECONDS = 5
-WORKSPACE_STATUS_MAX_CHARS = 1500
+WORKSPACE_STATUS_MAX_CHARS = 2000
 
 
 def _is_protected_environment_name(value):
