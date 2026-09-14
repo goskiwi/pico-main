@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 
 from .compaction_summary import CompactedContext
-from .contracts import AssistantTurn, ToolOutcome
+from .contracts import AssistantTurn, ModelMessage, ToolOutcome
 
 HISTORY_OMITTED = "- older events omitted by History budget"
 
@@ -185,11 +185,11 @@ class RunHistory:
                 continue
             turn = AssistantTurn.from_dict(entry.payload["turn"])
             facts = []
-            if turn.visible_text:
+            if turn.text:
                 facts.append(
                     _ProjectedFact(
                         "assistant_text",
-                        {"content": turn.visible_text},
+                        {"content": turn.text},
                         (entry.event_id,),
                     )
                 )
@@ -304,7 +304,7 @@ class RunHistory:
             events = tuple(event for unit in candidate_units for event in unit)
             projected = self._projection_units(
                 events,
-                include_user_guidance=False,
+                include_user_guidance=True,
             )
             lines = ["Current run events:"]
             if compacted_context is not None:
@@ -386,6 +386,7 @@ class RunHistory:
     def _recent_projection_units(self):
         return self._projection_units(
             self.recent_events(),
+            include_user_guidance=True,
             allow_incomplete=True,
         ) or []
 
@@ -416,6 +417,48 @@ class RunHistory:
                 self.recent_events() if events is None else tuple(events)
             )
             if entry.kind == "user_guidance"
+        )
+
+    def model_message_units(self):
+        """Return chronological messages without splitting an Assistant tool turn."""
+
+        units = []
+        for events in self._history_units(self.recent_events()):
+            first = events[0]
+            if first.kind == "user_guidance":
+                units.append((ModelMessage.user(first.content),))
+                continue
+            if first.kind != "assistant_turn":
+                continue
+            turn = AssistantTurn.from_dict(first.payload["turn"])
+            if turn.action.kind == "final":
+                units.append((ModelMessage.assistant(text=turn.action.content),))
+                continue
+            messages = [
+                ModelMessage.assistant(
+                    text=turn.text,
+                    tool_calls=turn.action.tool_calls,
+                )
+            ]
+            messages.extend(
+                ModelMessage.tool(
+                    result.call_id,
+                    ToolOutcome.from_dict(
+                        result.payload["outcome"]
+                    ).render_for_model(),
+                )
+                for result in events[1:]
+            )
+            units.append(tuple(messages))
+        return tuple(units)
+
+    def compacted_message(self):
+        if self.state.compacted is None:
+            return None
+        return ModelMessage.user(
+            "<conversation_summary>\n"
+            + self.state.compacted.render()
+            + "\n</conversation_summary>"
         )
 
     def render_required_projection(self):

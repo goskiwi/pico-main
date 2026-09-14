@@ -174,8 +174,10 @@ class AgentLoop:
     ):
         agent = self.agent
         input_tokens = agent.model_client.estimate_action_input_tokens(
-            prompt.input_text, instructions=prompt.instructions,
-            action_tools=tool_surface.action_tools, token_counter=agent.prompt.count_tokens,
+            prompt.messages,
+            system_prompt=prompt.system_prompt,
+            action_tools=tool_surface.action_tools,
+            token_counter=agent.prompt.count_tokens,
         )
         if loop_state.overflow_recovery_attempted and input_tokens >= loop_state.last_request_input_tokens:
             raise ProviderContextOverflow(
@@ -186,9 +188,9 @@ class AgentLoop:
         loop_state.last_request_input_tokens = input_tokens
         agent.emit_event("model_requested")
         turn = agent.model_client.complete_turn(
-            prompt.input_text,
+            prompt.messages,
             agent.config.max_output_tokens,
-            instructions=prompt.instructions,
+            system_prompt=prompt.system_prompt,
             action_tools=tool_surface.action_tools,
             execution_context=agent.run.execution_context,
         )
@@ -212,7 +214,7 @@ class AgentLoop:
         provider_results = tuple(str(result) for result in provider_results)
         projected_tokens = agent.model_client.projected_context_tokens(
             provider_results,
-            instructions=prompt.instructions,
+            system_prompt=prompt.system_prompt,
             action_tools=tool_surface.action_tools,
             token_counter=agent.prompt.count_tokens,
         )

@@ -10,16 +10,16 @@
 4. 同文件的 _handle_tool_turn：按模型顺序逐个调用 ToolRuntime，再把这一轮的全部结果交回模型。
 5. 同文件的 _handle_final_action：把模型的 `submit_final` 转成交给 RunLifecycle 的终态声明。
 
-请求准备只走 `PromptBuilder.build_for_run()`：准备预算 → 必要时生成并提交摘要 → 渲染。AgentLoop 只在仓库指令变化、Context 高水位或溢出恢复时调用 `_reset_context()`；普通失败提醒随 Tool Result 返回。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
+请求准备只走 `PromptBuilder.build_for_run()`：固定有效 Run 权限 → 构造 System Prompt → 从 RunLog 恢复 Messages → 必要时生成并提交摘要。AgentLoop 只在仓库指令变化、Context 高水位或溢出恢复时调用 `_reset_context()`；普通失败提醒随 Tool Result 返回。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
 
 例子：read_file → edit_file → run_shell 运行测试 → 根据失败继续 edit_file → 再次运行测试 → submit_final。
-第一次把 ToolRuntime 当成“执行一个工具并给出真实结果”，把 PromptBuilder 当成“构造有预算的输入”。
+第一次把 ToolRuntime 当成“执行一个工具并给出真实结果”，把 PromptBuilder 当成“构造 System Prompt 与 Messages”。
 
 ## 第二遍：三个亮点落在哪
 
 | 问题 | 阅读入口 | 能讲清的行为 |
 | --- | --- | --- |
-| 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | TaskContract 保留唯一目标；CompactedContext 保存约束、进度、决定、下一步、关键上下文和确定性文件集合；近期 Assistant Turn 与 Tool Result 精确保留 |
+| 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | TaskContract 保留目标和固定授权上限；CompactedContext 保存约束、进度、决定、下一步、关键上下文和确定性文件集合；近期 User、Assistant 与 Tool Messages 精确保留 |
 | 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 完整 Assistant Turn 先落盘；副作用工具再记录 started；没有可靠 result 时检查当前文件，不自动重放 |
 | Shell 超时、等待输入或输出过大怎么办 | tools.py 的 tool_run_shell；command_runner.py | Shell 先审批且默认 stdin 为 EOF；Timeout 有界，输出保留 Head/Tail，超时终止进程组并返回已有输出 |
 
@@ -56,4 +56,4 @@ Run 是可跨进程恢复的持久任务；Attempt 是一次首次执行或 Resu
 
 当前代码使用 DeepSeek `deepseek-v4-flash` 做过真实模型冒烟回归：模型读取并修复错误函数，尝试现有测试，在临时环境缺少 pytest 后改用等价断言完成验证，最后通过 `submit_final` 正常结束。该结果只证明真实 Provider 主链可运行，不作为公开 Coding Benchmark 成绩。SDK 接管 HTTP、SSE 与标准重试；Pico 用剩余 deadline 限制请求，并在读取流事件时检查取消。
 
-History 先形成完整工具事务，ContextManager 只做一次预算选择，PromptBuilder 负责采集、摘要协调和最终渲染。规则范围固定为仓库根 `AGENTS.md`。
+History 先形成完整工具事务，PromptBuilder 负责 System Prompt、Message 投影、预算和摘要协调。规则范围固定为仓库根 `AGENTS.md`；Responses Input Item 只存在于 Provider Adapter。

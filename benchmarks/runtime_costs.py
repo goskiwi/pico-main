@@ -9,9 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from pico import context_manager
 from pico.compaction_summary import CompactedContext
-from pico.prompt_builder import _assemble_input, render_history
 from pico.run_checkpoint import write_run_checkpoint
 from pico.run_log import RunLog
 from pico.run_store import RunStore
@@ -19,9 +17,6 @@ from pico.task_state import TaskContract, WriteScope
 
 COMPACTION_INTERVAL = 1_000
 TAIL_EVENTS = 100
-CONTEXT_BUDGET = 240_000
-
-
 def elapsed(call):
     started = time.perf_counter()
     result = call()
@@ -29,25 +24,21 @@ def elapsed(call):
 
 
 def build_context(restored):
-    tokenizer = context_manager.Tokenizer("scripted-model")
     history = restored.history()
-    raw = {
-        "permissions": "permissions: benchmark",
-        "project_instructions": "",
-        "user_messages": 'user_messages: ["benchmark"]',
-        "retry_instruction": "",
-        "workspace": "Workspace: benchmark",
-        "history": render_history(history),
-    }
-    selected = context_manager.select_context(
-        raw,
-        CONTEXT_BUDGET,
-        section_caps=context_manager.DEFAULT_SECTION_CAPS,
-        count_tokens=tokenizer.count,
-        history=history,
-        render_input=_assemble_input,
+    messages = []
+    compacted = history.compacted_message()
+    if compacted is not None:
+        messages.append(compacted)
+    messages.extend(
+        message
+        for unit in history.model_message_units()
+        for message in unit
     )
-    return _assemble_input(raw, selected)
+    return json.dumps(
+        [message.to_dict() for message in messages],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def build_fixture(root, size):
@@ -57,7 +48,14 @@ def build_fixture(root, size):
         checkpoint_byte_interval=10**12,
     )
     log = RunLog(f"run_{size}", "session_benchmark", store)
-    log.append_user(TaskContract("benchmark", WriteScope("none")))
+    log.append_user(
+        TaskContract(
+            goal="benchmark",
+            mode="ask",
+            allowed_tools=("read_file",),
+            write_scope=WriteScope("none"),
+        )
+    )
     checkpoint_at = max(1, size - min(TAIL_EVENTS, max(0, size - 1)))
     started = time.perf_counter()
     checkpoint_written = False

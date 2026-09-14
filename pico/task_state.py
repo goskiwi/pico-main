@@ -49,6 +49,8 @@ class WriteScope:
 @dataclass(frozen=True)
 class TaskContract:
     goal: str
+    mode: Literal["ask", "code", "auto"]
+    allowed_tools: tuple[str, ...]
     write_scope: WriteScope
 
     def __post_init__(self):
@@ -59,21 +61,44 @@ class TaskContract:
             raise TypeError("task contract goal must be a string")
         if not self.goal.strip():
             raise ValueError("task contract requires a goal")
+        if self.mode not in {"ask", "code", "auto"}:
+            raise ValueError("task contract requires a valid mode")
+        if (
+            not isinstance(self.allowed_tools, tuple)
+            or not self.allowed_tools
+            or any(
+                not isinstance(name, str) or not name.strip()
+                for name in self.allowed_tools
+            )
+            or len(set(self.allowed_tools)) != len(self.allowed_tools)
+        ):
+            raise ValueError("task contract requires unique allowed tools")
         if not isinstance(self.write_scope, WriteScope):
             raise TypeError("task contract requires WriteScope")
         return self
 
     @classmethod
     def from_dict(cls, value):
-        if not isinstance(value, dict) or set(value) != {"goal", "write_scope"}:
+        if not isinstance(value, dict) or set(value) != {
+            "goal",
+            "mode",
+            "allowed_tools",
+            "write_scope",
+        }:
             raise ValueError("invalid task contract fields")
+        if not isinstance(value["allowed_tools"], list):
+            raise TypeError("task contract allowed_tools must be a list")
         return cls(
-            value["goal"],
-            WriteScope.from_dict(value["write_scope"]),
+            goal=value["goal"],
+            mode=value["mode"],
+            allowed_tools=tuple(value["allowed_tools"]),
+            write_scope=WriteScope.from_dict(value["write_scope"]),
         )
 
     def to_dict(self):
         return {
             "goal": self.goal,
+            "mode": self.mode,
+            "allowed_tools": list(self.allowed_tools),
             "write_scope": self.write_scope.to_dict(),
         }

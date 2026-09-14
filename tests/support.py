@@ -29,18 +29,25 @@ class ScriptedModel:
         return count_tokens(json.dumps(list(action_tools), sort_keys=True))
 
     def estimate_action_input_tokens(
-        self, input_text, *, instructions, action_tools, token_counter
+        self, messages, *, system_prompt, action_tools, token_counter
     ):
-        return token_counter(input_text) + token_counter(instructions) + self.estimate_action_tool_tokens(
-            action_tools, token_counter
+        rendered = json.dumps(
+            [message.to_dict() for message in messages],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return (
+            token_counter(rendered)
+            + token_counter(system_prompt)
+            + self.estimate_action_tool_tokens(action_tools, token_counter)
         )
 
     def complete_turn(
         self,
-        input_text,
+        messages,
         max_output_tokens,
         *,
-        instructions,
+        system_prompt,
         action_tools,
         execution_context,
     ):
@@ -61,14 +68,14 @@ class ScriptedModel:
         action = turn.action
         self.requests.append(
             {
-                "input_text": input_text,
-                "instructions": instructions,
+                "messages": tuple(messages),
+                "system_prompt": system_prompt,
                 "action_tools": tuple(action_tools),
                 "max_output_tokens": max_output_tokens,
             }
         )
         self.last_completion_metadata = {
-            "input_tokens": len(input_text),
+            "input_tokens": sum(len(message.text) for message in messages),
             "cached_tokens": 0,
             "output_tokens": 1,
         }
@@ -79,13 +86,12 @@ class ScriptedModel:
         return turn
 
     def projected_context_tokens(
-        self, results, *, instructions, action_tools, token_counter
+        self, results, *, system_prompt, action_tools, token_counter
     ):
-        return self.estimate_action_input_tokens(
-            "\n".join(results),
-            instructions=instructions,
-            action_tools=action_tools,
-            token_counter=token_counter,
+        return (
+            token_counter("\n".join(results))
+            + token_counter(system_prompt)
+            + self.estimate_action_tool_tokens(action_tools, token_counter)
         )
 
     def record_action_results(self, results):
@@ -108,6 +114,12 @@ def assert_file_command(path, expected):
 
 def approve_all(_name, _args, _plan):
     return True
+
+
+def request_text(request):
+    return "\n".join(
+        [request["system_prompt"], *(message.text for message in request["messages"])]
+    )
 
 
 def build_agent(

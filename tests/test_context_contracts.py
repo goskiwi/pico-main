@@ -3,20 +3,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pico import (
-    AssistantTurn,
-    ModelAction,
-    SessionStore,
-    TaskContract,
-    ToolCall,
-    ToolOutcome,
-    WriteScope,
-    context_manager,
-)
+from pico import AssistantTurn, ModelAction, ToolCall, ToolOutcome
 from pico.compaction_summary import CompactedContext
-from pico.prompt_builder import _assemble_input, load_project_instructions
-from pico.run_log import RunLog
-from tests.support import build_agent
+from pico.prompt_builder import load_project_instructions
+from pico.run_lifecycle import RunLifecycle
+from tests.support import build_agent, request_text
 
 
 class RepositoryInstructionTests(unittest.TestCase):
@@ -51,191 +42,121 @@ class RepositoryInstructionTests(unittest.TestCase):
                 outcome = agent.ask("Inspect the nested subject")
 
             self.assertEqual(outcome.status, "completed")
-            self.assertIn("ROOT_RULE_V1", model.requests[0]["input_text"])
-            self.assertNotIn("ROOT_RULE_V2", model.requests[0]["input_text"])
-            self.assertIn("ROOT_RULE_V2", model.requests[1]["input_text"])
+            self.assertIn("ROOT_RULE_V1", request_text(model.requests[0]))
+            self.assertNotIn("ROOT_RULE_V2", request_text(model.requests[0]))
+            self.assertIn("ROOT_RULE_V2", request_text(model.requests[1]))
             self.assertTrue(
-                all("NESTED_RULE" not in request["input_text"] for request in model.requests)
+                all("NESTED_RULE" not in request_text(request) for request in model.requests)
             )
-            first = next(
+            self.assertEqual(load.call_count, 2)
+            resets = [
                 event
                 for event in agent.read_run_events(outcome.run_id)
-                if event.kind == "tool_result"
-            )
-            self.assertEqual(first.payload["outcome"]["status"], "success")
-            self.assertEqual(len(model.requests), 2)
-            self.assertEqual(load.call_count, 2)
-            self.assertNotIn("deeper rules take precedence", model.requests[1]["instructions"])
-            resets = [e for e in agent.read_run_events(outcome.run_id)
-                      if e.kind == "provider_session_reset"]
+                if event.kind == "provider_session_reset"
+            ]
             self.assertEqual(len(resets), 1)
-            self.assertEqual(resets[0].payload["reason"], "project_instructions_changed")
+            self.assertEqual(
+                resets[0].payload["reason"],
+                "project_instructions_changed",
+            )
 
 
-class ContextSelectionTests(unittest.TestCase):
-    @staticmethod
-    def _raw(history="", guidance="retry_instruction: change strategy"):
-        return {
-            "permissions": "permissions: fixed",
-            "project_instructions": "",
-            "user_messages": 'user_messages: ["fixed"]',
-            "retry_instruction": guidance,
-            "workspace": "Workspace: fixed",
-            "history": history,
-        }
-
-    def test_bounded_history_keeps_a_complete_exchange(self):
+class ModelMessageTests(unittest.TestCase):
+    def test_runtime_permissions_live_in_the_system_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = SessionStore(Path(directory) / "sessions")
-            session = store.create(Path(directory))
-            log = RunLog("run_context", session.id, store.runs(session.id))
-            log.append_user(TaskContract("Inspect", WriteScope("none")))
-            for call_id, path, content in (
-                ("old", "old.txt", "old-result"),
-                ("new", "new.txt", "new-result"),
-            ):
-                call = ToolCall("read_file", {"path": path}, call_id)
-                log.append("model_requested")
-                log.append_assistant_turn(
-                    AssistantTurn(
-                        ModelAction.tool(call.name, call.args, call_id=call.call_id)
-                    )
+            agent, _model = build_agent(Path(directory), [])
+            RunLifecycle(agent).initialize("Inspect")
+
+            prompt = agent.prompt.build_for_run(
+                tool_surface=agent.tools.resolve_surface()
+            )
+
+            self.assertIn("Run permissions", prompt.system_prompt)
+            self.assertIn('"mode": "auto"', prompt.system_prompt)
+            self.assertFalse(
+                any("Run permissions" in message.text for message in prompt.messages)
+            )
+            self.assertFalse(hasattr(prompt, "input_text"))
+
+    def test_user_assistant_and_tool_messages_preserve_chronology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
+            agent, _model = build_agent(root, [])
+            RunLifecycle(agent).initialize("Inspect subject.txt")
+            call = ToolCall("read_file", {"path": "subject.txt"}, "read")
+            log = agent.run.run_log
+            log.append("model_requested")
+            log.append_assistant_turn(
+                AssistantTurn(
+                    ModelAction.tool(call.name, call.args, call_id=call.call_id),
+                    "I will inspect it.",
                 )
-                log.append_tool_result(
-                    ToolOutcome(
-                        call_id,
-                        "read_file",
-                        "success",
-                        "completed",
-                        "none",
-                        content,
-                    ),
+            )
+            log.append_tool_result(
+                ToolOutcome(
+                    "read",
+                    "read_file",
+                    "success",
+                    "completed",
+                    "none",
+                    "alpha",
                 )
-            history = log.history()
-            full = history.render_projection()
-            raw = self._raw(full)
+            )
+            log.append_user_guidance("Do not change the public API")
 
-            selected = context_manager.select_context(
-                raw,
-                500,
-                section_caps={"workspace": 50},
-                count_tokens=len,
-                history=history,
-                render_input=_assemble_input,
+            prompt = agent.prompt.build_for_run(
+                tool_surface=agent.tools.resolve_surface()
             )
 
-            self.assertIn("new.txt", selected["history"])
-            self.assertIn("new-result", selected["history"])
-            self.assertNotIn("old.txt", selected["history"])
-            rendered = _assemble_input(raw, selected)
-            self.assertIn('user_messages: ["fixed"]', rendered)
-            self.assertIn("retry_instruction: change strategy", rendered)
-            self.assertLess(
-                rendered.index("retry_instruction: change strategy"),
-                rendered.index("<conversation_history>"),
+            messages = prompt.messages
+            start = next(
+                index
+                for index, message in enumerate(messages)
+                if message.role == "user" and message.text == "Inspect subject.txt"
+            )
+            self.assertEqual(
+                [message.role for message in messages[start:]],
+                ["user", "assistant", "tool", "user"],
+            )
+            self.assertEqual(messages[start + 1].tool_calls, (call,))
+            self.assertEqual(messages[start + 2].tool_call_id, "read")
+            self.assertEqual(
+                messages[start + 3].text,
+                "Do not change the public API",
             )
 
-    def test_user_guidance_is_rendered_once_in_the_trusted_region(self):
+    def test_committed_summary_precedes_recent_messages(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = SessionStore(Path(directory) / "sessions")
-            session = store.create(Path(directory))
-            log = RunLog("run_guidance", session.id, store.runs(session.id))
-            log.append_user(TaskContract("Change the service", WriteScope("none")))
-            log.append_user_guidance("Do not modify database code")
-            raw = self._raw("prior conversation")
-            raw["user_messages"] = (
-                'user_messages: ["Change the service", '
-                '"Do not modify database code"]'
-            )
-
-            rendered = _assemble_input(
-                raw,
-                {
-                    "user_messages": raw["user_messages"],
-                    "history": raw["history"],
-                },
-            )
-
-            self.assertEqual(rendered.count("Do not modify database code"), 1)
-            self.assertLess(
-                rendered.index("Do not modify database code"),
-                rendered.index("<conversation_history>"),
-            )
-
-    def test_required_retry_guidance_over_budget_is_explicit(self):
-        raw = self._raw(guidance="retry_instruction: " + "x" * 500)
-
-        with self.assertRaises(context_manager.ContextBudgetExceeded):
-            context_manager.select_context(
-                raw,
-                100,
-                section_caps={"workspace": 10},
-                count_tokens=len,
-                history=None,
-                render_input=_assemble_input,
-            )
-
-    def test_uncompacted_user_guidance_is_never_partially_selected(self):
-        raw = self._raw(guidance="")
-        raw["user_messages"] = "user_messages:\n" + "x" * 500
-
-        with self.assertRaisesRegex(
-            context_manager.ContextBudgetExceeded,
-            "required Runtime context",
-        ):
-            context_manager.select_context(
-                raw,
-                100,
-                section_caps={"workspace": 10},
-                count_tokens=len,
-                history=None,
-                render_input=_assemble_input,
-            )
-
-    def test_committed_summary_is_reserved_before_optional_workspace(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = SessionStore(Path(directory) / "sessions")
-            session = store.create(Path(directory))
-            log = RunLog("run_required_summary", session.id, store.runs(session.id))
-            log.append_user(TaskContract("Inspect", WriteScope("none")))
-            old = log.append_user_guidance("older guidance")
-            log.append_compaction(
+            agent, _model = build_agent(Path(directory), [])
+            RunLifecycle(agent).initialize("Inspect")
+            old = agent.run.run_log.append_user_guidance("older guidance")
+            agent.run.run_log.append_compaction(
                 CompactedContext(
-                    constraints=("S" * 180,),
+                    constraints=("Keep the API",),
                     progress_done=(),
                     progress_in_progress=(),
                     progress_blocked=(),
                     key_decisions=(),
-                    next_steps=(),
+                    next_steps=("Continue inspection",),
                     critical_context=(),
                     covered_through_sequence=old.sequence,
                 )
             )
-            history = log.history()
-            history_text = history.render_projection()
-            raw = self._raw(history_text, guidance="")
-            raw["workspace"] = "\n".join(["W"] * 40)
-            summary_only_size = len(
-                _assemble_input(
-                    raw,
-                    {
-                        "user_messages": raw["user_messages"],
-                        "history": history_text,
-                    },
-                )
-            )
+            agent.run.run_log.append_user_guidance("new guidance")
 
-            selected = context_manager.select_context(
-                raw,
-                summary_only_size,
-                section_caps={"workspace": 150},
-                count_tokens=len,
-                history=history,
-                render_input=_assemble_input,
+            prompt = agent.prompt.build_for_run(
+                tool_surface=agent.tools.resolve_surface()
             )
+            texts = [message.text for message in prompt.messages]
 
-            self.assertIn("S" * 180, selected["history"])
-            self.assertNotIn("workspace", selected)
+            summary = next(
+                index
+                for index, text in enumerate(texts)
+                if text.startswith("<conversation_summary>")
+            )
+            self.assertEqual(texts[summary + 1], "new guidance")
+            self.assertNotIn("older guidance", texts)
 
     def test_one_prompt_rebuild_reuses_one_history_snapshot_and_tool_surface(self):
         with tempfile.TemporaryDirectory() as directory:

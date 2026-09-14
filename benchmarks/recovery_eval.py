@@ -64,7 +64,14 @@ def _new_run(root: Path, *, checkpoint_interval=10_000):
         checkpoint_byte_interval=10**9,
     )
     log = RunLog("run_eval", session.id, store)
-    log.append_user(TaskContract("Evaluate recovery", WriteScope("workspace")))
+    log.append_user(
+        TaskContract(
+            goal="Evaluate recovery",
+            mode="auto",
+            allowed_tools=("read_file", "write_file", "run_shell"),
+            write_scope=WriteScope("workspace"),
+        )
+    )
     store.checkpoint_if_due(log, force=True)
     session.set_active_run(log.run_id)
     return sessions, session, store, log

@@ -206,7 +206,7 @@ class RunEvent:
             return str(self.payload.get("content", ""))
         if self.kind == "assistant_turn":
             turn = AssistantTurn.from_dict(self.payload["turn"])
-            return turn.visible_text or turn.action.content
+            return turn.text or turn.action.content
         if self.kind == "tool_result":
             outcome = dict(self.payload.get("outcome", {}) or {})
             return str(outcome.get("content", ""))

@@ -18,7 +18,7 @@ from pico import (
 )
 from pico.run_log import RunLog
 from pico.run_store import RunStore
-from tests.support import ScriptedModel, build_agent
+from tests.support import ScriptedModel, build_agent, request_text
 
 
 def build_policy_agent(root, actions, *, mode, allowed_write_paths=None):
@@ -177,7 +177,7 @@ class SecurityBoundaryTests(unittest.TestCase):
                 [event.to_dict() for event in agent.read_run_events(outcome.run_id)]
             )
 
-            self.assertNotIn("test-secret-value", model.requests[0]["input_text"])
+            self.assertNotIn("test-secret-value", request_text(model.requests[0]))
             self.assertNotIn("test-secret-value", persisted)
             self.assertNotIn("test-secret-value", outcome.answer)
             self.assertIn("<redacted>", outcome.answer)
@@ -218,7 +218,14 @@ class SecurityBoundaryTests(unittest.TestCase):
             log = RunLog("run_private", "session_private", store)
             previous = os.umask(0o022)
             try:
-                log.append_user(TaskContract("Inspect", WriteScope("none")))
+                log.append_user(
+                    TaskContract(
+                        goal="Inspect",
+                        mode="ask",
+                        allowed_tools=("read_file",),
+                        write_scope=WriteScope("none"),
+                    )
+                )
             finally:
                 os.umask(previous)
 

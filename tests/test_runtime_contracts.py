@@ -20,7 +20,7 @@ from pico.compaction_summary import CompactedContext, SemanticCompactionError
 from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunEvent, RunLog, replay_events
-from tests.support import ScriptedModel, assert_file_command, build_agent
+from tests.support import ScriptedModel, assert_file_command, build_agent, request_text
 
 
 class RuntimeContractTests(unittest.TestCase):
@@ -61,6 +61,41 @@ class RuntimeContractTests(unittest.TestCase):
 
             self.assertEqual(outcome.stop_reason, "model_request_limit")
             self.assertEqual(len(model.requests), 2)
+
+    def test_resuming_with_broader_config_cannot_expand_run_permissions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = Workspace.build(root, repo_root_override=root)
+            sessions = SessionStore(root / ".pico" / "sessions")
+            session = sessions.create(workspace.root)
+            original = Pico(
+                ScriptedModel([]),
+                workspace,
+                session,
+                config=PicoConfig(
+                    mode="code",
+                    allowed_tools=("read_file", "edit_file"),
+                    context_limit_tokens=64_000,
+                ),
+            )
+            RunLifecycle(original).initialize("Inspect and edit one file")
+
+            resumed = Pico(
+                ScriptedModel([]),
+                workspace,
+                sessions.load(session.id),
+                config=PicoConfig(
+                    mode="auto",
+                    context_limit_tokens=64_000,
+                ),
+            )
+            surface = resumed.tools.resolve_surface()
+
+            self.assertEqual(surface.mode, "code")
+            self.assertEqual(
+                surface.names,
+                ("read_file", "edit_file", "submit_final"),
+            )
 
     def test_run_status_combines_task_and_bounded_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -157,7 +192,14 @@ class RuntimeContractTests(unittest.TestCase):
             session = sessions.create(root)
             run_store = sessions.runs(session.id)
             orphan = RunLog("run_orphan", session.id, run_store)
-            orphan.append_user(TaskContract("orphan", WriteScope("none")))
+            orphan.append_user(
+                TaskContract(
+                    goal="orphan",
+                    mode="ask",
+                    allowed_tools=("read_file",),
+                    write_scope=WriteScope("none"),
+                )
+            )
 
             runtime = Pico(
                 ScriptedModel([]),
@@ -211,7 +253,7 @@ class RuntimeContractTests(unittest.TestCase):
                 ["read-a", "read-b"],
             )
 
-    def test_visible_assistant_text_is_durable_history(self):
+    def test_assistant_text_is_durable_history(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
@@ -235,10 +277,10 @@ class RuntimeContractTests(unittest.TestCase):
 
             outcome = agent.ask("Inspect subject.txt")
             messages = [
-                AssistantTurn.from_dict(event.payload["turn"]).visible_text
+                AssistantTurn.from_dict(event.payload["turn"]).text
                 for event in agent.read_run_events(outcome.run_id)
                 if event.kind == "assistant_turn"
-                and AssistantTurn.from_dict(event.payload["turn"]).visible_text
+                and AssistantTurn.from_dict(event.payload["turn"]).text
             ]
 
             self.assertEqual(
@@ -392,8 +434,9 @@ class RuntimeContractTests(unittest.TestCase):
                 provider_context_tokens=agent.effective_context_limit_tokens,
             )
 
-            self.assertIn("OLD-GUIDANCE summarized", prompt.input_text)
-            self.assertNotIn(old_guidance, prompt.input_text)
+            prompt_text = "\n".join(message.text for message in prompt.messages)
+            self.assertIn("OLD-GUIDANCE summarized", prompt_text)
+            self.assertNotIn(old_guidance, prompt_text)
             self.assertTrue(
                 any(
                     event.kind == "compaction"
@@ -828,7 +871,7 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual((root / "generated.txt").read_text(), "x")
             self.assertIn(
                 "Workspace changes were not tracked",
-                model.requests[1]["input_text"],
+                request_text(model.requests[1]),
             )
             recovered = next(
                 event
@@ -851,7 +894,14 @@ class RuntimeContractTests(unittest.TestCase):
             session = store.create(Path(directory))
             run_store = store.runs(session.id)
             log = RunLog("run_compaction", session.id, run_store)
-            log.append_user(TaskContract("Inspect", WriteScope("none")))
+            log.append_user(
+                TaskContract(
+                    goal="Inspect",
+                    mode="ask",
+                    allowed_tools=("read_file", "write_file"),
+                    write_scope=WriteScope("none"),
+                )
+            )
             call = ToolCall("write_file", {"path": "subject.txt", "content": "alpha"}, "write")
             log.append("model_requested")
             turn_event = log.append_assistant_turn(

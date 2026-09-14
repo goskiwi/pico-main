@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pico import ModelAction, ToolCall
+from pico import ModelAction, ModelMessage, ToolCall
 from pico.compaction_summary import SUMMARY_TOOL
-from pico.providers.clients import _parse_turn, _result_items
+from pico.providers.clients import _message_items, _parse_turn, _result_items
 from pico.run_log import replay_events
 from tests.support import build_agent
 
@@ -98,7 +98,25 @@ class ModelResultTests(unittest.TestCase):
             ],
         )
 
-    def test_visible_assistant_text_is_separate_from_hidden_reasoning(self):
+    def test_messages_convert_to_responses_items_without_flattening_tools(self):
+        call = ToolCall("read_file", {"path": "a.py"}, "read")
+
+        items = _message_items(
+            (
+                ModelMessage.user("Inspect a.py"),
+                ModelMessage.assistant(text="Reading it.", tool_calls=(call,)),
+                ModelMessage.tool("read", '{"status":"success"}'),
+            )
+        )
+
+        self.assertEqual(items[0]["role"], "user")
+        self.assertEqual(items[1]["type"], "message")
+        self.assertEqual(items[2]["type"], "function_call")
+        self.assertEqual(items[2]["call_id"], "read")
+        self.assertEqual(items[3]["type"], "function_call_output")
+        self.assertEqual(items[3]["call_id"], "read")
+
+    def test_assistant_text_is_separate_from_hidden_reasoning(self):
         turn = _parse_turn(
             {
                 "status": "completed",
@@ -129,8 +147,8 @@ class ModelResultTests(unittest.TestCase):
             self._tools(),
         )
 
-        self.assertEqual(turn.visible_text, "I will inspect the current file.")
-        self.assertNotIn("opaque-reasoning", turn.visible_text)
+        self.assertEqual(turn.text, "I will inspect the current file.")
+        self.assertNotIn("opaque-reasoning", turn.text)
 
     def test_submit_final_must_be_alone(self):
         turn = _parse_turn(

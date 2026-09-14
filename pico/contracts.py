@@ -185,39 +185,94 @@ class ModelAction:
 
 @dataclass(frozen=True)
 class AssistantTurn:
-    """Provider-neutral accepted or failed Assistant response."""
+    """Provider-neutral Assistant response accepted by the Runtime."""
 
     action: ModelAction
-    visible_text: str = ""
+    text: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.action, ModelAction):
             raise TypeError("assistant turn requires a ModelAction")
-        if not isinstance(self.visible_text, str):
-            raise TypeError("assistant visible text must be text")
+        if not isinstance(self.text, str):
+            raise TypeError("assistant text must be text")
         if not isinstance(self.usage, dict):
             raise TypeError("assistant turn usage must be an object")
 
     def to_dict(self):
         return {
             "action": self.action.to_dict(),
-            "visible_text": self.visible_text,
+            "text": self.text,
             "usage": dict(self.usage),
         }
 
     @classmethod
     def from_dict(cls, value):
-        expected = {"action", "visible_text", "usage"}
+        expected = {"action", "text", "usage"}
         if not isinstance(value, dict) or set(value) != expected:
             raise ValueError("invalid AssistantTurn")
         if not isinstance(value["usage"], dict):
             raise TypeError("AssistantTurn usage must be an object")
         return cls(
             action=ModelAction.from_dict(value["action"]),
-            visible_text=str(value["visible_text"]),
+            text=str(value["text"]),
             usage=dict(value["usage"]),
         )
+
+
+@dataclass(frozen=True)
+class ModelMessage:
+    """One chronological User, Assistant, or Tool message sent to a model."""
+
+    role: str
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str = ""
+
+    def __post_init__(self):
+        if self.role not in {"user", "assistant", "tool"}:
+            raise ValueError("model message has an invalid role")
+        if not isinstance(self.text, str):
+            raise TypeError("model message text must be text")
+        calls = tuple(self.tool_calls)
+        if any(not isinstance(call, ToolCall) for call in calls):
+            raise TypeError("assistant tool calls must be ToolCall values")
+        object.__setattr__(self, "tool_calls", calls)
+        if self.role == "user" and (not self.text or calls or self.tool_call_id):
+            raise ValueError("user message requires only text")
+        if self.role == "assistant" and self.tool_call_id:
+            raise ValueError("assistant message cannot be a Tool Result")
+        if self.role == "assistant" and not self.text and not calls:
+            raise ValueError("assistant message requires text or Tool Calls")
+        if self.role == "tool" and (not self.tool_call_id or calls):
+            raise ValueError("tool message requires one Tool Call id")
+
+    @classmethod
+    def user(cls, text):
+        return cls("user", str(text))
+
+    @classmethod
+    def assistant(cls, *, text="", tool_calls=()):
+        return cls("assistant", str(text), tuple(tool_calls))
+
+    @classmethod
+    def tool(cls, call_id, text):
+        return cls("tool", str(text), tool_call_id=str(call_id))
+
+    def to_dict(self):
+        return {
+            "role": self.role,
+            "text": self.text,
+            "tool_calls": [
+                {
+                    "name": call.name,
+                    "args": dict(call.args),
+                    "call_id": call.call_id,
+                }
+                for call in self.tool_calls
+            ],
+            "tool_call_id": self.tool_call_id,
+        }
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+from pico import ModelMessage
 from pico.execution import ExecutionContext
 from pico.providers.clients import OpenAICompatibleModelClient
 
@@ -66,7 +67,10 @@ def exercise(stage, *, deadline=False):
     def request():
         try:
             observed["action"] = client.complete_turn(
-                "first", 100, instructions="test", action_tools=tools,
+                (ModelMessage.user("first"),),
+                100,
+                system_prompt="test",
+                action_tools=tools,
                 execution_context=context,
             ).action.kind
         except Exception as exc:  # noqa: BLE001 - return worker failures to the test thread
@@ -92,7 +96,10 @@ def exercise(stage, *, deadline=False):
             raise RuntimeError("request did not settle after server release")
         client.reset_action_session()  # Same Pico client; new task after cancellation.
         action = client.complete_turn(
-            "second", 100, instructions="test", action_tools=tools,
+            (ModelMessage.user("second"),),
+            100,
+            system_prompt="test",
+            action_tools=tools,
             execution_context=ExecutionContext.root(max_seconds=3),
         ).action
         return {"stage": stage, "cancel_returned_within_1s": prompt_cancel,
@@ -196,9 +203,9 @@ class HttpCancellationTests(unittest.TestCase):
                 transport = None
                 for _index in range(2):
                     action = client.complete_turn(
-                        "request",
+                        (ModelMessage.user("request"),),
                         100,
-                        instructions="test",
+                        system_prompt="test",
                         action_tools=tools,
                         execution_context=ExecutionContext.root(max_seconds=3),
                     )

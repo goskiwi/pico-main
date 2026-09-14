@@ -154,8 +154,15 @@ class RunLifecycle:
         goal,
     ):
         config = self.runtime.config
+        configured_tools = config.allowed_tools
         return TaskContract(
             goal=self.runtime.redact_text(goal),
+            mode=config.mode,
+            allowed_tools=tuple(
+                name
+                for name in self.runtime.tools.registry
+                if configured_tools is None or name in configured_tools
+            ),
             write_scope=WriteScope.from_policy(config.mode, config.allowed_write_paths),
         )
 

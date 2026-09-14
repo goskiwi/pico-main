@@ -44,7 +44,14 @@ class CheckpointRecoveryTests(unittest.TestCase):
             checkpoint_byte_interval=10**9,
         )
         log = RunLog("run_checkpoint", "session_checkpoint", store)
-        log.append_user(TaskContract("Inspect", WriteScope("none")))
+        log.append_user(
+            TaskContract(
+                goal="Inspect",
+                mode="ask",
+                allowed_tools=("read_file",),
+                write_scope=WriteScope("none"),
+            )
+        )
         store.checkpoint_if_due(log, force=True)
         return store, log
 
@@ -268,7 +275,14 @@ class IncrementalHistoryTests(unittest.TestCase):
     def new_log(directory, run_id="run_history"):
         store = RunStore(Path(directory) / "runs")
         log = RunLog(run_id, "session_history", store)
-        log.append_user(TaskContract("Inspect", WriteScope("workspace")))
+        log.append_user(
+            TaskContract(
+                goal="Inspect",
+                mode="auto",
+                allowed_tools=("read_file", "edit_file"),
+                write_scope=WriteScope("workspace"),
+            )
+        )
         return store, log
 
     @staticmethod
@@ -402,6 +416,10 @@ class IncrementalHistoryTests(unittest.TestCase):
             self.assertEqual(
                 restored.history().user_texts(),
                 rebuilt.user_texts(),
+            )
+            self.assertEqual(
+                restored.history().model_message_units(),
+                rebuilt.model_message_units(),
             )
 
     def test_live_projection_matches_full_event_replay(self):

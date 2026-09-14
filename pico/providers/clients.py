@@ -14,7 +14,7 @@ from openai import (
     DefaultAsyncHttpxClient,
 )
 
-from ..contracts import AssistantTurn, ModelAction, ToolCall
+from ..contracts import AssistantTurn, ModelAction, ModelMessage, ToolCall
 from ..execution import ExecutionCancelled, ExecutionContext, ExecutionDeadlineExceeded
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -77,26 +77,52 @@ def _result_items(pending_call_ids, results):
     }]
 
 
-def _estimate_input(action_input, input_text, instructions, action_tools, count_tokens):
-    items = action_input or [{
-        "role": "user",
-        "content": [{"type": "input_text", "text": str(input_text)}],
-    }]
+def _message_items(messages):
+    items = []
+    for message in messages:
+        if not isinstance(message, ModelMessage):
+            raise TypeError("model prompt messages must be ModelMessage values")
+        if message.role == "user":
+            items.append({
+                "role": "user",
+                "content": [{"type": "input_text", "text": message.text}],
+            })
+            continue
+        if message.role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id,
+                "output": message.text,
+            })
+            continue
+        if message.text:
+            items.append({
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": message.text}],
+            })
+        items.extend(_function_call_item(call) for call in message.tool_calls)
+    return items
+
+
+def _estimate_input(action_input, messages, system_prompt, action_tools, count_tokens):
+    items = action_input or _message_items(messages)
     return count_tokens(json.dumps({
-        "instructions": str(instructions),
+        "instructions": str(system_prompt),
         "tools": list(action_tools),
         "input": items,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
-def _projected_tokens(action_input, result_items, *, instructions, action_tools,
+def _projected_tokens(action_input, result_items, *, system_prompt, action_tools,
                       count_tokens, replay_context_tokens):
     if isinstance(replay_context_tokens, int):
         return replay_context_tokens + count_tokens(json.dumps(
             result_items, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
     return count_tokens(json.dumps({
-        "instructions": str(instructions),
+        "instructions": str(system_prompt),
         "tools": list(action_tools),
         "input": [*action_input, *result_items],
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -186,7 +212,7 @@ class ParsedTurn:
     action: ModelAction
     replay_items: tuple[dict, ...] = ()
     pending_call_ids: tuple[str, ...] = ()
-    visible_text: str = ""
+    text: str = ""
     usage: dict = field(default_factory=dict)
 
     @property
@@ -293,7 +319,7 @@ def _parse_turn(data, action_tools):
         action=action,
         replay_items=tuple(replay),
         pending_call_ids=pending_call_ids,
-        visible_text="\n".join(visible).strip(),
+        text="\n".join(visible).strip(),
         usage=usage,
     )
 
@@ -364,10 +390,14 @@ class OpenAICompatibleModelClient:
             separators=(",", ":"),
         ))
 
-    def estimate_action_input_tokens(self, input_text, *, instructions,
+    def estimate_action_input_tokens(self, messages, *, system_prompt,
                                      action_tools, token_counter):
         return _estimate_input(
-            self._action_input, input_text, instructions, action_tools, token_counter,
+            self._action_input,
+            messages,
+            system_prompt,
+            action_tools,
+            token_counter,
         )
 
     def _result_items(self, results):
@@ -378,26 +408,23 @@ class OpenAICompatibleModelClient:
         self._pending_call_ids = ()
         self._replay_context_tokens = None
 
-    def projected_context_tokens(self, results, *, instructions, action_tools,
+    def projected_context_tokens(self, results, *, system_prompt, action_tools,
                                  token_counter):
         return _projected_tokens(
             self._action_input,
             self._result_items(results),
-            instructions=instructions,
+            system_prompt=system_prompt,
             action_tools=action_tools,
             count_tokens=token_counter,
             replay_context_tokens=self._replay_context_tokens,
         )
 
-    def _payload(self, input_text, max_output_tokens, instructions, action_tools):
+    def _payload(self, messages, max_output_tokens, system_prompt, action_tools):
         if not self._action_input:
-            self._action_input.append({
-                "role": "user",
-                "content": [{"type": "input_text", "text": str(input_text)}],
-            })
+            self._action_input.extend(_message_items(messages))
         payload = {
             "model": self.model,
-            "instructions": str(instructions),
+            "instructions": str(system_prompt),
             "input": list(self._action_input),
             "max_output_tokens": int(max_output_tokens),
             "stream": True,
@@ -475,13 +502,18 @@ class OpenAICompatibleModelClient:
             self._runner.close()
             self._closed = True
 
-    def complete_turn(self, input_text, max_output_tokens, *, instructions,
+    def complete_turn(self, messages, max_output_tokens, *, system_prompt,
                       action_tools, execution_context: ExecutionContext):
         if self._pending_call_ids:
             raise RuntimeError("pending function calls have no recorded outputs")
         try:
             response = self._request(
-                self._payload(input_text, max_output_tokens, instructions, action_tools),
+                self._payload(
+                    messages,
+                    max_output_tokens,
+                    system_prompt,
+                    action_tools,
+                ),
                 execution_context,
             )
         except ProviderContextOverflow:
@@ -497,4 +529,4 @@ class OpenAICompatibleModelClient:
         if turn.accepted:
             self._action_input.extend(turn.replay_items)
             self._pending_call_ids = turn.pending_call_ids
-        return AssistantTurn(turn.action, turn.visible_text, turn.usage)
+        return AssistantTurn(turn.action, turn.text, turn.usage)

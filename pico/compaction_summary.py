@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from html import escape
 
-from .contracts import ToolOutcome
+from .contracts import ModelMessage, ToolOutcome
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
 
 SUMMARY_FIELDS = {
@@ -289,8 +289,11 @@ class CompactionSummarizer:
             ]
             source = escape(json.dumps(bounded, ensure_ascii=False,
                                        sort_keys=True, separators=(",", ":")), quote=False)
-            return ('Historical execution data:\n<history trust="untrusted_data">\n'
-                    + source + '\n</history>\n')
+            return (
+                "Historical execution data:\n<conversation_history>\n"
+                + source
+                + "\n</conversation_history>\n"
+            )
 
         high = max(1, len(cls._source(events)))
         full = render(high)
@@ -338,14 +341,14 @@ evidence was omitted, not that work succeeded or facts are absent."""
                 - count_tokens(task_context)
             ),
         )
-        input_text = task_context + "\n\n" + history_text
+        summary_prompt = task_context + "\n\n" + history_text
         client = None
         try:
             client = self.client_factory()
             turn = client.complete_turn(
-                input_text,
+                (ModelMessage.user(summary_prompt),),
                 max_output_tokens,
-                instructions=instructions,
+                system_prompt=instructions,
                 action_tools=[SUMMARY_TOOL],
                 execution_context=execution_context,
             )

@@ -211,10 +211,17 @@ class ToolRuntime:
     def _effective_policy(self):
         run_log = self.runtime.run.run_log
         contract = run_log.projection.contract if run_log is not None else None
-        mode = self.runtime.config.mode
-        if mode == "ask" or (
-            contract is not None and contract.write_scope.mode == "none"
-        ):
+        configured_mode = self.runtime.config.mode
+        mode_rank = {"ask": 0, "code": 1, "auto": 2}
+        mode = (
+            min(
+                (configured_mode, contract.mode),
+                key=mode_rank.__getitem__,
+            )
+            if contract is not None
+            else configured_mode
+        )
+        if contract is not None and contract.write_scope.mode == "none":
             mode = "ask"
         paths = intersect_write_scopes(
             contract.write_scope.allowed_paths() if contract is not None else None,
@@ -244,8 +251,11 @@ class ToolRuntime:
         mode, allowed_write_paths = self._effective_policy()
         definitions = {}
         configured = self.runtime.config.allowed_tools
+        contract = self.runtime.run.projection.contract
         for name, tool in self.registry.items():
             if configured is not None and name not in configured:
+                continue
+            if contract is not None and name not in contract.allowed_tools:
                 continue
             if not self._tool_allowed_by_mode(name, mode):
                 continue

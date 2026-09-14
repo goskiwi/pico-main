@@ -7,7 +7,7 @@ User request
     ↓
 Pico → AgentLoop → ModelClient
           │
-          ├── PromptBuilder：组装任务、历史、仓库规则和工作区状态
+          ├── PromptBuilder：构造 System Prompt 和按时间排列的 Messages
           ├── ToolRuntime：校验并执行工具
           └── RunLog：追加执行事实并更新 RunProjection
 ```
@@ -38,7 +38,7 @@ PICO_OPENAI_REASONING_EFFORT=none
 当前生产接入只实现 OpenAI-compatible **Responses API**，不是 Chat
 Completions、Anthropic `/messages` 或 OpenAI Agents SDK。更换 Base URL 的
 前提是服务端真正兼容 Responses 的流式事件、函数调用和函数结果格式；Pico
-内部以 `AssistantTurn`、`ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构。
+内部以 `ModelMessage`、`AssistantTurn`、`ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构；只有 Provider Adapter 使用 Responses Input Item。
 
 CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度和请求超时通过环境变量配置。
 
@@ -50,7 +50,7 @@ CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部
 - `Session`：只保存会话 ID、工作区归属和当前 `active_run_id`。
 - `RunLog`：一个任务一次 Run，按顺序追加用户请求、模型调用、工具阶段、失败和终态。
 - `RunProjection`：用同一套规则消费实时事件和历史事件，得到当前 Run 状态。
-- `PromptBuilder`：在模型窗口预算内组装当前任务、历史、规则和工作区信息。
+- `PromptBuilder`：构造 System Prompt，并从 RunLog 恢复按时间排列的 User、Assistant 和 Tool Messages。
 - `ToolRuntime`：统一处理工具 Schema、模式权限、写入范围、审批、执行阶段和结果。
 
 Session 不保存完整对话：
@@ -88,11 +88,13 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 
 `TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。Runtime 从被压缩的成功工具结果中确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。已提交的 CompactedContext 和确定性文件集合是压缩后必保上下文；必要压缩失败时不发送残缺 Prompt。
 
+`TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
+
 ## 一次任务
 
 1. CLI 创建或加载 Session，通过唯一的 `Pico(..., session=session)` 入口组装 Runtime。
 2. `Pico.ask()` 创建新 Run，恢复时继续 Session 指向的未完成 Run。
-3. `PromptBuilder` 从 RunLog 投影出模型需要的上下文。
+3. `PromptBuilder` 从 RunLog 构造 System Prompt 和按时间排列的 Messages。
 4. Runtime 先记录完整 `assistant_turn`，其中包含公开文字与有序 Tool Call。
 5. 所有工具统一返回 `tool_result`；潜在副作用在执行前额外提交 `tool_started`。
 6. 中断恢复根据 Assistant Turn、已完成结果和 Started 状态区分 completed、started 与 not_started，不盲目重放。
