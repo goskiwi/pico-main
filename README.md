@@ -87,7 +87,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 → 摘要 + 近期用户指导与完整工具事务 + 当前真实状态
 ```
 
-`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。摘要输入沿用 Pi 的简单边界：User、Assistant、Tool Call Arguments、状态、失败、路径和 metadata 完整提供，只把较早 Tool Result 的 `content` 截到2,000字符；存在 Artifact 时保留可读取的 `artifact_id`。Runtime 另行确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。必保内容仍放不下时 Compaction 明确失败，不提交残缺摘要。
+`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。摘要输入沿用 Pi 的简单边界：User、Assistant、Tool Call Arguments、状态、失败、路径和 metadata 完整提供，只把较早 Tool Result 的 `content` 截到2,000字符；存在 Artifact 时保留可读取的 `artifact_id`。如果整体仍超过摘要输入预算，或 Provider 仍返回 Overflow，则沿用 Codex/Claude Code 的有限降级，依次省略最老的完整 Tool Turn 并明确记录省略数量，Provider 请求最多尝试3次；User 与旧 CompactedContext 不作为可删除 Turn。Runtime 另行确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。仍无法容纳时 Compaction 明确失败，不提交残缺摘要。
 
 `TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
 

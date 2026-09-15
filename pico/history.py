@@ -340,18 +340,19 @@ class RunHistory:
             compacted,
             include_user_guidance=True,
         )
-        summary_facts = tuple(
-            (
+        summary_groups = tuple(summary_units)
+        if previous is not None:
+            summary_groups = (
+                (
                 _ProjectedFact(
                     "compaction",
                     {"context": previous.to_dict()},
                     (),
                 ),
+                ),
+                *summary_groups,
             )
-            if previous is not None
-            else ()
-        ) + tuple(fact for unit in summary_units for fact in unit)
-        if not summary_facts:
+        if not summary_groups:
             return None
         read_files, modified_files = self._compacted_file_lists(
             units[:cut],
@@ -362,7 +363,7 @@ class RunHistory:
         summary_budget = max_history_tokens - retained_tokens
         if summary_budget < 1:
             return None
-        semantic = summary_builder(summary_facts, max_summary_tokens=summary_budget)
+        semantic = summary_builder(summary_groups, max_summary_tokens=summary_budget)
         if not isinstance(semantic, CompactedContext):
             raise TypeError("summary builder must return CompactedContext")
         compacted_context = semantic.with_runtime_facts(

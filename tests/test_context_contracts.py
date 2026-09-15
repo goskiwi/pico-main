@@ -6,11 +6,14 @@ from unittest import mock
 
 from pico import AssistantTurn, ModelAction, PicoConfig, ToolCall, ToolOutcome
 from pico.compaction_summary import (
+    SUMMARY_TOOL,
     CompactedContext,
     CompactionSummarizer,
     SemanticCompactionError,
 )
+from pico.execution import ExecutionContext
 from pico.prompt_builder import load_project_instructions
+from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
 from tests.support import build_agent, request_text
 
@@ -80,12 +83,11 @@ class ModelMessageTests(unittest.TestCase):
             structured={"path": "subject.txt"},
             artifact_id="tool_0123456789abcdef_0123456789",
         )
-        events = (
-            SimpleNamespace(
+        user = SimpleNamespace(
                 kind="user_guidance",
                 payload={"content": user_text},
-            ),
-            SimpleNamespace(
+            )
+        call = SimpleNamespace(
                 kind="tool_call",
                 payload={
                     "name": "edit_file",
@@ -94,19 +96,20 @@ class ModelMessageTests(unittest.TestCase):
                         "new_text": argument_text,
                     },
                 },
-            ),
-            SimpleNamespace(
+            )
+        result = SimpleNamespace(
                 kind="tool_result",
                 payload={"outcome": outcome.to_dict()},
-            ),
-        )
+            )
+        groups = ((user,), (call, result))
 
-        rendered = CompactionSummarizer._summary_input(
-            events,
+        rendered, dropped = CompactionSummarizer._summary_input(
+            groups,
             count_tokens=len,
             input_budget=20_000,
         )
 
+        self.assertEqual(dropped, 0)
         self.assertIn(user_text, rendered)
         self.assertIn(argument_text, rendered)
         self.assertIn("X" * 2_000, rendered)
@@ -125,10 +128,109 @@ class ModelMessageTests(unittest.TestCase):
             "exceeds the summary input budget",
         ):
             CompactionSummarizer._summary_input(
-                (event,),
+                ((event,),),
                 count_tokens=len,
                 input_budget=100,
             )
+
+    def test_summary_input_omits_oldest_complete_tool_turn_first(self):
+        user = SimpleNamespace(
+            kind="user_guidance",
+            payload={"content": "Keep this requirement"},
+        )
+
+        def tool_group(call_id, path, content):
+            call = SimpleNamespace(
+                kind="tool_call",
+                payload={
+                    "name": "read_file",
+                    "args": {"path": path},
+                },
+            )
+            outcome = ToolOutcome(
+                call_id,
+                "read_file",
+                "success",
+                "completed",
+                "none",
+                content,
+                structured={"path": path},
+            )
+            result = SimpleNamespace(
+                kind="tool_result",
+                payload={"outcome": outcome.to_dict()},
+            )
+            return call, result
+
+        rendered, dropped = CompactionSummarizer._summary_input(
+            (
+                (user,),
+                tool_group("old", "old.py", "X" * 3_000),
+                tool_group("recent", "recent.py", "ok"),
+            ),
+            count_tokens=len,
+            input_budget=1_000,
+        )
+
+        self.assertEqual(dropped, 1)
+        self.assertIn("Keep this requirement", rendered)
+        self.assertNotIn("old.py", rendered)
+        self.assertIn("recent.py", rendered)
+        self.assertIn("1 older complete Tool Turns were omitted", rendered)
+
+    def test_summary_provider_overflow_omits_one_more_turn_and_retries(self):
+        call = SimpleNamespace(
+            kind="tool_call",
+            payload={"name": "read_file", "args": {"path": "old.py"}},
+        )
+        outcome = ToolOutcome(
+            "old",
+            "read_file",
+            "success",
+            "completed",
+            "none",
+            "old result",
+        )
+        result = SimpleNamespace(
+            kind="tool_result",
+            payload={"outcome": outcome.to_dict()},
+        )
+        summary_args = {
+            "constraints": [],
+            "progress": {"done": [], "in_progress": [], "blocked": []},
+            "key_decisions": [],
+            "next_steps": [],
+            "critical_context": [],
+        }
+        client = mock.Mock()
+        client.complete_turn.side_effect = [
+            ProviderContextOverflow("too large"),
+            AssistantTurn(
+                ModelAction.tool(
+                    SUMMARY_TOOL["name"],
+                    summary_args,
+                    call_id="summary",
+                )
+            ),
+        ]
+        summarizer = CompactionSummarizer(lambda: client)
+
+        compacted = summarizer.summarize(
+            ((call, result),),
+            task_goal="Inspect",
+            execution_context=ExecutionContext.root(max_seconds=5),
+            effective_context_limit_tokens=100_000,
+            effective_input_limit_tokens=100_000,
+            max_output_tokens=1_000,
+            count_tokens=len,
+        )
+
+        self.assertIsInstance(compacted, CompactedContext)
+        self.assertEqual(client.complete_turn.call_count, 2)
+        client.reset_action_session.assert_called_once_with()
+        second_messages = client.complete_turn.call_args_list[1].args[0]
+        self.assertIn("1 older complete Tool Turns were omitted", second_messages[0].text)
+        client.close.assert_called_once_with()
 
     def test_runtime_permissions_live_in_the_system_prompt(self):
         with tempfile.TemporaryDirectory() as directory:

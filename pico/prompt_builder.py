@@ -286,10 +286,10 @@ class PromptBuilder:
         )
         history_budget = max(0, prepared["input_limit"] - fixed_tokens)
 
-        def build_summary(events, *, max_summary_tokens):
+        def build_summary(groups, *, max_summary_tokens):
             try:
                 return self.semantic_summarizer.summarize(
-                    events,
+                    groups,
                     task_goal=self.runtime.run.projection.contract.goal,
                     execution_context=self.runtime.run.execution_context,
                     effective_context_limit_tokens=(

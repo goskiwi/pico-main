@@ -8,6 +8,7 @@ from html import escape
 
 from .contracts import ModelMessage, ToolOutcome
 from .execution import ExecutionCancelled, ExecutionDeadlineExceeded
+from .providers import ProviderContextOverflow
 
 SUMMARY_FIELDS = {
     "constraints",
@@ -272,30 +273,73 @@ class CompactionSummarizer:
         }
 
     @classmethod
-    def _summary_input(cls, events, *, count_tokens, input_budget):
-        records = [cls._semantic_record(entry) for entry in events]
-        source = escape(
-            json.dumps(
-                records,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            quote=False,
-        )
-        rendered = (
-            "Historical execution data:\n<conversation_history>\n"
-            + source
-            + "\n</conversation_history>\n"
-        )
-        if count_tokens(rendered) > input_budget:
-            raise SemanticCompactionError(
-                "conversation history exceeds the summary input budget after "
-                "tool result truncation"
-            )
-        return rendered
+    def _summary_input(cls, groups, *, count_tokens, input_budget, drop_turns=0):
+        groups = tuple(tuple(group) for group in groups)
 
-    def summarize(self, events, *, task_goal, execution_context,
+        def is_tool_turn(group):
+            kinds = [entry.kind for entry in group]
+            return "tool_call" in kinds and kinds.count("tool_call") == kinds.count(
+                "tool_result"
+            )
+
+        droppable = [index for index, group in enumerate(groups) if is_tool_turn(group)]
+        if drop_turns > len(droppable):
+            raise SemanticCompactionError(
+                "conversation history has no more complete Tool Turns to omit"
+            )
+        omitted = set(droppable[:drop_turns])
+
+        def render(selected_groups, omitted_count):
+            records = []
+            if omitted_count:
+                records.append(
+                    {
+                        "kind": "history_omitted",
+                        "detail": (
+                            f"{omitted_count} older complete Tool Turns were omitted "
+                            "from this compaction input"
+                        ),
+                    }
+                )
+            records.extend(
+                cls._semantic_record(entry)
+                for group in selected_groups
+                for entry in group
+            )
+            source = escape(
+                json.dumps(
+                    records,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                quote=False,
+            )
+            return (
+                "Historical execution data:\n<conversation_history>\n"
+                + source
+                + "\n</conversation_history>\n"
+            )
+
+        while True:
+            selected = [
+                group for index, group in enumerate(groups) if index not in omitted
+            ]
+            rendered = render(selected, len(omitted))
+            if count_tokens(rendered) <= input_budget:
+                return rendered, len(omitted)
+            next_drop = next(
+                (index for index in droppable if index not in omitted),
+                None,
+            )
+            if next_drop is None:
+                raise SemanticCompactionError(
+                    "conversation history exceeds the summary input budget and "
+                    "has no more complete Tool Turns to omit"
+                )
+            omitted.add(next_drop)
+
+    def summarize(self, groups, *, task_goal, execution_context,
                   effective_context_limit_tokens, effective_input_limit_tokens,
                   max_output_tokens, count_tokens):
         instructions = """Create a structured context checkpoint for a coding agent.
@@ -316,28 +360,40 @@ evidence was omitted, not that work succeeded or facts are absent."""
         request_overhead = count_tokens(instructions) + count_tokens(
             json.dumps([SUMMARY_TOOL], ensure_ascii=False, sort_keys=True)
         )
-        history_text = self._summary_input(
-            tuple(events), count_tokens=count_tokens,
-            input_budget=(
-                min(
-                    effective_context_limit_tokens - max_output_tokens,
-                    effective_input_limit_tokens,
-                )
-                - request_overhead
-                - count_tokens(task_context)
-            ),
+        input_budget = (
+            min(
+                effective_context_limit_tokens - max_output_tokens,
+                effective_input_limit_tokens,
+            )
+            - request_overhead
+            - count_tokens(task_context)
         )
-        summary_prompt = task_context + "\n\n" + history_text
+        dropped_turns = 0
         client = None
         try:
             client = self.client_factory()
-            turn = client.complete_turn(
-                (ModelMessage.user(summary_prompt),),
-                max_output_tokens,
-                system_prompt=instructions,
-                action_tools=[SUMMARY_TOOL],
-                execution_context=execution_context,
-            )
+            for attempt in range(3):
+                history_text, dropped_turns = self._summary_input(
+                    tuple(groups),
+                    count_tokens=count_tokens,
+                    input_budget=input_budget,
+                    drop_turns=dropped_turns,
+                )
+                summary_prompt = task_context + "\n\n" + history_text
+                try:
+                    turn = client.complete_turn(
+                        (ModelMessage.user(summary_prompt),),
+                        max_output_tokens,
+                        system_prompt=instructions,
+                        action_tools=[SUMMARY_TOOL],
+                        execution_context=execution_context,
+                    )
+                    break
+                except ProviderContextOverflow:
+                    if attempt == 2:
+                        raise
+                    dropped_turns += 1
+                    client.reset_action_session()
             action = turn.action
             if (
                 action.kind != "tool"
