@@ -17,6 +17,10 @@ class RunMetrics:
     attempt_duration_ms: int = 0
     model_request_count: int = 0
     executed_tool_count: int = 0
+    input_tokens: int = 0
+    cached_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
     kind_counts: dict[str, int] = field(default_factory=dict)
     tool_counts: dict[str, int] = field(default_factory=dict)
     outcome_counts: dict[str, int] = field(default_factory=dict)
@@ -27,6 +31,8 @@ class RunMetrics:
         self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
         if kind == "model_requested":
             self.model_request_count += 1
+        elif kind == "model_failure":
+            self._add_usage(payload.get("usage", {}))
         elif kind == "tool_result":
             outcome = dict(payload.get("outcome", {}) or {})
             tool = str(outcome.get("tool_name", ""))
@@ -37,6 +43,7 @@ class RunMetrics:
             self.outcome_counts[status] = self.outcome_counts.get(status, 0) + 1
         elif kind == "assistant_turn":
             turn = AssistantTurn.from_dict(payload["turn"])
+            self._add_usage(turn.usage)
             if turn.action.kind == "final":
                 self.attempt_duration_ms = int(
                     payload.get("attempt_duration_ms", 0)
@@ -44,11 +51,28 @@ class RunMetrics:
         elif kind == "run_stopped":
             self.attempt_duration_ms = int(payload.get("attempt_duration_ms", 0))
 
+    def _add_usage(self, usage):
+        if not isinstance(usage, dict):
+            return
+        for field_name in (
+            "input_tokens",
+            "cached_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+        ):
+            value = usage.get(field_name)
+            if type(value) is int and value >= 0:
+                setattr(self, field_name, getattr(self, field_name) + value)
+
     def to_dict(self):
         return {
             "attempt_duration_ms": self.attempt_duration_ms,
             "model_request_count": self.model_request_count,
             "executed_tool_count": self.executed_tool_count,
+            "input_tokens": self.input_tokens,
+            "cached_tokens": self.cached_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "kind_counts": dict(sorted(self.kind_counts.items())),
             "tool_counts": dict(sorted(self.tool_counts.items())),
             "outcome_counts": dict(sorted(self.outcome_counts.items())),
@@ -60,6 +84,10 @@ class RunMetrics:
             "attempt_duration_ms",
             "model_request_count",
             "executed_tool_count",
+            "input_tokens",
+            "cached_tokens",
+            "output_tokens",
+            "reasoning_tokens",
             "kind_counts",
             "tool_counts",
             "outcome_counts",
@@ -77,6 +105,10 @@ class RunMetrics:
             attempt_duration_ms=int(value["attempt_duration_ms"]),
             model_request_count=int(value["model_request_count"]),
             executed_tool_count=int(value["executed_tool_count"]),
+            input_tokens=int(value["input_tokens"]),
+            cached_tokens=int(value["cached_tokens"]),
+            output_tokens=int(value["output_tokens"]),
+            reasoning_tokens=int(value["reasoning_tokens"]),
             kind_counts=counts("kind_counts"),
             tool_counts=counts("tool_counts"),
             outcome_counts=counts("outcome_counts"),
@@ -85,6 +117,10 @@ class RunMetrics:
             result.attempt_duration_ms,
             result.model_request_count,
             result.executed_tool_count,
+            result.input_tokens,
+            result.cached_tokens,
+            result.output_tokens,
+            result.reasoning_tokens,
             *result.kind_counts.values(),
             *result.tool_counts.values(),
             *result.outcome_counts.values(),

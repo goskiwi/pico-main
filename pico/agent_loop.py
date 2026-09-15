@@ -20,7 +20,7 @@ class AgentLoopState:
     prompt_snapshot: ModelPrompt | None = None
     force_compaction: bool = False
     overflow_recovery_attempted: bool = False
-    last_request_input_tokens: int = 0
+    current_context_tokens: int = 0
     invalid_output_count: int = 0
     model_request_count_at_start: int = 0
 
@@ -162,7 +162,9 @@ class AgentLoop:
     def _reset_context(self, loop_state, reason=None, *, force_compaction=False, **details):
         self.agent.model_client.reset_action_session()
         loop_state.prompt_snapshot = None
-        loop_state.force_compaction = bool(force_compaction)
+        loop_state.force_compaction = (
+            loop_state.force_compaction or bool(force_compaction)
+        )
         if reason is not None:
             self.agent.emit_event("provider_session_reset", {"reason": reason, **details})
 
@@ -173,19 +175,23 @@ class AgentLoop:
         tool_surface,
     ):
         agent = self.agent
-        input_tokens = agent.model_client.estimate_action_input_tokens(
+        context_tokens = agent.model_client.estimate_action_input_tokens(
             prompt.messages,
             system_prompt=prompt.system_prompt,
             action_tools=tool_surface.action_tools,
             token_counter=agent.prompt.count_tokens,
         )
-        if loop_state.overflow_recovery_attempted and input_tokens >= loop_state.last_request_input_tokens:
+        if (
+            loop_state.overflow_recovery_attempted
+            and context_tokens >= loop_state.current_context_tokens
+        ):
             raise ProviderContextOverflow(
                 "context overflow recovery did not reduce the full request "
-                f"({loop_state.last_request_input_tokens} -> {input_tokens} estimated input tokens); "
+                f"({loop_state.current_context_tokens} -> {context_tokens} "
+                "estimated input tokens); "
                 "check the model context/output limits or reduce required context"
             )
-        loop_state.last_request_input_tokens = input_tokens
+        loop_state.current_context_tokens = context_tokens
         agent.emit_event("model_requested")
         turn = agent.model_client.complete_turn(
             prompt.messages,
@@ -196,7 +202,7 @@ class AgentLoop:
         )
         return turn
 
-    def _provider_high_watermark(self):
+    def _context_limit(self):
         return self.agent.effective_input_limit_tokens
 
     def _continue_provider(
@@ -208,18 +214,19 @@ class AgentLoop:
     ):
         agent = self.agent
         provider_results = tuple(str(result) for result in provider_results)
-        projected_tokens = agent.model_client.projected_context_tokens(
+        context_tokens = agent.model_client.projected_context_tokens(
             provider_results,
             system_prompt=prompt.system_prompt,
             action_tools=tool_surface.action_tools,
             token_counter=agent.prompt.count_tokens,
         )
-        if projected_tokens >= self._provider_high_watermark():
-            threshold_tokens = self._provider_high_watermark()
+        loop_state.current_context_tokens = context_tokens
+        if context_tokens >= self._context_limit():
+            threshold_tokens = self._context_limit()
             self._reset_context(
                 loop_state, "context_high_watermark",
                 input_tokens=agent.model_client.last_completion_metadata.get("input_tokens"),
-                projected_input_tokens=projected_tokens,
+                projected_input_tokens=context_tokens,
                 threshold_tokens=threshold_tokens,
             )
             return

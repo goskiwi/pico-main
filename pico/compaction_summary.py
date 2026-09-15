@@ -17,6 +17,7 @@ SUMMARY_FIELDS = {
     "critical_context",
 }
 SUMMARY_MAX_OUTPUT_TOKENS = 16_000
+COMPACTION_TOOL_RESULT_MAX_CHARS = 2_000
 PROGRESS_FIELDS = {"done", "in_progress", "blocked"}
 TEXT_LIST = {"type": "array", "items": {"type": "string"}}
 SUMMARY_TOOL = {
@@ -214,6 +215,20 @@ class CompactionSummarizer:
         self.client_factory = client_factory
 
     @staticmethod
+    def _tool_result_content(outcome):
+        content = outcome.content
+        if len(content) <= COMPACTION_TOOL_RESULT_MAX_CHARS:
+            return content
+        omitted = len(content) - COMPACTION_TOOL_RESULT_MAX_CHARS
+        marker = f"[... {omitted} more characters truncated for compaction"
+        if outcome.artifact_id:
+            marker += (
+                "; full retained output: artifact_id="
+                + outcome.artifact_id
+            )
+        return content[:COMPACTION_TOOL_RESULT_MAX_CHARS] + "\n" + marker + "]"
+
+    @staticmethod
     def _semantic_record(entry):
         payload = dict(entry.payload)
         if entry.kind == "compaction":
@@ -230,7 +245,7 @@ class CompactionSummarizer:
             record = {
                 "kind": "tool_result",
                 "tool": outcome.tool_name,
-                "content": outcome.content,
+                "content": CompactionSummarizer._tool_result_content(outcome),
             }
             metadata = {key: value for key, value in outcome.structured.items() if key in {
                 "path", "start_line", "end_line", "exit_code", "stop_reason",
@@ -257,60 +272,28 @@ class CompactionSummarizer:
         }
 
     @classmethod
-    def _source(cls, events):
+    def _summary_input(cls, events, *, count_tokens, input_budget):
         records = [cls._semantic_record(entry) for entry in events]
-        return json.dumps(
-            records,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        source = escape(
+            json.dumps(
+                records,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            quote=False,
         )
-
-    @classmethod
-    def _bounded_input(cls, events, *, count_tokens, input_budget):
-        records = [cls._semantic_record(entry) for entry in events]
-
-        def clip(value, limit):
-            if isinstance(value, str) and len(value) > limit:
-                return value[:limit] + "\n[omitted from summary input; consult original RunLog/artifact]"
-            if isinstance(value, dict):
-                return {key: clip(item, limit) for key, item in value.items()}
-            if isinstance(value, list):
-                return [clip(item, limit) for item in value]
-            return value
-
-        def render(limit):
-            # Keep record identity, outcome status and artifact references intact.
-            bounded = [
-                {key: clip(value, limit) if key in {
-                    "content", "arguments", "instruction", "evidence", "metadata"
-                } else value for key, value in record.items()}
-                for record in records
-            ]
-            source = escape(json.dumps(bounded, ensure_ascii=False,
-                                       sort_keys=True, separators=(",", ":")), quote=False)
-            return (
-                "Historical execution data:\n<conversation_history>\n"
-                + source
-                + "\n</conversation_history>\n"
+        rendered = (
+            "Historical execution data:\n<conversation_history>\n"
+            + source
+            + "\n</conversation_history>\n"
+        )
+        if count_tokens(rendered) > input_budget:
+            raise SemanticCompactionError(
+                "conversation history exceeds the summary input budget after "
+                "tool result truncation"
             )
-
-        high = max(1, len(cls._source(events)))
-        full = render(high)
-        if count_tokens(full) <= input_budget:
-            return full
-        best = render(0)
-        if count_tokens(best) > input_budget:
-            raise SemanticCompactionError("summary record metadata exceeds input budget")
-        low = 0
-        while low < high:
-            middle = (low + high + 1) // 2
-            candidate = render(middle)
-            if count_tokens(candidate) <= input_budget:
-                low, best = middle, candidate
-            else:
-                high = middle - 1
-        return best
+        return rendered
 
     def summarize(self, events, *, task_goal, execution_context,
                   effective_context_limit_tokens, effective_input_limit_tokens,
@@ -333,7 +316,7 @@ evidence was omitted, not that work succeeded or facts are absent."""
         request_overhead = count_tokens(instructions) + count_tokens(
             json.dumps([SUMMARY_TOOL], ensure_ascii=False, sort_keys=True)
         )
-        history_text = self._bounded_input(
+        history_text = self._summary_input(
             tuple(events), count_tokens=count_tokens,
             input_budget=(
                 min(

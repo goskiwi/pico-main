@@ -87,11 +87,13 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 → 摘要 + 近期用户指导与完整工具事务 + 当前真实状态
 ```
 
-`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。Runtime 从被压缩的成功工具结果中确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。已提交的 CompactedContext 和确定性文件集合是压缩后必保上下文；必要压缩失败时不发送残缺 Prompt。
+`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。摘要输入沿用 Pi 的简单边界：User、Assistant、Tool Call Arguments、状态、失败、路径和 metadata 完整提供，只把较早 Tool Result 的 `content` 截到2,000字符；存在 Artifact 时保留可读取的 `artifact_id`。Runtime 另行确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。必保内容仍放不下时 Compaction 明确失败，不提交残缺摘要。
 
 `TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
 
-本地 Prompt Token 只用于判断重建后的 Prompt 是否需要 Compaction；Provider Usage 只用于判断当前 Provider Session 何时 Reset，两者不取最大值。普通高水位 Reset 后重新计算本地 Prompt，只有 Provider 明确返回 Context Overflow 时才以 `force_compaction` 强制尝试摘要。
+Runtime 只维护一个当前 Context 用量：首次构造或恢复时来自本地完整请求估算，模型响应后由 Provider Usage 加新增 Tool Result 估算覆盖。达到高水位时先 Reset，随后同一个计数由重建 Prompt 的本地估算覆盖并重新判断；重建值仍达到 Input Limit 才 Compaction。Provider 明确返回 Context Overflow 时直接强制尝试摘要。任一时刻只有一个当前值，不比较两份快照。
+
+Provider 提供 `output_tokens_details.reasoning_tokens` 时，Pico 将其作为可选 Usage 明细写入 Assistant Turn、RunMetrics 和 Trace。Reasoning Token 已包含在 `output_tokens` 中，Context 计算仍只使用总 `output_tokens`，不会重复相加。
 
 Environment Context 是轻量启动快照：Git short status 在 Workspace 层最多保留 2,000 字符并明确标记截断，PromptBuilder 不再重复设置 Token 上限；如果整个模型输入仍放不下，Environment Message 可以省略，模型按需通过工具重新观察当前状态。
 

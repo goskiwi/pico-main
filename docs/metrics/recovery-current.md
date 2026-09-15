@@ -1,8 +1,8 @@
 # Current Pico recovery evaluation
 
-- Source: `2662534`; dirty=true
+- Source: `225c0e4`; dirty=true
 - Result: **12/12 passed**
-- Duration: 0.189s
+- Duration: 0.194s
 - Every row is a distinct recovery state; no repeated variants are used to inflate the count.
 
 | Category | Scenario | Result |

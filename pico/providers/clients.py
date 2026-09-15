@@ -130,12 +130,25 @@ def _projected_tokens(action_input, result_items, *, system_prompt, action_tools
 
 def _usage(data):
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    details = usage.get("input_tokens_details")
-    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    input_details = usage.get("input_tokens_details")
+    output_details = usage.get("output_tokens_details")
+    cached = (
+        input_details.get("cached_tokens")
+        if isinstance(input_details, dict)
+        else None
+    )
+    reasoning = (
+        output_details.get("reasoning_tokens")
+        if isinstance(output_details, dict)
+        else None
+    )
     return {
         "input_tokens": usage.get("input_tokens"),
         "cached_tokens": cached if type(cached) is int and cached >= 0 else None,
         "output_tokens": usage.get("output_tokens"),
+        "reasoning_tokens": (
+            reasoning if type(reasoning) is int and reasoning >= 0 else None
+        ),
         "total_tokens": usage.get("total_tokens"),
     }
 
@@ -513,6 +526,7 @@ class OpenAICompatibleModelClient:
                       action_tools, execution_context: ExecutionContext):
         if self._pending_call_ids:
             raise RuntimeError("pending function calls have no recorded outputs")
+        self.last_completion_metadata = {}
         try:
             response = self._request(
                 self._payload(

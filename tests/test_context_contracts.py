@@ -1,10 +1,15 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from pico import AssistantTurn, ModelAction, PicoConfig, ToolCall, ToolOutcome
-from pico.compaction_summary import CompactedContext
+from pico.compaction_summary import (
+    CompactedContext,
+    CompactionSummarizer,
+    SemanticCompactionError,
+)
 from pico.prompt_builder import load_project_instructions
 from pico.run_lifecycle import RunLifecycle
 from tests.support import build_agent, request_text
@@ -62,6 +67,69 @@ class RepositoryInstructionTests(unittest.TestCase):
 
 
 class ModelMessageTests(unittest.TestCase):
+    def test_summary_input_only_truncates_tool_result_content(self):
+        user_text = "U" * 3_000
+        argument_text = "A" * 3_000
+        outcome = ToolOutcome(
+            "read",
+            "read_file",
+            "success",
+            "completed",
+            "none",
+            "X" * 3_000,
+            structured={"path": "subject.txt"},
+            artifact_id="tool_0123456789abcdef_0123456789",
+        )
+        events = (
+            SimpleNamespace(
+                kind="user_guidance",
+                payload={"content": user_text},
+            ),
+            SimpleNamespace(
+                kind="tool_call",
+                payload={
+                    "name": "edit_file",
+                    "args": {
+                        "path": "subject.txt",
+                        "new_text": argument_text,
+                    },
+                },
+            ),
+            SimpleNamespace(
+                kind="tool_result",
+                payload={"outcome": outcome.to_dict()},
+            ),
+        )
+
+        rendered = CompactionSummarizer._summary_input(
+            events,
+            count_tokens=len,
+            input_budget=20_000,
+        )
+
+        self.assertIn(user_text, rendered)
+        self.assertIn(argument_text, rendered)
+        self.assertIn("X" * 2_000, rendered)
+        self.assertNotIn("X" * 2_001, rendered)
+        self.assertIn("full retained output: artifact_id=tool_", rendered)
+        self.assertNotIn("RunLog", rendered)
+
+    def test_required_summary_content_over_budget_fails(self):
+        event = SimpleNamespace(
+            kind="user_guidance",
+            payload={"content": "required" * 1_000},
+        )
+
+        with self.assertRaisesRegex(
+            SemanticCompactionError,
+            "exceeds the summary input budget",
+        ):
+            CompactionSummarizer._summary_input(
+                (event,),
+                count_tokens=len,
+                input_budget=100,
+            )
+
     def test_runtime_permissions_live_in_the_system_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, _model = build_agent(Path(directory), [])

@@ -64,10 +64,13 @@ class TracePrinter:
                 action = {"kind": payload.get("kind")}
             cached = usage.get("cached_tokens")
             cached_text = "unknown" if cached is None else str(cached)
+            reasoning = usage.get("reasoning_tokens")
+            reasoning_text = "unknown" if reasoning is None else str(reasoning)
             status = action.get("kind", "unknown")
             return (f"[Model {self.turn}] {status} · input={usage.get('input_tokens')} "
                     f"cached={cached_text} "
-                    f"output={usage.get('output_tokens')} · {elapsed:.2f}s")
+                    f"output={usage.get('output_tokens')} "
+                    f"reasoning={reasoning_text} · {elapsed:.2f}s")
         if kind == "tool_started":
             call = self.calls.get(event.call_id)
             label = self._label(call) if call else event.call_id

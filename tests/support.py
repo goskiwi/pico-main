@@ -79,6 +79,7 @@ class ScriptedModel:
             "input_tokens": sum(len(message.text) for message in messages),
             "cached_tokens": 0,
             "output_tokens": 1,
+            "reasoning_tokens": 0,
         }
         if action.kind == "tool":
             self._pending_call_ids = tuple(

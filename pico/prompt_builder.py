@@ -265,11 +265,14 @@ class PromptBuilder:
             or run_log.projection.pending_tool is not None
         ):
             return None
-        local_prompt_tokens = self._prompt_tokens(
+        current_context_tokens = self._prompt_tokens(
             prepared["system_prompt"],
             prepared["messages"],
         )
-        if not force_compaction and local_prompt_tokens < prepared["input_limit"]:
+        if (
+            not force_compaction
+            and current_context_tokens < prepared["input_limit"]
+        ):
             return None
         if self.semantic_summarizer is None:
             raise SemanticCompactionError(

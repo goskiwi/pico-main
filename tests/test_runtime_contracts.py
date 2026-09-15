@@ -7,6 +7,7 @@ from unittest import mock
 from pico import (
     AssistantTurn,
     ModelAction,
+    ModelMessage,
     Pico,
     PicoConfig,
     SessionStore,
@@ -16,7 +17,9 @@ from pico import (
     Workspace,
     WriteScope,
 )
+from pico.agent_loop import AgentLoop, AgentLoopState
 from pico.compaction_summary import CompactedContext, SemanticCompactionError
+from pico.prompt_builder import ModelPrompt
 from pico.providers import ProviderContextOverflow
 from pico.run_lifecycle import RunLifecycle
 from pico.run_log import RunEvent, RunLog, replay_events
@@ -61,6 +64,31 @@ class RuntimeContractTests(unittest.TestCase):
 
             self.assertEqual(outcome.stop_reason, "model_request_limit")
             self.assertEqual(len(model.requests), 2)
+
+    def test_run_metrics_record_reasoning_as_output_detail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _model = build_agent(
+                Path(directory),
+                [
+                    AssistantTurn(
+                        ModelAction.final("Done."),
+                        usage={
+                            "input_tokens": 10,
+                            "cached_tokens": 4,
+                            "output_tokens": 8,
+                            "reasoning_tokens": 6,
+                            "total_tokens": 18,
+                        },
+                    )
+                ],
+            )
+
+            agent.ask("Inspect")
+
+            self.assertEqual(agent.run.metrics.input_tokens, 10)
+            self.assertEqual(agent.run.metrics.cached_tokens, 4)
+            self.assertEqual(agent.run.metrics.output_tokens, 8)
+            self.assertEqual(agent.run.metrics.reasoning_tokens, 6)
 
     def test_resuming_with_broader_config_cannot_expand_run_permissions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -375,7 +403,37 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(request.call_count, 1)
             self.assertTrue(agent.run.resumable)
 
-    def test_provider_high_watermark_resets_without_forcing_compaction(self):
+    def test_project_refresh_preserves_pending_forced_compaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _model = build_agent(Path(directory), [])
+            RunLifecycle(agent).initialize("Inspect")
+            loop = AgentLoop(agent)
+            state = AgentLoopState(force_compaction=True)
+            surface = agent.tools.resolve_surface()
+            expected = ModelPrompt(
+                "system",
+                (ModelMessage.user("Inspect"),),
+            )
+
+            with mock.patch.object(
+                agent.prompt,
+                "refresh_project_instructions",
+                return_value=True,
+            ), mock.patch.object(
+                agent.prompt,
+                "build_for_run",
+                return_value=expected,
+            ) as build:
+                prompt = loop._prepare_prompt(state, surface)
+
+            self.assertIs(prompt, expected)
+            build.assert_called_once_with(
+                tool_surface=surface,
+                force_compaction=True,
+            )
+            self.assertFalse(state.force_compaction)
+
+    def test_high_watermark_replaces_provider_count_with_rebuilt_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
@@ -402,6 +460,12 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(
                 [event.payload["reason"] for event in resets],
                 ["context_high_watermark"],
+            )
+            self.assertFalse(
+                any(
+                    event.kind == "compaction"
+                    for event in agent.read_run_events(outcome.run_id)
+                )
             )
 
     def test_context_overflow_without_compactable_history_does_not_retry(self):

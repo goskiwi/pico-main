@@ -1,10 +1,19 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pico import ModelAction, ModelMessage, ToolCall
 from pico.compaction_summary import SUMMARY_TOOL
-from pico.providers.clients import _message_items, _parse_turn, _result_items
+from pico.execution import ExecutionContext
+from pico.providers.clients import (
+    OpenAICompatibleModelClient,
+    ProviderContextOverflow,
+    _message_items,
+    _parse_turn,
+    _replay_context_tokens,
+    _result_items,
+)
 from pico.run_log import replay_events
 from tests.support import build_agent
 
@@ -54,6 +63,32 @@ class ModelResultTests(unittest.TestCase):
 
         self.assertEqual(service.action.kind, "service_failed")
         self.assertEqual(protocol.action.kind, "protocol_error")
+
+    def test_provider_failure_does_not_reuse_previous_request_usage(self):
+        client = OpenAICompatibleModelClient(
+            "test-model",
+            "https://example.invalid/v1",
+            "test-key",
+            None,
+            1,
+        )
+        client.last_completion_metadata = {"input_tokens": 99}
+        try:
+            with mock.patch.object(
+                client,
+                "_request",
+                side_effect=ProviderContextOverflow("too large"),
+            ), self.assertRaises(ProviderContextOverflow):
+                client.complete_turn(
+                    (ModelMessage.user("Inspect"),),
+                    100,
+                    system_prompt="test",
+                    action_tools=self._tools(),
+                    execution_context=ExecutionContext.root(max_seconds=1),
+                )
+            self.assertEqual(client.last_completion_metadata, {})
+        finally:
+            client.close()
 
     def test_multiple_tool_calls_preserve_order_and_result_identity(self):
         turn = _parse_turn(
@@ -122,6 +157,12 @@ class ModelResultTests(unittest.TestCase):
         turn = _parse_turn(
             {
                 "status": "completed",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 8,
+                    "total_tokens": 18,
+                    "output_tokens_details": {"reasoning_tokens": 6},
+                },
                 "output": [
                     {
                         "type": "reasoning",
@@ -151,6 +192,8 @@ class ModelResultTests(unittest.TestCase):
 
         self.assertEqual(turn.text, "I will inspect the current file.")
         self.assertNotIn("opaque-reasoning", turn.text)
+        self.assertEqual(turn.usage["reasoning_tokens"], 6)
+        self.assertEqual(_replay_context_tokens(turn), 18)
 
     def test_submit_final_must_be_alone(self):
         turn = _parse_turn(
