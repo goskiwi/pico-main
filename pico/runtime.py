@@ -45,10 +45,10 @@ class Pico:
             model_context_window = int(model_context_window)
             if model_context_window < 1:
                 raise ValueError("model context window must be positive")
-        available_context = (
-            self.effective_context_limit_tokens
-            - self.config.max_output_tokens
-        )
+        model_input_limit = getattr(model_client, "input_limit_tokens", None)
+        if model_input_limit is not None and int(model_input_limit) < 1:
+            raise ValueError("model input limit must be positive")
+        available_context = self.effective_input_limit_tokens
         if available_context < 1:
             raise ValueError("model context window must exceed max_output_tokens")
         if self.config.recent_history_tokens > available_context:
@@ -90,6 +90,21 @@ class Pico:
         if policy_limit is None:
             return int(model_limit)
         return min(int(policy_limit), int(model_limit))
+
+    @property
+    def effective_input_limit_tokens(self):
+        """Return the strictest Provider input limit after output reservation."""
+
+        combined_limit = (
+            self.effective_context_limit_tokens
+            - self.config.max_output_tokens
+        )
+        provider_limit = getattr(self.model_client, "input_limit_tokens", None)
+        return (
+            combined_limit
+            if provider_limit is None
+            else min(combined_limit, int(provider_limit))
+        )
 
     def redact_text(self, text):
         return securitylib.redact_text(text)

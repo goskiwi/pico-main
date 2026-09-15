@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 @dataclass
 class AgentLoopState:
     prompt_snapshot: ModelPrompt | None = None
-    provider_context_tokens: int | None = None
+    force_compaction: bool = False
     overflow_recovery_attempted: bool = False
     last_request_input_tokens: int = 0
     invalid_output_count: int = 0
@@ -151,18 +151,18 @@ class AgentLoop:
         if loop_state.prompt_snapshot is None:
             prompt = agent.prompt.build_for_run(
                 tool_surface=tool_surface,
-                provider_context_tokens=loop_state.provider_context_tokens,
+                force_compaction=loop_state.force_compaction,
             )
-            loop_state.provider_context_tokens = None
+            loop_state.force_compaction = False
             loop_state.prompt_snapshot = prompt
         else:
             prompt = loop_state.prompt_snapshot
         return prompt
 
-    def _reset_context(self, loop_state, reason=None, *, provider_context_tokens=None, **details):
+    def _reset_context(self, loop_state, reason=None, *, force_compaction=False, **details):
         self.agent.model_client.reset_action_session()
         loop_state.prompt_snapshot = None
-        loop_state.provider_context_tokens = provider_context_tokens
+        loop_state.force_compaction = bool(force_compaction)
         if reason is not None:
             self.agent.emit_event("provider_session_reset", {"reason": reason, **details})
 
@@ -197,11 +197,7 @@ class AgentLoop:
         return turn
 
     def _provider_high_watermark(self):
-        config = self.agent.config
-        return (
-            self.agent.effective_context_limit_tokens
-            - config.max_output_tokens
-        )
+        return self.agent.effective_input_limit_tokens
 
     def _continue_provider(
         self,
@@ -222,7 +218,6 @@ class AgentLoop:
             threshold_tokens = self._provider_high_watermark()
             self._reset_context(
                 loop_state, "context_high_watermark",
-                provider_context_tokens=projected_tokens,
                 input_tokens=agent.model_client.last_completion_metadata.get("input_tokens"),
                 projected_input_tokens=projected_tokens,
                 threshold_tokens=threshold_tokens,
@@ -236,7 +231,7 @@ class AgentLoop:
         loop_state.overflow_recovery_attempted = True
         self._reset_context(
             loop_state, "context_overflow_retry",
-            provider_context_tokens=self.agent.effective_context_limit_tokens,
+            force_compaction=True,
         )
         return True
 

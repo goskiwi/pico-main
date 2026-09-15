@@ -32,6 +32,7 @@ PICO_OPENAI_API_KEY=your-key
 PICO_OPENAI_API_BASE=https://api.deepseek.com
 PICO_OPENAI_MODEL=deepseek-v4-flash
 PICO_MODEL_CONTEXT_WINDOW=1000000
+PICO_MODEL_INPUT_LIMIT=
 PICO_OPENAI_REASONING_EFFORT=none
 ```
 
@@ -71,9 +72,9 @@ Session 不保存完整对话：
 
 ## 上下文与压缩
 
-`PicoConfig.context_limit_tokens` 是可选的 Runtime 策略上限，默认不限制模型声明的窗口；模型 Adapter 负责声明实际窗口。`Pico.effective_context_limit_tokens` 是已有上限的只读派生值：两者都有时取较小值，只提供一方时使用该值，两者都缺失时初始化失败。`max_output_tokens` 默认为 32,000，`recent_history_tokens` 为 20,000。摘要输出上限是 Compaction 内部常量，最多 16,000 Token 且不会超过当前模型输出上限。这些上限不会预先占用或产生对应数量的计费 Token。
+`PicoConfig.context_limit_tokens` 是可选的 Runtime Combined Context 上限；模型 Adapter 负责声明实际窗口。`Pico.effective_context_limit_tokens` 取两者中存在的较小值。`Pico.effective_input_limit_tokens` 再取 `Context Window - max_output_tokens` 与 Provider 独立 Input Limit 的较小值；System Prompt 和 Messages 的预算从中继续扣除 Tool Schema。`max_output_tokens` 默认为 32,000，`recent_history_tokens` 为 20,000。摘要请求使用同一 Input Limit。
 
-CLI 可通过 `PICO_CONTEXT_LIMIT` 设置 Pico 上限，通过 `PICO_MODEL_CONTEXT_WINDOW` 向模型 Adapter 声明当前模型支持的窗口。模型窗口由用户依据 Provider 文档配置，不自动推断；未配置时，Runtime 只使用 Pico 上限，不能保证适配任意模型。更换模型时需同步更新窗口配置。
+CLI 可通过 `PICO_CONTEXT_LIMIT` 设置 Pico Combined Context 上限，通过 `PICO_MODEL_CONTEXT_WINDOW` 声明模型窗口；Provider 另有更小输入上限时，通过 `PICO_MODEL_INPUT_LIMIT` 声明。模型能力由用户依据 Provider 文档配置，不自动推断；更换模型时需同步更新。
 
 例如当前 DeepSeek-V4-Flash 可配置 `PICO_MODEL_CONTEXT_WINDOW=1000000`；只有希望 Pico 主动采用更小窗口时才设置 `PICO_CONTEXT_LIMIT`。旧的 Context、Reserve 和 Summary 配置字段均已移除，不提供别名。
 
@@ -89,6 +90,8 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 `TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。Runtime 从被压缩的成功工具结果中确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。旧的大结果在摘要输入中裁剪，原始 RunLog 和 Artifact 不被摘要改写。已提交的 CompactedContext 和确定性文件集合是压缩后必保上下文；必要压缩失败时不发送残缺 Prompt。
 
 `TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
+
+本地 Prompt Token 只用于判断重建后的 Prompt 是否需要 Compaction；Provider Usage 只用于判断当前 Provider Session 何时 Reset，两者不取最大值。普通高水位 Reset 后重新计算本地 Prompt，只有 Provider 明确返回 Context Overflow 时才以 `force_compaction` 强制尝试摘要。
 
 Environment Context 是轻量启动快照：Git short status 在 Workspace 层最多保留 2,000 字符并明确标记截断，PromptBuilder 不再重复设置 Token 上限；如果整个模型输入仍放不下，Environment Message 可以省略，模型按需通过工具重新观察当前状态。
 

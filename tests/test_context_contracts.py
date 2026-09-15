@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pico import AssistantTurn, ModelAction, ToolCall, ToolOutcome
+from pico import AssistantTurn, ModelAction, PicoConfig, ToolCall, ToolOutcome
 from pico.compaction_summary import CompactedContext
 from pico.prompt_builder import load_project_instructions
 from pico.run_lifecycle import RunLifecycle
@@ -72,11 +72,42 @@ class ModelMessageTests(unittest.TestCase):
             )
 
             self.assertIn("Run permissions", prompt.system_prompt)
-            self.assertIn('"mode": "auto"', prompt.system_prompt)
+            self.assertIn("- Mode: auto.", prompt.system_prompt)
+            self.assertIn(
+                "shell commands still require user approval",
+                prompt.system_prompt,
+            )
             self.assertFalse(
                 any("Run permissions" in message.text for message in prompt.messages)
             )
             self.assertFalse(hasattr(prompt, "input_text"))
+
+    def test_path_limited_code_permissions_are_plain_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent, _model = build_agent(Path(directory), [])
+            agent.config = PicoConfig(
+                mode="code",
+                allowed_write_paths=("src/cart.py",),
+                context_limit_tokens=32_000,
+                max_output_tokens=1_000,
+                recent_history_tokens=2_000,
+            )
+            RunLifecycle(agent).initialize("Fix cart.py")
+
+            prompt = agent.prompt.build_for_run(
+                tool_surface=agent.tools.resolve_surface()
+            )
+
+            self.assertIn("- Mode: code.", prompt.system_prompt)
+            self.assertIn(
+                "- You may modify only: src/cart.py.",
+                prompt.system_prompt,
+            )
+            self.assertIn(
+                "File modifications and shell commands require user approval.",
+                prompt.system_prompt,
+            )
+            self.assertNotIn("write_scope", prompt.system_prompt)
 
     def test_failure_correction_is_the_last_developer_message(self):
         with tempfile.TemporaryDirectory() as directory:

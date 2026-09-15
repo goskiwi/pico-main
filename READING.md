@@ -10,7 +10,7 @@
 4. 同文件的 _handle_tool_turn：按模型顺序逐个调用 ToolRuntime，再把这一轮的全部结果交回模型。
 5. 同文件的 _handle_final_action：把模型的 `submit_final` 转成交给 RunLifecycle 的终态声明。
 
-请求准备只走 `PromptBuilder.build_for_run()`：固定有效 Run 权限 → 构造 System Prompt → 从 RunLog 恢复 Messages → 必要时生成并提交摘要。System Prompt 只包含稳定规则和权限；恢复出的当前失败纠正位于最后一条 Developer Message。AgentLoop 只在仓库指令变化、Context 高水位或溢出恢复时调用 `_reset_context()`；普通失败提醒随 Tool Result 返回。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
+请求准备只走 `PromptBuilder.build_for_run()`：固定有效 Run 权限 → 构造 System Prompt → 从 RunLog 恢复 Messages → 必要时生成并提交摘要。System Prompt 只包含稳定规则和权限；恢复出的当前失败纠正位于最后一条 Developer Message。本地 Prompt Token 决定重建后是否压缩；Provider Usage 只决定活跃 Session 是否 Reset，明确 Overflow 才强制压缩。AgentLoop 只在仓库指令变化、Context 高水位或溢出恢复时调用 `_reset_context()`；普通失败提醒随 Tool Result 返回。RunLifecycle 只负责初始化、恢复和终态收尾。工具仍经过同一套校验、审批和 `_execute_prepared()`；局部编辑读取当前内容、验证唯一锚点，再原子替换。
 
 例子：read_file → edit_file → run_shell 运行测试 → 根据失败继续 edit_file → 再次运行测试 → submit_final。
 第一次把 ToolRuntime 当成“执行一个工具并给出真实结果”，把 PromptBuilder 当成“构造 System Prompt 与 Messages”。

@@ -110,28 +110,40 @@ class PromptBuilder:
         return changed
 
     def _system_prompt(self, tool_surface):
-        write_scope = (
-            {"mode": "none"}
-            if tool_surface.mode == "ask"
-            else (
-                {"mode": "workspace"}
-                if tool_surface.allowed_write_paths is None
-                else {
-                    "mode": "paths",
-                    "paths": list(tool_surface.allowed_write_paths),
-                }
+        tools = ", ".join(tool["name"] for tool in tool_surface.action_tools)
+        if tool_surface.mode == "ask":
+            write_rule = "- Workspace modifications are not allowed."
+            approval_rule = ""
+        elif tool_surface.allowed_write_paths is None:
+            write_rule = "- You may modify files inside the workspace."
+            approval_rule = (
+                "- File modifications and shell commands require user approval."
+                if tool_surface.mode == "code"
+                else "- File tools may run without approval; shell commands still require user approval."
             )
-        )
-        permissions = {
-            "mode": tool_surface.mode,
-            "tools": [tool["name"] for tool in tool_surface.action_tools],
-            "write_scope": write_scope,
-        }
+        else:
+            write_rule = (
+                "- You may modify only: "
+                + ", ".join(tool_surface.allowed_write_paths)
+                + "."
+            )
+            approval_rule = (
+                "- File modifications and shell commands require user approval."
+                if tool_surface.mode == "code"
+                else "- File tools may run without approval; shell commands still require user approval."
+            )
+        permission_lines = [
+            "Effective Run permissions (cannot expand after Run creation):",
+            f"- Mode: {tool_surface.mode}.",
+            f"- Available tools: {tools}.",
+            "- You may read allowed files inside the workspace.",
+            write_rule,
+        ]
+        if approval_rule:
+            permission_lines.append(approval_rule)
         parts = [
             self.base_system_prompt,
-            "Effective Run permissions (the Run authorization cannot expand after "
-            "creation and is enforced locally):\n"
-            + json.dumps(permissions, ensure_ascii=False, sort_keys=True),
+            "\n".join(permission_lines),
         ]
         return "\n\n".join(parts)
 
@@ -186,8 +198,7 @@ class PromptBuilder:
 
     def _input_limit(self, tool_surface):
         return (
-            self.runtime.effective_context_limit_tokens
-            - self.runtime.config.max_output_tokens
+            self.runtime.effective_input_limit_tokens
             - self._tool_schema_tokens(tool_surface)
         )
 
@@ -204,11 +215,11 @@ class PromptBuilder:
             "input_limit": self._input_limit(tool_surface),
         }
 
-    def build_for_run(self, *, tool_surface, provider_context_tokens=None):
+    def build_for_run(self, *, tool_surface, force_compaction=False):
         prepared = self.prepare(tool_surface=tool_surface)
         plan = self.plan_compaction(
             prepared,
-            provider_context_tokens=provider_context_tokens,
+            force_compaction=force_compaction,
         )
         if plan is not None:
             self.runtime.run.run_log.append_compaction(plan)
@@ -245,7 +256,7 @@ class PromptBuilder:
             )
         return ModelPrompt(prepared["system_prompt"], messages)
 
-    def plan_compaction(self, prepared, *, provider_context_tokens=None):
+    def plan_compaction(self, prepared, *, force_compaction=False):
         run_log = self.runtime.run.run_log
         history = prepared["history"]
         if (
@@ -254,11 +265,11 @@ class PromptBuilder:
             or run_log.projection.pending_tool is not None
         ):
             return None
-        context_tokens = max(
-            self._prompt_tokens(prepared["system_prompt"], prepared["messages"]),
-            int(provider_context_tokens or 0),
+        local_prompt_tokens = self._prompt_tokens(
+            prepared["system_prompt"],
+            prepared["messages"],
         )
-        if context_tokens < prepared["input_limit"]:
+        if not force_compaction and local_prompt_tokens < prepared["input_limit"]:
             return None
         if self.semantic_summarizer is None:
             raise SemanticCompactionError(
@@ -280,6 +291,9 @@ class PromptBuilder:
                     execution_context=self.runtime.run.execution_context,
                     effective_context_limit_tokens=(
                         self.runtime.effective_context_limit_tokens
+                    ),
+                    effective_input_limit_tokens=(
+                        self.runtime.effective_input_limit_tokens
                     ),
                     max_output_tokens=min(
                         SUMMARY_MAX_OUTPUT_TOKENS,

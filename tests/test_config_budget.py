@@ -22,6 +22,7 @@ class ContextBudgetTests(unittest.TestCase):
             agent = self._agent(root, model, PicoConfig())
 
             self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_input_limit_tokens, 96_000)
             self.assertFalse(hasattr(agent, "context_limit_tokens"))
             self.assertEqual(agent.config.max_output_tokens, 32_000)
             self.assertEqual(agent.config.recent_history_tokens, 20_000)
@@ -39,6 +40,7 @@ class ContextBudgetTests(unittest.TestCase):
             )
 
             self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_input_limit_tokens, 96_000)
 
     def test_missing_model_and_policy_context_limits_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,6 +62,23 @@ class ContextBudgetTests(unittest.TestCase):
             )
 
             self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_input_limit_tokens, 96_000)
+
+    def test_provider_input_limit_can_be_stricter_than_combined_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = ScriptedModel([])
+            model.context_window_tokens = 128_000
+            model.input_limit_tokens = 64_000
+
+            agent = self._agent(root, model, PicoConfig())
+
+            self.assertEqual(agent.effective_context_limit_tokens, 128_000)
+            self.assertEqual(agent.effective_input_limit_tokens, 64_000)
+
+            model.input_limit_tokens = 256_000
+            agent = self._agent(root, model, PicoConfig())
+            self.assertEqual(agent.effective_input_limit_tokens, 96_000)
 
     def test_effective_model_window_must_fit_output_and_recent_history(self):
         with tempfile.TemporaryDirectory() as directory:

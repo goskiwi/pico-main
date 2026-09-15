@@ -78,6 +78,7 @@ def _build_model_client(args):
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("PICO_OPENAI_TIMEOUT must be positive")
     model_window = provider_env("PICO_MODEL_CONTEXT_WINDOW")
+    model_input_limit = provider_env("PICO_MODEL_INPUT_LIMIT")
     return OpenAICompatibleModelClient(
         model=model,
         base_url=configured_base_url or DEFAULT_OPENAI_BASE_URL,
@@ -86,6 +87,7 @@ def _build_model_client(args):
         timeout=timeout,
         reasoning_effort=provider_env("PICO_OPENAI_REASONING_EFFORT"),
         context_window_tokens=int(model_window) if model_window else None,
+        input_limit_tokens=int(model_input_limit) if model_input_limit else None,
     )
 
 

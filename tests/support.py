@@ -11,6 +11,7 @@ class ScriptedModel:
 
     model = "scripted-model"
     context_window_tokens = None
+    input_limit_tokens = None
 
     def __init__(self, actions, *, before_action=None):
         self.actions = list(actions)

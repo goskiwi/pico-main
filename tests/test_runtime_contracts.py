@@ -375,6 +375,35 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(request.call_count, 1)
             self.assertTrue(agent.run.resumable)
 
+    def test_provider_high_watermark_resets_without_forcing_compaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "subject.txt").write_text("alpha\n", encoding="utf-8")
+            agent, model = build_agent(
+                root,
+                [
+                    ModelAction.tool("read_file", {"path": "subject.txt"}),
+                    ModelAction.final("Read the file."),
+                ],
+            )
+            with mock.patch.object(
+                model,
+                "projected_context_tokens",
+                return_value=agent.effective_input_limit_tokens,
+            ):
+                outcome = agent.ask("Read subject.txt")
+
+            self.assertEqual(outcome.status, "completed")
+            resets = [
+                event
+                for event in agent.read_run_events(outcome.run_id)
+                if event.kind == "provider_session_reset"
+            ]
+            self.assertEqual(
+                [event.payload["reason"] for event in resets],
+                ["context_high_watermark"],
+            )
+
     def test_context_overflow_without_compactable_history_does_not_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(Path(directory), [])
@@ -431,7 +460,7 @@ class RuntimeContractTests(unittest.TestCase):
 
             prompt = agent.prompt.build_for_run(
                 tool_surface=agent.tools.resolve_surface(),
-                provider_context_tokens=agent.effective_context_limit_tokens,
+                force_compaction=True,
             )
 
             prompt_text = "\n".join(message.text for message in prompt.messages)

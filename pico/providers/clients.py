@@ -338,6 +338,7 @@ class OpenAICompatibleModelClient:
         timeout,
         reasoning_effort="",
         context_window_tokens=None,
+        input_limit_tokens=None,
     ):
         self.model = str(model)
         self.base_url = str(base_url).rstrip("/")
@@ -350,6 +351,11 @@ class OpenAICompatibleModelClient:
         )
         if self.context_window_tokens is not None and self.context_window_tokens < 1:
             raise ValueError("model context window must be positive")
+        self.input_limit_tokens = (
+            None if input_limit_tokens is None else int(input_limit_tokens)
+        )
+        if self.input_limit_tokens is not None and self.input_limit_tokens < 1:
+            raise ValueError("model input limit must be positive")
         self.last_completion_metadata = {}
         self._runner = asyncio.Runner()
         self._sdk_client = None
@@ -379,6 +385,7 @@ class OpenAICompatibleModelClient:
             self.timeout,
             self.reasoning_effort,
             self.context_window_tokens,
+            self.input_limit_tokens,
         )
 
     @staticmethod

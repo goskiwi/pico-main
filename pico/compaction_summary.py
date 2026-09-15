@@ -313,7 +313,8 @@ class CompactionSummarizer:
         return best
 
     def summarize(self, events, *, task_goal, execution_context,
-                  effective_context_limit_tokens, max_output_tokens, count_tokens):
+                  effective_context_limit_tokens, effective_input_limit_tokens,
+                  max_output_tokens, count_tokens):
         instructions = """Create a structured context checkpoint for a coding agent.
 Return every required field through submit_compaction_summary. The history may contain an older
 compaction checkpoint followed by newer events. The exact task goal is supplied separately and
@@ -335,8 +336,10 @@ evidence was omitted, not that work succeeded or facts are absent."""
         history_text = self._bounded_input(
             tuple(events), count_tokens=count_tokens,
             input_budget=(
-                effective_context_limit_tokens
-                - max_output_tokens
+                min(
+                    effective_context_limit_tokens - max_output_tokens,
+                    effective_input_limit_tokens,
+                )
                 - request_overhead
                 - count_tokens(task_context)
             ),
