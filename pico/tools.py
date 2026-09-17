@@ -211,12 +211,12 @@ def _validate_edit_file(context, args, *, mutation_service):
     return args
 
 
-def _validate_run_shell(context, args, *, command_runner):
+def _validate_run_shell(context, args, *, shell_runner):
     command = str(args["command"]).strip()
     if not command:
         raise ValueError("run_shell requires a non-blank command")
-    if command_runner is None:
-        raise RuntimeError("run_shell requires a CommandRunner")
+    if shell_runner is None:
+        raise RuntimeError("run_shell requires a shell executor")
     return {
         "command": command,
         "timeout_seconds": int(args["timeout_seconds"]),
@@ -503,9 +503,9 @@ def _mutation_result(relative, receipt):
     )
 
 
-def tool_run_shell(context, args, *, command_runner, workspace_root):
+def tool_run_shell(context, args, *, shell_runner, workspace_root):
     command = str(args["command"])
-    result = command_runner.run(
+    result = shell_runner.run(
         shell_argv(command),
         cwd=workspace_root,
         timeout=int(args["timeout_seconds"]),
@@ -536,6 +536,7 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
     return ToolRunnerResult(
         output,
         structured={
+            **shell_runner.execution_policy,
             "command": command,
             "exit_code": result.returncode,
             "stop_reason": result.stop_reason,
@@ -554,20 +555,19 @@ def _workspace_file_plan(context, args, *, path_resolver, workspace_root):
     return ToolExecutionPlan("workspace", ((logical, path),))
 
 
-def _run_shell_plan(context, args):
+def _run_shell_plan(context, args, *, shell_runner):
     return ToolExecutionPlan(
         "workspace",
         operation={
             "command": args["command"],
             "shell": "/bin/sh",
-            "cwd": ".",
             "timeout_seconds": args["timeout_seconds"],
-            "environment_policy": "minimal",
+            **shell_runner.execution_policy,
         },
     )
 
 
-def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner):
+def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, shell_runner):
     """Each tool declares its schema, policy, validator, runner and effects together."""
     return {
         "list_files": {
@@ -601,10 +601,10 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
         "run_shell": {
             "args_schema": RunShellArgs,
             "risky": True,
-            "description": "Run one user-approved, non-interactive host command from the workspace root. Use timeout_seconds from 1 to 600 (default 120). Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so replacements stay exact and auditable.",
-            "validate": partial(_validate_run_shell, command_runner=command_runner),
-            "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
-            "plan": _run_shell_plan,
+            "description": "Run one approved, non-interactive command in a network-disabled Docker container at /workspace, sharing the local workspace files. Use timeout_seconds from 1 to 600 (default 120). Use container tools, not host executable paths. Existing sensitive .env files and .pico are hidden, .git is read-only. Dependencies must be prepared in the image; prefer file tools for source edits. Background services are not supported beyond this Run.",
+            "validate": partial(_validate_run_shell, shell_runner=shell_runner),
+            "run": partial(tool_run_shell, shell_runner=shell_runner, workspace_root=workspace_root),
+            "plan": partial(_run_shell_plan, shell_runner=shell_runner),
         },
         "write_file": {
             "args_schema": WriteFileArgs,

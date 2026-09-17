@@ -53,8 +53,8 @@ class RuntimeContractTests(unittest.TestCase):
             agent, model = self._agent_with_limits(
                 root,
                 [
-                    ModelAction.protocol_error("first"),
-                    ModelAction.protocol_error("second"),
+                    ModelAction.invalid("first"),
+                    ModelAction.invalid("second"),
                     ModelAction.final("must not run"),
                 ],
                 max_model_requests_per_attempt=2,
@@ -584,6 +584,7 @@ class RuntimeContractTests(unittest.TestCase):
                     "command": check,
                     "cwd": ".",
                     "environment_policy": "minimal",
+                    "executor": "test-host",
                     "shell": "/bin/sh",
                     "timeout_seconds": 120,
                 },

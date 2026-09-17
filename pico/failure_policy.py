@@ -1,15 +1,9 @@
 """Pure, trusted model guidance derived from durable failure facts."""
 
-MODEL_CORRECTIONS = {
-    "truncated": (
-        "The previous model response was truncated. Return one complete tool "
-        "action or one complete final answer."
-    ),
-    "protocol_error": (
-        "The previous model response did not match the required protocol. "
-        "Return valid tool calls or one complete final answer."
-    ),
-}
+INVALID_OUTPUT_GUIDANCE = (
+    "The previous model response was incomplete or did not match the required "
+    "protocol. Return valid tool calls or one complete final answer."
+)
 
 REPEATED_FAILURE_GUIDANCE = (
     "The same failure has occurred three times with identical input and error "
@@ -23,8 +17,8 @@ def guidance_for_failure(failure):
     if failure is None:
         return ""
     parts = []
-    if failure.category == "model" and failure.code in MODEL_CORRECTIONS:
-        parts.append(MODEL_CORRECTIONS[failure.code])
+    if failure.category == "model" and failure.code == "invalid":
+        parts.append(INVALID_OUTPUT_GUIDANCE)
     if failure.count == 3:
         parts.append(REPEATED_FAILURE_GUIDANCE)
     return "\n\n".join(parts)

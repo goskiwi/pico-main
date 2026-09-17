@@ -185,7 +185,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
             store, log = self.new_log(directory)
             log.append("model_requested")
             log.append_model_failure(
-                "truncated",
+                "invalid",
                 "untrusted partial output",
                 "untrusted partial output",
                 {},
@@ -195,7 +195,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
             restored = RunStore(Path(directory) / "runs").load_run(log.run_id)
             correction = guidance_for_failure(restored.projection.failure)
 
-            self.assertIn("response was truncated", correction)
+            self.assertIn("incomplete", correction)
             self.assertNotIn("untrusted partial output", correction)
 
     def test_damaged_checkpoint_rebuilds_only_at_a_ready_boundary(self):

@@ -9,6 +9,7 @@ from pico.execution import ExecutionContext
 from pico.providers.clients import (
     OpenAICompatibleModelClient,
     ProviderContextOverflow,
+    ProviderRequestFailed,
     _message_items,
     _parse_turn,
     _replay_context_tokens,
@@ -44,25 +45,29 @@ class ModelResultTests(unittest.TestCase):
             self._tools(),
         )
 
-        self.assertEqual(turn.action.kind, "truncated")
+        self.assertEqual(turn.action.kind, "invalid")
         self.assertEqual(turn.action.tool_calls, ())
         self.assertFalse(turn.accepted)
 
-    def test_service_and_protocol_failures_are_distinct(self):
-        service = _parse_turn(
-            {
-                "status": "failed",
-                "error": {"message": "upstream unavailable"},
-            },
-            self._tools(),
-        )
+    def test_provider_failure_is_not_a_model_action(self):
+        with self.assertRaisesRegex(
+            ProviderRequestFailed, "upstream unavailable"
+        ) as raised:
+            _parse_turn(
+                {
+                    "status": "failed",
+                    "error": {"message": "upstream unavailable"},
+                    "usage": {"input_tokens": 12},
+                },
+                self._tools(),
+            )
         protocol = _parse_turn(
             {"status": "completed", "output": []},
             self._tools(),
         )
 
-        self.assertEqual(service.action.kind, "service_failed")
-        self.assertEqual(protocol.action.kind, "protocol_error")
+        self.assertEqual(raised.exception.usage["input_tokens"], 12)
+        self.assertEqual(protocol.action.kind, "invalid")
 
     def test_provider_failure_does_not_reuse_previous_request_usage(self):
         client = OpenAICompatibleModelClient(
@@ -79,6 +84,66 @@ class ModelResultTests(unittest.TestCase):
                 "_request",
                 side_effect=ProviderContextOverflow("too large"),
             ), self.assertRaises(ProviderContextOverflow):
+                client.complete_turn(
+                    (ModelMessage.user("Inspect"),),
+                    100,
+                    system_prompt="test",
+                    action_tools=self._tools(),
+                    execution_context=ExecutionContext.root(max_seconds=1),
+                )
+            self.assertEqual(client.last_completion_metadata, {})
+        finally:
+            client.close()
+
+    def test_failed_provider_response_raises_and_records_its_usage(self):
+        client = OpenAICompatibleModelClient(
+            "test-model",
+            "https://example.invalid/v1",
+            "test-key",
+            None,
+            1,
+        )
+        try:
+            with mock.patch.object(
+                client,
+                "_request",
+                return_value={
+                    "status": "failed",
+                    "error": {"message": "upstream unavailable"},
+                    "usage": {"input_tokens": 12, "output_tokens": 0},
+                },
+            ), self.assertRaisesRegex(
+                ProviderRequestFailed, "upstream unavailable"
+            ):
+                client.complete_turn(
+                    (ModelMessage.user("Inspect"),),
+                    100,
+                    system_prompt="test",
+                    action_tools=self._tools(),
+                    execution_context=ExecutionContext.root(max_seconds=1),
+                )
+            self.assertEqual(client.last_completion_metadata["input_tokens"], 12)
+            self.assertEqual(client.last_completion_metadata["output_tokens"], 0)
+        finally:
+            client.close()
+
+    def test_transport_failure_raises_without_reusing_previous_usage(self):
+        client = OpenAICompatibleModelClient(
+            "test-model",
+            "https://example.invalid/v1",
+            "test-key",
+            None,
+            1,
+        )
+        client.last_completion_metadata = {"input_tokens": 99}
+        try:
+            with mock.patch.object(
+                client,
+                "_request",
+                side_effect=RuntimeError("connection failed"),
+            ), self.assertRaisesRegex(
+                ProviderRequestFailed, "connection failed"
+            ):
                 client.complete_turn(
                     (ModelMessage.user("Inspect"),),
                     100,
@@ -217,7 +282,7 @@ class ModelResultTests(unittest.TestCase):
             self._tools(),
         )
 
-        self.assertEqual(turn.action.kind, "protocol_error")
+        self.assertEqual(turn.action.kind, "invalid")
 
     def test_model_action_rejects_duplicate_call_ids(self):
         with self.assertRaisesRegex(ValueError, "unique"):
@@ -252,7 +317,7 @@ class ModelResultTests(unittest.TestCase):
             self._tools(),
         )
 
-        self.assertEqual(turn.action.kind, "protocol_error")
+        self.assertEqual(turn.action.kind, "invalid")
         self.assertIn("at most 8", turn.action.content)
 
     def test_compaction_schema_does_not_duplicate_the_task_goal(self):
@@ -328,10 +393,10 @@ class RepeatedFailureTests(unittest.TestCase):
                 all("retry_instruction" not in item for item in model.result_batches[-1])
             )
 
-    def test_different_model_errors_do_not_accumulate(self):
+    def test_different_invalid_outputs_do_not_accumulate(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(Path(directory), [
-                *[ModelAction.protocol_error(f"different error {i}") for i in range(4)],
+                *[ModelAction.invalid(f"different error {i}") for i in range(4)],
                 ModelAction.final("Recovered."),
             ])
             outcome = agent.ask("Exercise distinct errors")
@@ -342,8 +407,9 @@ class RepeatedFailureTests(unittest.TestCase):
                     batch,
                     (
                         (
-                            "The previous model response did not match the required "
-                            "protocol. Return valid tool calls or one complete final answer."
+                            "The previous model response was incomplete or did not match "
+                            "the required protocol. Return valid tool calls or one complete "
+                            "final answer."
                         ),
                     ),
                 )
@@ -355,14 +421,14 @@ class RepeatedFailureTests(unittest.TestCase):
             ]
             self.assertTrue(any("different error 0" in item for item in audit))
 
-    def test_third_identical_failure_warns_and_fourth_stops(self):
+    def test_third_identical_invalid_output_warns_and_fourth_stops(self):
         with tempfile.TemporaryDirectory() as directory:
             agent, model = build_agent(
                 Path(directory),
-                [ModelAction.protocol_error("malformed response")] * 4,
+                [ModelAction.invalid("malformed response")] * 4,
             )
 
-            outcome = agent.ask("Exercise repeated protocol failure")
+            outcome = agent.ask("Exercise repeated invalid output")
 
             self.assertEqual(outcome.status, "stopped")
             self.assertEqual(outcome.stop_reason, "repeated_failure")
@@ -384,21 +450,17 @@ class RepeatedFailureTests(unittest.TestCase):
 
     def test_provider_failure_stops_without_asking_the_model_to_fix_it(self):
         with tempfile.TemporaryDirectory() as directory:
-            agent, model = build_agent(
-                Path(directory),
-                [
-                    ModelAction.service_failed("upstream unavailable"),
-                    ModelAction.final("must not run"),
-                ],
+            agent, model = build_agent(Path(directory), [])
+            model.complete_turn = mock.Mock(
+                side_effect=ProviderRequestFailed("upstream unavailable")
             )
 
             outcome = agent.ask("Exercise Provider failure")
 
             self.assertEqual(outcome.status, "stopped")
             self.assertEqual(outcome.stop_reason, "provider_failure")
-            self.assertEqual(len(model.requests), 1)
+            self.assertEqual(model.complete_turn.call_count, 1)
             self.assertEqual(model.result_batches, [])
-            self.assertEqual(len(model.actions), 1)
 
     def test_successful_tool_resets_the_failure_streak(self):
         with tempfile.TemporaryDirectory() as directory:

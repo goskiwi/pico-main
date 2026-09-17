@@ -189,7 +189,7 @@ class ToolRuntime:
             artifact_store=runtime.dependencies.artifacts,
             redact_text=runtime.redact_text,
             mutation_service=runtime.dependencies.mutations,
-            command_runner=runtime.dependencies.command_runner,
+            shell_runner=runtime.dependencies.shell_runner,
         )
 
     def _validate_allowlist(self, tools):

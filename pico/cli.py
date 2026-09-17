@@ -171,6 +171,7 @@ def build_agent(args):
         context_limit_tokens=(
             int(configured_context_limit) if configured_context_limit else None
         ),
+        docker_image=provider_env("PICO_DOCKER_IMAGE", "pico-sandbox:python"),
     )
     session_id = args.resume
     if session_id == "latest":
@@ -250,7 +251,7 @@ def build_arg_parser():
         default=defaults.mode,
         help=(
             "Ask is observation-only; Code asks before risky actions; Auto "
-            "automates bounded file changes; host shell commands still ask for approval."
+            "automates bounded file changes; Docker shell commands still ask for approval."
         ),
     )
     return parser

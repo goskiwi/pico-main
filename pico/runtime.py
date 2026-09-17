@@ -10,6 +10,7 @@ from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
 from .config import PicoConfig
 from .contracts import AssistantTurn
+from .docker_sandbox import DockerSandbox
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .run_lifecycle import RunLifecycle, load_resumable_run
@@ -34,6 +35,7 @@ class Pico:
         config: PicoConfig | None = None,
         trace=None,
         command_runner=None,
+        shell_runner=None,
         approval_handler=None,
     ):
         if session.workspace_root != workspace.root.resolve():
@@ -62,11 +64,15 @@ class Pico:
         mutations = WorkspaceMutationService(self.workspace.root)
 
         effective_command_runner = command_runner or CommandRunner(self.workspace.root)
+        effective_shell_runner = shell_runner or DockerSandbox(
+            self.workspace.root, session=session, image=self.config.docker_image,
+        )
         self.dependencies = RuntimeDependencies(
             run_store=effective_run_store,
             artifacts=artifacts,
             mutations=mutations,
             command_runner=effective_command_runner,
+            shell_runner=effective_shell_runner,
             approval_handler=approval_handler,
         )
 
@@ -142,7 +148,12 @@ class Pico:
     def ask(self, user_message) -> RunOutcome:
         from .agent_loop import AgentLoop
 
-        return AgentLoop(self).run(user_message)
+        shell_runner = self.dependencies.shell_runner
+        shell_runner.reconcile()
+        try:
+            return AgentLoop(self).run(user_message)
+        finally:
+            shell_runner.close()
 
     @staticmethod
     def new_run_id():

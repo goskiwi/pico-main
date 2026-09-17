@@ -35,6 +35,7 @@ class PicoConfig:
     context_limit_tokens: int | None = None
     max_output_tokens: int = 32000
     recent_history_tokens: int = 20000
+    docker_image: str = "pico-sandbox:python"
 
     def __post_init__(self):
         if self.mode not in {"ask", "code", "auto"}:
@@ -71,5 +72,9 @@ class PicoConfig:
             "allowed_tools": _allowed_tools(self.allowed_tools),
             "allowed_write_paths": _allowed_write_paths(self.allowed_write_paths),
         }
+        image = str(self.docker_image).strip()
+        if not image or image.startswith("-") or any(char.isspace() for char in image):
+            raise ValueError("docker_image must be a non-empty image reference")
+        normalized["docker_image"] = image
         for name, value in normalized.items():
             object.__setattr__(self, name, value)

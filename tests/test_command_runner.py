@@ -13,6 +13,7 @@ from pico.command_runner import CommandRunner, shell_argv
 from pico.execution import ExecutionContext
 from pico.tool_context import ToolContext
 from pico.tools import tool_run_shell
+from tests.support import HostShellRunner
 
 
 class CommandRunnerTests(unittest.TestCase):
@@ -251,7 +252,7 @@ class RunShellExecutionTests(unittest.TestCase):
                     "command": "printf 'after\\n' > tracked.txt; sleep 30",
                     "timeout_seconds": 1,
                 },
-                command_runner=CommandRunner(root),
+                shell_runner=HostShellRunner(root),
                 workspace_root=root,
             )
 

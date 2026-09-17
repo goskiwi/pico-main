@@ -184,6 +184,7 @@ class RunLifecycle:
     def finish_success(self, turn, *, attempt_started_at) -> RunOutcome:
         runtime = self.runtime
         runtime.run.execution_context.check_active()
+        runtime.dependencies.shell_runner.close()
         safe_turn = runtime.redact_turn(turn)
         runtime.run.run_log.append_assistant_turn(
             safe_turn,
@@ -194,6 +195,7 @@ class RunLifecycle:
         return self._finish_run()
 
     def finish_stopped(self, stop_reason, *, attempt_started_at=None) -> RunOutcome:
+        self.runtime.dependencies.shell_runner.close()
         final, stop_reason = self._stopped_result(stop_reason)
         self.runtime.run.run_log.append_stopped(
             final,

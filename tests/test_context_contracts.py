@@ -285,7 +285,7 @@ class ModelMessageTests(unittest.TestCase):
             RunLifecycle(agent).initialize("Inspect")
             agent.run.run_log.append("model_requested")
             agent.run.run_log.append_model_failure(
-                "protocol_error",
+                "invalid",
                 "malformed response",
                 "malformed response",
                 {},

@@ -21,9 +21,14 @@
 | --- | --- | --- |
 | 历史太长怎么办 | prompt_builder.py 的 prepare/build/plan_compaction；history.py；compaction_summary.py | TaskContract 保留目标和固定授权上限；CompactedContext 保存约束、进度、决定、下一步、关键上下文和确定性文件集合；近期 User、Assistant 与 Tool Messages 精确保留 |
 | 工具写完进程退出怎么办 | run_lifecycle.py 的 initialize；tool_runtime.py 的 reconcile_interrupted | 完整 Assistant Turn 先落盘；副作用工具再记录 started；没有可靠 result 时检查当前文件，不自动重放 |
-| Shell 超时、等待输入或输出过大怎么办 | tools.py 的 tool_run_shell；command_runner.py | Shell 先审批且默认 stdin 为 EOF；Timeout 有界，输出保留 Head/Tail，超时终止进程组并返回已有输出 |
+| Shell 超时、等待输入或输出过大怎么办 | tools.py 的 tool_run_shell；docker_sandbox.py；command_runner.py | Shell 先审批再进入 Docker；输出保留 Head/Tail；超时/取消先结束客户端等待，再停止、移除真实容器，不自动回滚工作区 |
 
 测试由模型通过 `run_shell` 主动运行，失败结果作为普通 ToolOutcome 返回下一轮。Runtime 不运行隐藏验收，也不声称能自动证明自然语言需求已经满足。
+
+DockerSandbox 只承接模型 Shell。Runtime 的 Git 状态观察仍由宿主侧 CommandRunner 执行。
+容器 `/workspace` 与本地 Root 共享文件，镜像依赖预先准备；不联网、不传模型 Key、
+隐藏 `.pico` 与现有敏感 `.env`。容器创建前保存 Session 所属 sandbox.json，恢复先清理旧容器。
+SIGKILL 后不保证即时清理；Worktree、Git 元数据与任意名称的秘密不能从挂载方式推导完整安全保证。
 
 ## 第三遍：状态只回答当前问题
 

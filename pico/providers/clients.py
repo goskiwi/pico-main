@@ -41,6 +41,14 @@ class ProviderContextOverflow(RuntimeError):
     """The provider rejected input that exceeded its context window."""
 
 
+class ProviderRequestFailed(RuntimeError):
+    """The Provider request failed before producing a model action."""
+
+    def __init__(self, message, usage=None):
+        super().__init__(str(message))
+        self.usage = dict(usage or {})
+
+
 def _context_overflow(error):
     body = getattr(error, "body", None)
     body = body.get("error", body) if isinstance(body, dict) else body
@@ -230,16 +238,11 @@ class ParsedTurn:
 
     @property
     def accepted(self):
-        return self.action.kind in {"tool", "final"}
+        return self.action.kind != "invalid"
 
     @classmethod
-    def failed(cls, kind, message, usage=None):
-        factory = {
-            "truncated": ModelAction.truncated,
-            "service_failed": ModelAction.service_failed,
-            "protocol_error": ModelAction.protocol_error,
-        }[kind]
-        return cls(factory(message), usage=dict(usage or {}))
+    def invalid(cls, message, usage=None):
+        return cls(ModelAction.invalid(message), usage=dict(usage or {}))
 
 
 def _action_from_calls(calls):
@@ -276,27 +279,25 @@ def _parse_turn(data, action_tools):
     status = data.get("status")
     if status == "incomplete":
         reason = (data.get("incomplete_details") or {}).get("reason", "")
-        return ParsedTurn.failed(
-            "truncated",
+        return ParsedTurn.invalid(
             f"Provider response was truncated: {reason or 'incomplete'}",
             usage,
         )
     if status == "failed":
         error = data.get("error") or {}
         detail = error.get("message") if isinstance(error, dict) else error
-        return ParsedTurn.failed(
-            "service_failed",
+        raise ProviderRequestFailed(
             f"Provider response failed: {detail or 'service failure'}",
             usage,
         )
     if status != "completed":
-        return ParsedTurn.failed(
-            "protocol_error", f"Provider returned unknown status: {status}", usage
+        return ParsedTurn.invalid(
+            f"Provider returned unknown status: {status}", usage
         )
     output = data.get("output")
     if not isinstance(output, list) or any(not isinstance(item, dict) for item in output):
-        return ParsedTurn.failed(
-            "protocol_error", "provider returned malformed response output", usage
+        return ParsedTurn.invalid(
+            "provider returned malformed response output", usage
         )
     declared = {str(tool["name"]) for tool in action_tools}
     replay = []
@@ -306,17 +307,17 @@ def _parse_turn(data, action_tools):
         if item.get("type") == "function_call":
             call, error = _tool_call(item)
             if error:
-                return ParsedTurn.failed("protocol_error", error, usage)
+                return ParsedTurn.invalid(error, usage)
             if call.name not in declared:
-                return ParsedTurn.failed(
-                    "protocol_error", f"unknown function call: {call.name}", usage
+                return ParsedTurn.invalid(
+                    f"unknown function call: {call.name}", usage
                 )
             calls.append(call)
             replay.append(_function_call_item(call))
             continue
         normalized, error = _replay_item(item)
         if error:
-            return ParsedTurn.failed("protocol_error", error, usage)
+            return ParsedTurn.invalid(error, usage)
         replay.append(normalized)
         if item.get("type") == "message":
             visible.extend(
@@ -327,7 +328,7 @@ def _parse_turn(data, action_tools):
     try:
         action, pending_call_ids = _action_from_calls(calls)
     except ValueError as exc:
-        return ParsedTurn.failed("protocol_error", str(exc), usage)
+        return ParsedTurn.invalid(str(exc), usage)
     return ParsedTurn(
         action=action,
         replay_items=tuple(replay),
@@ -542,9 +543,13 @@ class OpenAICompatibleModelClient:
         except (ExecutionCancelled, ExecutionDeadlineExceeded):
             raise
         except RuntimeError as exc:
-            turn = ParsedTurn.failed("service_failed", str(exc))
+            raise ProviderRequestFailed(str(exc)) from exc
         else:
-            turn = _parse_turn(response, action_tools)
+            try:
+                turn = _parse_turn(response, action_tools)
+            except ProviderRequestFailed as exc:
+                self.last_completion_metadata = dict(exc.usage)
+                raise
         self.last_completion_metadata = dict(turn.usage)
         self._replay_context_tokens = _replay_context_tokens(turn)
         if turn.accepted:

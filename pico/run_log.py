@@ -59,9 +59,8 @@ def _validate_assistant_turn_payload(kind, payload):
 def _validate_model_failure_payload(kind, payload):
     _exact_payload(kind, payload, {"kind", "identity", "detail", "usage"})
     if payload["kind"] not in {
-        "truncated",
-        "service_failed",
-        "protocol_error",
+        "invalid",
+        "provider_failure",
         "interrupted",
         "context_overflow",
     }:

@@ -27,7 +27,8 @@ def build_prompt_instructions():
             "Tools",
             (
                 "Only the schemas supplied in the Responses tools field for this turn may be called; ToolRuntime validates them again locally.",
-                "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking; run_shell still requires approval because it executes on the host without a sandbox.",
+                "Ask mode is observation-only. Code mode asks before risky actions. Auto mode may modify bounded workspace files without asking; run_shell still requires approval because arbitrary commands may modify the shared workspace, even inside Docker.",
+                "run_shell executes in Linux Docker at /workspace, not on the host. Use the image's executables (python, pytest, git), not host absolute paths. Network is disabled, .pico and existing sensitive .env files are hidden, .git is read-only, and host virtual environments are not available. Install required dependencies into a trusted image before starting the task. Timeout or cancellation stops the container; shared workspace changes are not rolled back.",
                 "Each response may contain up to eight independent tool calls. Runtime executes them in source order and returns all results together; do not group calls whose arguments depend on an earlier result.",
                 "Use run_shell for tests, linters, type checks, builds, git inspection, and reproductions. Commands may create normal build or test outputs; prefer file tools for deliberate source edits so replacements stay exact and auditable.",
                 "Do not stage, commit, push, create or switch branches, merge, rebase, reset, clean, or otherwise change Git history unless the user explicitly requests that exact Git operation.",

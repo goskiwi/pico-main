@@ -4,6 +4,21 @@ import sys
 from pathlib import Path
 
 from pico import AssistantTurn, Pico, PicoConfig, SessionStore, Workspace
+from pico.command_runner import CommandRunner
+
+
+class HostShellRunner(CommandRunner):
+    """Explicit test dependency for protocol tests, not a production fallback."""
+
+    @property
+    def execution_policy(self):
+        return {"executor": "test-host", "cwd": ".", "environment_policy": "minimal"}
+
+    def reconcile(self):
+        pass
+
+    def close(self):
+        pass
 
 
 class ScriptedModel:
@@ -146,5 +161,6 @@ def build_agent(
             max_output_tokens=1_000,
         ),
         approval_handler=approval_handler,
+        shell_runner=HostShellRunner(root),
     )
     return agent, model

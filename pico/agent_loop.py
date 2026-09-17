@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from .failure_policy import guidance_for_failure
-from .providers import ProviderContextOverflow
+from .providers import ProviderContextOverflow, ProviderRequestFailed
 from .run_lifecycle import RunLifecycle, reload_current_run
 from .run_projection import RunOutcome
 
@@ -90,8 +90,8 @@ class AgentLoop:
                     prompt,
                     tool_surface,
                 )
-            if action.kind not in {"tool", "final"}:
-                return self._handle_model_failure(
+            if action.kind == "invalid":
+                return self._handle_invalid_output(
                     loop_state,
                     action,
                     prompt,
@@ -108,6 +108,16 @@ class AgentLoop:
             if self._recover_context_overflow(loop_state):
                 return LoopDirective("continue")
             raise
+        except ProviderRequestFailed as exc:
+            detail = self.agent.redact_text(str(exc))
+            self.agent.run.run_log.append_model_failure(
+                "provider_failure",
+                detail,
+                detail,
+                getattr(self.agent.model_client, "last_completion_metadata", {})
+                or {},
+            )
+            return LoopDirective("stop", "provider_failure")
         except BaseException:
             stop = self.lifecycle.execution_stop()
             if not stop:
@@ -292,7 +302,7 @@ class AgentLoop:
         agent.dependencies.run_store.checkpoint_if_due(agent.run.run_log)
         return LoopDirective("continue")
 
-    def _handle_model_failure(self, loop_state, action, prompt, tool_surface):
+    def _handle_invalid_output(self, loop_state, action, prompt, tool_surface):
         self.agent.run.run_log.append_model_failure(
             action.kind,
             self.agent.redact_text(action.content),
@@ -302,8 +312,6 @@ class AgentLoop:
         failure = self.agent.run.projection.failure
         if failure is None:
             raise RuntimeError("Model Failure did not update failure state")
-        if action.kind == "service_failed":
-            return LoopDirective("stop", "provider_failure")
         loop_state.invalid_output_count += 1
         if failure.count >= 4:
             return LoopDirective("stop", "repeated_failure")

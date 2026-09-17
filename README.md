@@ -40,10 +40,63 @@ PICO_OPENAI_REASONING_EFFORT=none
 Completions、Anthropic `/messages` 或 OpenAI Agents SDK。更换 Base URL 的
 前提是服务端真正兼容 Responses 的流式事件、函数调用和函数结果格式；Pico
 内部以 `ModelMessage`、`AssistantTurn`、`ModelAction`、`ToolCall` 和 `ToolOutcome` 隔离 Provider 数据结构；只有 Provider Adapter 使用 Responses Input Item。
+`ModelAction` 只表示 `tool`、`final` 或 `invalid`；Provider 请求失败通过异常
+停止本次 Run，Context Overflow 则进入独立的压缩恢复路径。
 
-CLI 只提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度和请求超时通过环境变量配置。
+CLI 提供 `--cwd`、`--resume`、`--mode`、`--model` 和 `--trace`。内部预算由 `PicoConfig` 管理；模型温度、请求超时和 Docker 镜像通过环境变量配置。
 
 `pico/config.py` 定义 Runtime 配置，`pico/env.py` 只负责加载项目环境变量。
+
+## Docker Shell 沙箱
+
+生产 `run_shell` 只在本地 Docker 的 Linux 容器中执行，不再裸执行宿主命令。
+先启动 Docker Desktop / Docker Engine，并显式构建可信的 Python 任务镜像：
+
+```bash
+docker build -t pico-sandbox:python docker
+uv run pico --cwd /path/to/repo --mode code "修复问题并运行测试"
+```
+
+默认镜像预装 Python、pytest、ruff、uv 和 Pico 的 Python 依赖。其他项目应在
+自己的可信镜像中预装依赖，并设置 `PICO_DOCKER_IMAGE=my-task-image:tag`。
+任务容器不联网、不自动拉取镜像；缺少 Docker、引擎或镜像时返回明确失败，
+没有宿主 Shell 回退。当前只支持本地 Unix Socket 的 Linux Docker Engine，
+包括 macOS Docker Desktop；不支持远程 Docker daemon 或 Windows 原生容器。
+
+```text
+宿主：Pico、模型 API Key、文件工具、RunLog、Checkpoint
+容器：Linux 工具链、Shell、测试、构建
+本地仓库 ← bind mount → /workspace（同一份文件）
+```
+
+一个 `Pico.ask()` 内懒创建并复用一个容器，结束时停止并移除。权限固定为：
+无网络、只读根文件系统、非 root 用户、移除 Capabilities、禁止提权、
+最多 2 CPU / 1 GiB 内存 / 128 个进程，以及 256 MiB 临时空间。
+`.git` 只读；`.pico`、宿主 `.venv` / `venv` 和现有敏感 `.env` 文件被遮蔽，
+`.env.example` / `.env.sample` 保持可见。受保护路径是软链接时拒绝创建容器。
+受保护路径只在容器创建时发现，不在每条命令前全仓库扫描。
+扫描到的普通工作区 Unix Socket / FIFO 也用空文件遮蔽，避免只关闭 IP 网络却暴露宿主 IPC。
+
+Shell 仍然需要审批，且可写挂载允许命令修改整个工作区，不承诺执行精确文件白名单、
+自动回滚或精确归因 Shell 修改。遮蔽不是通用秘密识别：普通文件名中的秘密、
+其他别名中的秘密，以及容器创建后被宿主新引入的秘密不在保证内；不要把此类秘密放入
+暴露给容器的仓库。模型 Key 不传入容器，不挂载用户主目录、宿主根目录或 Docker Socket。
+使用 linked Worktree 时，Git 元数据引用可能指向未挂载的宿主路径；容器 Git 不保证可用，
+Runtime 自己的 Git 观察仍在宿主侧执行。
+
+超时、取消或 Docker 客户端异常会停止整个容器后移除，保留已经发生的工作区修改。
+如果 Docker daemon 不可用而无法确认清理，会显式报错并保留所属 Session 下的
+`sandbox.json`。容器创建前先保存这份所有权记录；恢复同一 Session 时，先校验容器
+标签并清理上次容器，再恢复 Agent，不重放旧命令。进程被 SIGKILL 后容器可能继续运行，
+直到下次恢复清理或用户手动停止；不承诺即时崩溃回收，不支持跨 Run 的后台服务。
+
+真实容器测试（未显式启用时仅跳过集成部分；显式启用后缺依赖会失败）：
+
+```bash
+PICO_DOCKER_TESTS=1 uv run python -m unittest tests.test_docker_sandbox -v
+```
+
+协议单元测试通过明确注入测试用 Shell 执行器独立于 Docker 运行，这不是生产回退路径。
 
 ## 核心对象
 

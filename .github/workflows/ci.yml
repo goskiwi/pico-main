@@ -25,3 +25,17 @@ jobs:
       - run: uv run ruff check pico applications tests benchmarks
       - run: uv run python -m compileall -q pico applications tests benchmarks
       - run: uv run python -m unittest discover -s tests -v
+
+  docker-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - run: docker build -t pico-sandbox:python docker
+      - run: uv run python -m unittest tests.test_docker_sandbox -v
+        env:
+          PICO_DOCKER_TESTS: '1'
