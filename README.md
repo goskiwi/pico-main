@@ -138,6 +138,12 @@ Run 表示可跨进程恢复的持久任务；每次首次执行或 Resume 是�
 
 回归：`uv run python -m unittest discover -s tests`。真实模型交接测试：`PICO_HISTORY_LLM_TEST=1 uv run python -m unittest tests.test_history_llm -v`，需要配置 Responses API，执行真实摘要和新 Model Client 恢复、回查、修复，只修改临时工作区。
 
+## 项目长期记忆
+
+通过 `pico --memory` 或 `PICO_MEMORY=1` 显式启用。独立后台 Worker 从已完成 Run 和显式记住请求提取主题 Markdown，主 Agent 通过 `list_memories`、`read_memory` 按需读取。支持已有主题纠正、`/memory forget FILE.md` 删除、来源引用、失败退避和更新中断续接；不使用 SQLite 或向量数据库，不将任务内摘要冒充长期记忆。
+
+查看 `/memory status` 了解后台状态；API 调用方退出应调用 `Pico.close()`。完整流程、边界和测试见 [长期记忆说明](docs/long-term-memory.md)。
+
 ## 阅读顺序
 
 只按下面顺序阅读即可：

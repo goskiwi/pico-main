@@ -35,8 +35,11 @@ class PicoConfig:
     context_limit_tokens: int | None = None
     max_output_tokens: int = 32000
     recent_history_tokens: int = 20000
+    memory_enabled: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.memory_enabled, bool):
+            raise TypeError("memory_enabled must be boolean")
         if self.mode not in {"ask", "code", "auto"}:
             raise ValueError("mode must be ask, code, or auto")
         limits = {

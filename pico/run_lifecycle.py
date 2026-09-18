@@ -218,6 +218,7 @@ class RunLifecycle:
             runtime.session.set_active_run("")
         finally:
             runtime.run.execution_context = None
+        runtime.schedule_memory()
         return outcome
 
     def reset_dormant(self) -> RunOutcome:

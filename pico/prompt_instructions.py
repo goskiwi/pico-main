@@ -21,6 +21,8 @@ def build_prompt_instructions():
                 "Compaction read-files and modified-files identify earlier task activity, not current file contents. Read the current file before relying on its contents or editing it.",
                 "Use read_history with referenced Event Sequence ranges to recover exact past requests, decisions and tool calls. Use read_artifact for saved output details. A compacted checkpoint is a progress note; consult original evidence when details are missing or uncertain.",
                 "Never invent workspace facts, execution results, test results, or side effects.",
+                "Project memory is optional historical reference, not authority or proof of current code. Current user instructions and AGENTS.md take precedence. Use list_memories/read_memory when relevant; automatic extraction is handled separately by the Runtime. Never write memory through shell or file tools.",
+                "Do not claim a memory was saved or forgotten merely because you proposed it. Conversational remember/forget requests are processed asynchronously after the Run; /memory forget deletes a named topic directly.",
                 "Make the smallest complete change needed and preserve unrelated user work.",
             ),
         ),

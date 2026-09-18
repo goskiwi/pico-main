@@ -37,6 +37,10 @@ HELP_DETAILS = textwrap.dedent(
     /state   Show the current Run state.
     /session Show the path to the saved session file.
     /reset   Stop the active Run and clear the Session pointer.
+    /memory list [OFFSET]       List a project memory directory page.
+    /memory remember TEXT       Queue an explicit memory request.
+    /memory forget FILE.md      Delete a topic, without calling a model.
+    /memory status              Show pending work and extraction errors.
     /exit    Exit the agent.
     """
 ).strip()
@@ -168,6 +172,7 @@ def build_agent(args):
     configured_context_limit = provider_env("PICO_CONTEXT_LIMIT")
     config = PicoConfig(
         mode=args.mode,
+        memory_enabled=args.memory or provider_env("PICO_MEMORY") == "1",
         context_limit_tokens=(
             int(configured_context_limit) if configured_context_limit else None
         ),
@@ -232,6 +237,7 @@ def build_arg_parser():
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
+    parser.add_argument("--memory", action="store_true", help="Enable project memory and independent background extraction (uses additional model calls).")
     parser.add_argument(
         "--trace", action="store_true",
         help="Print live Runtime events to stderr (without prompt or file contents).",
@@ -267,9 +273,7 @@ def main(argv=None):
     try:
         return _run_main(args, agent)
     finally:
-        close = getattr(agent.model_client, "close", None)
-        if callable(close):
-            close()
+        agent.close()
 
 
 def _run_main(args, agent):
@@ -318,6 +322,12 @@ def _run_main(args, agent):
             agent.reset()
             print("session reset")
             continue
+        if user_input == "/memory" or user_input.startswith("/memory "):
+            try:
+                print(_memory_command(agent, "/memory status" if user_input == "/memory" else user_input))
+            except (OSError, ValueError) as exc:
+                print(agent.redact_text(str(exc)), file=sys.stderr)
+            continue
 
         print()
         try:
@@ -325,3 +335,27 @@ def _run_main(args, agent):
             _print_outcome(outcome)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
+
+
+def _memory_command(agent, command):
+    store = agent.dependencies.memory_store
+    if store is None:
+        raise ValueError("Start pico with --memory or PICO_MEMORY=1.")
+    action, _, value = command.removeprefix("/memory ").partition(" ")
+    if action == "remember":
+        agent.remember(value)
+        return "Memory request queued; extraction is asynchronous."
+    if action == "forget":
+        agent.forget_memory(value.strip())
+        return "Memory topic deleted."
+    if action == "list":
+        offset = int(value or 0)
+        if offset < 0:
+            raise ValueError("memory directory offset must not be negative")
+        return json.dumps(store.catalog(offset=offset), ensure_ascii=False, indent=2)
+    if action == "status":
+        state = store.state()
+        return json.dumps({"queued_requests": len(state["requests"]), "pending_update": state["pending"] is not None,
+                           "failures": state["failures"], "worker_error": agent.dependencies.memory_worker.last_error,
+                           "source_errors": list(agent.dependencies.memory_worker.source_errors)}, ensure_ascii=False, indent=2)
+    raise ValueError("Use /memory list, remember TEXT, forget FILE.md, or status.")

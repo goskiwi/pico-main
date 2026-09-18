@@ -39,6 +39,8 @@ ASK_TOOL_NAMES = frozenset(
         "read_file",
         "read_artifact",
         "read_history",
+        "list_memories",
+        "read_memory",
         "search",
         "submit_final",
     }
@@ -193,6 +195,7 @@ class ToolRuntime:
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
             run_store=runtime.dependencies.run_store,
+            memory_store=runtime.dependencies.memory_store,
         )
 
     def _validate_allowlist(self, tools):

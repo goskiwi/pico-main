@@ -161,7 +161,7 @@ class PromptBuilder:
         )
         return text
 
-    def _messages(self, history, workspace, *, include_workspace=True):
+    def _messages(self, history, workspace, *, include_workspace=True, memory_index=""):
         projection = self.runtime.run.projection
         if projection.contract is None:
             raise RuntimeError("Prompt construction requires an active TaskContract")
@@ -176,6 +176,8 @@ class PromptBuilder:
             environment = _environment_message(workspace)
             if environment is not None:
                 messages.append(environment)
+        if memory_index:
+            messages.append(ModelMessage.user(memory_index))
         messages.append(ModelMessage.user(projection.contract.goal))
         compacted = history.compacted_message() if history is not None else None
         if compacted is not None:
@@ -206,13 +208,15 @@ class PromptBuilder:
         history = self._history()
         workspace = self._workspace_text()
         system_prompt = self._system_prompt(tool_surface)
-        messages = self._messages(history, workspace)
+        memory_index = self.runtime.memory_index()
+        messages = self._messages(history, workspace, memory_index=memory_index)
         return {
             "history": history,
             "workspace": workspace,
             "system_prompt": system_prompt,
             "messages": messages,
             "input_limit": self._input_limit(tool_surface),
+            "memory_index": memory_index,
         }
 
     def build_for_run(self, *, tool_surface, force_compaction=False):
@@ -235,7 +239,7 @@ class PromptBuilder:
     def build(self, prepared, *, refresh_history=False):
         if refresh_history:
             history = self._history()
-            messages = self._messages(history, prepared["workspace"])
+            messages = self._messages(history, prepared["workspace"], memory_index=prepared["memory_index"])
         else:
             history = prepared["history"]
             messages = prepared["messages"]
@@ -246,6 +250,7 @@ class PromptBuilder:
                 history,
                 prepared["workspace"],
                 include_workspace=False,
+                memory_index=prepared["memory_index"],
             )
         if self._prompt_tokens(prepared["system_prompt"], messages) > prepared[
             "input_limit"
@@ -279,7 +284,7 @@ class PromptBuilder:
                 "model client does not support isolated semantic compaction"
             )
 
-        fixed_messages = self._messages(None, prepared["workspace"])
+        fixed_messages = self._messages(None, prepared["workspace"], memory_index=prepared["memory_index"])
         fixed_tokens = self._prompt_tokens(
             prepared["system_prompt"],
             fixed_messages,

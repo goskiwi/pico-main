@@ -26,6 +26,7 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
+from .memory import MEMORY_FILENAME
 from .security import redact_facts
 from .workspace import IGNORED_PATH_NAMES
 
@@ -63,6 +64,41 @@ class ReadArtifactArgs(ToolArgs):
 class ReadHistoryArgs(ToolArgs):
     start_sequence: int = Field(ge=1)
     end_sequence: int = Field(ge=1)
+
+
+class ListMemoriesArgs(ToolArgs):
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=10, ge=1, le=10)
+
+
+class ReadMemoryArgs(ToolArgs):
+    filename: str = Field(pattern=MEMORY_FILENAME)
+    offset: int = Field(default=0, ge=0, description="Character offset in the memory body.")
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
+def _validate_memory(context, args, *, memory_store):
+    if memory_store is None:
+        raise ValueError("project memory is disabled")
+    return args
+
+
+def tool_list_memories(context, args, *, memory_store):
+    catalog = memory_store.catalog(args["offset"], args["limit"])
+    return ToolRunnerResult(json.dumps(catalog["entries"], ensure_ascii=False),
+                            structured={"next_offset": catalog["next_offset"], "has_more": catalog["next_offset"] is not None})
+
+
+def tool_read_memory(context, args, *, memory_store):
+    topic = memory_store.read(args["filename"])
+    offset = args["offset"]
+    if offset > len(topic["content"]):
+        raise ValueError("memory offset is outside the body")
+    body = topic.pop("content")
+    text = body[offset:offset + args["limit"]]
+    length = len(body)
+    next_offset = offset + len(text) if offset + len(text) < length else None
+    return ToolRunnerResult(text, structured={**topic, "next_offset": next_offset, "has_more": next_offset is not None})
 
 
 class SearchArgs(ToolArgs):
@@ -625,9 +661,9 @@ def _run_shell_plan(context, args):
     )
 
 
-def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner, run_store):
+def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner, run_store, memory_store):
     """Each tool declares its schema, policy, validator, runner and effects together."""
-    return {
+    registry = {
         "list_files": {
             "args_schema": ListFilesArgs,
             "risky": False,
@@ -690,3 +726,19 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "plan": partial(_workspace_file_plan, path_resolver=path_resolver, workspace_root=workspace_root),
         },
     }
+    if memory_store is not None:
+        registry.update({
+            "list_memories": {
+                "args_schema": ListMemoriesArgs, "risky": False,
+                "description": "List project memory topic names and descriptions. Continue with next_offset.",
+                "validate": partial(_validate_memory, memory_store=memory_store),
+                "run": partial(tool_list_memories, memory_store=memory_store),
+            },
+            "read_memory": {
+                "args_schema": ReadMemoryArgs, "risky": False,
+                "description": "Read a project memory body page with provenance. Historical reference only; verify changeable facts against current files. Continue with next_offset.",
+                "validate": partial(_validate_memory, memory_store=memory_store),
+                "run": partial(tool_read_memory, memory_store=memory_store),
+            },
+        })
+    return registry

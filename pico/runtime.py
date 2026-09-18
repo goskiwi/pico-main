@@ -10,6 +10,8 @@ from .artifacts import ArtifactStore
 from .command_runner import CommandRunner
 from .config import PicoConfig
 from .contracts import AssistantTurn
+from .memory import MemoryStore
+from .memory_worker import MemoryWorker
 from .mutations import WorkspaceMutationService
 from .prompt_builder import PromptBuilder
 from .run_lifecycle import RunLifecycle, load_resumable_run
@@ -68,11 +70,64 @@ class Pico:
             mutations=mutations,
             command_runner=effective_command_runner,
             approval_handler=approval_handler,
+            memory_store=(MemoryStore(self.workspace.root, self.redact_text) if self.config.memory_enabled else None),
         )
 
         self.tools = ToolRuntime(self)
         self.prompt = PromptBuilder(self)
         load_resumable_run(self)
+        if self.config.memory_enabled:
+            factory = getattr(model_client, "new_isolated_client", None)
+            if not callable(factory):
+                raise ValueError("memory requires an isolated model client factory")
+            self.dependencies.memory_worker = MemoryWorker(
+                self.dependencies.memory_store, session.store, workspace.root, factory,
+                count_tokens=self.prompt.count_tokens, input_limit=self.effective_input_limit_tokens,
+                output_limit=self.config.max_output_tokens,
+            )
+            self.schedule_memory()
+
+    def schedule_memory(self):
+        worker = self.dependencies.memory_worker
+        if worker is not None:
+            try:
+                worker.wake()
+            except Exception as exc:  # noqa: BLE001 - optional worker startup cannot fail a finished Run
+                worker.last_error = self.redact_text(str(exc))
+
+    def memory_index(self):
+        store = self.dependencies.memory_store
+        if store is None:
+            return ""
+        try:
+            return store.index()
+        except (OSError, ValueError) as exc:
+            self.dependencies.memory_worker.last_error = self.redact_text(str(exc))
+            return ""  # Optional recall cannot block the current task.
+
+    def remember(self, text):
+        if self.dependencies.memory_store is None:
+            raise ValueError("enable project memory first")
+        self.dependencies.memory_worker.interrupt()
+        self.dependencies.memory_store.remember(text)
+        self.schedule_memory()
+
+    def forget_memory(self, filename):
+        if self.dependencies.memory_store is None:
+            raise ValueError("enable project memory first")
+        if self.run.execution_context is not None:
+            raise ValueError("forget memory between Agent attempts, not during a model/tool transaction")
+        self.dependencies.memory_worker.interrupt()
+        self.dependencies.memory_store.forget(filename)
+        self.model_client.reset_action_session()  # Do not keep a deleted index in Provider replay.
+
+    def close(self):
+        worker = self.dependencies.memory_worker
+        if worker is not None:
+            worker.close()
+        close = getattr(self.model_client, "close", None)
+        if callable(close):
+            close()
 
     @property
     def effective_context_limit_tokens(self):
