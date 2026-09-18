@@ -85,6 +85,7 @@ class ToolRunnerResult:
     affected_paths: tuple[str, ...] = ()
     effect_scope: str = "none"
     failure: FailureInfo | None = None
+    artifact_id: str = ""
 
     def __post_init__(self):
         if not isinstance(self.structured, dict):
@@ -473,6 +474,7 @@ class ToolOutcome:
                 "has_more", "truncated", "artifact_id", "exit_code", "stop_reason",
                 "output_limited", "status",
                 "stdout_discarded_bytes", "stderr_discarded_bytes",
+                "log_complete", "log_omitted_bytes", "next_sequence",
             }
             payload["structured"] = {
                 key: value for key, value in payload.get("structured", {}).items()

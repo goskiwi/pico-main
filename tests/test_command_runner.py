@@ -9,8 +9,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from pico.artifacts import ArtifactStore
 from pico.command_runner import CommandRunner, shell_argv
 from pico.execution import ExecutionContext
+from pico.run_store import RunStore
 from pico.tool_context import ToolContext
 from pico.tools import tool_run_shell
 
@@ -253,6 +255,7 @@ class RunShellExecutionTests(unittest.TestCase):
                 },
                 command_runner=CommandRunner(root),
                 workspace_root=root,
+                artifact_store=ArtifactStore(RunStore(root / "runs"), lambda text: text),
             )
 
             self.assertEqual(result.failure.code, "command_failed")

@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .artifacts import ARTIFACT_PAGE_MAX_BYTES, CommandOutputLog, head_tail
 from .command_runner import shell_argv
 from .contracts import (
     TOOL_ARTIFACT_ID_PATTERN,
@@ -25,6 +26,7 @@ from .contracts import (
     ToolOutcome,
     ToolRunnerResult,
 )
+from .security import redact_facts
 from .workspace import IGNORED_PATH_NAMES
 
 READ_FILE_MAX_OUTPUT_BYTES = 512 * 1024
@@ -56,6 +58,11 @@ class ReadArtifactArgs(ToolArgs):
     artifact_id: str = Field(pattern=TOOL_ARTIFACT_ID_PATTERN)
     offset: int = Field(default=0, ge=0)
     max_bytes: int = Field(default=8192, ge=4, le=8192)
+
+
+class ReadHistoryArgs(ToolArgs):
+    start_sequence: int = Field(ge=1)
+    end_sequence: int = Field(ge=1)
 
 
 class SearchArgs(ToolArgs):
@@ -165,6 +172,42 @@ def _validate_read_artifact(context, args, *, artifact_store):
     if artifact_store is None or not context.run_id:
         raise ValueError("artifact store is unavailable")
     return args
+
+
+def _validate_read_history(context, args, *, run_store):
+    if run_store is None or not context.run_id:
+        raise ValueError("Run history is unavailable")
+    if args["end_sequence"] < args["start_sequence"]:
+        raise ValueError("end_sequence must not precede start_sequence")
+    return args
+
+
+def tool_read_history(context, args, *, run_store, artifact_store, redact_text):
+    records, size = [], 0
+    next_sequence = None
+    for event in run_store.iter_history(context.run_id, args["start_sequence"], args["end_sequence"],
+                                        execution_context=context.execution_context):
+        record = json.dumps(redact_facts(event.to_dict(), redact_text), ensure_ascii=False)
+        # Content becomes a JSON string inside ToolOutcome; budget that encoding,
+        # not only the event's own JSON, so paging never triggers a second clip.
+        cost = len(json.dumps(record, ensure_ascii=False).encode("utf-8")) + 2
+        if records and (size + cost > ARTIFACT_PAGE_MAX_BYTES or len(records) >= 100):
+            next_sequence = event.sequence
+            break
+        if cost > ARTIFACT_PAGE_MAX_BYTES:
+            descriptor = artifact_store.write_tool_output(context.run_id, context.tool_call_id, record)
+            record = json.dumps({
+                "sequence": event.sequence, "event_id": event.event_id,
+                "kind": event.kind, "artifact_id": descriptor["artifact_id"],
+                "detail": "Full event is available through read_artifact.",
+            })
+        cost = len(json.dumps(record, ensure_ascii=False).encode("utf-8")) + 2
+        records.append(record)
+        size += cost
+    return ToolRunnerResult(
+        "\n".join(records) or "No committed events in this range.",
+        structured={"next_sequence": next_sequence, "has_more": next_sequence is not None},
+    )
 
 
 def _validate_search(context, args, *, path_resolver):
@@ -503,15 +546,21 @@ def _mutation_result(relative, receipt):
     )
 
 
-def tool_run_shell(context, args, *, command_runner, workspace_root):
+def tool_run_shell(context, args, *, command_runner, workspace_root, artifact_store):
     command = str(args["command"])
-    result = command_runner.run(
-        shell_argv(command),
-        cwd=workspace_root,
-        timeout=int(args["timeout_seconds"]),
-        env={},
-        execution_context=context.execution_context,
-    )
+    log = CommandOutputLog(artifact_store, context.run_id, context.tool_call_id)
+    try:
+        result = command_runner.run(
+            shell_argv(command),
+            cwd=workspace_root,
+            timeout=int(args["timeout_seconds"]),
+            env={},
+            execution_context=context.execution_context,
+            output_log=log,
+        )
+        descriptor = log.finish()
+    finally:
+        log.close()
     output = "\n".join(
         part
         for part in (
@@ -533,6 +582,12 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
             result.stop_reason or f"command exited with {result.returncode}",
             "retry_after_change",
         )
+    if descriptor or log.error:
+        output = head_tail(artifact_store.redactor(output))
+    if descriptor:
+        output += f"\n[Saved command output: {descriptor['artifact_id']}; use read_artifact.]"
+    if log.error:
+        output += f"\n[Log unavailable: {log.error}]"
     return ToolRunnerResult(
         output,
         structured={
@@ -542,9 +597,12 @@ def tool_run_shell(context, args, *, command_runner, workspace_root):
             "output_limited": result.output_limited,
             "stdout_discarded_bytes": result.stdout_discarded_bytes,
             "stderr_discarded_bytes": result.stderr_discarded_bytes,
+            "log_complete": not bool(log.error or log.omitted_bytes or result.stop_reason == "pipe_held_open"),
+            "log_omitted_bytes": log.omitted_bytes,
         },
         effect_scope=("none" if result.infrastructure_error else "workspace"),
         failure=failure,
+        artifact_id=descriptor.get("artifact_id", ""),
     )
 
 
@@ -567,7 +625,7 @@ def _run_shell_plan(context, args):
     )
 
 
-def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner):
+def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact_text, mutation_service, command_runner, run_store):
     """Each tool declares its schema, policy, validator, runner and effects together."""
     return {
         "list_files": {
@@ -591,6 +649,13 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "validate": partial(_validate_read_artifact, artifact_store=artifact_store),
             "run": partial(tool_read_artifact, artifact_store=artifact_store, redact_text=redact_text),
         },
+        "read_history": {
+            "args_schema": ReadHistoryArgs,
+            "risky": False,
+            "description": "Read committed events in the current Run by Sequence range. Returns a bounded page; continue from next_sequence with the same end_sequence. Oversized events have read_artifact references. History describes past observations, not current file contents.",
+            "validate": partial(_validate_read_history, run_store=run_store),
+            "run": partial(tool_read_history, run_store=run_store, artifact_store=artifact_store, redact_text=redact_text),
+        },
         "search": {
             "args_schema": SearchArgs,
             "risky": False,
@@ -603,7 +668,7 @@ def build_tool_registry(*, workspace_root, path_resolver, artifact_store, redact
             "risky": True,
             "description": "Run one user-approved, non-interactive host command from the workspace root. Use timeout_seconds from 1 to 600 (default 120). Use it for tests, linters, type checks, builds, git inspection, and reproductions. It is not sandboxed and may create normal command outputs; prefer file tools for deliberate source edits so replacements stay exact and auditable.",
             "validate": partial(_validate_run_shell, command_runner=command_runner),
-            "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root),
+            "run": partial(tool_run_shell, command_runner=command_runner, workspace_root=workspace_root, artifact_store=artifact_store),
             "plan": _run_shell_plan,
         },
         "write_file": {

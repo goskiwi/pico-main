@@ -1,13 +1,79 @@
 """Write-once, redacted and pageable tool-output artifacts."""
 
 import hashlib
+import tempfile
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
 from .contracts import TOOL_ARTIFACT_ID
 from .persistence import write_once_bytes
 
 ARTIFACT_PAGE_MAX_BYTES = 8 * 1024
+COMMAND_LOG_MAX_BYTES = 16 * 1024 * 1024
+
+
+def head_tail(text, max_chars=2000):
+    """Bound a preview without losing the final error or summary."""
+    if len(text) <= max_chars:
+        return text
+    half = max_chars // 2
+    return text[:half] + "\n[... middle omitted; consult referenced output ...]\n" + text[-half:]
+
+
+class CommandOutputLog:
+    """Private, bounded spool; publish only after whole-stream redaction.
+
+    Anonymous temporary files keep unredacted bytes out of persistent artifacts.
+    Redacting after capture also handles secrets split across pipe reads.
+    """
+
+    def __init__(self, store, run_id, call_id, *, max_bytes=COMMAND_LOG_MAX_BYTES):
+        self.store, self.run_id, self.call_id = store, run_id, call_id
+        self.max_bytes = max_bytes
+        self.files = {}
+        self.stack = ExitStack()
+        self.size = 0
+        self.omitted_bytes = 0
+        self.error = ""
+
+    def write(self, stream, chunk):
+        selected = chunk[:max(0, self.max_bytes - self.size)]
+        self.omitted_bytes += len(chunk) - len(selected)
+        if self.error or not selected:
+            return
+        try:
+            if stream not in self.files:
+                self.files[stream] = self.stack.enter_context(tempfile.TemporaryFile(mode="w+b"))  # noqa: SIM115 - ExitStack owns the file lifetime
+            self.files[stream].write(selected)
+            self.size += len(selected)
+        except OSError as exc:
+            self.error = f"command output could not be saved: {exc}"
+
+    def finish(self):
+        if self.error:
+            return {}
+        try:
+            sections = []
+            for stream, source in self.files.items():
+                source.seek(0)
+                text = source.read().decode("utf-8", errors="replace")
+                # If capped mid-secret, do not publish the final incomplete line.
+                if self.omitted_bytes:
+                    text = text[:text.rfind("\n") + 1]
+                sections.append(f"## {stream}\n{text}")
+            content = "\n".join(sections)
+            if self.omitted_bytes:
+                content += f"\n[Log incomplete: capture limit reached; {self.omitted_bytes} bytes not saved.]"
+            if len(content.encode("utf-8")) <= ARTIFACT_PAGE_MAX_BYTES and not self.omitted_bytes:
+                return {}
+            return self.store.write_tool_output(self.run_id, self.call_id, content)
+        except OSError as exc:
+            self.error = f"command output could not be saved: {exc}"
+            return {}
+
+    def close(self):
+        self.stack.close()
 
 
 class ArtifactStore:

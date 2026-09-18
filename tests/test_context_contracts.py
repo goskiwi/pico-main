@@ -84,10 +84,12 @@ class ModelMessageTests(unittest.TestCase):
             artifact_id="tool_0123456789abcdef_0123456789",
         )
         user = SimpleNamespace(
+                source_event_ids=("run_test:event:000003",),
                 kind="user_guidance",
                 payload={"content": user_text},
             )
         call = SimpleNamespace(
+                source_event_ids=("run_test:event:000004",),
                 kind="tool_call",
                 payload={
                     "name": "edit_file",
@@ -98,6 +100,7 @@ class ModelMessageTests(unittest.TestCase):
                 },
             )
         result = SimpleNamespace(
+                source_event_ids=("run_test:event:000005",),
                 kind="tool_result",
                 payload={"outcome": outcome.to_dict()},
             )
@@ -112,13 +115,15 @@ class ModelMessageTests(unittest.TestCase):
         self.assertEqual(dropped, 0)
         self.assertIn(user_text, rendered)
         self.assertIn(argument_text, rendered)
-        self.assertIn("X" * 2_000, rendered)
+        self.assertIn("X" * 1_000, rendered)
+        self.assertIn("middle omitted", rendered)
         self.assertNotIn("X" * 2_001, rendered)
         self.assertIn("full retained output: artifact_id=tool_", rendered)
         self.assertNotIn("RunLog", rendered)
 
     def test_required_summary_content_over_budget_fails(self):
         event = SimpleNamespace(
+            source_event_ids=("run_test:event:000003",),
             kind="user_guidance",
             payload={"content": "required" * 1_000},
         )
@@ -135,12 +140,14 @@ class ModelMessageTests(unittest.TestCase):
 
     def test_summary_input_omits_oldest_complete_tool_turn_first(self):
         user = SimpleNamespace(
+            source_event_ids=("run_test:event:000003",),
             kind="user_guidance",
             payload={"content": "Keep this requirement"},
         )
 
         def tool_group(call_id, path, content):
             call = SimpleNamespace(
+                source_event_ids=("run_test:event:000004",),
                 kind="tool_call",
                 payload={
                     "name": "read_file",
@@ -157,6 +164,7 @@ class ModelMessageTests(unittest.TestCase):
                 structured={"path": path},
             )
             result = SimpleNamespace(
+                source_event_ids=("run_test:event:000005",),
                 kind="tool_result",
                 payload={"outcome": outcome.to_dict()},
             )
@@ -180,6 +188,7 @@ class ModelMessageTests(unittest.TestCase):
 
     def test_summary_provider_overflow_omits_one_more_turn_and_retries(self):
         call = SimpleNamespace(
+            source_event_ids=("run_test:event:000004",),
             kind="tool_call",
             payload={"name": "read_file", "args": {"path": "old.py"}},
         )
@@ -192,6 +201,7 @@ class ModelMessageTests(unittest.TestCase):
             "old result",
         )
         result = SimpleNamespace(
+            source_event_ids=("run_test:event:000005",),
             kind="tool_result",
             payload={"outcome": outcome.to_dict()},
         )
@@ -201,6 +211,7 @@ class ModelMessageTests(unittest.TestCase):
             "key_decisions": [],
             "next_steps": [],
             "critical_context": [],
+            "history_refs": [],
         }
         client = mock.Mock()
         client.complete_turn.side_effect = [

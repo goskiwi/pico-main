@@ -87,7 +87,7 @@ Pico 使用 Pi 风格的滚动摘要，不要求模型维护第二套任务笔�
 → 摘要 + 近期用户指导与完整工具事务 + 当前真实状态
 ```
 
-`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps 和 Critical Context；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。摘要输入沿用 Pi 的简单边界：User、Assistant、Tool Call Arguments、状态、失败、路径和 metadata 完整提供，只把较早 Tool Result 的 `content` 截到2,000字符；存在 Artifact 时保留可读取的 `artifact_id`。如果整体仍超过摘要输入预算，或 Provider 仍返回 Overflow，则沿用 Codex/Claude Code 的有限降级，依次省略最老的完整 Tool Turn 并明确记录省略数量，Provider 请求最多尝试3次；User 与旧 CompactedContext 不作为可删除 Turn。Runtime 另行确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。仍无法容纳时 Compaction 明确失败，不提交残缺摘要。
+`TaskContract.goal` 是唯一目标来源。CompactedContext 保存 Constraints、Progress、Key Decisions、Next Steps、Critical Context 和关键历史引用；公开 Assistant 文字与完整 Tool Call 先作为 `assistant_turn` 持久化，隐藏推理不保存。尚未被 Compaction 覆盖的用户补充全部以可信原文提供，较早补充进入约束和进度摘要。摘要输入沿用 Pi 的简单边界：User、Assistant、Tool Call Arguments、状态、失败、路径和 metadata 完整提供，只把较早 Tool Result 的 `content` 保留前后共约2,000字符并标记省略；存在 Artifact 时保留可读取的 `artifact_id`。如果整体仍超过摘要输入预算，或 Provider 仍返回 Overflow，则沿用 Codex/Claude Code 的有限降级，依次省略最老的完整 Tool Turn 并明确记录省略数量，Provider 请求最多尝试3次；User 与旧 CompactedContext 不作为可删除 Turn。Runtime 另行确定生成 `read_files` 与 `modified_files`，修改路径优先于只读路径；Shell 不做虚假路径归因。仍无法容纳时 Compaction 明确失败，不提交残缺摘要。
 
 `TaskContract` 还固定 Run 创建时的 `mode`、`allowed_tools` 和 `write_scope`。恢复时当前 Runtime 配置只能与这份授权取更严格的交集，不能扩大旧 Run 权限。Runtime 的有效权限进入 System Prompt；AGENTS.md、Environment Context、原始用户请求、Compacted Summary 和摘要后的消息按真实时间顺序进入 `ModelPrompt.messages`。恢复时 Provider Adapter 将同一组 Messages 转换成原生 Responses Message、Function Call 和 Function Call Output，不把历史降级成一段文本。
 
@@ -113,7 +113,7 @@ Run 表示可跨进程恢复的持久任务；每次首次执行或 Resume 是�
 
 ## 工具与安全边界
 
-主要工具包括 `list_files`、`read_file`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。模型每轮可以返回最多八个彼此独立的调用，Runtime 按模型顺序串行执行并一次返回全部结果；`submit_final` 必须独占一轮。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
+主要工具包括 `list_files`、`read_file`、`read_history`、`read_artifact`、`search`、`run_shell`、`write_file`、`edit_file` 和 `submit_final`。模型每轮可以返回最多八个彼此独立的调用，Runtime 按模型顺序串行执行并一次返回全部结果；`submit_final` 必须独占一轮。模型通过 `run_shell` 主动运行测试、构建、lint、类型检查和复现命令，并根据结果继续修复；`submit_final` 不会偷偷执行额外命令。
 
 完整执行事实保存在 RunLog 中；当前任务、Assistant Turn、Pending Tool、连续失败状态和 Metrics 由 RunProjection 重建。模型纠错提示由失败状态临时生成。Checkpoint 只在 `ready_for_model` 稳定边界生成，直接保存 RunProjection、ContextState 和日志游标；崩溃中的阶段由 Tail Replay 恢复。状态查询只读取这两个现成视图，不维护第三份状态。
 
@@ -126,7 +126,17 @@ Run 表示可跨进程恢复的持久任务；每次首次执行或 Resume 是�
 - 执行意图和修改前状态标识先落盘；中断后根据记录与当前文件状态判断未修改、已修改或未知，不盲目重放。
 - 模型负责选择并运行相关测试，Runtime 不把普通测试结果冒充为自然语言任务的独立验收；恢复出的不确定副作用作为事实反馈模型，由模型观察当前工作区后继续，不自动重放原工具。
 - 模型结果明确区分完成、截断、服务失败和协议错误；截断调用不会执行。工具失败按工具名、完整参数、错误码和错误详情比较，忽略参数键顺序及调用 ID；连续第三次相同工具失败把固定 `retry_instruction` 附在对应 Tool Result 中，不重建 Context，第四次停止。当前多工具批次若随后取得成功，失败 streak 与尚未发送的提醒一起取消。不同失败或成功工具会结束当前连续计数，交替循环由总轮数和时间限制兜底。
-- Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受当前 Attempt 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；总内存上限为 1 MiB，stdout/stderr 各保留固定大小的 Head 与 Tail，并报告中间省略字节。超时会先终止再强制清理整个进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
+- Shell 命令是非交互式执行，默认 stdin 为 EOF；`timeout_seconds` 默认为 120，允许 1～600 秒且始终受当前 Attempt 剩余期限约束。POSIX 非阻塞管道和 `selectors` 持续排空输出；收集阶段的 Head/Tail 缓冲总上限为 1 MiB。模型发起的 Shell 调用另用匿名临时文件采集最多 16 MiB 的 stdout/stderr；结束时对有界内容整体脱敏，大于 8 KiB 的输出发布为 Artifact。Context 只放 Head/Tail、退出状态和引用，不再复制完整日志。达到采集上限时继续排空管道并明确标记 `log_complete=false`；写盘失败也明确报告，不自动重跑命令。超时会先终止再强制清理整个进程组，输出收集有固定清理期限，结束时不无限等待 EOF；主动脱离进程组的后代不保证被终止。模型请求通过异步任务取消结束网络等待。
+
+### 压缩后的证据回查
+
+沿用 `TaskContract.goal` 与 `CompactedContext`，不另建 TaskState 或 Notes。摘要新增最多 20 条 `history_refs`，每条记录起止 Sequence 和说明；模型只能引用摘要输入中已有的来源 Sequence 或旧摘要的有效引用。缺少新字段的旧摘要格式不兼容。
+
+`read_history(start_sequence, end_sequence)` 只读取当前 Run 的已提交事件，从磁盘流式扫描，不全量加载或重放；返回有界页面及 `next_sequence`，下一次保持原 `end_sequence` 继续。单条事件过大时通过 Artifact 保留完整脱敏记录。此读取是按需线性扫描，不承诺 O(1) 定位。
+
+`read_history` 用于查用户原话、工具参数和过去的结果，`read_artifact` 用于分页查看保存的长输出。历史表示当时的观察，不能代替修改前读取当前文件。超时和取消会发布已经收集的日志；进程在命令执行中途被强杀时，匿名采集文件不保证恢复，Started 工具仍按现有中断恢复协议处理。
+
+回归：`uv run python -m unittest discover -s tests`。真实模型交接测试：`PICO_HISTORY_LLM_TEST=1 uv run python -m unittest tests.test_history_llm -v`，需要配置 Responses API，执行真实摘要和新 Model Client 恢复、回查、修复，只修改临时工作区。
 
 ## 阅读顺序
 

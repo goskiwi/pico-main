@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import tools as toolkit
+from .artifacts import head_tail
 from .contracts import (
     TOOL_OUTPUT_MAX_BYTES,
     FailureInfo,
@@ -37,6 +38,7 @@ ASK_TOOL_NAMES = frozenset(
         "list_files",
         "read_file",
         "read_artifact",
+        "read_history",
         "search",
         "submit_final",
     }
@@ -190,6 +192,7 @@ class ToolRuntime:
             redact_text=runtime.redact_text,
             mutation_service=runtime.dependencies.mutations,
             command_runner=runtime.dependencies.command_runner,
+            run_store=runtime.dependencies.run_store,
         )
 
     def _validate_allowlist(self, tools):
@@ -409,6 +412,7 @@ class ToolRuntime:
             failure=result.failure,
             affected_paths=paths,
             structured=result.structured,
+            artifact_id=result.artifact_id,
         )
 
     @staticmethod
@@ -702,6 +706,7 @@ class ToolRuntime:
         failure=None,
         affected_paths=(),
         structured=None,
+        artifact_id="",
     ):
         return self.prepare_outcome(ToolOutcome(
             tool_call_id=call.call_id,
@@ -713,6 +718,7 @@ class ToolRuntime:
             structured=dict(structured or {}),
             failure=failure,
             affected_paths=tuple(affected_paths),
+            artifact_id=artifact_id,
         ))
 
     def prepare_outcome(self, outcome):
@@ -733,7 +739,7 @@ class ToolRuntime:
             sort_keys=True,
             separators=(",", ":"),
         )
-        if len(full_output.encode("utf-8")) <= TOOL_OUTPUT_MAX_BYTES:
+        if outcome.artifact_id or len(full_output.encode("utf-8")) <= TOOL_OUTPUT_MAX_BYTES:
             return outcome
 
         descriptor = self.runtime.dependencies.artifacts.write_tool_output(
@@ -753,7 +759,7 @@ class ToolRuntime:
         return replace(
             outcome,
             content=(
-                clip(safe_content, 2000)
+                head_tail(safe_content)
                 + "\n[Full tool result: artifact_id="
                 + descriptor["artifact_id"]
                 + ". Use read_artifact to inspect it.]"

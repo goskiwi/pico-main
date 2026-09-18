@@ -131,6 +131,7 @@ class CommandRunner:
         env=None,
         execution_context=None,
         input_bytes=None,
+        output_log=None,
     ):
         raw = self.run_bytes(
             argv,
@@ -139,6 +140,7 @@ class CommandRunner:
             env=env,
             execution_context=execution_context,
             input_bytes=input_bytes,
+            output_log=output_log,
         )
         rendered_stdout = self._render_output(
             raw.stdout,
@@ -173,6 +175,7 @@ class CommandRunner:
         execution_context=None,
         input_bytes=None,
         require_complete_output=False,
+        output_log=None,
     ):
         """Run one process while preserving stdout and stderr as exact bytes."""
 
@@ -224,7 +227,7 @@ class CommandRunner:
         }
         try:
             stop_reason = self._collect_output(
-                process, context, deadline, input_bytes, buffers
+                process, context, deadline, input_bytes, buffers, output_log
             )
         except BaseException:
             self._stop_process_group(process)
@@ -288,7 +291,7 @@ class CommandRunner:
         except OSError:
             pass
 
-    def _collect_output(self, process, context, deadline, input_bytes, buffers):
+    def _collect_output(self, process, context, deadline, input_bytes, buffers, output_log):
         stop_reason = ""
         pipe_deadline = None
         input_view = memoryview(input_bytes or b"")
@@ -326,11 +329,11 @@ class CommandRunner:
                 wait = max(0.0, min(COMMAND_POLL_SECONDS, next_deadline - time.monotonic()))
                 for key, _mask in selector.select(wait):
                     input_view = self._consume_ready_pipe(
-                        selector, key, input_view, buffers
+                        selector, key, input_view, buffers, output_log
                     )
         return stop_reason
 
-    def _consume_ready_pipe(self, selector, key, input_view, buffers):
+    def _consume_ready_pipe(self, selector, key, input_view, buffers, output_log):
         stream, name = key.fileobj, key.data
         try:
             if name == "stdin":
@@ -347,6 +350,8 @@ class CommandRunner:
                 if not chunk:
                     selector.unregister(stream)
                 else:
+                    if output_log is not None:
+                        output_log.write(name, chunk)
                     buffers[name].append(chunk)
         except BlockingIOError:
             pass  # Readiness may change before the nonblocking operation.

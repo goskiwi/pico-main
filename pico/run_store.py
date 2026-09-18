@@ -107,6 +107,25 @@ class RunStore:
         self._remember_cursor(run_id, events)
         return events
 
+    def iter_history(self, run_id, start_sequence, end_sequence, *, execution_context=None):
+        """Read historical facts on demand, without replay or tail repair."""
+        path = self.events_path(run_id)
+        with path.open("rb") as source:
+            for raw in source:
+                if execution_context is not None:
+                    execution_context.check_active()
+                if not raw.endswith(b"\n"):
+                    break  # An in-flight final record is not a committed fact.
+                if not raw.strip():
+                    continue
+                event = RunEvent.from_dict(json.loads(raw))
+                if event.run_id != run_id:
+                    raise ValueError("history event belongs to another Run")
+                if event.sequence > end_sequence:
+                    break
+                if event.sequence >= start_sequence:
+                    yield event
+
     def _read_tail(self, run_id, *, offset):
         path = self.events_path(run_id)
         size = path.stat().st_size
